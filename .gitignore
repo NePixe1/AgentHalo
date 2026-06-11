@@ -1,0 +1,11 @@
+CodexHalo.ico
+AgentHalo.ico
+*.txt
+*renders*/
+*-package-*/
+package-*/
+bin/
+obj/
+.vs/
+*.user
+*.suo
