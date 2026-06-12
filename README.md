@@ -6,7 +6,7 @@ A local, always-on-top status halo for the Codex desktop app.
 当前版本支持 Codex；后续计划加入 Claude Code（CC）状态识别。  
 The current release supports Codex, with Claude Code detection planned next.
 
-版本 / Version: `0.9.6`（预发布 / Pre-release）
+版本 / Version: `0.10.0`（预发布 / Pre-release）
 
 ---
 
@@ -46,7 +46,8 @@ The current release supports Codex, with Claude Code detection planned next.
 平滑推开到约 150°，随后带着逐渐衰减的惯性继续滑行并往返漂移。待机也会
 持续运动，思考和执行状态转得更快。思考和执行期间，环条本体会从暗色材质
 逐渐点亮：主体升为亮白灯芯，状态色保留在灯管边缘；窄光晕同步增强，中心透明。
-执行状态的完整呼吸周期约 3.2 秒，思考状态约 5.2 秒。磁斥时长和离场惯性
+思考、执行和完成状态采用连续的长亮短暗非对称呼吸，状态切换会先柔和收光，
+在暗部完成颜色渐变，再自然点亮。磁斥时长和离场惯性
 会根据当前实际转速自动调整，慢状态不会被突然拉走。
 动画直接跟随桌面合成刷新频率，不再对待机或完成状态主动降帧。
 “暂停状态监听”只在当前运行期间有效，重新启动后会自动恢复实时监听。

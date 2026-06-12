@@ -29,8 +29,8 @@ using MediaPoint = System.Windows.Point;
 [assembly: System.Reflection.AssemblyDescription("Ambient desktop status light for coding agents")]
 [assembly: System.Reflection.AssemblyCompany("Agent Halo")]
 [assembly: System.Reflection.AssemblyProduct("Agent Halo")]
-[assembly: System.Reflection.AssemblyVersion("0.9.6.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.9.6.0")]
+[assembly: System.Reflection.AssemblyVersion("0.10.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.10.0.0")]
 
 namespace CodexHalo
 {
@@ -42,6 +42,13 @@ namespace CodexHalo
         Done,
         Attention,
         Error
+    }
+
+    public enum ErrorPresentation
+    {
+        Flashing,
+        Bright,
+        Dim
     }
 
     public sealed class SessionSnapshot
@@ -73,6 +80,7 @@ namespace CodexHalo
         public bool Paused { get; set; }
         public string InstalledAt { get; set; }
         public Dictionary<string, string> Acknowledged { get; set; }
+        public string AcknowledgedErrorAt { get; set; }
 
         public HaloSettings()
         {
@@ -112,6 +120,14 @@ namespace CodexHalo
                 Acknowledged = new Dictionary<string, string>();
             }
             Acknowledged[threadId] = completedUtc.ToUniversalTime().ToString("o");
+        }
+
+        public DateTime GetAcknowledgedErrorUtc()
+        {
+            DateTime parsed;
+            return DateTime.TryParse(AcknowledgedErrorAt, CultureInfo.InvariantCulture,
+                DateTimeStyles.RoundtripKind, out parsed)
+                ? parsed.ToUniversalTime() : DateTime.MinValue;
         }
     }
 
@@ -533,8 +549,9 @@ namespace CodexHalo
                 Snapshot.State = HaloState.Attention;
                 Snapshot.Action = "Needs you";
             }
-            else if (lower.Contains("error") || lower.Contains("abort") ||
-                lower.Contains("interrupt") || lower.Contains("failed"))
+            else if (lower == "turn_aborted" || lower == "turn_failed" ||
+                lower == "task_failed" || lower == "task_cancelled" ||
+                lower == "task_interrupted" || lower == "fatal_error")
             {
                 Snapshot.Active = false;
                 Snapshot.State = HaloState.Error;
@@ -855,8 +872,8 @@ namespace CodexHalo
         {
             switch (state)
             {
-                case HaloState.Attention: return 0;
-                case HaloState.Error: return 1;
+                case HaloState.Error: return 0;
+                case HaloState.Attention: return 1;
                 case HaloState.Working: return 2;
                 case HaloState.Thinking: return 3;
                 case HaloState.Done: return 4;
@@ -885,6 +902,17 @@ namespace CodexHalo
 
     public sealed class HaloVisual : FrameworkElement
     {
+        private struct VisualSnapshot
+        {
+            public MediaColor Color;
+            public double Powered;
+            public double Breath;
+            public double Intensity;
+            public double BodyWidth;
+            public double CoreWhite;
+            public double GlowGain;
+        }
+
         private readonly Stopwatch clock;
         private HaloState state;
         private HaloState previousState;
@@ -892,6 +920,9 @@ namespace CodexHalo
         private MediaColor transitionFromColor;
         private double transitionStartSeconds;
         private double transitionDuration;
+        private VisualSnapshot transitionFromVisual;
+        private VisualSnapshot renderedVisual;
+        private bool hasRenderedFrame;
         private string label;
         private int count;
         private bool isRendering;
@@ -920,6 +951,7 @@ namespace CodexHalo
         private double smallGapInertiaVelocity;
         private double energy;
         private bool steadyDone;
+        private ErrorPresentation errorPresentation;
 
         public HaloVisual()
         {
@@ -930,6 +962,7 @@ namespace CodexHalo
             transitionFromColor = StateColor(HaloState.Idle);
             transitionStartSeconds = -10;
             transitionDuration = 1;
+            renderedVisual.Color = transitionFromColor;
             label = "READY";
             energy = TargetEnergy(HaloState.Idle);
             outerPhase = 97;
@@ -983,7 +1016,7 @@ namespace CodexHalo
             if (state != value)
             {
                 double now = clock.Elapsed.TotalSeconds;
-                transitionFromColor = AnimatedColor(now);
+                CaptureTransitionStart(now);
                 previousState = state;
                 state = value;
                 stateChangedUtc = DateTime.UtcNow;
@@ -999,7 +1032,37 @@ namespace CodexHalo
         {
             if (steadyDone != value)
             {
+                double now = clock.Elapsed.TotalSeconds;
+                CaptureTransitionStart(now);
                 steadyDone = value;
+                previousState = state;
+                stateChangedUtc = DateTime.UtcNow;
+                transitionStartSeconds = now;
+                transitionDuration = value ? 1.45 : 1.15;
+                InvalidateVisual();
+            }
+        }
+
+        private void CaptureTransitionStart(double now)
+        {
+            double localTime = Math.Max(0,
+                (DateTime.UtcNow - stateChangedUtc).TotalSeconds);
+            transitionFromVisual = hasRenderedFrame ? renderedVisual :
+                TargetVisual(state, localTime);
+            transitionFromColor = transitionFromVisual.Color;
+        }
+
+        public void SetErrorPresentation(ErrorPresentation value)
+        {
+            if (errorPresentation != value)
+            {
+                double now = clock.Elapsed.TotalSeconds;
+                CaptureTransitionStart(now);
+                errorPresentation = value;
+                previousState = state;
+                stateChangedUtc = DateTime.UtcNow;
+                transitionStartSeconds = now;
+                transitionDuration = value == ErrorPresentation.Flashing ? 0.82 : 1.24;
                 InvalidateVisual();
             }
         }
@@ -1011,6 +1074,7 @@ namespace CodexHalo
             testSinceState = seconds;
             previousState = state;
             transitionFromColor = StateColor(state);
+            transitionFromVisual = TargetVisual(state, seconds);
             transitionStartSeconds = -10;
             stateChangedUtc = DateTime.UtcNow.AddSeconds(-seconds);
             InvalidateVisual();
@@ -1023,6 +1087,7 @@ namespace CodexHalo
             previousState = from;
             state = to;
             transitionFromColor = StateColor(from);
+            transitionFromVisual = TargetVisual(from, absoluteTime);
             transitionDuration = TransitionDuration(from, to);
             transitionStartSeconds = absoluteTime - transitionDuration *
                 Clamp(progress, 0, 1);
@@ -1030,6 +1095,64 @@ namespace CodexHalo
             testSinceState = transitionDuration * Clamp(progress, 0, 1);
             stateChangedUtc = DateTime.UtcNow.AddSeconds(
                 -transitionDuration * Clamp(progress, 0, 1));
+            InvalidateVisual();
+        }
+
+        public void SetTestSteadyGreenTransition(double progress)
+        {
+            useTestTime = true;
+            previousState = HaloState.Done;
+            state = HaloState.Done;
+            steadyDone = true;
+            transitionFromColor = StateColor(HaloState.Done);
+            transitionFromVisual = TargetVisual(HaloState.Done, 0);
+            transitionFromVisual.Powered = 0.82;
+            transitionFromVisual.Breath = 0.90;
+            transitionDuration = 1.45;
+            testTime = 4;
+            transitionStartSeconds = testTime - transitionDuration *
+                Clamp(progress, 0, 1);
+            testSinceState = transitionDuration * Clamp(progress, 0, 1);
+            stateChangedUtc = DateTime.UtcNow.AddSeconds(-testSinceState);
+            InvalidateVisual();
+        }
+
+        public void SetTestSteadyGreenToThinking(double progress)
+        {
+            useTestTime = true;
+            previousState = HaloState.Done;
+            state = HaloState.Thinking;
+            steadyDone = false;
+            transitionFromColor = StateColor(HaloState.Done);
+            transitionFromVisual = TargetVisual(HaloState.Done, 0);
+            transitionFromVisual.Powered = 0;
+            transitionFromVisual.Breath = 0.34;
+            transitionDuration = TransitionDuration(HaloState.Done,
+                HaloState.Thinking);
+            testTime = 4;
+            transitionStartSeconds = testTime - transitionDuration *
+                Clamp(progress, 0, 1);
+            testSinceState = transitionDuration * Clamp(progress, 0, 1);
+            stateChangedUtc = DateTime.UtcNow.AddSeconds(-testSinceState);
+            InvalidateVisual();
+        }
+
+        public void SetTestErrorPresentationTransition(ErrorPresentation from,
+            ErrorPresentation to, double progress)
+        {
+            useTestTime = true;
+            previousState = HaloState.Error;
+            state = HaloState.Error;
+            errorPresentation = from;
+            transitionFromVisual = TargetVisual(HaloState.Error, 0.18);
+            transitionFromColor = StateColor(HaloState.Error);
+            errorPresentation = to;
+            transitionDuration = to == ErrorPresentation.Flashing ? 0.82 : 1.24;
+            testTime = 4;
+            transitionStartSeconds = testTime - transitionDuration *
+                Clamp(progress, 0, 1);
+            testSinceState = transitionDuration * Clamp(progress, 0, 1);
+            stateChangedUtc = DateTime.UtcNow.AddSeconds(-testSinceState);
             InvalidateVisual();
         }
 
@@ -1124,6 +1247,7 @@ namespace CodexHalo
 
             DrawPureRing(dc, center, color, displayEnergy, displayOuterPhase,
                 displayInnerPhase, t, sinceState, transition);
+            hasRenderedFrame = true;
             dc.Pop();
         }
 
@@ -1131,48 +1255,43 @@ namespace CodexHalo
             double displayEnergy, double gapA, double gapB, double t, double sinceState,
             double transition)
         {
-            double breath = Lerp(StateBreath(previousState, t),
-                StateBreath(state, t), transition);
-            if (state == HaloState.Done && steadyDone)
-            {
-                breath = 0.34;
-            }
+            double localStateTime = useTestTime && transitionStartSeconds < 0
+                ? sinceState : Math.Max(0, sinceState - transitionDuration);
+            VisualSnapshot target = TargetVisual(state, localStateTime);
+            target.Color = color;
+            VisualSnapshot visual = TransitionVisual(transitionFromVisual, target,
+                transition);
+            double breath = visual.Breath;
             double completionFlash = state == HaloState.Done
-                && !steadyDone ? CompletionDoubleFlash(sinceState) : 0;
-            double transitionFlash = Math.Sin(Math.PI * Clamp(
-                (t - transitionStartSeconds) / Math.Max(transitionDuration, 0.001), 0, 1));
-            double alert = state == HaloState.Attention
-                ? DoublePulse(t, 1.34) : state == HaloState.Error
-                    ? DoublePulse(t, 1.08) : 0;
-            double intensity = Clamp(0.5 + displayEnergy * 0.54 +
-                breath * 0.16 + completionFlash * 0.5 + alert * 0.13, 0, 1.32);
+                && !steadyDone && transition >= 0.999
+                    ? CompletionDoubleFlash(localStateTime) : 0;
+            double intensity = Clamp(visual.Intensity + displayEnergy * 0.18 +
+                completionFlash * 0.5, 0, 1.32);
             double radius = 35.8 + completionFlash * 0.45;
-            double bodyWidth = 8.6 + completionFlash * 0.65 + alert * 0.3;
-
-            double activeGlow = ActiveRingGlow(t, transition);
-            double powered = Clamp(activeGlow + completionFlash * 0.82 +
-                transitionFlash * 0.48, 0, 1);
-            if (state == HaloState.Done && steadyDone)
-            {
-                powered = 0;
-            }
+            double bodyWidth = visual.BodyWidth + completionFlash * 0.65;
+            double powered = visual.Powered;
+            powered = Clamp(powered + completionFlash * 0.82, 0, 1);
+            renderedVisual = visual;
+            renderedVisual.Color = color;
+            renderedVisual.Powered = powered;
             MediaColor dimColor = AdjustSaturation(color, 0.88);
             MediaColor emissionColor = AdjustSaturation(color,
                 0.92 + 0.36 * powered);
             MediaColor glowColor = MixColor(emissionColor,
                 MediaColor.FromRgb(242, 248, 249), 0.18 + 0.08 * powered);
+            double glowGain = visual.GlowGain;
             DrawDynamicRing(dc, center, radius, gapA, gapB,
                 NewPen(WithAlpha(emissionColor,
-                    Alpha((12 + 39 * powered) * intensity)), 19.5));
+                    Alpha((12 + 39 * powered) * intensity * glowGain)), 19.5));
             DrawDynamicRing(dc, center, radius, gapA, gapB,
                 NewPen(WithAlpha(emissionColor,
-                    Alpha((22 + 52 * powered) * intensity)), 14.5));
+                    Alpha((22 + 52 * powered) * intensity * glowGain)), 14.5));
             DrawDynamicRing(dc, center, radius, gapA, gapB,
                 NewPen(WithAlpha(emissionColor,
-                    Alpha((38 + 70 * powered) * intensity)), 11.2));
+                    Alpha((38 + 70 * powered) * intensity * glowGain)), 11.2));
             DrawDynamicRing(dc, center, radius, gapA, gapB,
                 NewPen(WithAlpha(glowColor,
-                    Alpha(82 * powered * intensity)), 9.8));
+                    Alpha(82 * powered * intensity * glowGain)), 9.8));
 
             MediaColor darkMaterial = MixColor(dimColor,
                 MediaColor.FromRgb(18, 24, 26), 0.46);
@@ -1187,7 +1306,7 @@ namespace CodexHalo
                 NewPen(WithAlpha(poweredMaterial,
                     Alpha((182 + 73 * powered) * intensity)), bodyWidth));
             MediaColor poweredCore = MixColor(emissionColor,
-                MediaColor.FromRgb(253, 255, 255), 0.82);
+                MediaColor.FromRgb(253, 255, 255), visual.CoreWhite);
             DrawDynamicRing(dc, center, radius, gapA, gapB,
                 NewPen(WithAlpha(poweredCore,
                     Alpha((5 + 235 * powered) * intensity)),
@@ -1197,30 +1316,96 @@ namespace CodexHalo
                     Alpha(205 * powered * intensity)), 1.65));
         }
 
-        private double ActiveRingGlow(double time, double transition)
+        private VisualSnapshot TargetVisual(HaloState value, double localTime)
         {
-            double thinkingWeight =
-                (previousState == HaloState.Thinking ? 1 - transition : 0) +
-                (state == HaloState.Thinking ? transition : 0);
-            double workingWeight =
-                (previousState == HaloState.Working ? 1 - transition : 0) +
-                (state == HaloState.Working ? transition : 0);
-            double doneWeight =
-                (previousState == HaloState.Done ? 1 - transition : 0) +
-                (state == HaloState.Done ? transition : 0);
-            double activityWeight = Clamp(thinkingWeight + workingWeight + doneWeight, 0, 1);
-            if (activityWeight < 0.002)
+            VisualSnapshot result = new VisualSnapshot();
+            result.Color = StateColor(value);
+            result.Breath = StateBreath(value, localTime);
+            result.Powered = TargetPowered(value, localTime);
+            result.Intensity = 0.50 + result.Breath * 0.18;
+            result.BodyWidth = 8.6;
+            result.CoreWhite = CoreWhiteFor(value);
+            result.GlowGain = GlowGainFor(value);
+            if (value == HaloState.Done && steadyDone)
             {
-                return 0;
+                result.Powered = 0;
+                result.Breath = 0.34;
+                result.Intensity = 0.56;
             }
+            else if (value == HaloState.Attention)
+            {
+                double pulse = AttentionPulse(localTime);
+                result.Powered = 0.10 + 0.90 * pulse;
+                result.Breath = 0.28 + 0.72 * pulse;
+                result.Intensity = 0.56 + 0.18 * pulse;
+                result.BodyWidth = 8.6 + 0.30 * pulse;
+            }
+            else if (value == HaloState.Error)
+            {
+                double pulse = ErrorPulse(localTime, errorPresentation);
+                result.Powered = errorPresentation == ErrorPresentation.Bright
+                    ? 1.0 : errorPresentation == ErrorPresentation.Dim ? 0 : pulse;
+                result.Breath = errorPresentation == ErrorPresentation.Dim ? 0.10 : pulse;
+                result.Intensity = errorPresentation == ErrorPresentation.Dim
+                    ? 0.52 : 0.62 + 0.12 * pulse;
+                result.BodyWidth = 8.6 + 0.25 * pulse;
+            }
+            return result;
+        }
 
-            double thinkingBreath = 0.025 + 0.975 * LampBreath(time, 5.2);
-            double workingBreath = 0.035 + 0.965 * LampBreath(time, 3.2);
-            double doneBreath = steadyDone
-                ? 0
-                : 0.30 + 0.70 * LampBreath(time, 7.2);
-            return Clamp(thinkingWeight * thinkingBreath * 0.94 +
-                workingWeight * workingBreath + doneWeight * doneBreath, 0, 1);
+        private static VisualSnapshot TransitionVisual(VisualSnapshot from,
+            VisualSnapshot to, double progress)
+        {
+            VisualSnapshot result = new VisualSnapshot();
+            double scalarProgress = SmootherStep(Clamp((progress - 0.34) / 0.66, 0, 1));
+            result.Color = to.Color;
+            result.Powered = TransitionLight(from.Powered, to.Powered, progress);
+            result.Breath = Lerp(from.Breath, to.Breath, scalarProgress);
+            result.Intensity = Lerp(from.Intensity, to.Intensity, scalarProgress);
+            result.BodyWidth = Lerp(from.BodyWidth, to.BodyWidth, scalarProgress);
+            result.CoreWhite = Lerp(from.CoreWhite, to.CoreWhite, scalarProgress);
+            result.GlowGain = Lerp(from.GlowGain, to.GlowGain, scalarProgress);
+            return result;
+        }
+
+        private static double TargetPowered(HaloState value, double localTime)
+        {
+            if (value == HaloState.Thinking)
+            {
+                return LivingBreath(localTime, 5.5, 1.0, 0.18, 0.70);
+            }
+            if (value == HaloState.Working)
+            {
+                return LivingBreath(localTime, 7.2, 1.0, 0.16, 0.78);
+            }
+            if (value == HaloState.Done)
+            {
+                return LivingBreath(localTime, 9.2, 0.84, 0.09, 0.76);
+            }
+            return 0;
+        }
+
+        private static double CoreWhiteFor(HaloState value)
+        {
+            switch (value)
+            {
+                case HaloState.Thinking: return 0.90;
+                case HaloState.Working: return 0.86;
+                case HaloState.Error: return 0.91;
+                case HaloState.Done: return 0.84;
+                default: return 0.82;
+            }
+        }
+
+        private static double GlowGainFor(HaloState value)
+        {
+            switch (value)
+            {
+                case HaloState.Thinking: return 1.13;
+                case HaloState.Working: return 1.07;
+                case HaloState.Error: return 1.12;
+                default: return 1.0;
+            }
         }
 
         private static void DrawDynamicRing(DrawingContext dc, MediaPoint center,
@@ -1702,7 +1887,30 @@ namespace CodexHalo
         private MediaColor AnimatedColor(double time)
         {
             double progress = TransitionProgress(time);
-            return MixEmissionColor(transitionFromColor, StateColor(state), progress);
+            double colorProgress = SmootherStep(Clamp((progress - 0.18) / 0.56, 0, 1));
+            return MixColor(transitionFromColor, StateColor(state), colorProgress);
+        }
+
+        private static double TransitionScalar(double from, double to, double progress)
+        {
+            double blend = SmootherStep(Clamp((progress - 0.42) / 0.58, 0, 1));
+            return Lerp(from, to, blend);
+        }
+
+        private static double TransitionLight(double from, double to, double progress)
+        {
+            const double low = 0.08;
+            if (progress < 0.36)
+            {
+                return Lerp(from, Math.Min(from, low),
+                    SmootherStep(progress / 0.36));
+            }
+            if (progress < 0.58)
+            {
+                return Math.Min(from, low);
+            }
+            return Lerp(Math.Min(from, low), to,
+                SmootherStep((progress - 0.58) / 0.42));
         }
 
         private double TransitionProgress(double time)
@@ -1719,25 +1927,25 @@ namespace CodexHalo
         {
             if (to == HaloState.Error)
             {
-                return 0.56;
+                return 0.92;
             }
             if (to == HaloState.Attention)
             {
-                return 0.7;
+                return 1.02;
             }
             if (to == HaloState.Done)
             {
-                return 0.58;
+                return 1.72;
             }
             if (to == HaloState.Working)
             {
-                return 0.48;
+                return 1.48;
             }
             if (to == HaloState.Thinking)
             {
-                return 0.94;
+                return 1.68;
             }
-            return 1.08;
+            return 1.78;
         }
 
         private static double TargetGapVelocityA(HaloState value)
@@ -1889,6 +2097,46 @@ namespace CodexHalo
             return RepulsionDurationFromOrbit(orbitVelocity);
         }
 
+        public static double DiagnosticBreath(HaloState value, double time)
+        {
+            return StateBreath(value, time);
+        }
+
+        public static double DiagnosticPowered(HaloState value, double time)
+        {
+            if (value == HaloState.Thinking)
+                return LivingBreath(time, 5.5, 1.0, 0.18, 0.70);
+            if (value == HaloState.Working)
+                return LivingBreath(time, 7.2, 1.0, 0.16, 0.78);
+            if (value == HaloState.Done)
+                return LivingBreath(time, 9.2, 0.84, 0.09, 0.76);
+            return 0;
+        }
+
+        public static double DiagnosticAttentionPulse(double time)
+        {
+            return AttentionPulse(time);
+        }
+
+        public static double DiagnosticBrightDuration(HaloState value)
+        {
+            if (value == HaloState.Thinking) return 5.5 * 0.70;
+            if (value == HaloState.Working) return 7.2 * 0.78;
+            if (value == HaloState.Done) return 9.2 * 0.76;
+            return 0;
+        }
+
+        public static double DiagnosticCoreWhite(HaloState value)
+        {
+            return CoreWhiteFor(value);
+        }
+
+        public static double DiagnosticTransitionLight(double from, double to,
+            double progress)
+        {
+            return TransitionLight(from, to, SmootherStep(progress));
+        }
+
         private static double CompletionDoubleFlash(double sinceState)
         {
             double first = Math.Exp(-Math.Pow((sinceState - 0.28) / 0.14, 2));
@@ -1914,15 +2162,15 @@ namespace CodexHalo
             switch (value)
             {
                 case HaloState.Thinking:
-                    return 0.14 + 0.86 * LampBreath(time, 5.2);
+                    return LivingBreath(time, 5.5, 1.0, 0.26, 0.70);
                 case HaloState.Working:
-                    return 0.2 + 0.8 * LampBreath(time, 3.2);
+                    return LivingBreath(time, 7.2, 1.0, 0.22, 0.78);
                 case HaloState.Done:
-                    return 0.30 + 0.70 * LampBreath(time, 7.2);
+                    return LivingBreath(time, 9.2, 0.92, 0.22, 0.76);
                 case HaloState.Attention:
-                    return 0.28 + 0.72 * DoublePulse(time, 1.34);
+                    return 0.18 + 0.82 * AttentionPulse(time);
                 case HaloState.Error:
-                    return 0.35 + 0.65 * DoublePulse(time, 1.08);
+                    return ErrorPulse(time, ErrorPresentation.Flashing);
                 default:
                     return 0.18 + 0.22 * SoftWave(time / 6.8);
             }
@@ -2112,6 +2360,58 @@ namespace CodexHalo
             return Clamp(first + second * 0.82, 0, 1);
         }
 
+        private static double AttentionPulse(double time)
+        {
+            double cycle = PositiveModulo(time, 5.8) / 5.8;
+            double first = SmoothPulse(cycle, 0.16, 0.095);
+            double second = SmoothPulse(cycle, 0.38, 0.11) * 0.82;
+            double livingBase = 0.08 + 0.05 * SoftWave(cycle + 0.18);
+            return Clamp(livingBase + first + second, 0, 1);
+        }
+
+        private static double ErrorPulse(double time, ErrorPresentation presentation)
+        {
+            if (presentation == ErrorPresentation.Bright) return 0.92;
+            if (presentation == ErrorPresentation.Dim) return 0.04;
+            double cycle = PositiveModulo(time, 1.55);
+            double first = Math.Exp(-Math.Pow((cycle - 0.12) / 0.055, 2));
+            double second = Math.Exp(-Math.Pow((cycle - 0.34) / 0.065, 2));
+            return Clamp(first + second, 0, 1);
+        }
+
+        private static double ThinkingBreath(double time)
+        {
+            return LivingBreath(time, 5.5, 1.0, 0.26, 0.70);
+        }
+
+        private static double LongBrightBreath(double time, double period)
+        {
+            return LivingBreath(time, period, 1, 0.16, 0.74);
+        }
+
+        private static double LivingBreath(double time, double period,
+            double maximum, double minimum, double brightShare)
+        {
+            double phase = PositiveModulo(time, period) / period;
+            double center = brightShare + (1 - brightShare) * 0.46;
+            double distance = Math.Abs(phase - center);
+            distance = Math.Min(distance, 1 - distance);
+            double width = Math.Max(0.075, (1 - brightShare) * 0.46);
+            double dip = Math.Exp(-Math.Pow(distance / width, 4));
+            double micro = 0.018 * Math.Sin(phase * Math.PI * 2) +
+                0.009 * Math.Sin(phase * Math.PI * 4 + 0.8);
+            return Clamp(maximum - (maximum - minimum) * dip + micro,
+                minimum, maximum);
+        }
+
+        private static double SmoothPulse(double phase, double center, double width)
+        {
+            double distance = Math.Abs(phase - center);
+            distance = Math.Min(distance, 1 - distance);
+            double normalized = Clamp(1 - distance / width, 0, 1);
+            return SmootherStep(normalized);
+        }
+
         private static double SoftWave(double phase)
         {
             double cycle = PositiveModulo(phase, 1);
@@ -2184,6 +2484,88 @@ namespace CodexHalo
         {
             return (byte)Math.Max(0, Math.Min(255, Math.Round(value)));
         }
+    }
+
+    public static class CodexFailureReader
+    {
+        public static bool TryReadRecent(out string detail, out DateTime eventUtc)
+        {
+            detail = null;
+            eventUtc = DateTime.MinValue;
+            string root = Path.Combine(Environment.GetFolderPath(
+                Environment.SpecialFolder.UserProfile), ".codex");
+            string database = Path.Combine(root, "logs_2.sqlite");
+            string sqlite = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "sqlite3.exe");
+            if (!File.Exists(database) || !File.Exists(sqlite))
+            {
+                return false;
+            }
+            try
+            {
+                long cutoff = DateTimeOffset.UtcNow.AddMinutes(-2).ToUnixTimeSeconds();
+                string query = "select ts || char(9) || replace(replace(" +
+                    "coalesce(feedback_log_body,''),char(10),' '),char(13),' ') from logs " +
+                    "where ts >= " + cutoff.ToString(CultureInfo.InvariantCulture) +
+                    " and lower(level)='error' and (" +
+                    "lower(target) like '%client%' or lower(target) like '%auth%' or " +
+                    "lower(target) like '%response%' or lower(target) like '%session%') " +
+                    "order by id desc limit 24;";
+                ProcessStartInfo start = new ProcessStartInfo
+                {
+                    FileName = sqlite,
+                    Arguments = "-readonly -batch \"" + database.Replace("\"", "\"\"") +
+                        "\" \"" + query.Replace("\"", "\"\"") + "\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+                using (Process process = Process.Start(start))
+                {
+                    string output = process.StandardOutput.ReadToEnd();
+                    process.WaitForExit(1500);
+                    foreach (string line in output.Split(new[] { '\r', '\n' },
+                        StringSplitOptions.RemoveEmptyEntries))
+                    {
+                        int tab = line.IndexOf('\t');
+                        if (tab <= 0) continue;
+                        long seconds;
+                        if (!long.TryParse(line.Substring(0, tab), out seconds)) continue;
+                        string matched = FailureDetail(line.Substring(tab + 1).ToLowerInvariant());
+                        if (matched == null) continue;
+                        detail = matched;
+                        eventUtc = DateTimeOffset.FromUnixTimeSeconds(seconds).UtcDateTime;
+                        return true;
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return false;
+        }
+
+        private static string FailureDetail(string text)
+        {
+            if (ContainsAny(text, "authentication failed", "unauthorized", "invalid token",
+                "sign in again")) return "认证已失效";
+            if (ContainsAny(text, "rate limit reached", "usage limit", "quota exceeded",
+                "rate_limit_reached")) return "额度已用尽";
+            if (ContainsAny(text, "service unavailable", "server overloaded", "overloaded",
+                "bad gateway")) return "服务暂时不可用";
+            if (ContainsAny(text, "connection failed", "network error", "connection aborted",
+                "request timed out", "connect timeout")) return "连接 Codex 失败";
+            return null;
+        }
+
+        private static bool ContainsAny(string text, params string[] values)
+        {
+            return values.Any(delegate(string value)
+            {
+                return text.IndexOf(value, StringComparison.Ordinal) >= 0;
+            });
+        }
+
     }
 
     public static class RateLimitReader
@@ -2371,8 +2753,10 @@ namespace CodexHalo
                 case HaloState.Thinking: return "正在思考与规划";
                 case HaloState.Working: return "正在执行任务";
                 case HaloState.Done: return "任务已完成";
-                case HaloState.Attention: return "需要你进行处理";
-                case HaloState.Error: return "任务已中断";
+                case HaloState.Attention: return "等待你的授权或输入";
+                case HaloState.Error:
+                    return String.IsNullOrEmpty(aggregate.Detail)
+                        ? "任务已中断" : aggregate.Detail;
                 default: return "Codex 正在待命";
             }
         }
@@ -2462,9 +2846,11 @@ namespace CodexHalo
         private bool dragging;
         private bool moved;
         private HaloState? demoState;
+        private ErrorPresentation? demoErrorPresentation;
         private bool codexWasForeground;
-        private bool greenStandby;
-        private DateTime greenStandbySinceUtc;
+        private DateTime activeErrorUtc;
+        private DateTime errorDimmedUtc;
+        private ErrorPresentation errorPresentation = ErrorPresentation.Flashing;
 
         public HaloWindow(HaloSettings appSettings)
         {
@@ -2517,13 +2903,6 @@ namespace CodexHalo
                 hoverHideTimer.Start();
             };
 
-            ToolTip tooltip = new ToolTip();
-            tooltip.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
-            tooltip.HorizontalOffset = 0;
-            tooltip.VerticalOffset = 4;
-            tooltip.Content = "Agent Halo";
-            ToolTip = tooltip;
-
             MouseLeftButtonDown += OnMouseDown;
             MouseMove += OnMouseMove;
             MouseLeftButtonUp += OnMouseUp;
@@ -2567,7 +2946,20 @@ namespace CodexHalo
             {
                 AcknowledgeCompleted();
             }
-            else if (codexIsForeground != codexWasForeground || greenStandby)
+            if (aggregate != null && aggregate.State == HaloState.Error)
+            {
+                if (codexIsForeground)
+                {
+                    errorPresentation = ErrorPresentation.Bright;
+                }
+                else if (codexWasForeground)
+                {
+                    errorPresentation = ErrorPresentation.Dim;
+                    errorDimmedUtc = DateTime.UtcNow;
+                }
+            }
+            if (codexIsForeground != codexWasForeground ||
+                errorPresentation == ErrorPresentation.Dim)
             {
                 RefreshState();
             }
@@ -2622,15 +3014,64 @@ namespace CodexHalo
         private void RefreshState()
         {
             aggregate = monitor.GetAggregate(settings);
-            if (aggregate.State != HaloState.Idle)
+            bool codexRunning = IsCodexRunning();
+            string appFailure;
+            DateTime appFailureUtc;
+            if (codexRunning && aggregate.State == HaloState.Idle &&
+                CodexFailureReader.TryReadRecent(out appFailure, out appFailureUtc) &&
+                appFailureUtc > settings.GetAcknowledgedErrorUtc())
             {
-                greenStandby = false;
+                aggregate.State = HaloState.Error;
+                aggregate.Label = CodexSessionMonitor.StateLabel(HaloState.Error);
+                aggregate.Detail = appFailure;
+                aggregate.Sessions.Add(new SessionSnapshot
+                {
+                    ThreadId = "codex-app",
+                    ProjectName = "Codex",
+                    State = HaloState.Error,
+                    Action = appFailure,
+                    LastEventUtc = appFailureUtc,
+                    Active = false
+                });
             }
-            if (greenStandby &&
-                (!IsCodexRunning() ||
-                 DateTime.UtcNow - greenStandbySinceUtc > TimeSpan.FromMinutes(30)))
+            if (aggregate.State == HaloState.Error)
             {
-                greenStandby = false;
+                DateTime previousErrorUtc = activeErrorUtc;
+                SessionSnapshot latestError = aggregate.Sessions
+                    .Where(delegate(SessionSnapshot session)
+                    {
+                        return session.State == HaloState.Error;
+                    })
+                    .OrderByDescending(delegate(SessionSnapshot session)
+                    {
+                        return session.LastEventUtc;
+                    }).FirstOrDefault();
+                activeErrorUtc = latestError == null ? DateTime.UtcNow : latestError.LastEventUtc;
+                if (activeErrorUtc <= settings.GetAcknowledgedErrorUtc())
+                {
+                    aggregate.State = HaloState.Idle;
+                }
+                else if (activeErrorUtc > previousErrorUtc)
+                {
+                    errorPresentation = IsCodexForeground()
+                        ? ErrorPresentation.Bright : ErrorPresentation.Flashing;
+                }
+                else if (IsCodexForeground())
+                {
+                    errorPresentation = ErrorPresentation.Bright;
+                }
+                else if (errorPresentation != ErrorPresentation.Dim)
+                {
+                    errorPresentation = ErrorPresentation.Flashing;
+                }
+            }
+            if (errorPresentation == ErrorPresentation.Dim &&
+                DateTime.UtcNow - errorDimmedUtc >= TimeSpan.FromMinutes(1))
+            {
+                settings.AcknowledgedErrorAt = activeErrorUtc.ToString("o");
+                SettingsStorage.Save(settings);
+                errorPresentation = ErrorPresentation.Flashing;
+                aggregate.State = HaloState.Idle;
             }
             if (demoState.HasValue)
             {
@@ -2639,19 +3080,26 @@ namespace CodexHalo
                 aggregate.Detail = "Preview mode";
             }
             int count = aggregate.Sessions == null ? 0 : aggregate.Sessions.Count;
-            bool showGreenStandby = !demoState.HasValue && greenStandby &&
+            bool showGreenStandby = !demoState.HasValue && codexRunning &&
                 aggregate.State == HaloState.Idle;
             visual.SetSteadyDone(showGreenStandby);
+            visual.SetErrorPresentation(demoErrorPresentation ?? errorPresentation);
             visual.SetState(showGreenStandby ? HaloState.Done : aggregate.State,
                 showGreenStandby ? "待命" : aggregate.Label, count);
-            ToolTip tooltip = ToolTip as ToolTip;
-            if (tooltip != null)
-            {
-                tooltip.Content = aggregate.Label + "\n" + aggregate.Detail;
-            }
             tray.Text = ("Agent Halo · " + aggregate.Label).Substring(0,
                 Math.Min(63, ("Agent Halo · " + aggregate.Label).Length));
-            details.UpdateContent(aggregate, monitor.GetAllRecent());
+            AggregateSnapshot displayAggregate = aggregate;
+            if (showGreenStandby)
+            {
+                displayAggregate = new AggregateSnapshot
+                {
+                    State = HaloState.Done,
+                    Label = "STANDBY",
+                    Detail = "Codex 正在待命",
+                    Sessions = aggregate.Sessions
+                };
+            }
+            details.UpdateContent(displayAggregate, monitor.GetAllRecent());
         }
 
         private void OnMouseDown(object sender, MouseButtonEventArgs e)
@@ -2849,8 +3297,6 @@ namespace CodexHalo
                     settings.Acknowledge(session.ThreadId, session.CompletedUtc);
                 }
             }
-            greenStandby = true;
-            greenStandbySinceUtc = DateTime.UtcNow;
             SettingsStorage.Save(settings);
             RefreshState();
         }
@@ -2933,8 +3379,13 @@ namespace CodexHalo
             AddPreviewItem(preview, "思考中", HaloState.Thinking);
             AddPreviewItem(preview, "执行中", HaloState.Working);
             AddPreviewItem(preview, "已完成", HaloState.Done);
-            AddPreviewItem(preview, "需要你处理", HaloState.Attention);
-            AddPreviewItem(preview, "已中断", HaloState.Error);
+            AddPreviewItem(preview, "等待授权（双脉冲）", HaloState.Attention);
+            AddPreviewItem(preview, "故障（爆闪）", HaloState.Error,
+                ErrorPresentation.Flashing);
+            AddPreviewItem(preview, "故障（常亮）", HaloState.Error,
+                ErrorPresentation.Bright);
+            AddPreviewItem(preview, "故障（暗红）", HaloState.Error,
+                ErrorPresentation.Dim);
             AddPreviewItem(preview, "待机", HaloState.Idle);
             menu.Items.Add(preview);
 
@@ -2953,12 +3404,19 @@ namespace CodexHalo
         private void AddPreviewItem(Forms.ToolStripMenuItem parent, string title,
             HaloState? preview)
         {
+            AddPreviewItem(parent, title, preview, null);
+        }
+
+        private void AddPreviewItem(Forms.ToolStripMenuItem parent, string title,
+            HaloState? preview, ErrorPresentation? presentation)
+        {
             Forms.ToolStripMenuItem item = new Forms.ToolStripMenuItem(title);
             item.Click += delegate
             {
                 Dispatcher.BeginInvoke(new Action(delegate
                 {
                     demoState = preview;
+                    demoErrorPresentation = presentation;
                     RefreshState();
                 }));
             };
@@ -3140,6 +3598,33 @@ namespace CodexHalo
                     "working visibility expires to thinking");
 
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"tool_failed\"}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Thinking,
+                    "recoverable tool failure does not become fatal error");
+
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"approval_requested\"}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Attention,
+                    "approval request -> attention");
+
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+                    Encoding.UTF8);
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"turn_failed\"}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Error,
+                    "terminal turn failure -> error");
+
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+                    Encoding.UTF8);
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
                     Encoding.UTF8);
                 tracker.Refresh();
@@ -3152,6 +3637,38 @@ namespace CodexHalo
                 Assert(HaloVisual.DiagnosticRepulsionDuration(28) >
                     HaloVisual.DiagnosticRepulsionDuration(80),
                     "slow orbit uses slower magnetic repulsion");
+                Assert(HaloVisual.DiagnosticBreath(HaloState.Thinking, 1.0) >
+                    HaloVisual.DiagnosticBreath(HaloState.Thinking, 4.6),
+                    "thinking uses long bright and short dim cadence");
+                Assert(HaloVisual.DiagnosticBreath(HaloState.Done, 2.0) >
+                    HaloVisual.DiagnosticBreath(HaloState.Done, 8.0),
+                    "done uses long bright and short dim cadence");
+                Assert(HaloVisual.DiagnosticPowered(HaloState.Thinking, 1.0) > 0.85,
+                    "thinking has a bright sustained plateau");
+                Assert(HaloVisual.DiagnosticPowered(HaloState.Working, 0.8) > 0.88,
+                    "working uses a bright sustained plateau");
+                Assert(HaloVisual.DiagnosticPowered(HaloState.Working, 6.35) < 0.35,
+                    "working includes a shorter dim interval");
+                Assert(HaloVisual.DiagnosticTransitionLight(0.9, 0.8, 0.48) < 0.12,
+                    "state transition changes color while the ring is dim");
+                Assert(HaloVisual.DiagnosticTransitionLight(0.9, 0.0, 0.99) < 0.01,
+                    "steady green transition finishes without glow");
+                Assert(HaloVisual.DiagnosticAttentionPulse(0.93) > 0.88,
+                    "attention first pulse is clearly visible");
+                Assert(HaloVisual.DiagnosticAttentionPulse(2.20) > 0.70,
+                    "attention second pulse is visible and softer");
+                Assert(HaloVisual.DiagnosticAttentionPulse(4.5) < 0.20,
+                    "attention leaves a quiet living interval");
+                Assert(HaloVisual.DiagnosticPowered(HaloState.Thinking, 0.8) > 0.97,
+                    "thinking reaches the full bright tier");
+                Assert(HaloVisual.DiagnosticPowered(HaloState.Working, 0.8) > 0.97,
+                    "working reaches the full bright tier");
+                Assert(HaloVisual.DiagnosticBrightDuration(HaloState.Thinking) <
+                    HaloVisual.DiagnosticBrightDuration(HaloState.Working),
+                    "thinking bright duration is shorter than working");
+                Assert(HaloVisual.DiagnosticCoreWhite(HaloState.Thinking) >
+                    HaloVisual.DiagnosticCoreWhite(HaloState.Done),
+                    "yellow receives perceptual white-core compensation");
                 File.Delete(temp);
                 File.WriteAllText(outputPath,
                     "PASS\nCodex lifecycle reducer, incremental reader, and gap bounds passed.\n",
@@ -3250,6 +3767,7 @@ namespace CodexHalo
                 }
                 RenderPanelPreview(outputDirectory);
                 RenderRingBackdropPreview(outputDirectory);
+                RenderPeakBrightnessComparison(outputDirectory);
                 RenderGapMotionStrip(outputDirectory, HaloState.Idle,
                     "motion-idle.png");
                 RenderGapMotionStrip(outputDirectory, HaloState.Working,
@@ -3257,15 +3775,28 @@ namespace CodexHalo
                 RenderGapMotionStrip(outputDirectory, HaloState.Done,
                     "motion-done.png");
                 RenderGlowPulseStrip(outputDirectory, HaloState.Thinking,
-                    "glow-thinking.png", 5.2);
+                    "glow-thinking.png", 5.5);
                 RenderGlowPulseStrip(outputDirectory, HaloState.Working,
-                    "glow-working.png", 3.2);
+                    "glow-working.png", 7.2);
+                RenderGlowPulseStrip(outputDirectory, HaloState.Attention,
+                    "glow-attention-double-pulse.png", 5.8);
                 RenderTransitionStrip(outputDirectory, HaloState.Thinking,
                     HaloState.Working, "transition-thinking-working.png");
                 RenderTransitionStrip(outputDirectory, HaloState.Working,
                     HaloState.Done, "transition-working-done.png");
                 RenderTransitionStrip(outputDirectory, HaloState.Error,
                     HaloState.Thinking, "transition-error-thinking.png");
+                RenderSteadyGreenToThinkingStrip(outputDirectory);
+                RenderSteadyGreenTransitionStrip(outputDirectory);
+                RenderErrorPresentationStrip(outputDirectory,
+                    ErrorPresentation.Flashing, ErrorPresentation.Bright,
+                    "transition-error-flashing-bright.png");
+                RenderErrorPresentationStrip(outputDirectory,
+                    ErrorPresentation.Bright, ErrorPresentation.Dim,
+                    "transition-error-bright-dim.png");
+                RenderErrorPresentationStrip(outputDirectory,
+                    ErrorPresentation.Dim, ErrorPresentation.Flashing,
+                    "transition-error-dim-flashing.png");
                 RenderCompletionFlashStrip(outputDirectory);
                 return 0;
             }
@@ -3517,6 +4048,53 @@ namespace CodexHalo
             }
         }
 
+        private static void RenderPeakBrightnessComparison(string outputDirectory)
+        {
+            HaloState[] states =
+            {
+                HaloState.Thinking, HaloState.Working, HaloState.Done, HaloState.Error
+            };
+            const double cellSize = 170;
+            Grid strip = new Grid();
+            strip.Width = cellSize * states.Length;
+            strip.Height = cellSize;
+            strip.Background = new SolidColorBrush(MediaColor.FromRgb(7, 10, 15));
+            for (int i = 0; i < states.Length; i++)
+            {
+                strip.ColumnDefinitions.Add(new ColumnDefinition
+                {
+                    Width = new GridLength(cellSize)
+                });
+                HaloVisual visual = new HaloVisual();
+                visual.Width = 136;
+                visual.Height = 136;
+                visual.HorizontalAlignment = HorizontalAlignment.Center;
+                visual.VerticalAlignment = VerticalAlignment.Center;
+                visual.SetState(states[i], CodexSessionMonitor.StateLabel(states[i]), 1);
+                if (states[i] == HaloState.Error)
+                {
+                    visual.SetErrorPresentation(ErrorPresentation.Bright);
+                }
+                visual.SetTestTime(0.8);
+                Grid.SetColumn(visual, i);
+                strip.Children.Add(visual);
+            }
+            strip.Measure(new System.Windows.Size(strip.Width, strip.Height));
+            strip.Arrange(new Rect(0, 0, strip.Width, strip.Height));
+            strip.UpdateLayout();
+            RenderTargetBitmap bitmap = new RenderTargetBitmap(
+                (int)(strip.Width * 2), (int)(strip.Height * 2), 192, 192,
+                PixelFormats.Pbgra32);
+            bitmap.Render(strip);
+            PngBitmapEncoder encoder = new PngBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(bitmap));
+            using (FileStream stream = File.Create(Path.Combine(outputDirectory,
+                "peak-brightness-comparison.png")))
+            {
+                encoder.Save(stream);
+            }
+        }
+
         private static void RenderTransitionStrip(string outputDirectory,
             HaloState from, HaloState to, string fileName)
         {
@@ -3554,6 +4132,125 @@ namespace CodexHalo
             PngBitmapEncoder encoder = new PngBitmapEncoder();
             encoder.Frames.Add(BitmapFrame.Create(bitmap));
             using (FileStream stream = File.Create(Path.Combine(outputDirectory, fileName)))
+            {
+                encoder.Save(stream);
+            }
+        }
+
+        private static void RenderSteadyGreenTransitionStrip(string outputDirectory)
+        {
+            const int frameCount = 9;
+            const double cellSize = 150;
+            Grid strip = new Grid();
+            strip.Width = cellSize * frameCount;
+            strip.Height = cellSize;
+            strip.Background = new SolidColorBrush(MediaColor.FromRgb(7, 10, 15));
+            for (int i = 0; i < frameCount; i++)
+            {
+                strip.ColumnDefinitions.Add(new ColumnDefinition
+                {
+                    Width = new GridLength(cellSize)
+                });
+                HaloVisual visual = new HaloVisual();
+                visual.Width = 126;
+                visual.Height = 126;
+                visual.HorizontalAlignment = HorizontalAlignment.Center;
+                visual.VerticalAlignment = VerticalAlignment.Center;
+                visual.SetTestSteadyGreenTransition(i / (double)(frameCount - 1));
+                Grid.SetColumn(visual, i);
+                strip.Children.Add(visual);
+            }
+            strip.Measure(new System.Windows.Size(strip.Width, strip.Height));
+            strip.Arrange(new Rect(0, 0, strip.Width, strip.Height));
+            strip.UpdateLayout();
+            RenderTargetBitmap bitmap = new RenderTargetBitmap(
+                (int)(strip.Width * 2), (int)(strip.Height * 2), 192, 192,
+                PixelFormats.Pbgra32);
+            bitmap.Render(strip);
+            PngBitmapEncoder encoder = new PngBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(bitmap));
+            using (FileStream stream = File.Create(Path.Combine(outputDirectory,
+                "transition-done-standby.png")))
+            {
+                encoder.Save(stream);
+            }
+        }
+
+        private static void RenderSteadyGreenToThinkingStrip(string outputDirectory)
+        {
+            const int frameCount = 9;
+            const double cellSize = 150;
+            Grid strip = new Grid();
+            strip.Width = cellSize * frameCount;
+            strip.Height = cellSize;
+            strip.Background = new SolidColorBrush(MediaColor.FromRgb(7, 10, 15));
+            for (int i = 0; i < frameCount; i++)
+            {
+                strip.ColumnDefinitions.Add(new ColumnDefinition
+                {
+                    Width = new GridLength(cellSize)
+                });
+                HaloVisual visual = new HaloVisual();
+                visual.Width = 126;
+                visual.Height = 126;
+                visual.HorizontalAlignment = HorizontalAlignment.Center;
+                visual.VerticalAlignment = VerticalAlignment.Center;
+                visual.SetTestSteadyGreenToThinking(i / (double)(frameCount - 1));
+                Grid.SetColumn(visual, i);
+                strip.Children.Add(visual);
+            }
+            strip.Measure(new System.Windows.Size(strip.Width, strip.Height));
+            strip.Arrange(new Rect(0, 0, strip.Width, strip.Height));
+            strip.UpdateLayout();
+            RenderTargetBitmap bitmap = new RenderTargetBitmap(
+                (int)(strip.Width * 2), (int)(strip.Height * 2), 192, 192,
+                PixelFormats.Pbgra32);
+            bitmap.Render(strip);
+            PngBitmapEncoder encoder = new PngBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(bitmap));
+            using (FileStream stream = File.Create(Path.Combine(outputDirectory,
+                "transition-standby-thinking.png")))
+            {
+                encoder.Save(stream);
+            }
+        }
+
+        private static void RenderErrorPresentationStrip(string outputDirectory,
+            ErrorPresentation from, ErrorPresentation to, string fileName)
+        {
+            const int frameCount = 9;
+            const double cellSize = 150;
+            Grid strip = new Grid();
+            strip.Width = cellSize * frameCount;
+            strip.Height = cellSize;
+            strip.Background = new SolidColorBrush(MediaColor.FromRgb(7, 10, 15));
+            for (int i = 0; i < frameCount; i++)
+            {
+                strip.ColumnDefinitions.Add(new ColumnDefinition
+                {
+                    Width = new GridLength(cellSize)
+                });
+                HaloVisual visual = new HaloVisual();
+                visual.Width = 126;
+                visual.Height = 126;
+                visual.HorizontalAlignment = HorizontalAlignment.Center;
+                visual.VerticalAlignment = VerticalAlignment.Center;
+                visual.SetTestErrorPresentationTransition(from, to,
+                    i / (double)(frameCount - 1));
+                Grid.SetColumn(visual, i);
+                strip.Children.Add(visual);
+            }
+            strip.Measure(new System.Windows.Size(strip.Width, strip.Height));
+            strip.Arrange(new Rect(0, 0, strip.Width, strip.Height));
+            strip.UpdateLayout();
+            RenderTargetBitmap bitmap = new RenderTargetBitmap(
+                (int)(strip.Width * 2), (int)(strip.Height * 2), 192, 192,
+                PixelFormats.Pbgra32);
+            bitmap.Render(strip);
+            PngBitmapEncoder encoder = new PngBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(bitmap));
+            using (FileStream stream = File.Create(Path.Combine(outputDirectory,
+                fileName)))
             {
                 encoder.Save(stream);
             }
