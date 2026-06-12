@@ -6,7 +6,7 @@ A local, always-on-top status halo for the Codex desktop app.
 当前版本支持 Codex；后续计划加入 Claude Code（CC）状态识别。  
 The current release supports Codex, with Claude Code detection planned next.
 
-版本 / Version: `0.10.0`（预发布 / Pre-release）
+版本 / Version: `0.10.2`（预发布 / Pre-release）
 
 ---
 
@@ -32,6 +32,7 @@ The current release supports Codex, with Claude Code detection planned next.
 - 左键单击：查看当前及最近的 Codex 会话。
 - 绿色会持续缓慢呼吸；再次打开 Codex 后自动确认并恢复待机。也可单击手动确认。
 - 右键单击：打开状态预览、暂停监听、开机启动和退出菜单。
+- 光环因拔掉副屏而消失时，从系统托盘右键选择“脱离卡死”，可移回主屏右上角。
 - 双击：将 Codex 窗口切到前台。
 
 ### 状态含义

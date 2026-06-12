@@ -29,8 +29,8 @@ using MediaPoint = System.Windows.Point;
 [assembly: System.Reflection.AssemblyDescription("Ambient desktop status light for coding agents")]
 [assembly: System.Reflection.AssemblyCompany("Agent Halo")]
 [assembly: System.Reflection.AssemblyProduct("Agent Halo")]
-[assembly: System.Reflection.AssemblyVersion("0.10.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.10.0.0")]
+[assembly: System.Reflection.AssemblyVersion("0.10.2.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.10.2.0")]
 
 namespace CodexHalo
 {
@@ -1952,7 +1952,7 @@ namespace CodexHalo
         {
             switch (value)
             {
-                case HaloState.Thinking: return 64;
+                case HaloState.Thinking: return 78;
                 case HaloState.Working: return 106;
                 case HaloState.Attention: return 46;
                 case HaloState.Error: return 60;
@@ -3276,6 +3276,38 @@ namespace CodexHalo
             return new Rect(topLeft, bottomRight);
         }
 
+        private Rect GetPrimaryWorkAreaDip()
+        {
+            Forms.Screen primary = Forms.Screen.PrimaryScreen;
+            if (primary == null)
+            {
+                return SystemParameters.WorkArea;
+            }
+            PresentationSource source = PresentationSource.FromVisual(this);
+            if (source == null || source.CompositionTarget == null)
+            {
+                return SystemParameters.WorkArea;
+            }
+            System.Windows.Media.Matrix fromDevice =
+                source.CompositionTarget.TransformFromDevice;
+            System.Drawing.Rectangle work = primary.WorkingArea;
+            MediaPoint topLeft = fromDevice.Transform(
+                new MediaPoint(work.Left, work.Top));
+            MediaPoint bottomRight = fromDevice.Transform(
+                new MediaPoint(work.Right, work.Bottom));
+            return new Rect(topLeft, bottomRight);
+        }
+
+        private void EscapeOffscreen()
+        {
+            Rect area = GetPrimaryWorkAreaDip();
+            Left = area.Right - Width - 28;
+            Top = area.Top + 28;
+            SavePosition();
+            Topmost = settings.AlwaysOnTop;
+            Activate();
+        }
+
         private void SavePosition()
         {
             settings.HasPosition = true;
@@ -3373,6 +3405,11 @@ namespace CodexHalo
                 }));
             };
             menu.Items.Add(pause);
+
+            menu.Items.Add("脱离卡死（移到主屏右上角）", null, delegate
+            {
+                Dispatcher.BeginInvoke(new Action(EscapeOffscreen));
+            });
 
             Forms.ToolStripMenuItem preview = new Forms.ToolStripMenuItem("预览状态");
             AddPreviewItem(preview, "实时状态", null);
