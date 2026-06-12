@@ -20,28 +20,30 @@ The current release supports Codex, with Claude Code detection planned next.
 
 ### 安装与运行
 
-1. 解压整个 ZIP 压缩包，不要直接在压缩包内运行。
-2. 双击 `AgentHalo.exe`。
-3. 光环会出现在主显示器右上方附近。
+1. 从 GitHub Releases 下载最新的 `AgentHalo-Windows-v*.zip`。
+2. 解压整个 ZIP 压缩包，不要直接在压缩包内运行。
+3. 双击 `AgentHalo.exe`，光环会出现在主显示器右上方附近。
 
 程序没有安装器，不会修改 Codex，也不需要 OpenAI API Key。
 
 ### 操作
 
 - 拖动光环：调整位置，靠近屏幕边缘时会自动吸附。
-- 左键单击：查看当前及最近的 Codex 会话。
-- 绿色会持续缓慢呼吸；再次打开 Codex 后自动确认并恢复待机。也可单击手动确认。
+- 鼠标悬停：查看当前状态、5 小时额度和周额度。
+- 任务完成后绿色会缓慢呼吸；再次打开 Codex 后自动确认并变为不发光的稳定绿色。
 - 右键单击：打开状态预览、暂停监听、开机启动和退出菜单。
 - 光环因拔掉副屏而消失时，从系统托盘右键选择“脱离卡死”，可移回主屏右上角。
 - 双击：将 Codex 窗口切到前台。
 
 ### 状态含义
 
-- 黄色呼吸：Codex 正在思考或规划。
-- 蓝色流动：Codex 正在执行命令、搜索、编辑文件或调用工具。
+- 黄色长亮短暗：Codex 正在思考或规划。
+- 蓝色长亮短暗：Codex 正在执行命令、搜索、编辑文件或调用工具。
 - 绿色双闪：Codex 已完成；高亮两次后持续缓慢呼吸，直到你再次打开 Codex。
-- 红色双脉冲：Codex 需要输入、授权或遇到了问题。
-- 暗白色：当前没有待处理任务。
+- 珊瑚橙双脉冲：Codex 正在等待 Yes、授权、确认或输入。
+- 红色：仅表示阻止任务继续的故障；未查看时爆闪，打开 Codex 后常亮，离开后变为暗红。
+- 稳定绿色：Codex 已运行且当前没有活动任务。
+- 暗白色：Codex 未运行。
 
 大断点会追赶缓慢往返漂移的小断点；接近约 40° 时，小断点会像受到磁斥一样
 平滑推开到约 150°，随后带着逐渐衰减的惯性继续滑行并往返漂移。待机也会
@@ -56,9 +58,10 @@ The current release supports Codex, with Claude Code detection planned next.
 
 ### 隐私
 
-Agent Halo 只在本机读取 `%USERPROFILE%\.codex\sessions` 中的生命周期事件，
-用于判断开始、工具执行和完成状态。它不会上传数据、调用网络服务、显示聊天内容，
-也不会读取或保存 OpenAI API Key。
+Agent Halo 只在本机读取 `%USERPROFILE%\.codex\sessions` 中的生命周期事件、
+额度信息，以及 `logs_2.sqlite` 中结构化的连接和服务故障记录。SQLite 数据库仅以
+只读方式查询。程序不会上传数据、调用网络服务、显示聊天内容，也不会读取或保存
+OpenAI API Key。
 
 ### Windows 安全提示
 
@@ -86,9 +89,10 @@ Get-FileHash .\AgentHalo.exe -Algorithm SHA256
 
 ### Install and run
 
-1. Extract the entire ZIP archive. Do not run the app from inside the ZIP.
-2. Double-click `AgentHalo.exe`.
-3. The halo appears near the upper-right corner of the primary display.
+1. Download the latest `AgentHalo-Windows-v*.zip` from GitHub Releases.
+2. Extract the entire archive. Do not run the app from inside the ZIP.
+3. Double-click `AgentHalo.exe`. The halo appears near the upper-right corner
+   of the primary display.
 
 There is no installer. Agent Halo does not modify Codex and does not require an
 OpenAI API key.
@@ -96,27 +100,35 @@ OpenAI API key.
 ### Controls
 
 - Drag the halo to reposition it; it gently snaps to display edges.
-- Left-click to inspect active and recently completed Codex sessions.
-- Green breathes slowly until Codex returns to the foreground. Click it to acknowledge manually.
+- Hover to inspect the current state plus five-hour and weekly usage limits.
+- Completed green breathes until Codex returns to the foreground, then settles
+  into a non-glowing standby green.
 - Right-click for state previews, pause, startup, and exit controls.
+- If a disconnected display leaves the halo off-screen, right-click its system
+  tray icon and select `脱离卡死` to move it to the primary display.
 - Double-click to bring the Codex window forward.
 
 ### Status language
 
-- Amber breathing: Codex is thinking or planning.
-- Blue orbit: Codex is running a command, search, edit, or tool.
+- Amber long-bright/short-dim breathing: Codex is thinking or planning.
+- Blue long-bright/short-dim breathing: Codex is running a command, search,
+  edit, or tool.
 - Green double flash: Codex finished, then breathes slowly until Codex returns to the foreground.
-- Red paired pulse: Codex needs input or encountered a problem.
-- Dim white: no pending activity.
+- Coral double pulse: Codex is waiting for approval, confirmation, or input.
+- Red: a blocking failure. It flashes while unseen, stays brightly lit when
+  Codex is foregrounded, and becomes dim red after you leave.
+- Stable green: Codex is running with no active task.
+- Dim white: Codex is not running.
 
 The large gap chases a small gap that drifts gently back and forth. Near 40° of
 separation, the small gap is smoothly repelled toward roughly 150°, then coasts with
 decaying momentum before returning to its bounded drift. Thinking and working
 accelerate the motion. The ring body itself powers up from a dim material into a
 bright white core while the state color remains around the tube edge. Its narrow bloom
-increases while the center stays transparent. A full working pulse takes roughly
-3.2 seconds; thinking takes roughly 5.2 seconds. Repulsion duration and exit momentum
-scale from the current orbit speed. Animation follows the desktop
+increases while the center stays transparent. Thinking, execution, and completion use
+continuous asymmetric breathing, and state changes dim before blending into the next
+color and powering up again. Repulsion duration and exit momentum scale from the
+current orbit speed. Animation follows the desktop
 composition refresh rate without lowering idle or completed states to 30 FPS.
 Monitoring pause is runtime-only and automatically clears on the next launch.
 Blue remains visible for roughly 1.8 seconds after a tool returns, so short tool calls
@@ -124,9 +136,10 @@ still produce a readable execution state.
 
 ### Privacy
 
-Agent Halo reads lifecycle events from `%USERPROFILE%\.codex\sessions` locally to
-detect task starts, tool activity, and completion. It does not upload data, call a
-network service, display conversation content, or read/store an OpenAI API key.
+Agent Halo locally reads lifecycle and usage events from
+`%USERPROFILE%\.codex\sessions`. It also performs read-only structured queries
+against `logs_2.sqlite` for connection and service failures. It does not upload data,
+call a network service, display conversation content, or read/store an OpenAI API key.
 
 ### Windows security notice
 
