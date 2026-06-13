@@ -10,6 +10,7 @@ binary="$mac_root/.build/release/AgentHaloMac"
 
 cd "$mac_root"
 swift run AgentHaloCoreChecks
+swift run AgentHaloDiagnostics --self-test "$output_root/diagnostics-self-test.txt"
 swift build -c release --product AgentHaloDiagnostics
 swift build -c release --product AgentHaloMac
 

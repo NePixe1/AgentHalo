@@ -18,6 +18,29 @@ English | [简体中文](README.zh-CN.md)
 - The Codex desktop app installed and in use
 - .NET Framework 4.8, normally included with current Windows 10/11 systems
 
+## macOS development build
+
+Run and verify:
+
+```bash
+./script/build_and_run.sh --verify
+```
+
+The app is a menu bar accessory app and does not show a Dock icon. Quit it from the Agent Halo menu bar icon, or run:
+
+```bash
+pkill -x AgentHaloMac
+```
+
+Diagnostics:
+
+```bash
+cd mac
+swift run AgentHaloDiagnostics --self-test /tmp/agent-halo-self-test.txt
+swift run AgentHaloDiagnostics --render-states /tmp/agent-halo-states
+swift run AgentHaloDiagnostics --transition-strip /tmp/agent-halo-transitions
+```
+
 ## Install and run
 
 1. Download the latest `AgentHalo-Windows-v*.zip` from GitHub Releases.

@@ -18,6 +18,29 @@ Codex 桌面端的本地常驻状态光环。
 - 已安装并使用 Codex 桌面端
 - .NET Framework 4.8（目前的 Windows 10/11 通常已自带）
 
+## macOS 开发版
+
+运行并验证：
+
+```bash
+./script/build_and_run.sh --verify
+```
+
+应用是菜单栏辅助应用，不显示 Dock 图标。可以从菜单栏 Agent Halo 图标退出，也可以执行：
+
+```bash
+pkill -x AgentHaloMac
+```
+
+诊断命令：
+
+```bash
+cd mac
+swift run AgentHaloDiagnostics --self-test /tmp/agent-halo-self-test.txt
+swift run AgentHaloDiagnostics --render-states /tmp/agent-halo-states
+swift run AgentHaloDiagnostics --transition-strip /tmp/agent-halo-transitions
+```
+
 ## 安装与运行
 
 1. 从 GitHub Releases 下载最新的 `AgentHalo-Windows-v*.zip`。
