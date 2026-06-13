@@ -26,6 +26,9 @@ public enum SessionAggregator {
                     && completedAt >= now.addingTimeInterval(-86_400)
             }
             if snapshot.state == .error {
+                if !settings.shouldShowError(eventAt: snapshot.lastEventAt) {
+                    return false
+                }
                 return snapshot.lastEventAt >= now.addingTimeInterval(-43_200)
             }
             return snapshot.active

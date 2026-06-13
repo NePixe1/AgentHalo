@@ -236,6 +236,45 @@ func testMonitorHandlesPendingLinesAndTruncation() throws {
     expect(monitor.snapshots().first?.state == .idle, "truncated partial line should not parse")
 }
 
+func testAggregatorHidesAcknowledgedErrorsAndShowsStandbyInput() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
+    let error = SessionSnapshot(
+        threadId: "error",
+        projectName: "Codex",
+        workingDirectory: "",
+        state: .error,
+        action: "Interrupted",
+        lastEventAt: now,
+        completedAt: nil,
+        active: false
+    )
+    let settings = HaloSettings(installedAt: now.addingTimeInterval(-600), acknowledgedErrorAt: now.addingTimeInterval(1))
+    let aggregate = SessionAggregator.aggregate(snapshots: [error], settings: settings, now: now)
+    expect(aggregate.state, .idle, "acknowledged error should hide")
+    expect(aggregate.label, "READY", "hidden error should return ready")
+}
+
+func testFailureClassification() {
+    expect(CodexFailureReader.classify("authentication failed for account"), "认证已失效", "auth failure")
+    expect(CodexFailureReader.classify("rate_limit_reached"), "额度已用尽", "rate limit")
+    expect(CodexFailureReader.classify("server overloaded"), "服务暂时不可用", "service")
+    expect(CodexFailureReader.classify("connect timeout"), "连接 Codex 失败", "network")
+    expect(CodexFailureReader.classify("plain info") == nil, "non failure")
+}
+
+func testRateLimitReaderFindsNewestTailRateLimit() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-rate-\(UUID().uuidString)", isDirectory: true)
+    let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+    try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+    let file = sessions.appendingPathComponent("a.jsonl")
+    let line = #"{"type":"event_msg","payload":{"info":{"rate_limits":{"primary":{"used_percent":25},"secondary":{"used_percent":80}}}}}"#
+    try Data((line + "\n").utf8).write(to: file)
+
+    let snapshot = RateLimitReader(roots: [sessions]).read()
+    expect(snapshot, RateLimitSnapshot(primaryUsedPercent: 25, secondaryUsedPercent: 80), "rate limit")
+}
+
 testReducesPlanningWorkingAttentionErrorAndCompleteEvents()
 testAggregatePrioritizesActionableSessions()
 testAcknowledgingCompletedSessionsStoresLatestVisibleCompletionOnly()
@@ -245,6 +284,13 @@ testWorkingVisibilityLiveCallOutputAndInitialTail()
 testToolFailedDoesNotBecomeFatalError()
 do {
     try testMonitorHandlesPendingLinesAndTruncation()
+} catch {
+    fatalError("\(error)")
+}
+testAggregatorHidesAcknowledgedErrorsAndShowsStandbyInput()
+testFailureClassification()
+do {
+    try testRateLimitReaderFindsNewestTailRateLimit()
 } catch {
     fatalError("\(error)")
 }
