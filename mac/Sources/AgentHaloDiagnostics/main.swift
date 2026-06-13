@@ -56,15 +56,16 @@ enum Diagnostics {
     static func renderStates(to directory: String) throws {
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
         for state in HaloState.allCases {
-            try renderSmokePNG(name: state.rawValue, directory: directory)
+            try renderStatePNG(state: state, directory: directory)
         }
     }
 
     static func renderTransitionStrips(to directory: String) throws {
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
-        for name in ["transition-thinking-working", "transition-working-done", "transition-done-standby", "transition-standby-thinking"] {
-            try renderSmokePNG(name: name, directory: directory)
-        }
+        try renderTransitionPNG(name: "transition-thinking-working", directory: directory, state: .working, time: 1.2)
+        try renderTransitionPNG(name: "transition-working-done", directory: directory, state: .done, time: 1.2)
+        try renderTransitionPNG(name: "transition-done-standby", directory: directory, state: .done, time: 4.0)
+        try renderTransitionPNG(name: "transition-standby-thinking", directory: directory, state: .thinking, time: 1.2)
     }
 
     static func writeBenchmark(to path: String) throws {
@@ -76,19 +77,29 @@ enum Diagnostics {
         try Data("PASS\nelapsed=\(elapsed)\n".utf8).write(to: URL(fileURLWithPath: path))
     }
 
-    static func renderSmokePNG(name: String, directory: String) throws {
-        let image = NSImage(size: NSSize(width: 160, height: 160))
-        image.lockFocus()
-        NSColor.clear.setFill()
-        NSRect(x: 0, y: 0, width: 160, height: 160).fill()
-        NSColor.white.setStroke()
-        NSBezierPath(ovalIn: NSRect(x: 42, y: 42, width: 76, height: 76)).stroke()
-        image.unlockFocus()
-        guard let tiff = image.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiff),
-              let png = bitmap.representation(using: .png, properties: [:]) else {
-            throw NSError(domain: "AgentHaloDiagnostics", code: 1)
-        }
-        try png.write(to: URL(fileURLWithPath: directory).appendingPathComponent("\(name).png"))
+    static func renderStatePNG(state: HaloState, directory: String) throws {
+        let data = try DiagnosticHaloRenderer.renderPNG(input: DiagnosticHaloRenderInput(
+            state: state,
+            errorPresentation: state == .error ? .bright : .flashing,
+            steadyDone: false,
+            time: 2.4,
+            sinceState: state == .done ? 0.55 : 2.4,
+            gapA: 97,
+            gapB: 247
+        ))
+        try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent("\(state.rawValue).png"))
+    }
+
+    static func renderTransitionPNG(name: String, directory: String, state: HaloState, time: Double) throws {
+        let data = try DiagnosticHaloRenderer.renderPNG(input: DiagnosticHaloRenderInput(
+            state: state,
+            errorPresentation: .flashing,
+            steadyDone: name.contains("standby"),
+            time: time,
+            sinceState: time,
+            gapA: 97 + time * 38,
+            gapB: 247 + time * 38
+        ))
+        try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent("\(name).png"))
     }
 }

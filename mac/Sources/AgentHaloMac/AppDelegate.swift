@@ -140,7 +140,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quit.target = self
         menu.addItem(quit)
         statusItem.menu = menu
-        statusItem.button?.image = StatusIcon.image(color: haloView.colorForCurrentState())
+        let rgb = HaloVisualModel.stateColor(aggregate.state)
+        let color = NSColor(calibratedRed: rgb.red / 255, green: rgb.green / 255, blue: rgb.blue / 255, alpha: 1)
+        statusItem.button?.image = StatusIcon.image(color: color)
     }
 
     @objc private func togglePause() {

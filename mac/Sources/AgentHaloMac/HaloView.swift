@@ -14,7 +14,14 @@ final class HaloView: NSView {
     private var dragStart: NSPoint?
     private var windowStart: NSPoint?
     private var animationTimer: Timer?
-    private var phase: CGFloat = 0
+    var visualState: HaloState = .idle
+    var errorPresentation: ErrorPresentation = .flashing
+    var steadyDone = false
+    private var animationTime = 0.0
+    private var sinceState = 0.0
+    private var transitionProgress = 1.0
+    private var gapA = 97.0
+    private var gapB = 247.0
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -36,37 +43,46 @@ final class HaloView: NSView {
     override var isOpaque: Bool { false }
 
     @objc private func stepAnimation() {
-        phase += speedForCurrentState()
-        if phase > 360 {
-            phase -= 360
-        }
+        let delta = 1.0 / 60.0
+        animationTime += max(0.001, min(delta, 0.08))
+        sinceState += max(0.001, min(delta, 0.08))
+        let velocity = targetGapVelocity(for: visualState)
+        gapA += velocity * delta
+        gapB = gapA + 150 + 5 * sin(animationTime)
         needsDisplay = true
+    }
+
+    private func targetGapVelocity(for state: HaloState) -> Double {
+        switch state {
+        case .thinking: 78
+        case .working: 106
+        case .attention: 46
+        case .error: 60
+        case .done: 38
+        case .idle: 27
+        }
     }
 
     override func draw(_ dirtyRect: NSRect) {
         NSColor.clear.setFill()
         dirtyRect.fill()
-
         guard let context = NSGraphicsContext.current?.cgContext else {
             return
         }
-        let center = CGPoint(x: bounds.midX, y: bounds.midY)
-        let radius = min(bounds.width, bounds.height) * 0.36
-        let color = colorForCurrentState()
-        let breath = breathForCurrentState()
-
-        context.setLineCap(.round)
-        context.setLineWidth(12)
-        context.setStrokeColor(color.withAlphaComponent(0.18 + breath * 0.20).cgColor)
-        drawHaloArcs(context: context, center: center, radius: radius, offset: phase)
-
-        context.setLineWidth(6)
-        context.setStrokeColor(color.withAlphaComponent(0.78 + breath * 0.22).cgColor)
-        drawHaloArcs(context: context, center: center, radius: radius, offset: phase)
-
-        context.setLineWidth(2)
-        context.setStrokeColor(NSColor.white.withAlphaComponent(0.55 + breath * 0.35).cgColor)
-        drawHaloArcs(context: context, center: center, radius: radius - 4, offset: phase + 3)
+        HaloRenderer.drawPureRing(
+            context: context,
+            bounds: bounds,
+            input: HaloRenderInput(
+                state: visualState,
+                errorPresentation: errorPresentation,
+                steadyDone: steadyDone,
+                time: animationTime,
+                sinceState: sinceState,
+                transition: transitionProgress,
+                gapA: gapA,
+                gapB: gapB
+            )
+        )
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -96,62 +112,5 @@ final class HaloView: NSView {
         }
         dragStart = nil
         windowStart = nil
-    }
-
-    func colorForCurrentState() -> NSColor {
-        switch aggregate.state {
-        case .idle: NSColor(calibratedRed: 0.82, green: 0.88, blue: 0.90, alpha: 1)
-        case .thinking: NSColor(calibratedRed: 1.00, green: 0.73, blue: 0.22, alpha: 1)
-        case .working: NSColor(calibratedRed: 0.16, green: 0.73, blue: 1.00, alpha: 1)
-        case .done: NSColor(calibratedRed: 0.20, green: 0.90, blue: 0.48, alpha: 1)
-        case .attention: NSColor(calibratedRed: 1.00, green: 0.40, blue: 0.32, alpha: 1)
-        case .error: NSColor(calibratedRed: 1.00, green: 0.14, blue: 0.18, alpha: 1)
-        }
-    }
-
-    private func speedForCurrentState() -> CGFloat {
-        switch aggregate.state {
-        case .thinking: 1.8
-        case .working: 2.8
-        case .done: 0.7
-        case .attention: 1.4
-        case .error: 2.2
-        case .idle: 0.35
-        }
-    }
-
-    private func breathForCurrentState() -> CGFloat {
-        switch aggregate.state {
-        case .idle:
-            0.08
-        case .error:
-            0.35 + 0.65 * abs(sin(phase * .pi / 45))
-        case .attention:
-            0.25 + 0.65 * abs(sin(phase * .pi / 80))
-        case .done:
-            0.18 + 0.28 * abs(sin(phase * .pi / 140))
-        case .thinking, .working:
-            0.22 + 0.52 * abs(sin(phase * .pi / 110))
-        }
-    }
-
-    private func drawHaloArcs(
-        context: CGContext,
-        center: CGPoint,
-        radius: CGFloat,
-        offset: CGFloat
-    ) {
-        let startA = radians(-52 + offset)
-        let endA = radians(88 + offset)
-        let startB = radians(106 + offset)
-        let endB = radians(300 + offset)
-        context.addArc(center: center, radius: radius, startAngle: startA, endAngle: endA, clockwise: false)
-        context.strokePath()
-        context.addArc(center: center, radius: radius, startAngle: startB, endAngle: endB, clockwise: false)
-        context.strokePath()
-    }
-
-    private func radians(_ degrees: CGFloat) -> CGFloat {
-        degrees * .pi / 180
     }
 }
