@@ -59,6 +59,10 @@ public struct SessionReducer: Sendable {
         }
     }
 
+    public mutating func setLiveTracking(_ value: Bool) {
+        liveTracking = value
+    }
+
     public mutating func applyWorkingVisibility(now: Date = Date()) {
         if snapshot.active,
            inFlightTools == 0,

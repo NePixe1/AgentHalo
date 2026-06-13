@@ -5,6 +5,7 @@ public final class CodexSessionMonitor {
     private var reducers: [URL: SessionReducer] = [:]
     private var offsets: [URL: UInt64] = [:]
     private var pending: [URL: String] = [:]
+    private var lastModified: [URL: Date] = [:]
     private var lastDiscoveryAt = Date.distantPast
     private let fileManager: FileManager
 
@@ -61,12 +62,15 @@ public final class CodexSessionMonitor {
             reducers[url] = SessionReducer(filePath: url.path(percentEncoded: false), liveTracking: false)
             readInitialTail(from: url)
             offsets[url] = fileSize(url)
+            lastModified[url] = modificationDate(url)
+            reducers[url]?.setLiveTracking(true)
             changed = true
         }
         for url in reducers.keys where !recent.contains(url) {
             reducers.removeValue(forKey: url)
             offsets.removeValue(forKey: url)
             pending.removeValue(forKey: url)
+            lastModified.removeValue(forKey: url)
             changed = true
         }
         return changed
@@ -89,14 +93,36 @@ public final class CodexSessionMonitor {
         if start > 0, let firstNewline = text.firstIndex(of: "\n") {
             text.removeSubrange(text.startIndex...firstNewline)
         }
-        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
-            reducers[url]?.consume(jsonLine: String(line).trimmingCharacters(in: CharacterSet(charactersIn: "\r")))
+        let complete = text.hasSuffix("\n")
+        var lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        if !complete {
+            let trailing = lines.popLast() ?? ""
+            if !trailing.isEmpty {
+                pending[url] = trailing
+            }
+        }
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+            if !trimmed.isEmpty {
+                reducers[url]?.consume(jsonLine: trimmed)
+            }
         }
     }
 
     private func readNewLines(from url: URL, now: Date) -> Bool {
         let previous = offsets[url] ?? 0
         let current = fileSize(url)
+        let mtime = modificationDate(url)
+        let priorMtime = lastModified[url]
+        let mtimeChanged = mtime != nil && priorMtime != nil && mtime != priorMtime
+        let truncated = current < previous || (mtimeChanged && current <= previous)
+        if truncated {
+            offsets[url] = 0
+            pending[url] = nil
+            lastModified[url] = mtime
+            reducers[url] = SessionReducer(filePath: url.path(percentEncoded: false), liveTracking: true)
+            return false
+        }
         guard current > previous, let handle = try? FileHandle(forReadingFrom: url) else {
             return false
         }
@@ -107,6 +133,7 @@ public final class CodexSessionMonitor {
             try handle.seek(toOffset: previous)
             let data = try handle.readToEnd() ?? Data()
             offsets[url] = current
+            lastModified[url] = mtime
             guard let chunk = String(data: data, encoding: .utf8) else {
                 return false
             }
@@ -132,6 +159,17 @@ public final class CodexSessionMonitor {
     }
 
     private func fileSize(_ url: URL) -> UInt64 {
-        (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(UInt64.init) ?? 0
+        if let attrs = try? fileManager.attributesOfItem(atPath: url.path),
+           let size = attrs[.size] as? NSNumber {
+            return size.uint64Value
+        }
+        return 0
+    }
+
+    private func modificationDate(_ url: URL) -> Date? {
+        if let attrs = try? fileManager.attributesOfItem(atPath: url.path) {
+            return attrs[.modificationDate] as? Date
+        }
+        return nil
     }
 }

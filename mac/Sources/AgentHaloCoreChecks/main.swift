@@ -175,9 +175,77 @@ func testAcknowledgedErrorVisibilityUsesLatestErrorTime() {
     expect(settings.acknowledgingError(at: now).shouldShowError(eventAt: later), true, "future error should show")
 }
 
+func testWorkingVisibilityLiveCallOutputAndInitialTail() {
+    let formatter = ISO8601DateFormatter()
+    let now = formatter.date(from: "2026-06-13T02:00:00Z")!
+
+    var live = SessionReducer(filePath: "/tmp/live.jsonl", now: now, liveTracking: true)
+    live.consume(jsonLine: #"{"timestamp":"2026-06-13T02:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#, now: now)
+    live.consume(jsonLine: #"{"timestamp":"2026-06-13T02:00:01Z","type":"response_item","payload":{"type":"function_call","name":"shell_command"}}"#, now: now.addingTimeInterval(1))
+    live.consume(jsonLine: #"{"timestamp":"2026-06-13T02:00:02Z","type":"response_item","payload":{"type":"function_call_output"}}"#, now: now.addingTimeInterval(2))
+    live.applyWorkingVisibility(now: now.addingTimeInterval(3.7))
+    expect(live.snapshot.state, .working, "live output should remain working before 1.8s expires")
+    live.applyWorkingVisibility(now: now.addingTimeInterval(3.9))
+    expect(live.snapshot.state, .thinking, "live output should return thinking after 1.8s expires")
+
+    var initial = SessionReducer(filePath: "/tmp/initial.jsonl", now: now, liveTracking: false)
+    initial.consume(jsonLine: #"{"timestamp":"2026-06-13T02:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#, now: now)
+    initial.consume(jsonLine: #"{"timestamp":"2026-06-13T02:00:01Z","type":"response_item","payload":{"type":"function_call","name":"shell_command"}}"#, now: now.addingTimeInterval(1))
+    initial.consume(jsonLine: #"{"timestamp":"2026-06-13T02:00:02Z","type":"response_item","payload":{"type":"function_call_output"}}"#, now: now.addingTimeInterval(2))
+    expect(initial.snapshot.state, .thinking, "initial tail output should not fake working")
+}
+
+func testToolFailedDoesNotBecomeFatalError() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
+    var reducer = SessionReducer(filePath: "/tmp/tool-failed.jsonl", now: now, liveTracking: true)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-13T02:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#, now: now)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-13T02:00:01Z","type":"event_msg","payload":{"type":"tool_failed"}}"#, now: now.addingTimeInterval(1))
+    expect(reducer.snapshot.state, .thinking, "tool_failed should keep active thinking state")
+    expect(reducer.snapshot.active, true, "tool_failed should not deactivate session")
+}
+
+extension FileHandle {
+    func withClose(_ body: (FileHandle) throws -> Void) rethrows {
+        defer { try? close() }
+        try body(self)
+    }
+}
+
+func testMonitorHandlesPendingLinesAndTruncation() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-monitor-\(UUID().uuidString)", isDirectory: true)
+    let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+    try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+    let file = sessions.appendingPathComponent("session-\(UUID().uuidString).jsonl")
+    let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
+    try Data(#"{"timestamp":"2026-06-13T02:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#.utf8).write(to: file)
+
+    let monitor = CodexSessionMonitor(sessionsRoot: sessions)
+    _ = monitor.refresh(now: now)
+    expect(monitor.snapshots().first?.state == .idle, "partial line should wait for newline")
+
+    try FileHandle(forWritingTo: file).withClose {
+        try $0.seekToEnd()
+        try $0.write(contentsOf: Data("\n".utf8))
+    }
+    _ = monitor.refresh(now: now.addingTimeInterval(1))
+    expect(monitor.snapshots().first?.state == .thinking, "completed pending line should parse")
+
+    try Data(#"{"timestamp":"2026-06-13T02:00:02Z","type":"event_msg","payload":{"type":"task_complete"}}"#.utf8).write(to: file)
+    _ = monitor.refresh(now: now.addingTimeInterval(2))
+    expect(monitor.snapshots().first?.state == .idle, "truncated partial line should not parse")
+}
+
 testReducesPlanningWorkingAttentionErrorAndCompleteEvents()
 testAggregatePrioritizesActionableSessions()
 testAcknowledgingCompletedSessionsStoresLatestVisibleCompletionOnly()
 testSettingsPersistFormalFieldsAndNormalizePaused()
 testAcknowledgedErrorVisibilityUsesLatestErrorTime()
+testWorkingVisibilityLiveCallOutputAndInitialTail()
+testToolFailedDoesNotBecomeFatalError()
+do {
+    try testMonitorHandlesPendingLinesAndTruncation()
+} catch {
+    fatalError("\(error)")
+}
 print("PASS AgentHaloCore checks")
