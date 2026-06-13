@@ -19,6 +19,7 @@ final class HaloView: NSView {
     var onDoubleClick: (() -> Void)?
     var onMoved: ((NSRect) -> Void)?
     var onClick: (() -> Void)?
+    var onRightClick: ((NSEvent) -> Void)?
     var onMouseEntered: (() -> Void)?
     var onMouseExited: (() -> Void)?
     private var dragStart: NSPoint?
@@ -201,6 +202,14 @@ final class HaloView: NSView {
         }
         dragStart = NSEvent.mouseLocation
         windowStart = window?.frame.origin
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        if let onRightClick {
+            onRightClick(event)
+        } else {
+            super.rightMouseDown(with: event)
+        }
     }
 
     override func mouseDragged(with event: NSEvent) {

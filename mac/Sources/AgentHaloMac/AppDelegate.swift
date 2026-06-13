@@ -87,6 +87,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         haloView.onMouseEntered = { [weak self] in self?.showDetails() }
         haloView.onMouseExited = { [weak self] in self?.scheduleHideDetails() }
         haloView.onClick = { [weak self] in self?.toggleDetailsOrAcknowledge() }
+        haloView.onRightClick = { [weak self] event in
+            self?.showHaloContextMenu(for: event)
+        }
 
         panel = HaloPanel(
             contentRect: NSRect(x: origin.x, y: origin.y, width: haloSize, height: haloSize),
@@ -197,6 +200,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quit() {
         NSApp.terminate(nil)
+    }
+
+    private func showHaloContextMenu(for event: NSEvent) {
+        hoverHideTimer?.invalidate()
+        detailsPanel.orderOut(nil)
+
+        NSMenu.popUpContextMenu(makeHaloContextMenu(), with: event, for: haloView)
+    }
+
+    func makeHaloContextMenu() -> NSMenu {
+        let menu = NSMenu()
+        let closeItem = NSMenuItem(title: "关闭圆环", action: #selector(quit), keyEquivalent: "")
+        closeItem.target = self
+        menu.addItem(closeItem)
+        return menu
     }
 
     private func saveWindowPosition() {

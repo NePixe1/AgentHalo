@@ -37,6 +37,18 @@ public struct HaloRingMorph: Equatable, Sendable {
     }
 }
 
+public struct HaloRingStroke: Equatable, Sendable {
+    public var radius: Double
+    public var width: Double
+    public var alphaScale: Double
+
+    public init(radius: Double, width: Double, alphaScale: Double) {
+        self.radius = radius
+        self.width = width
+        self.alphaScale = alphaScale
+    }
+}
+
 public enum HaloMath {
     public static func clamp(_ value: Double, _ lower: Double, _ upper: Double) -> Double {
         min(max(value, lower), upper)
@@ -293,6 +305,24 @@ public enum HaloMath {
             gapSkew: shapeAmount * (4.6 * sin(cycle * .pi * 2) + 1.8 * sin(cycle * .pi * 4 + 0.7)),
             glowBoost: 0.08 * shapeAmount * secondary + 0.045 * shapeAmount * swell
         )
+    }
+
+    public static func ringHighlightStrokes(radius: Double, bodyWidth: Double, scale: Double) -> [HaloRingStroke] {
+        let bodyWidth = max(bodyWidth, scale)
+        let innerWidth = max(scale * 0.95, min(scale * 1.75, bodyWidth * 0.18))
+        let outerWidth = max(scale * 0.80, min(scale * 1.35, bodyWidth * 0.14))
+        return [
+            HaloRingStroke(
+                radius: radius - bodyWidth * 0.34,
+                width: innerWidth,
+                alphaScale: 0.52
+            ),
+            HaloRingStroke(
+                radius: radius + bodyWidth * 0.31,
+                width: outerWidth,
+                alphaScale: 0.30
+            )
+        ]
     }
 
     public static func mixColor(_ from: HaloRGB, _ to: HaloRGB, amount: Double) -> HaloRGB {

@@ -344,6 +344,22 @@ func testHaloRingMorphChangesShapeOverTime() {
     expect(abs(openGap.gapOpen - closedGap.gapOpen) > 0.35, "thinking gaps should open and close")
 }
 
+func testRingHighlightStrokesAvoidCenterLine() {
+    let radius = 51.2
+    let bodyWidth = 14.0
+    let scale = 1.45
+    let strokes = HaloMath.ringHighlightStrokes(radius: radius, bodyWidth: bodyWidth, scale: scale)
+
+    expect(strokes.count >= 2, "ring should keep separate edge highlights")
+    expect(strokes.contains { $0.radius < radius }, "ring should have an inner edge highlight")
+    expect(strokes.contains { $0.radius > radius }, "ring should have an outer edge highlight")
+
+    for stroke in strokes {
+        expect(abs(stroke.radius - radius) >= bodyWidth * 0.25, "highlight should not sit on the ring centerline")
+        expect(stroke.width <= bodyWidth * 0.28, "highlight should not fill the ring body")
+    }
+}
+
 func testLinearSRGBMixAvoidsGammaLerp() {
     let mixed = HaloMath.mixColor(
         HaloRGB(red: 226, green: 170, blue: 31),
@@ -388,5 +404,6 @@ do {
 }
 testHaloMathMatchesProgramConstants()
 testHaloRingMorphChangesShapeOverTime()
+testRingHighlightStrokesAvoidCenterLine()
 testLinearSRGBMixAvoidsGammaLerp()
 print("PASS AgentHaloCore checks")

@@ -40,8 +40,23 @@ enum HaloRenderer {
         drawRingLayer(context: context, center: center, radius: radius, gapA: gapA, gapB: gapB, gapOpen: morph.gapOpen, width: scale * 14.5, color: color.withAlphaComponent(0.18 * intensity))
         drawRingLayer(context: context, center: center, radius: radius, gapA: gapA, gapB: gapB, gapOpen: morph.gapOpen, width: scale * 11.2, color: color.withAlphaComponent(0.28 * intensity))
         drawRingLayer(context: context, center: center, radius: radius, gapA: gapA, gapB: gapB, gapOpen: morph.gapOpen, width: bodyWidth + scale * 1.15, color: color.withAlphaComponent(0.72 * intensity))
-        drawRingLayer(context: context, center: center, radius: radius, gapA: gapA, gapB: gapB, gapOpen: morph.gapOpen, width: max(scale * 1.0, bodyWidth - scale * 2.25), color: NSColor.white.withAlphaComponent(0.60 * target.powered * intensity))
-        drawRingLayer(context: context, center: center, radius: radius, gapA: gapA, gapB: gapB, gapOpen: morph.gapOpen, width: scale * 1.65, color: NSColor.white.withAlphaComponent(0.80 * target.powered * intensity))
+        let highlightColor = nsColor(HaloMath.mixColor(
+            HaloVisualModel.stateColor(input.state),
+            HaloRGB(red: 248, green: 253, blue: 252),
+            amount: 0.26 + 0.22 * target.powered
+        ))
+        for highlight in HaloMath.ringHighlightStrokes(radius: radius, bodyWidth: bodyWidth, scale: scale) {
+            drawRingLayer(
+                context: context,
+                center: center,
+                radius: highlight.radius,
+                gapA: gapA,
+                gapB: gapB,
+                gapOpen: morph.gapOpen,
+                width: highlight.width,
+                color: highlightColor.withAlphaComponent(highlight.alphaScale * target.powered * intensity)
+            )
+        }
 
         if morph.secondaryOpacity > 0.02 {
             let secondary = morph.secondaryOpacity * intensity
