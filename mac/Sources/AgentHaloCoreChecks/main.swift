@@ -275,6 +275,32 @@ func testRateLimitReaderFindsNewestTailRateLimit() throws {
     expect(snapshot, RateLimitSnapshot(primaryUsedPercent: 25, secondaryUsedPercent: 80), "rate limit")
 }
 
+func testHaloMathMatchesProgramConstants() {
+    expectAlmost(HaloMath.stateBreath(.thinking, time: 1.0), 1.0, tolerance: 0.08, "thinking bright plateau")
+    expect(HaloMath.targetPowered(.done, time: 8.0) < 0.20, "done powered should dip close to dark")
+    expect(HaloMath.transitionLight(from: 0.9, to: 0.0, progress: 0.99) < 0.01, "steady green transition should finish dark")
+    expect(HaloMath.diagnosticBrightDuration(.thinking) < HaloMath.diagnosticBrightDuration(.working), "thinking bright duration shorter than working")
+    expectAlmost(HaloMath.diagnosticGapSeparation(0), 40, tolerance: 0.001, "gap repulsion start")
+    expectAlmost(HaloMath.diagnosticGapSeparation(1), 150, tolerance: 0.001, "gap repulsion end")
+    expect(HaloMath.repulsionDurationFromOrbit(28) > HaloMath.repulsionDurationFromOrbit(80), "slow orbit uses longer repulsion")
+}
+
+func testLinearSRGBMixAvoidsGammaLerp() {
+    let mixed = HaloMath.mixColor(
+        HaloRGB(red: 226, green: 170, blue: 31),
+        HaloRGB(red: 52, green: 158, blue: 199),
+        amount: 0.5
+    )
+    expect(mixed.red > 150, "linear red midpoint should be brighter than gamma midpoint")
+    expect(mixed.blue > 145, "linear blue midpoint should be brighter than gamma midpoint")
+}
+
+func expectAlmost(_ actual: Double, _ expected: Double, tolerance: Double, _ message: String) {
+    if abs(actual - expected) > tolerance {
+        fatalError("\(message): expected \(expected) +/- \(tolerance), got \(actual)")
+    }
+}
+
 testReducesPlanningWorkingAttentionErrorAndCompleteEvents()
 testAggregatePrioritizesActionableSessions()
 testAcknowledgingCompletedSessionsStoresLatestVisibleCompletionOnly()
@@ -294,4 +320,6 @@ do {
 } catch {
     fatalError("\(error)")
 }
+testHaloMathMatchesProgramConstants()
+testLinearSRGBMixAvoidsGammaLerp()
 print("PASS AgentHaloCore checks")
