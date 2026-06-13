@@ -83,7 +83,7 @@ func testAggregatePrioritizesActionableSessions() {
 
     let aggregate = SessionAggregator.aggregate(
         snapshots: [idle, done, attention],
-        settings: HaloSettings(installedAt: now.addingTimeInterval(-60), acknowledged: [:], paused: false),
+        settings: HaloSettings(paused: false, installedAt: now.addingTimeInterval(-60), acknowledged: [:]),
         now: now
     )
 
@@ -134,7 +134,50 @@ func testAcknowledgingCompletedSessionsStoresLatestVisibleCompletionOnly() {
     expect(settings.acknowledged, ["done": later], "acknowledged completions")
 }
 
+func testSettingsPersistFormalFieldsAndNormalizePaused() {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-settings-\(UUID().uuidString)", isDirectory: true)
+    let url = root.appendingPathComponent("settings.json")
+    let store = SettingsStore(settingsURL: url)
+    let installedAt = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
+    let acknowledgedErrorAt = installedAt.addingTimeInterval(60)
+    let settings = HaloSettings(
+        hasPosition: true,
+        left: 110,
+        top: 220,
+        alwaysOnTop: false,
+        paused: true,
+        installedAt: installedAt,
+        acknowledged: ["thread": installedAt],
+        acknowledgedErrorAt: acknowledgedErrorAt
+    )
+
+    store.save(settings)
+    let loaded = store.load(now: installedAt.addingTimeInterval(120))
+
+    expect(loaded.hasPosition, true, "hasPosition should persist")
+    expect(loaded.left, 110, "left should persist")
+    expect(loaded.top, 220, "top should persist")
+    expect(loaded.alwaysOnTop, false, "alwaysOnTop should persist")
+    expect(loaded.paused, false, "paused should normalize false on load")
+    expect(loaded.acknowledged, ["thread": installedAt], "acknowledged should persist")
+    expect(loaded.acknowledgedErrorAt, acknowledgedErrorAt, "acknowledgedErrorAt should persist")
+}
+
+func testAcknowledgedErrorVisibilityUsesLatestErrorTime() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
+    let earlier = now.addingTimeInterval(-60)
+    let later = now.addingTimeInterval(60)
+    let settings = HaloSettings(installedAt: now, acknowledgedErrorAt: earlier)
+
+    expect(settings.shouldShowError(eventAt: now), true, "newer error should show")
+    expect(settings.acknowledgingError(at: now).shouldShowError(eventAt: earlier), false, "older error should hide")
+    expect(settings.acknowledgingError(at: now).shouldShowError(eventAt: later), true, "future error should show")
+}
+
 testReducesPlanningWorkingAttentionErrorAndCompleteEvents()
 testAggregatePrioritizesActionableSessions()
 testAcknowledgingCompletedSessionsStoresLatestVisibleCompletionOnly()
+testSettingsPersistFormalFieldsAndNormalizePaused()
+testAcknowledgedErrorVisibilityUsesLatestErrorTime()
 print("PASS AgentHaloCore checks")

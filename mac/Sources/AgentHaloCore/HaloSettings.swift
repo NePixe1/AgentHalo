@@ -1,24 +1,33 @@
 import Foundation
 
 public struct HaloSettings: Codable, Equatable, Sendable {
+    public var hasPosition: Bool
+    public var left: Double
+    public var top: Double
+    public var alwaysOnTop: Bool
+    public var paused: Bool
     public var installedAt: Date
     public var acknowledged: [String: Date]
-    public var paused: Bool
-    public var left: Double?
-    public var top: Double?
+    public var acknowledgedErrorAt: Date?
 
     public init(
+        hasPosition: Bool = false,
+        left: Double = 0,
+        top: Double = 0,
+        alwaysOnTop: Bool = true,
+        paused: Bool = false,
         installedAt: Date = Date(),
         acknowledged: [String: Date] = [:],
-        paused: Bool = false,
-        left: Double? = nil,
-        top: Double? = nil
+        acknowledgedErrorAt: Date? = nil
     ) {
-        self.installedAt = installedAt
-        self.acknowledged = acknowledged
-        self.paused = paused
+        self.hasPosition = hasPosition
         self.left = left
         self.top = top
+        self.alwaysOnTop = alwaysOnTop
+        self.paused = paused
+        self.installedAt = installedAt
+        self.acknowledged = acknowledged
+        self.acknowledgedErrorAt = acknowledgedErrorAt
     }
 
     public func acknowledgingCompletedSessions(_ sessions: [SessionSnapshot]) -> HaloSettings {
@@ -34,6 +43,18 @@ public struct HaloSettings: Codable, Equatable, Sendable {
         }
         return next
     }
+
+    public func acknowledgingError(at eventAt: Date) -> HaloSettings {
+        var next = self
+        if eventAt > (next.acknowledgedErrorAt ?? .distantPast) {
+            next.acknowledgedErrorAt = eventAt
+        }
+        return next
+    }
+
+    public func shouldShowError(eventAt: Date) -> Bool {
+        eventAt > (acknowledgedErrorAt ?? .distantPast)
+    }
 }
 
 public struct SettingsStore: Sendable {
@@ -43,9 +64,9 @@ public struct SettingsStore: Sendable {
         self.settingsURL = settingsURL
     }
 
-    public func load() -> HaloSettings {
+    public func load(now: Date = Date()) -> HaloSettings {
         guard let data = try? Data(contentsOf: settingsURL) else {
-            return HaloSettings()
+            return HaloSettings(installedAt: now)
         }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
@@ -53,7 +74,8 @@ public struct SettingsStore: Sendable {
             settings.paused = false
             return settings
         }
-        return HaloSettings()
+        AgentHaloLogger.log("Settings load failed: could not decode \(settingsURL.path)")
+        return HaloSettings(installedAt: now)
     }
 
     public func save(_ settings: HaloSettings) {
