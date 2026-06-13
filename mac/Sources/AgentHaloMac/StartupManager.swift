@@ -23,7 +23,7 @@ enum StartupManager {
     }
 
     private static func writePlist(appBundleURL: URL) {
-        let executable = appBundleURL.appendingPathComponent("Contents/MacOS/AgentHaloMac").path(percentEncoded: false)
+        let executable = StartupLaunchAgent.executablePath(appBundleURL: appBundleURL)
         let plist = """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

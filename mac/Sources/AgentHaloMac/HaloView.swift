@@ -8,7 +8,14 @@ final class HaloView: NSView {
         label: "READY",
         detail: "Codex is standing by",
         sessions: []
-    )
+    ) {
+        didSet {
+            guard !previewMode else {
+                return
+            }
+            applyVisualState(aggregate.state, presentation: .flashing)
+        }
+    }
     var onDoubleClick: (() -> Void)?
     var onMoved: ((NSRect) -> Void)?
     var onClick: (() -> Void)?
@@ -17,14 +24,26 @@ final class HaloView: NSView {
     private var dragStart: NSPoint?
     private var windowStart: NSPoint?
     private var animationTimer: Timer?
-    var visualState: HaloState = .idle
-    var errorPresentation: ErrorPresentation = .flashing
-    var steadyDone = false
+    private var visualState: HaloState = .idle
+    private var errorPresentation: ErrorPresentation = .flashing
+    private var steadyDone = false
+    private var previewMode = false
     private var animationTime = 0.0
     private var sinceState = 0.0
     private var transitionProgress = 1.0
     private var gapA = 97.0
     private var gapB = 247.0
+    private var outerVelocity = 0.0
+    private var gapSeparation = 150.0
+    private var gapRepelling = false
+    private var gapRepulsionElapsed = 0.0
+    private var gapRepulsionStart = 40.0
+    private var gapRepulsionDuration = 1.4
+    private var gapRepulsionCount = 0
+    private var smallGapAnchor = 247.0
+    private var smallGapDriftElapsed = 0.0
+    private var smallGapInertiaOffset = 0.0
+    private var smallGapInertiaVelocity = 0.0
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -49,21 +68,87 @@ final class HaloView: NSView {
         let delta = 1.0 / 60.0
         animationTime += max(0.001, min(delta, 0.08))
         sinceState += max(0.001, min(delta, 0.08))
-        let velocity = targetGapVelocity(for: visualState)
-        gapA += velocity * delta
-        gapB = gapA + 150 + 5 * sin(animationTime)
+        let targetVelocity = HaloMath.targetGapVelocity(visualState) *
+            HaloMath.gapVelocityEnvelope(visualState, time: animationTime)
+        outerVelocity = HaloMath.damp(
+            current: outerVelocity,
+            target: targetVelocity,
+            delta: delta,
+            response: 2.1
+        )
+        gapA += outerVelocity * delta
+
+        if gapRepelling {
+            gapRepulsionElapsed += delta
+            let progress = HaloMath.clamp(gapRepulsionElapsed / max(0.01, gapRepulsionDuration), 0, 1)
+            gapSeparation = HaloMath.lerp(
+                gapRepulsionStart,
+                150,
+                HaloMath.magneticRepulsionEase(progress)
+            )
+            gapB = gapA + gapSeparation
+            if progress >= 1 {
+                gapRepelling = false
+                gapSeparation = 150
+                gapB = gapA + gapSeparation
+                smallGapAnchor = gapB
+                smallGapDriftElapsed = 0
+                smallGapInertiaOffset = 0
+                smallGapInertiaVelocity = HaloMath.repulsionExitVelocityFromOrbit(outerVelocity)
+            }
+        } else {
+            smallGapDriftElapsed += delta
+            smallGapInertiaVelocity *= exp(-HaloMath.smallGapInertiaDamping(visualState) * delta)
+            smallGapInertiaOffset += smallGapInertiaVelocity * delta
+            gapB = smallGapAnchor +
+                smallGapInertiaOffset +
+                HaloMath.smallGapDriftOffset(
+                    state: visualState,
+                    time: smallGapDriftElapsed,
+                    cycle: gapRepulsionCount
+                )
+            gapSeparation = HaloMath.positiveModulo(gapB - gapA, 360)
+            if gapSeparation <= 41.5 || gapSeparation > 300 {
+                gapSeparation = 40
+                gapB = gapA + gapSeparation
+                gapRepelling = true
+                gapRepulsionElapsed = 0
+                gapRepulsionStart = gapSeparation
+                gapRepulsionDuration = HaloMath.repulsionDurationFromOrbit(outerVelocity)
+                gapRepulsionCount += 1
+                smallGapInertiaOffset = 0
+                smallGapInertiaVelocity = 0
+            }
+        }
+
+        if gapA > 36_000 {
+            gapA -= 36_000
+            gapB -= 36_000
+            smallGapAnchor -= 36_000
+        }
+        transitionProgress = min(1, transitionProgress + delta / 0.56)
         needsDisplay = true
     }
 
-    private func targetGapVelocity(for state: HaloState) -> Double {
-        switch state {
-        case .thinking: 78
-        case .working: 106
-        case .attention: 46
-        case .error: 60
-        case .done: 38
-        case .idle: 27
+    func showPreview(state: HaloState, presentation: ErrorPresentation) {
+        previewMode = true
+        applyVisualState(state, presentation: presentation)
+    }
+
+    func useLiveState() {
+        previewMode = false
+        applyVisualState(aggregate.state, presentation: .flashing)
+    }
+
+    private func applyVisualState(_ state: HaloState, presentation: ErrorPresentation) {
+        if visualState != state {
+            sinceState = 0
+            transitionProgress = 0
         }
+        visualState = state
+        errorPresentation = state == .error ? presentation : .flashing
+        steadyDone = state == .done && aggregate.sessions.isEmpty
+        needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {

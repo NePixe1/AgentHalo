@@ -275,6 +275,46 @@ func testRateLimitReaderFindsNewestTailRateLimit() throws {
     expect(snapshot, RateLimitSnapshot(primaryUsedPercent: 25, secondaryUsedPercent: 80), "rate limit")
 }
 
+func testAggregatorInjectsUnacknowledgedCodexFailureWhenIdle() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
+    let failure = CodexFailure(detail: "认证已失效", eventAt: now)
+    let aggregate = SessionAggregator.aggregate(
+        snapshots: [],
+        settings: HaloSettings(installedAt: now.addingTimeInterval(-600)),
+        recentFailure: failure,
+        codexRunning: true,
+        now: now
+    )
+
+    expect(aggregate.state, .error, "recent failure should surface as error")
+    expect(aggregate.label, "INTERRUPTED", "recent failure label")
+    expect(aggregate.detail, "认证已失效", "recent failure detail")
+    expect(aggregate.sessions.map(\.threadId), ["codex-app"], "synthetic failure session")
+
+    let acknowledged = SessionAggregator.aggregate(
+        snapshots: [],
+        settings: HaloSettings(installedAt: now.addingTimeInterval(-600), acknowledgedErrorAt: now),
+        recentFailure: failure,
+        codexRunning: true,
+        now: now
+    )
+    expect(acknowledged.state, .idle, "acknowledged failure should hide")
+}
+
+func testStartupExecutablePathUsesAppBundleRoot() {
+    let bundleURL = URL(fileURLWithPath: "/tmp/AgentHalo.app")
+    let path = StartupLaunchAgent.executablePath(appBundleURL: bundleURL)
+    expect(path, "/tmp/AgentHalo.app/Contents/MacOS/AgentHaloMac", "startup executable path")
+}
+
+func testDiagnosticsCreatesParentDirectoryForOutput() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-diagnostics-\(UUID().uuidString)", isDirectory: true)
+    let output = root.appendingPathComponent("self-test.txt")
+    try DiagnosticsOutput.write("PASS\n", to: output.path(percentEncoded: false))
+    expect(FileManager.default.fileExists(atPath: output.path(percentEncoded: false)), "diagnostics output should create parent directory")
+}
+
 func testHaloMathMatchesProgramConstants() {
     expectAlmost(HaloMath.stateBreath(.thinking, time: 1.0), 1.0, tolerance: 0.08, "thinking bright plateau")
     expect(HaloMath.targetPowered(.done, time: 8.0) < 0.20, "done powered should dip close to dark")
@@ -283,6 +323,25 @@ func testHaloMathMatchesProgramConstants() {
     expectAlmost(HaloMath.diagnosticGapSeparation(0), 40, tolerance: 0.001, "gap repulsion start")
     expectAlmost(HaloMath.diagnosticGapSeparation(1), 150, tolerance: 0.001, "gap repulsion end")
     expect(HaloMath.repulsionDurationFromOrbit(28) > HaloMath.repulsionDurationFromOrbit(80), "slow orbit uses longer repulsion")
+}
+
+func testHaloRingMorphChangesShapeOverTime() {
+    let workingWide = HaloMath.ringMorph(state: .working, time: 1.6)
+    let workingNarrow = HaloMath.ringMorph(state: .working, time: 3.2)
+    expect(workingWide.bodyWidthOffset > workingNarrow.bodyWidthOffset + 1.5, "working ring width should breathe visibly")
+
+    let thinkingLarge = HaloMath.ringMorph(state: .thinking, time: 2.3)
+    let thinkingSmall = HaloMath.ringMorph(state: .thinking, time: 4.7)
+    expect(abs(thinkingLarge.radiusOffset - thinkingSmall.radiusOffset) > 0.8, "thinking ring radius should breathe")
+
+    let split = HaloMath.ringMorph(state: .working, time: 1.05)
+    let single = HaloMath.ringMorph(state: .working, time: 3.45)
+    expect(split.secondaryOpacity > 0.50, "working ring should expose a secondary contour")
+    expect(single.secondaryOpacity < 0.20, "working ring should return to a mostly single contour")
+
+    let openGap = HaloMath.ringMorph(state: .thinking, time: 2.15)
+    let closedGap = HaloMath.ringMorph(state: .thinking, time: 4.55)
+    expect(abs(openGap.gapOpen - closedGap.gapOpen) > 0.35, "thinking gaps should open and close")
 }
 
 func testLinearSRGBMixAvoidsGammaLerp() {
@@ -320,6 +379,14 @@ do {
 } catch {
     fatalError("\(error)")
 }
+testAggregatorInjectsUnacknowledgedCodexFailureWhenIdle()
+testStartupExecutablePathUsesAppBundleRoot()
+do {
+    try testDiagnosticsCreatesParentDirectoryForOutput()
+} catch {
+    fatalError("\(error)")
+}
 testHaloMathMatchesProgramConstants()
+testHaloRingMorphChangesShapeOverTime()
 testLinearSRGBMixAvoidsGammaLerp()
 print("PASS AgentHaloCore checks")

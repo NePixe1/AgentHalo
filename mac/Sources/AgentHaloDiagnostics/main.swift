@@ -40,8 +40,11 @@ enum Diagnostics {
         lines.append(HaloMath.diagnosticBrightDuration(.thinking) < HaloMath.diagnosticBrightDuration(.working) ? "PASS bright-duration" : "FAIL bright-duration")
         lines.append(abs(HaloMath.diagnosticGapSeparation(0) - 40) < 0.001 ? "PASS gap-start" : "FAIL gap-start")
         lines.append(abs(HaloMath.diagnosticGapSeparation(1) - 150) < 0.001 ? "PASS gap-end" : "FAIL gap-end")
+        lines.append(HaloMath.ringMorph(state: .working, time: 1.6).bodyWidthOffset > HaloMath.ringMorph(state: .working, time: 3.2).bodyWidthOffset + 1.5 ? "PASS ring-width-morph" : "FAIL ring-width-morph")
+        lines.append(HaloMath.ringMorph(state: .working, time: 1.05).secondaryOpacity > 0.50 ? "PASS ring-secondary-contour" : "FAIL ring-secondary-contour")
+        lines.append(abs(HaloMath.ringMorph(state: .thinking, time: 2.15).gapOpen - HaloMath.ringMorph(state: .thinking, time: 4.55).gapOpen) > 0.35 ? "PASS ring-gap-morph" : "FAIL ring-gap-morph")
         let failed = lines.contains { $0.hasPrefix("FAIL") }
-        try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: URL(fileURLWithPath: path))
+        try DiagnosticsOutput.write(lines.joined(separator: "\n") + "\n", to: path)
         if failed { exit(1) }
     }
 
@@ -50,7 +53,7 @@ enum Diagnostics {
         _ = monitor.refresh()
         let aggregate = SessionAggregator.aggregate(snapshots: monitor.snapshots(), settings: SettingsStore().load())
         let report = "\(aggregate.label)\n\(aggregate.detail)\nSessions: \(aggregate.sessions.count)\n"
-        try Data(report.utf8).write(to: URL(fileURLWithPath: path))
+        try DiagnosticsOutput.write(report, to: path)
     }
 
     static func renderStates(to directory: String) throws {
@@ -74,7 +77,7 @@ enum Diagnostics {
             _ = HaloVisualModel.targetVisual(state: .working, time: Double(index) / 60, errorPresentation: .flashing, steadyDone: false)
         }
         let elapsed = Date().timeIntervalSince(started)
-        try Data("PASS\nelapsed=\(elapsed)\n".utf8).write(to: URL(fileURLWithPath: path))
+        try DiagnosticsOutput.write("PASS\nelapsed=\(elapsed)\n", to: path)
     }
 
     static func renderStatePNG(state: HaloState, directory: String) throws {
@@ -87,7 +90,7 @@ enum Diagnostics {
             gapA: 97,
             gapB: 247
         ))
-        try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent("\(state.rawValue).png"))
+        try DiagnosticsOutput.write(data, to: URL(fileURLWithPath: directory).appendingPathComponent("\(state.rawValue).png").path(percentEncoded: false))
     }
 
     static func renderTransitionPNG(name: String, directory: String, state: HaloState, time: Double) throws {
@@ -100,6 +103,6 @@ enum Diagnostics {
             gapA: 97 + time * 38,
             gapB: 247 + time * 38
         ))
-        try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent("\(name).png"))
+        try DiagnosticsOutput.write(data, to: URL(fileURLWithPath: directory).appendingPathComponent("\(name).png").path(percentEncoded: false))
     }
 }

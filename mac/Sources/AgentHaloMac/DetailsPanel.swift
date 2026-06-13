@@ -8,6 +8,8 @@ final class DetailsPanel: NSPanel {
     private let detailField = NSTextField(labelWithString: "Codex 正在待命")
     private let primaryQuota = NSTextField(labelWithString: "5 小时额度  暂无数据")
     private let secondaryQuota = NSTextField(labelWithString: "周额度  暂无数据")
+    var onMouseEntered: (() -> Void)?
+    var onMouseExited: (() -> Void)?
 
     init() {
         super.init(
@@ -42,7 +44,9 @@ final class DetailsPanel: NSPanel {
         secondaryQuota.font = .systemFont(ofSize: 12)
         [brand, titleField, detailField, primaryQuota, secondaryQuota].forEach(stack.addArrangedSubview)
 
-        contentView = NSView()
+        let rootView = TrackingDetailsContentView()
+        rootView.owner = self
+        contentView = rootView
         contentView?.addSubview(container)
         container.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -59,6 +63,8 @@ final class DetailsPanel: NSPanel {
 
     func update(aggregate: AggregateSnapshot, quota: RateLimitSnapshot?) {
         titleField.stringValue = aggregate.label
+        let rgb = HaloVisualModel.stateColor(aggregate.state)
+        titleField.textColor = NSColor(calibratedRed: rgb.red / 255, green: rgb.green / 255, blue: rgb.blue / 255, alpha: 1)
         detailField.stringValue = Self.localizedDetail(for: aggregate)
         if let quota {
             primaryQuota.stringValue = "5 小时额度  剩余 \(max(0, Int(100 - quota.primaryUsedPercent)))%"
@@ -82,5 +88,28 @@ final class DetailsPanel: NSPanel {
         case .error: return aggregate.detail.isEmpty ? "任务已中断" : aggregate.detail
         case .idle: return "Codex 正在待命"
         }
+    }
+}
+
+@MainActor
+private final class TrackingDetailsContentView: NSView {
+    weak var owner: DetailsPanel?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways],
+            owner: self
+        ))
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        owner?.onMouseEntered?()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        owner?.onMouseExited?()
     }
 }

@@ -6,6 +6,22 @@ public enum SessionAggregator {
         settings: HaloSettings,
         now: Date = Date()
     ) -> AggregateSnapshot {
+        aggregate(
+            snapshots: snapshots,
+            settings: settings,
+            recentFailure: nil,
+            codexRunning: false,
+            now: now
+        )
+    }
+
+    public static func aggregate(
+        snapshots: [SessionSnapshot],
+        settings: HaloSettings,
+        recentFailure: CodexFailure?,
+        codexRunning: Bool,
+        now: Date = Date()
+    ) -> AggregateSnapshot {
         if settings.paused {
             return AggregateSnapshot(
                 state: .idle,
@@ -43,6 +59,26 @@ public enum SessionAggregator {
         }
 
         guard let primary = visible.first else {
+            if codexRunning,
+               let recentFailure,
+               settings.shouldShowError(eventAt: recentFailure.eventAt) {
+                let synthetic = SessionSnapshot(
+                    threadId: "codex-app",
+                    projectName: "Codex",
+                    workingDirectory: "",
+                    state: .error,
+                    action: recentFailure.detail,
+                    lastEventAt: recentFailure.eventAt,
+                    completedAt: nil,
+                    active: false
+                )
+                return AggregateSnapshot(
+                    state: .error,
+                    label: label(for: .error),
+                    detail: recentFailure.detail,
+                    sessions: [synthetic]
+                )
+            }
             return AggregateSnapshot(
                 state: .idle,
                 label: "READY",

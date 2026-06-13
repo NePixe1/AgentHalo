@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var detailsPanel = DetailsPanel()
     private var hoverHideTimer: Timer?
     private let rateLimitReader = RateLimitReader()
+    private let failureReader = CodexFailureReader()
     private let instanceLock = InstanceLock()
 
     override init() {
@@ -54,7 +55,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         acknowledgeCompletedIfCodexIsForeground()
         aggregate = SessionAggregator.aggregate(
             snapshots: monitor.snapshots(),
-            settings: settings
+            settings: settings,
+            recentFailure: failureReader.readRecent(),
+            codexRunning: CodexAppDetector.isCodexRunning()
         )
         haloView.aggregate = aggregate
         haloView.needsDisplay = true
@@ -95,8 +98,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = false
-        panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        applyWindowLevels()
         panel.orderFrontRegardless()
     }
 
@@ -115,6 +118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateStatusMenu() {
         let menu = NSMenu()
         addMenuItem("确认已完成任务", #selector(dismissCompleted), enabled: aggregate.sessions.contains { $0.state == .done }, to: menu)
+        addMenuItem("确认当前错误", #selector(dismissError), enabled: aggregate.state == .error, to: menu)
         menu.addItem(.separator())
         addCheckItem("始终置顶", checked: settings.alwaysOnTop, action: #selector(toggleAlwaysOnTop), to: menu)
         addCheckItem("开机自动启动", checked: StartupManager.isEnabled(), action: #selector(toggleStartup), to: menu)
@@ -149,13 +153,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleAlwaysOnTop() {
         settings.alwaysOnTop.toggle()
+        applyWindowLevels()
         settingsStore.save(settings)
         tick()
     }
 
     @objc private func toggleStartup() {
-        let bundleURL = Bundle.main.bundleURL.deletingLastPathComponent().deletingLastPathComponent()
-        StartupManager.setEnabled(!StartupManager.isEnabled(), appBundleURL: bundleURL)
+        StartupManager.setEnabled(!StartupManager.isEnabled(), appBundleURL: Bundle.main.bundleURL)
         tick()
     }
 
@@ -174,6 +178,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func dismissCompleted() {
         settings = settings.acknowledgingCompletedSessions(aggregate.sessions)
+        settingsStore.save(settings)
+        tick()
+    }
+
+    @objc private func dismissError() {
+        let newestErrorAt = aggregate.sessions
+            .filter { $0.state == .error }
+            .map(\.lastEventAt)
+            .max()
+        guard let newestErrorAt else {
+            return
+        }
+        settings = settings.acknowledgingError(at: newestErrorAt)
         settingsStore.save(settings)
         tick()
     }
@@ -202,7 +219,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showDetails() {
+        hoverHideTimer?.invalidate()
         detailsPanel.update(aggregate: displayAggregate(), quota: rateLimitReader.read())
+        detailsPanel.onMouseEntered = { [weak self] in
+            self?.hoverHideTimer?.invalidate()
+        }
+        detailsPanel.onMouseExited = { [weak self] in
+            self?.scheduleHideDetails()
+        }
         positionDetailsPanel()
         detailsPanel.orderFrontRegardless()
     }
@@ -232,6 +256,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func toggleDetailsOrAcknowledge() {
         if aggregate.state == .done {
             dismissCompleted()
+        } else if aggregate.state == .error {
+            dismissError()
         } else if detailsPanel.isVisible {
             detailsPanel.orderOut(nil)
         } else {
@@ -269,11 +295,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         if let state = payload.state {
-            haloView.visualState = state
-            if state == .error, let presentation = payload.presentation {
-                haloView.errorPresentation = presentation
-            }
+            haloView.showPreview(state: state, presentation: payload.presentation ?? .flashing)
+        } else {
+            haloView.useLiveState()
         }
+    }
+
+    private func applyWindowLevels() {
+        let level: NSWindow.Level = settings.alwaysOnTop ? .floating : .normal
+        panel?.level = level
+        detailsPanel.level = level
     }
 
     private struct PreviewPayload {
