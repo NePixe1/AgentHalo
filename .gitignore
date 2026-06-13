@@ -9,3 +9,5 @@ obj/
 .vs/
 *.user
 *.suo
+outputs/
+mac/.build/
