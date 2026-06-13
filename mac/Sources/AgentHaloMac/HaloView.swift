@@ -11,6 +11,9 @@ final class HaloView: NSView {
     )
     var onDoubleClick: (() -> Void)?
     var onMoved: ((NSRect) -> Void)?
+    var onClick: (() -> Void)?
+    var onMouseEntered: (() -> Void)?
+    var onMouseExited: (() -> Void)?
     private var dragStart: NSPoint?
     private var windowStart: NSPoint?
     private var animationTimer: Timer?
@@ -85,10 +88,31 @@ final class HaloView: NSView {
         )
     }
 
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways],
+            owner: self
+        ))
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        onMouseEntered?()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        onMouseExited?()
+    }
+
     override func mouseDown(with event: NSEvent) {
         if event.clickCount == 2 {
             onDoubleClick?()
             return
+        }
+        if event.clickCount == 1 {
+            onClick?()
         }
         dragStart = NSEvent.mouseLocation
         windowStart = window?.frame.origin

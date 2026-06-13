@@ -18,6 +18,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: HaloPanel!
     private var haloView: HaloView!
     private var timer: Timer?
+    private var detailsPanel = DetailsPanel()
+    private var hoverHideTimer: Timer?
+    private let rateLimitReader = RateLimitReader()
 
     override init() {
         self.settings = settingsStore.load()
@@ -79,6 +82,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.settingsStore.save(settings)
             }
         }
+        haloView.onMouseEntered = { [weak self] in self?.showDetails() }
+        haloView.onMouseExited = { [weak self] in self?.scheduleHideDetails() }
+        haloView.onClick = { [weak self] in self?.toggleDetailsOrAcknowledge() }
 
         panel = HaloPanel(
             contentRect: NSRect(x: origin.x, y: origin.y, width: haloSize, height: haloSize),
@@ -205,5 +211,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let bundle = app.bundleIdentifier?.lowercased() ?? ""
         let name = app.localizedName?.lowercased() ?? ""
         return bundle.contains("codex") || name.contains("codex")
+    }
+
+    private func showDetails() {
+        detailsPanel.update(aggregate: displayAggregate(), quota: rateLimitReader.read())
+        positionDetailsPanel()
+        detailsPanel.orderFrontRegardless()
+    }
+
+    private func scheduleHideDetails() {
+        hoverHideTimer?.invalidate()
+        hoverHideTimer = Timer.scheduledTimer(withTimeInterval: 0.22, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                self?.detailsPanel.orderOut(nil)
+            }
+        }
+    }
+
+    private func positionDetailsPanel() {
+        guard let panel else { return }
+        let screen = NSScreen.screens.first { $0.visibleFrame.intersects(panel.frame) } ?? NSScreen.main
+        let area = screen?.visibleFrame ?? panel.frame
+        let gap: CGFloat = 10
+        var x = panel.frame.minX - detailsPanel.frame.width - gap
+        if x < area.minX + 8 {
+            x = panel.frame.maxX + gap
+        }
+        let y = max(area.minY + 8, min(panel.frame.midY - detailsPanel.frame.height / 2, area.maxY - detailsPanel.frame.height - 8))
+        detailsPanel.setFrameOrigin(CGPoint(x: max(area.minX + 8, min(x, area.maxX - detailsPanel.frame.width - 8)), y: y))
+    }
+
+    private func toggleDetailsOrAcknowledge() {
+        if aggregate.state == .done {
+            dismissCompleted()
+        } else if detailsPanel.isVisible {
+            detailsPanel.orderOut(nil)
+        } else {
+            showDetails()
+        }
+    }
+
+    private func displayAggregate() -> AggregateSnapshot {
+        aggregate
     }
 }
