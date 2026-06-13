@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var detailsPanel = DetailsPanel()
     private var hoverHideTimer: Timer?
     private let rateLimitReader = RateLimitReader()
+    private let instanceLock = InstanceLock()
 
     override init() {
         self.settings = settingsStore.load()
@@ -28,17 +29,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard instanceLock.acquire() else {
+            NSApp.terminate(nil)
+            return
+        }
         NSApp.setActivationPolicy(.accessory)
         createStatusItem()
         createHaloPanel()
         tick()
-        timer = Timer.scheduledTimer(
-            timeInterval: 0.35,
-            target: self,
-            selector: #selector(timerDidFire),
-            userInfo: nil,
-            repeats: true
-        )
+        timer = Timer.scheduledTimer(timeInterval: 0.22, target: self, selector: #selector(timerDidFire), userInfo: nil, repeats: true)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -105,46 +104,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if settings.hasPosition {
             return CGPoint(x: settings.left, y: settings.top)
         }
+        return defaultWindowOrigin(topOffset: 28)
+    }
+
+    private func defaultWindowOrigin(topOffset: CGFloat) -> CGPoint {
         let frame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        return CGPoint(x: frame.maxX - haloSize - 36, y: frame.maxY - haloSize - 36)
+        return CGPoint(x: frame.maxX - haloSize - 28, y: frame.maxY - haloSize - topOffset)
     }
 
     private func updateStatusMenu() {
         let menu = NSMenu()
-        let status = NSMenuItem(title: "\(aggregate.label) - \(aggregate.detail)", action: nil, keyEquivalent: "")
-        status.isEnabled = false
-        menu.addItem(status)
+        addMenuItem("确认已完成任务", #selector(dismissCompleted), enabled: aggregate.sessions.contains { $0.state == .done }, to: menu)
         menu.addItem(.separator())
-
-        let pause = NSMenuItem(
-            title: settings.paused ? "Resume Monitoring" : "Pause Monitoring",
-            action: #selector(togglePause),
-            keyEquivalent: ""
-        )
-        pause.target = self
-        menu.addItem(pause)
-
-        let bring = NSMenuItem(title: "Bring Codex Forward", action: #selector(bringCodexForward), keyEquivalent: "")
-        bring.target = self
-        menu.addItem(bring)
-
-        let dismissCompleted = NSMenuItem(
-            title: "Dismiss Completed",
-            action: #selector(dismissCompleted),
-            keyEquivalent: ""
-        )
-        dismissCompleted.target = self
-        dismissCompleted.isEnabled = aggregate.sessions.contains { $0.state == .done }
-        menu.addItem(dismissCompleted)
-
-        let recenter = NSMenuItem(title: "Recenter Halo", action: #selector(recenterHalo), keyEquivalent: "")
-        recenter.target = self
-        menu.addItem(recenter)
-
+        addCheckItem("始终置顶", checked: settings.alwaysOnTop, action: #selector(toggleAlwaysOnTop), to: menu)
+        addCheckItem("开机自动启动", checked: StartupManager.isEnabled(), action: #selector(toggleStartup), to: menu)
+        addCheckItem("暂停状态监听", checked: settings.paused, action: #selector(togglePause), to: menu)
+        addMenuItem("脱离卡死（移到主屏右上角）", #selector(escapeOffscreen), enabled: true, to: menu)
+        let preview = NSMenuItem(title: "预览状态", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        addPreviewItem("实时状态", state: nil, presentation: nil, to: submenu)
+        addPreviewItem("思考中", state: .thinking, presentation: nil, to: submenu)
+        addPreviewItem("执行中", state: .working, presentation: nil, to: submenu)
+        addPreviewItem("已完成", state: .done, presentation: nil, to: submenu)
+        addPreviewItem("等待授权（双脉冲）", state: .attention, presentation: nil, to: submenu)
+        addPreviewItem("故障（爆闪）", state: .error, presentation: .flashing, to: submenu)
+        addPreviewItem("故障（常亮）", state: .error, presentation: .bright, to: submenu)
+        addPreviewItem("故障（暗红）", state: .error, presentation: .dim, to: submenu)
+        addPreviewItem("待机", state: .idle, presentation: nil, to: submenu)
+        preview.submenu = submenu
+        menu.addItem(preview)
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "Quit Agent Halo", action: #selector(quit), keyEquivalent: "q")
-        quit.target = self
-        menu.addItem(quit)
+        addMenuItem("切换到 Codex", #selector(bringCodexForward), enabled: true, to: menu)
+        addMenuItem("退出 Agent Halo", #selector(quit), enabled: true, to: menu)
         statusItem.menu = menu
         let rgb = HaloVisualModel.stateColor(aggregate.state)
         let color = NSColor(calibratedRed: rgb.red / 255, green: rgb.green / 255, blue: rgb.blue / 255, alpha: 1)
@@ -156,29 +147,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         tick()
     }
 
+    @objc private func toggleAlwaysOnTop() {
+        settings.alwaysOnTop.toggle()
+        settingsStore.save(settings)
+        tick()
+    }
+
+    @objc private func toggleStartup() {
+        let bundleURL = Bundle.main.bundleURL.deletingLastPathComponent().deletingLastPathComponent()
+        StartupManager.setEnabled(!StartupManager.isEnabled(), appBundleURL: bundleURL)
+        tick()
+    }
+
+    @objc private func escapeOffscreen() {
+        let origin = defaultWindowOrigin(topOffset: 28)
+        panel.setFrameOrigin(origin)
+        settings.left = origin.x
+        settings.top = origin.y
+        settings.hasPosition = true
+        settingsStore.save(settings)
+    }
+
     @objc private func bringCodexForward() {
-        let apps = NSWorkspace.shared.runningApplications.filter { app in
-            let bundle = app.bundleIdentifier?.lowercased() ?? ""
-            let name = app.localizedName?.lowercased() ?? ""
-            return bundle.contains("codex") || name.contains("codex")
-        }
-        apps.first?.activate(options: [.activateIgnoringOtherApps])
+        CodexAppDetector.activateCodex()
     }
 
     @objc private func dismissCompleted() {
         settings = settings.acknowledgingCompletedSessions(aggregate.sessions)
         settingsStore.save(settings)
         tick()
-    }
-
-    @objc private func recenterHalo() {
-        let frame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let origin = CGPoint(x: frame.maxX - haloSize - 36, y: frame.maxY - haloSize - 36)
-        panel.setFrameOrigin(origin)
-        settings.left = origin.x
-        settings.top = origin.y
-        settings.hasPosition = true
-        settingsStore.save(settings)
     }
 
     @objc private func quit() {
@@ -196,21 +193,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func acknowledgeCompletedIfCodexIsForeground() {
         let updated = settings.acknowledgingCompletedSessions(
-            isCodexForeground() ? monitor.snapshots() : []
+            CodexAppDetector.isCodexForeground() ? monitor.snapshots() : []
         )
         if updated.acknowledged != settings.acknowledged {
             settings = updated
             settingsStore.save(settings)
         }
-    }
-
-    private func isCodexForeground() -> Bool {
-        guard let app = NSWorkspace.shared.frontmostApplication else {
-            return false
-        }
-        let bundle = app.bundleIdentifier?.lowercased() ?? ""
-        let name = app.localizedName?.lowercased() ?? ""
-        return bundle.contains("codex") || name.contains("codex")
     }
 
     private func showDetails() {
@@ -253,5 +241,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func displayAggregate() -> AggregateSnapshot {
         aggregate
+    }
+
+    private func addMenuItem(_ title: String, _ action: Selector, enabled: Bool, to menu: NSMenu) {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.isEnabled = enabled
+        menu.addItem(item)
+    }
+
+    private func addCheckItem(_ title: String, checked: Bool, action: Selector, to menu: NSMenu) {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.state = checked ? .on : .off
+        menu.addItem(item)
+    }
+
+    private func addPreviewItem(_ title: String, state: HaloState?, presentation: ErrorPresentation?, to menu: NSMenu) {
+        let item = NSMenuItem(title: title, action: #selector(previewState(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = PreviewPayload(state: state, presentation: presentation)
+        menu.addItem(item)
+    }
+
+    @objc private func previewState(_ sender: NSMenuItem) {
+        guard let payload = sender.representedObject as? PreviewPayload else {
+            return
+        }
+        if let state = payload.state {
+            haloView.visualState = state
+            if state == .error, let presentation = payload.presentation {
+                haloView.errorPresentation = presentation
+            }
+        }
+    }
+
+    private struct PreviewPayload {
+        let state: HaloState?
+        let presentation: ErrorPresentation?
     }
 }
