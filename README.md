@@ -58,6 +58,8 @@ OpenAI API key.
 - Completed green breathes until Codex returns to the foreground, then settles
   into a non-glowing standby green.
 - Right-click for state previews, pause, startup, and exit controls.
+- Use the `光环大小` submenu to select `75% / 100% / 125% / 150%`;
+  the selected size persists across restarts.
 - If a disconnected display leaves the halo off-screen, right-click its system
   tray icon and select `脱离卡死` to move it to the primary display.
 - Double-click to bring the Codex window forward.

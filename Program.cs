@@ -29,8 +29,8 @@ using MediaPoint = System.Windows.Point;
 [assembly: System.Reflection.AssemblyDescription("Ambient desktop status light for coding agents")]
 [assembly: System.Reflection.AssemblyCompany("Agent Halo")]
 [assembly: System.Reflection.AssemblyProduct("Agent Halo")]
-[assembly: System.Reflection.AssemblyVersion("0.10.2.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.10.2.0")]
+[assembly: System.Reflection.AssemblyVersion("0.11.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.11.0.0")]
 
 namespace CodexHalo
 {
@@ -81,10 +81,12 @@ namespace CodexHalo
         public string InstalledAt { get; set; }
         public Dictionary<string, string> Acknowledged { get; set; }
         public string AcknowledgedErrorAt { get; set; }
+        public int HaloScalePercent { get; set; }
 
         public HaloSettings()
         {
             AlwaysOnTop = true;
+            HaloScalePercent = 100;
             InstalledAt = DateTime.UtcNow.ToString("o");
             Acknowledged = new Dictionary<string, string>();
         }
@@ -175,6 +177,11 @@ namespace CodexHalo
                             // Pause is a temporary runtime control. Persisting it
                             // makes the next launch look like a broken monitor.
                             result.Paused = false;
+                            repaired = true;
+                        }
+                        if (!HaloWindow.IsValidScalePercent(result.HaloScalePercent))
+                        {
+                            result.HaloScalePercent = 100;
                             repaired = true;
                         }
                         if (repaired)
@@ -2833,6 +2840,7 @@ namespace CodexHalo
     public sealed class HaloWindow : Window
     {
         private const double HaloSize = 112;
+        private static readonly int[] HaloScalePresets = { 75, 100, 125, 150 };
         private readonly HaloSettings settings;
         private readonly CodexSessionMonitor monitor;
         private readonly HaloVisual visual;
@@ -2855,8 +2863,9 @@ namespace CodexHalo
         public HaloWindow(HaloSettings appSettings)
         {
             settings = appSettings;
-            Width = HaloSize;
-            Height = HaloSize;
+            double initialSize = SizeForScale(settings.HaloScalePercent);
+            Width = initialSize;
+            Height = initialSize;
             WindowStyle = WindowStyle.None;
             AllowsTransparency = true;
             Background = System.Windows.Media.Brushes.Transparent;
@@ -2927,6 +2936,21 @@ namespace CodexHalo
                 Dispatcher.BeginInvoke(new Action(ToggleDetails));
             };
             BuildTrayMenu();
+        }
+
+        public static bool IsValidScalePercent(int value)
+        {
+            return HaloScalePresets.Contains(value);
+        }
+
+        private static double SizeForScale(int percent)
+        {
+            return HaloSize * percent / 100.0;
+        }
+
+        public static double DiagnosticSizeForScale(int percent)
+        {
+            return SizeForScale(IsValidScalePercent(percent) ? percent : 100);
         }
 
         private void OnLoaded(object sender, RoutedEventArgs e)
@@ -3316,6 +3340,32 @@ namespace CodexHalo
             SettingsStorage.Save(settings);
         }
 
+        private void ApplyHaloScale(int percent)
+        {
+            if (!IsValidScalePercent(percent))
+            {
+                percent = 100;
+            }
+            double centerX = Double.IsNaN(Left) ? 0 : Left + Width / 2;
+            double centerY = Double.IsNaN(Top) ? 0 : Top + Height / 2;
+            double size = SizeForScale(percent);
+            Width = size;
+            Height = size;
+            if (!Double.IsNaN(Left) && !Double.IsNaN(Top))
+            {
+                Left = centerX - size / 2;
+                Top = centerY - size / 2;
+                Rect area = GetWorkAreaDip();
+                Left = Math.Max(area.Left + 8,
+                    Math.Min(Left, area.Right - Width - 8));
+                Top = Math.Max(area.Top + 8,
+                    Math.Min(Top, area.Bottom - Height - 8));
+            }
+            settings.HaloScalePercent = percent;
+            SavePosition();
+            PositionDetails();
+        }
+
         private void AcknowledgeCompleted()
         {
             if (aggregate == null || aggregate.Sessions == null)
@@ -3410,6 +3460,34 @@ namespace CodexHalo
             {
                 Dispatcher.BeginInvoke(new Action(EscapeOffscreen));
             });
+
+            Forms.ToolStripMenuItem sizeMenu =
+                new Forms.ToolStripMenuItem("光环大小");
+            foreach (int percent in HaloScalePresets)
+            {
+                int selectedPercent = percent;
+                Forms.ToolStripMenuItem sizeItem = new Forms.ToolStripMenuItem(
+                    percent.ToString(CultureInfo.InvariantCulture) + "%");
+                sizeItem.Checked = settings.HaloScalePercent == percent;
+                sizeItem.Click += delegate
+                {
+                    Dispatcher.BeginInvoke(new Action(delegate
+                    {
+                        ApplyHaloScale(selectedPercent);
+                        foreach (Forms.ToolStripItem child in sizeMenu.DropDownItems)
+                        {
+                            Forms.ToolStripMenuItem candidate =
+                                child as Forms.ToolStripMenuItem;
+                            if (candidate != null)
+                            {
+                                candidate.Checked = candidate == sizeItem;
+                            }
+                        }
+                    }));
+                };
+                sizeMenu.DropDownItems.Add(sizeItem);
+            }
+            menu.Items.Add(sizeMenu);
 
             Forms.ToolStripMenuItem preview = new Forms.ToolStripMenuItem("预览状态");
             AddPreviewItem(preview, "实时状态", null);
@@ -3706,6 +3784,16 @@ namespace CodexHalo
                 Assert(HaloVisual.DiagnosticCoreWhite(HaloState.Thinking) >
                     HaloVisual.DiagnosticCoreWhite(HaloState.Done),
                     "yellow receives perceptual white-core compensation");
+                Assert(Math.Abs(HaloWindow.DiagnosticSizeForScale(75) - 84) < 0.001,
+                    "75 percent halo size");
+                Assert(Math.Abs(HaloWindow.DiagnosticSizeForScale(100) - 112) < 0.001,
+                    "100 percent halo size");
+                Assert(Math.Abs(HaloWindow.DiagnosticSizeForScale(125) - 140) < 0.001,
+                    "125 percent halo size");
+                Assert(Math.Abs(HaloWindow.DiagnosticSizeForScale(150) - 168) < 0.001,
+                    "150 percent halo size");
+                Assert(Math.Abs(HaloWindow.DiagnosticSizeForScale(99) - 112) < 0.001,
+                    "invalid halo size falls back to 100 percent");
                 File.Delete(temp);
                 File.WriteAllText(outputPath,
                     "PASS\nCodex lifecycle reducer, incremental reader, and gap bounds passed.\n",
@@ -3805,6 +3893,7 @@ namespace CodexHalo
                 RenderPanelPreview(outputDirectory);
                 RenderRingBackdropPreview(outputDirectory);
                 RenderPeakBrightnessComparison(outputDirectory);
+                RenderSizePresetComparison(outputDirectory);
                 RenderGapMotionStrip(outputDirectory, HaloState.Idle,
                     "motion-idle.png");
                 RenderGapMotionStrip(outputDirectory, HaloState.Working,
@@ -4127,6 +4216,47 @@ namespace CodexHalo
             encoder.Frames.Add(BitmapFrame.Create(bitmap));
             using (FileStream stream = File.Create(Path.Combine(outputDirectory,
                 "peak-brightness-comparison.png")))
+            {
+                encoder.Save(stream);
+            }
+        }
+
+        private static void RenderSizePresetComparison(string outputDirectory)
+        {
+            int[] percents = { 75, 100, 125, 150 };
+            const double cellSize = 190;
+            Grid strip = new Grid();
+            strip.Width = cellSize * percents.Length;
+            strip.Height = cellSize;
+            strip.Background = new SolidColorBrush(MediaColor.FromRgb(7, 10, 15));
+            for (int i = 0; i < percents.Length; i++)
+            {
+                strip.ColumnDefinitions.Add(new ColumnDefinition
+                {
+                    Width = new GridLength(cellSize)
+                });
+                HaloVisual visual = new HaloVisual();
+                double size = HaloWindow.DiagnosticSizeForScale(percents[i]);
+                visual.Width = size;
+                visual.Height = size;
+                visual.HorizontalAlignment = HorizontalAlignment.Center;
+                visual.VerticalAlignment = VerticalAlignment.Center;
+                visual.SetState(HaloState.Working, "EXECUTING", 1);
+                visual.SetTestTime(0.8);
+                Grid.SetColumn(visual, i);
+                strip.Children.Add(visual);
+            }
+            strip.Measure(new System.Windows.Size(strip.Width, strip.Height));
+            strip.Arrange(new Rect(0, 0, strip.Width, strip.Height));
+            strip.UpdateLayout();
+            RenderTargetBitmap bitmap = new RenderTargetBitmap(
+                (int)(strip.Width * 2), (int)(strip.Height * 2), 192, 192,
+                PixelFormats.Pbgra32);
+            bitmap.Render(strip);
+            PngBitmapEncoder encoder = new PngBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(bitmap));
+            using (FileStream stream = File.Create(Path.Combine(outputDirectory,
+                "size-presets.png")))
             {
                 encoder.Save(stream);
             }
