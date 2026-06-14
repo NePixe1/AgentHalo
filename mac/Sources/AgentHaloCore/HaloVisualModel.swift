@@ -42,32 +42,19 @@ public enum HaloVisualModel {
     }
 
     public static func stateColor(_ state: HaloState) -> HaloRGB {
-        switch state {
-        case .thinking: HaloRGB(red: 226, green: 170, blue: 31)
-        case .working: HaloRGB(red: 52, green: 158, blue: 199)
-        case .done: HaloRGB(red: 38, green: 198, blue: 108)
-        case .attention: HaloRGB(red: 213, green: 103, blue: 55)
-        case .error: HaloRGB(red: 218, green: 50, blue: 86)
-        case .idle: HaloRGB(red: 113, green: 132, blue: 140)
-        }
+        let parameters = GeneratedHaloSpec.state(state)
+        return HaloRGB(
+            red: parameters.red,
+            green: parameters.green,
+            blue: parameters.blue
+        )
     }
 
     public static func coreWhite(for state: HaloState) -> Double {
-        switch state {
-        case .thinking: 0.90
-        case .working: 0.86
-        case .error: 0.91
-        case .done: 0.84
-        default: 0.82
-        }
+        GeneratedHaloSpec.state(state).coreWhite
     }
 
     public static func glowGain(for state: HaloState) -> Double {
-        switch state {
-        case .thinking: 1.13
-        case .working: 1.07
-        case .error: 1.12
-        default: 1.00
-        }
+        GeneratedHaloSpec.state(state).glowGain
     }
 }

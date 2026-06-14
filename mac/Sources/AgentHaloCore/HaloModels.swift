@@ -1,20 +1,5 @@
 import Foundation
 
-public enum HaloState: String, Codable, Equatable, Sendable, CaseIterable {
-    case idle
-    case thinking
-    case working
-    case done
-    case attention
-    case error
-}
-
-public enum ErrorPresentation: String, Codable, Equatable, Sendable, CaseIterable {
-    case flashing
-    case bright
-    case dim
-}
-
 public struct SessionSnapshot: Equatable, Sendable {
     public var threadId: String
     public var projectName: String

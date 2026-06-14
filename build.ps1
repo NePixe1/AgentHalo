@@ -70,7 +70,7 @@ $exe = Join-Path $output "AgentHalo.exe"
 
 & $csc /nologo /target:winexe /platform:anycpu /optimize+ `
     /out:$exe /win32manifest:"$root\app.manifest" /win32icon:$iconPath `
-    $referenceArgs "$root\Program.cs"
+    $referenceArgs "$root\windows\GeneratedHaloSpec.cs" "$root\Program.cs"
 
 if ($LASTEXITCODE -ne 0) {
     throw "Compilation failed with exit code $LASTEXITCODE"
@@ -85,7 +85,7 @@ $hashLine = "$hash  AgentHalo.exe"
 Set-Content -LiteralPath (Join-Path $output "SHA256.txt") -Value $hashLine `
     -Encoding ascii -NoNewline
 
-$archive = Join-Path (Split-Path -Parent $output) "AgentHalo-Windows-v0.11.1.zip"
+$archive = Join-Path (Split-Path -Parent $output) "AgentHalo-Windows-v0.12.0.zip"
 Remove-Item -LiteralPath $archive -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $output "*") -DestinationPath $archive `
     -CompressionLevel Optimal

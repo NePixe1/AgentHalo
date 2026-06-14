@@ -35,10 +35,10 @@ final class HaloView: NSView {
     private var gapA = 97.0
     private var gapB = 247.0
     private var outerVelocity = 0.0
-    private var gapSeparation = 150.0
+    private var gapSeparation = GeneratedHaloSpec.maximumGapSeparation
     private var gapRepelling = false
     private var gapRepulsionElapsed = 0.0
-    private var gapRepulsionStart = 40.0
+    private var gapRepulsionStart = GeneratedHaloSpec.minimumGapSeparation
     private var gapRepulsionDuration = 1.4
     private var gapRepulsionCount = 0
     private var smallGapAnchor = 247.0
@@ -84,13 +84,13 @@ final class HaloView: NSView {
             let progress = HaloMath.clamp(gapRepulsionElapsed / max(0.01, gapRepulsionDuration), 0, 1)
             gapSeparation = HaloMath.lerp(
                 gapRepulsionStart,
-                150,
+                GeneratedHaloSpec.maximumGapSeparation,
                 HaloMath.magneticRepulsionEase(progress)
             )
             gapB = gapA + gapSeparation
             if progress >= 1 {
                 gapRepelling = false
-                gapSeparation = 150
+                gapSeparation = GeneratedHaloSpec.maximumGapSeparation
                 gapB = gapA + gapSeparation
                 smallGapAnchor = gapB
                 smallGapDriftElapsed = 0
@@ -110,7 +110,7 @@ final class HaloView: NSView {
                 )
             gapSeparation = HaloMath.positiveModulo(gapB - gapA, 360)
             if gapSeparation <= 41.5 || gapSeparation > 300 {
-                gapSeparation = 40
+                gapSeparation = GeneratedHaloSpec.minimumGapSeparation
                 gapB = gapA + gapSeparation
                 gapRepelling = true
                 gapRepulsionElapsed = 0

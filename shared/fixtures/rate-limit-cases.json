@@ -1,0 +1,39 @@
+[
+  {
+    "name": "direct payload",
+    "document": {
+      "payload": {
+        "rate_limits": {
+          "primary": {"used_percent": 25},
+          "secondary": {"used_percent": 80}
+        }
+      }
+    },
+    "expected": {"primaryUsedPercent": 25, "secondaryUsedPercent": 80}
+  },
+  {
+    "name": "nested info",
+    "document": {
+      "payload": {
+        "info": {
+          "rate_limits": {
+            "primary": {"used_percent": "12.5"},
+            "secondary": {"used_percent": 44}
+          }
+        }
+      }
+    },
+    "expected": {"primaryUsedPercent": 12.5, "secondaryUsedPercent": 44}
+  },
+  {
+    "name": "missing secondary",
+    "document": {
+      "payload": {
+        "rate_limits": {
+          "primary": {"used_percent": 25}
+        }
+      }
+    },
+    "expected": null
+  }
+]

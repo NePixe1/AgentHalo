@@ -6,12 +6,16 @@ Codex 桌面端的本地常驻状态光环。
 
 当前版本支持 Codex；后续计划加入 Claude Code（CC）状态识别。
 
-版本：`0.11.1`（预发布）
+版本：`0.12.0`（开发中）
 
 [English](README.md) | 简体中文
 
-跨平台状态规范与测试样本保存在 [`shared/`](shared/)；Windows 和 macOS 继续使用
-各自的原生渲染。具体差异见 [macOS 差异报告](docs/MACOS_DIFFERENCES.md)。
+跨平台行为以
+[`shared/spec/agent-halo.v2.json`](shared/spec/agent-halo.v2.json)
+为唯一参数来源，并生成 C# 与 Swift 常量；Windows 和 macOS 继续使用各自的原生渲染。
+详见 [共享契约说明](shared/README.md)与
+[跨平台架构说明](docs/CROSS_PLATFORM_SHARED_CONTRACT.md)。macOS 维护者可直接使用
+[Codex 审阅提示词](docs/MACOS_CODEX_REVIEW_PROMPT.md)。
 
 ---
 

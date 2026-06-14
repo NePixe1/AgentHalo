@@ -40,24 +40,7 @@ public struct CodexFailureReader: Sendable {
     }
 
     public static func classify(_ text: String) -> String? {
-        let lower = text.lowercased()
-        if containsAny(lower, ["authentication failed", "unauthorized", "invalid token", "sign in again"]) {
-            return "认证已失效"
-        }
-        if containsAny(lower, ["rate limit reached", "usage limit", "quota exceeded", "rate_limit_reached"]) {
-            return "额度已用尽"
-        }
-        if containsAny(lower, ["service unavailable", "server overloaded", "overloaded", "bad gateway"]) {
-            return "服务暂时不可用"
-        }
-        if containsAny(lower, ["connection failed", "network error", "connection aborted", "request timed out", "connect timeout"]) {
-            return "连接 Codex 失败"
-        }
-        return nil
-    }
-
-    private static func containsAny(_ text: String, _ values: [String]) -> Bool {
-        values.contains { text.contains($0) }
+        GeneratedHaloSpec.classifyFailure(text)
     }
 
     private func runSQLite(query: String) -> String {

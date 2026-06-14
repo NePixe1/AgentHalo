@@ -1,6 +1,6 @@
 # macOS and Windows visual differences
 
-Compared at repository version 0.11.1.
+Compared during version 0.12.0 shared-contract migration.
 
 ## Deliberate macOS additions
 
@@ -26,9 +26,10 @@ Compared at repository version 0.11.1.
 
 ## Shared behavior
 
-- Session state reduction, approval detection, tool visibility delay, colors, breathing
-  periods, orbit velocities, gap separation, and error presentation names are intended
-  to match.
-- `shared/state-spec.json` and the lifecycle fixture are the current review contract.
+- Generated enums, session rules, failure and action matching, colors, breathing
+  parameters, orbit motion, gap separation, transition constants, and rate-limit
+  scanning limits now come from `shared/spec/agent-halo.v2.json`.
+- Shared fixtures and deterministic animation samples are checked in CI.
 
-No macOS visual behavior is changed as part of version 0.11.1.
+The migration does not intentionally change macOS visual behavior. Renderer-specific
+ring morphing, bloom, highlights, and fixed refresh behavior remain native.

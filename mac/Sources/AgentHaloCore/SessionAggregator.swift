@@ -99,24 +99,10 @@ public enum SessionAggregator {
     }
 
     public static func label(for state: HaloState) -> String {
-        switch state {
-        case .thinking: "THINKING"
-        case .working: "EXECUTING"
-        case .done: "COMPLETE"
-        case .attention: "NEEDS YOU"
-        case .error: "INTERRUPTED"
-        case .idle: "READY"
-        }
+        GeneratedHaloSpec.state(state).label
     }
 
     public static func priority(_ state: HaloState) -> Int {
-        switch state {
-        case .error: 0
-        case .attention: 1
-        case .working: 2
-        case .thinking: 3
-        case .done: 4
-        case .idle: 5
-        }
+        GeneratedHaloSpec.state(state).priority
     }
 }

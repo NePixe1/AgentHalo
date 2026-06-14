@@ -1,11 +1,38 @@
 # Shared cross-platform contract
 
-This directory contains platform-neutral behavior used to compare the Windows and
-macOS implementations.
+`spec/agent-halo.v2.json` is the canonical source for behavior shared by the
+Windows and macOS clients. Native rendering and operating-system integration remain
+platform-specific.
 
-- `state-spec.json`: canonical state colors and animation parameters.
-- `fixtures/`: sanitized Codex lifecycle input.
-- `expected/`: expected reducer output for the matching fixture.
+The contract owns state metadata, lifecycle rules, action and failure matching,
+rate-limit paths, animation parameters, gap motion, transition parameters, and the
+shared portion of settings. Platform-only material and morph identifiers live under
+`platformExtensions`.
 
-The native applications do not load these files at runtime yet. They are review and
-test contracts. Moving runtime constants into generated platform code is a later task.
+Generate native constants:
+
+```bash
+python scripts/generate_shared.py
+```
+
+Verify generated files without modifying them:
+
+```bash
+python scripts/generate_shared.py --check
+python scripts/check_shared.py
+```
+
+CI additionally installs `scripts/requirements-ci.txt` and validates the contract
+against `spec/agent-halo.v2.schema.json`.
+
+Generated outputs are committed:
+
+- `windows/GeneratedHaloSpec.cs`
+- `mac/Sources/AgentHaloCore/GeneratedHaloSpec.swift`
+
+Do not edit generated files by hand. Both applications compile the generated source
+and do not read the JSON contract at runtime.
+
+Fixtures cover lifecycle reduction, failure classification, rate-limit layouts, and
+deterministic animation samples. GitHub Actions checks code generation and runs the
+Windows and macOS native test suites.

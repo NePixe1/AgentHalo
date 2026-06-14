@@ -16,19 +16,21 @@ public struct RateLimitReader: @unchecked Sendable {
     }
 
     public func read() -> RateLimitSnapshot? {
-        for file in recentJSONLFiles().prefix(16) {
-            for line in tailLines(file).suffix(300).reversed() where line.contains("\"rate_limits\"") {
+        for file in recentJSONLFiles().prefix(GeneratedHaloSpec.rateLimitRecentFileCount) {
+            for line in tailLines(file).suffix(GeneratedHaloSpec.rateLimitRecentLineCount)
+                .reversed() where line.contains(GeneratedHaloSpec.rateLimitMarker) {
                 guard let data = line.data(using: .utf8),
                       let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let payload = root["payload"] as? [String: Any] else {
+                      let payload = root[GeneratedHaloSpec.ratePayloadKey] as? [String: Any] else {
                     continue
                 }
-                let info = payload["info"] as? [String: Any]
-                let limits = (payload["rate_limits"] as? [String: Any]) ?? (info?["rate_limits"] as? [String: Any])
-                guard let primary = limits?["primary"] as? [String: Any],
-                      let secondary = limits?["secondary"] as? [String: Any],
-                      let primaryUsed = Self.number(primary["used_percent"]),
-                      let secondaryUsed = Self.number(secondary["used_percent"]) else {
+                let info = payload[GeneratedHaloSpec.rateInfoKey] as? [String: Any]
+                let limits = (payload[GeneratedHaloSpec.rateLimitsKey] as? [String: Any])
+                    ?? (info?[GeneratedHaloSpec.rateLimitsKey] as? [String: Any])
+                guard let primary = limits?[GeneratedHaloSpec.ratePrimaryKey] as? [String: Any],
+                      let secondary = limits?[GeneratedHaloSpec.rateSecondaryKey] as? [String: Any],
+                      let primaryUsed = Self.number(primary[GeneratedHaloSpec.rateUsedPercentKey]),
+                      let secondaryUsed = Self.number(secondary[GeneratedHaloSpec.rateUsedPercentKey]) else {
                     continue
                 }
                 return RateLimitSnapshot(primaryUsedPercent: primaryUsed, secondaryUsedPercent: secondaryUsed)
@@ -63,7 +65,8 @@ public struct RateLimitReader: @unchecked Sendable {
         }
         defer { try? handle.close() }
         let size = (try? handle.seekToEnd()) ?? 0
-        let start = size > 1_048_576 ? size - 1_048_576 : 0
+        let tailBytes = UInt64(GeneratedHaloSpec.rateLimitTailBytes)
+        let start = size > tailBytes ? size - tailBytes : 0
         try? handle.seek(toOffset: start)
         guard let data = try? handle.readToEnd(),
               var text = String(data: data, encoding: .utf8) else {

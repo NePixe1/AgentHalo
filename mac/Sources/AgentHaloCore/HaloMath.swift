@@ -103,30 +103,57 @@ public enum HaloMath {
     }
 
     public static func stateBreath(_ state: HaloState, time: Double) -> Double {
-        switch state {
-        case .thinking: livingBreath(time: time, period: 5.5, maximum: 1.0, minimum: 0.26, brightShare: 0.70)
-        case .working: livingBreath(time: time, period: 7.2, maximum: 1.0, minimum: 0.22, brightShare: 0.78)
-        case .done: livingBreath(time: time, period: 9.2, maximum: 0.92, minimum: 0.22, brightShare: 0.76)
-        case .attention: 0.18 + 0.82 * attentionPulse(time)
-        case .error: errorPulse(time, presentation: .flashing)
-        case .idle: 0.18 + 0.22 * softWave(time / 6.8)
+        if state == .attention {
+            return 0.18 + 0.82 * attentionPulse(time)
         }
+        if state == .error {
+            return errorPulse(time, presentation: .flashing)
+        }
+        let parameters = GeneratedHaloSpec.state(state)
+        if state == .idle {
+            return parameters.visualMinimum
+                + (parameters.visualMaximum - parameters.visualMinimum)
+                * softWave(time / parameters.breathPeriod)
+        }
+        return livingBreath(
+            time: time,
+            period: parameters.breathPeriod,
+            maximum: parameters.visualMaximum,
+            minimum: parameters.visualMinimum,
+            brightShare: parameters.brightShare
+        )
     }
 
     public static func targetPowered(_ state: HaloState, time: Double) -> Double {
-        switch state {
-        case .thinking: livingBreath(time: time, period: 5.5, maximum: 1.0, minimum: 0.18, brightShare: 0.70)
-        case .working: livingBreath(time: time, period: 7.2, maximum: 1.0, minimum: 0.16, brightShare: 0.78)
-        case .done: livingBreath(time: time, period: 9.2, maximum: 0.84, minimum: 0.09, brightShare: 0.76)
-        default: 0
+        let parameters = GeneratedHaloSpec.state(state)
+        guard parameters.poweredMaximum > 0 else {
+            return 0
         }
+        return livingBreath(
+            time: time,
+            period: parameters.breathPeriod,
+            maximum: parameters.poweredMaximum,
+            minimum: parameters.poweredMinimum,
+            brightShare: parameters.brightShare
+        )
     }
 
     public static func attentionPulse(_ time: Double) -> Double {
-        let cycle = positiveModulo(time, 5.8) / 5.8
-        let first = smoothPulse(phase: cycle, center: 0.16, width: 0.095)
-        let second = smoothPulse(phase: cycle, center: 0.38, width: 0.11) * 0.82
-        let livingBase = 0.08 + 0.05 * softWave(cycle + 0.18)
+        let cycle = positiveModulo(time, GeneratedHaloSpec.attentionPeriod)
+            / GeneratedHaloSpec.attentionPeriod
+        let first = smoothPulse(
+            phase: cycle,
+            center: GeneratedHaloSpec.attentionFirstCenter,
+            width: GeneratedHaloSpec.attentionFirstWidth
+        ) * GeneratedHaloSpec.attentionFirstStrength
+        let second = smoothPulse(
+            phase: cycle,
+            center: GeneratedHaloSpec.attentionSecondCenter,
+            width: GeneratedHaloSpec.attentionSecondWidth
+        ) * GeneratedHaloSpec.attentionSecondStrength
+        let livingBase = GeneratedHaloSpec.attentionLivingBase
+            + GeneratedHaloSpec.attentionLivingAmplitude
+            * softWave(cycle + GeneratedHaloSpec.attentionLivingPhase)
         return clamp(livingBase + first + second, 0, 1)
     }
 
@@ -137,93 +164,87 @@ public enum HaloMath {
     }
 
     public static func errorPulse(_ time: Double, presentation: ErrorPresentation) -> Double {
-        if presentation == .bright { return 0.92 }
-        if presentation == .dim { return 0.04 }
-        let cycle = positiveModulo(time, 1.55)
-        let first = exp(-pow((cycle - 0.12) / 0.055, 2))
-        let second = exp(-pow((cycle - 0.34) / 0.065, 2))
+        if presentation == .bright { return GeneratedHaloSpec.errorBrightPower }
+        if presentation == .dim { return GeneratedHaloSpec.errorDimPower }
+        let cycle = positiveModulo(time, GeneratedHaloSpec.errorFlashPeriod)
+        let first = exp(-pow(
+            (cycle - GeneratedHaloSpec.errorFirstCenter)
+                / GeneratedHaloSpec.errorFirstWidth, 2
+        ))
+        let second = exp(-pow(
+            (cycle - GeneratedHaloSpec.errorSecondCenter)
+                / GeneratedHaloSpec.errorSecondWidth, 2
+        ))
         return clamp(first + second, 0, 1)
     }
 
     public static func transitionLight(from: Double, to: Double, progress rawProgress: Double) -> Double {
         let progress = smootherStep(clamp(rawProgress, 0, 1))
-        let low = 0.08
-        if progress < 0.36 {
-            return lerp(from, min(from, low), smootherStep(progress / 0.36))
+        let low = GeneratedHaloSpec.transitionLowPowered
+        if progress < GeneratedHaloSpec.transitionDimEnd {
+            return lerp(
+                from,
+                min(from, low),
+                smootherStep(progress / GeneratedHaloSpec.transitionDimEnd)
+            )
         }
-        if progress < 0.58 {
+        if progress < GeneratedHaloSpec.transitionColorBlendEnd {
             return min(from, low)
         }
-        return lerp(min(from, low), to, smootherStep((progress - 0.58) / 0.42))
+        return lerp(
+            min(from, low),
+            to,
+            smootherStep(
+                (progress - GeneratedHaloSpec.transitionColorBlendEnd)
+                    / (1 - GeneratedHaloSpec.transitionColorBlendEnd)
+            )
+        )
     }
 
     public static func diagnosticBrightDuration(_ state: HaloState) -> Double {
-        switch state {
-        case .thinking: 5.5 * 0.70
-        case .working: 7.2 * 0.78
-        case .done: 9.2 * 0.76
-        default: 0
-        }
+        let parameters = GeneratedHaloSpec.state(state)
+        return parameters.poweredMaximum > 0
+            ? parameters.breathPeriod * parameters.brightShare
+            : 0
     }
 
     public static func diagnosticGapSeparation(_ phase: Double) -> Double {
-        lerp(40, 150, magneticRepulsionEase(phase))
+        lerp(
+            GeneratedHaloSpec.minimumGapSeparation,
+            GeneratedHaloSpec.maximumGapSeparation,
+            magneticRepulsionEase(phase)
+        )
     }
 
     public static func repulsionDurationFromOrbit(_ orbitVelocity: Double) -> Double {
-        let speed = clamp(abs(orbitVelocity), 14, 92)
-        return clamp(1.42 * sqrt(72 / speed), 1.28, 3.05)
+        let speed = clamp(
+            abs(orbitVelocity),
+            GeneratedHaloSpec.repulsionSpeedMinimum,
+            GeneratedHaloSpec.repulsionSpeedMaximum
+        )
+        return clamp(
+            GeneratedHaloSpec.repulsionDurationFactor
+                * sqrt(GeneratedHaloSpec.repulsionReferenceSpeed / speed),
+            GeneratedHaloSpec.repulsionDurationMinimum,
+            GeneratedHaloSpec.repulsionDurationMaximum
+        )
     }
 
     public static func targetGapVelocity(_ state: HaloState) -> Double {
-        switch state {
-        case .thinking: 78
-        case .working: 106
-        case .attention: 46
-        case .error: 60
-        case .done: 38
-        case .idle: 27
-        }
+        GeneratedHaloSpec.state(state).orbitVelocity
     }
 
     public static func gapVelocityEnvelope(_ state: HaloState, time: Double) -> Double {
-        let period: Double
-        switch state {
-        case .working: period = 2.2
-        case .thinking: period = 4.2
-        case .attention: period = 4.1
-        case .error: period = 1.75
-        case .done: period = 8.5
-        case .idle: period = 7.6
-        }
+        let period = GeneratedHaloSpec.state(state).envelopePeriod
         let primary = softWave(time / period)
         let secondary = softWave(time / (period * 0.47) + 0.29)
         return 0.18 + 0.92 * pow(primary, 1.65) + 0.22 * secondary
     }
 
     public static func smallGapDriftOffset(state: HaloState, time: Double, cycle: Int) -> Double {
-        let amplitude: Double
-        let period: Double
-        switch state {
-        case .working:
-            amplitude = 8.5
-            period = 2.8
-        case .thinking:
-            amplitude = 7.0
-            period = 3.6
-        case .error:
-            amplitude = 7.5
-            period = 2.6
-        case .attention:
-            amplitude = 6.5
-            period = 3.3
-        case .done:
-            amplitude = 4.2
-            period = 5.5
-        case .idle:
-            amplitude = 5.2
-            period = 4.8
-        }
+        let parameters = GeneratedHaloSpec.state(state)
+        let amplitude = parameters.driftAmplitude
+        let period = parameters.driftPeriod
         let direction = cycle.isMultiple(of: 2) ? 1.0 : -1.0
         let primary = sin(time * .pi * 2 / period)
         let secondary = 0.22 * (sin(time * .pi * 2 / (period * 0.43) + 0.8) - sin(0.8))
@@ -231,18 +252,15 @@ public enum HaloMath {
     }
 
     public static func smallGapInertiaDamping(_ state: HaloState) -> Double {
-        switch state {
-        case .working: 0.72
-        case .thinking: 0.66
-        case .error: 0.84
-        case .attention: 0.76
-        case .done: 0.58
-        case .idle: 0.62
-        }
+        GeneratedHaloSpec.state(state).inertiaDamping
     }
 
     public static func repulsionExitVelocityFromOrbit(_ orbitVelocity: Double) -> Double {
-        clamp(abs(orbitVelocity) * 0.42, 9, 38)
+        clamp(
+            abs(orbitVelocity) * GeneratedHaloSpec.exitVelocityScale,
+            GeneratedHaloSpec.exitVelocityMinimum,
+            GeneratedHaloSpec.exitVelocityMaximum
+        )
     }
 
     public static func magneticRepulsionEase(_ value: Double) -> Double {

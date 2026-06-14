@@ -6,12 +6,16 @@ A local, always-on-top status halo for the Codex desktop app.
 
 The current release supports Codex, with Claude Code detection planned next.
 
-Version: `0.11.1` (Pre-release)
+Version: `0.12.0` (Development)
 
 English | [简体中文](README.zh-CN.md)
 
-Cross-platform behavior is tracked in [`shared/`](shared/), while platform-specific
-rendering remains native. See the [macOS difference report](docs/MACOS_DIFFERENCES.md).
+Cross-platform behavior is generated from
+[`shared/spec/agent-halo.v2.json`](shared/spec/agent-halo.v2.json), while
+platform-specific rendering remains native. See the
+[shared contract guide](shared/README.md) and
+[architecture notes](docs/CROSS_PLATFORM_SHARED_CONTRACT.md). The macOS maintainer
+can use the checked-in [Codex review prompt](docs/MACOS_CODEX_REVIEW_PROMPT.md).
 
 ---
 

@@ -29,28 +29,11 @@ using MediaPoint = System.Windows.Point;
 [assembly: System.Reflection.AssemblyDescription("Ambient desktop status light for coding agents")]
 [assembly: System.Reflection.AssemblyCompany("Agent Halo")]
 [assembly: System.Reflection.AssemblyProduct("Agent Halo")]
-[assembly: System.Reflection.AssemblyVersion("0.11.1.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.11.1.0")]
+[assembly: System.Reflection.AssemblyVersion("0.12.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.12.0.0")]
 
 namespace CodexHalo
 {
-    public enum HaloState
-    {
-        Idle,
-        Thinking,
-        Working,
-        Done,
-        Attention,
-        Error
-    }
-
-    public enum ErrorPresentation
-    {
-        Flashing,
-        Bright,
-        Dim
-    }
-
     public sealed class SessionSnapshot
     {
         public string ThreadId;
@@ -508,7 +491,7 @@ namespace CodexHalo
         private void ReduceEvent(string payloadType, DateTime eventUtc)
         {
             string lower = (payloadType ?? String.Empty).ToLowerInvariant();
-            if (lower == "task_started" || lower == "user_message")
+            if (GeneratedHaloSpec.IsTaskStartEvent(lower))
             {
                 inFlightTools = 0;
                 workingVisibleUntilUtc = DateTime.MinValue;
@@ -516,7 +499,7 @@ namespace CodexHalo
                 Snapshot.State = HaloState.Thinking;
                 Snapshot.Action = "Planning";
             }
-            else if (lower == "task_complete")
+            else if (GeneratedHaloSpec.IsTaskCompleteEvent(lower))
             {
                 inFlightTools = 0;
                 workingVisibleUntilUtc = DateTime.MinValue;
@@ -549,16 +532,13 @@ namespace CodexHalo
                     }
                 }
             }
-            else if (lower.Contains("approval") || lower.Contains("request_user") ||
-                lower.Contains("needs_input"))
+            else if (GeneratedHaloSpec.IsAttentionEvent(lower))
             {
                 Snapshot.Active = true;
                 Snapshot.State = HaloState.Attention;
                 Snapshot.Action = "Needs you";
             }
-            else if (lower == "turn_aborted" || lower == "turn_failed" ||
-                lower == "task_failed" || lower == "task_cancelled" ||
-                lower == "task_interrupted" || lower == "fatal_error")
+            else if (GeneratedHaloSpec.IsFatalEvent(lower))
             {
                 Snapshot.Active = false;
                 Snapshot.State = HaloState.Error;
@@ -568,7 +548,7 @@ namespace CodexHalo
             {
                 Snapshot.Active = true;
                 Snapshot.State = HaloState.Working;
-                Snapshot.Action = FriendlyAction(lower);
+                Snapshot.Action = GeneratedHaloSpec.FriendlyAction(lower);
             }
         }
 
@@ -589,20 +569,18 @@ namespace CodexHalo
                     inFlightTools++;
                     ExtendWorkingVisibility(2.2);
                     Snapshot.State = HaloState.Working;
-                    Snapshot.Action = FriendlyAction(name);
+                    Snapshot.Action = GeneratedHaloSpec.FriendlyAction(name);
                 }
             }
-            else if (lower == "web_search_call" || lower == "tool_search_call" ||
-                lower.EndsWith("_call"))
+            else if (GeneratedHaloSpec.IsToolCall(lower) || lower.EndsWith("_call"))
             {
                 inFlightTools++;
                 ExtendWorkingVisibility(2.2);
                 Snapshot.Active = true;
                 Snapshot.State = HaloState.Working;
-                Snapshot.Action = FriendlyAction(lower);
+                Snapshot.Action = GeneratedHaloSpec.FriendlyAction(lower);
             }
-            else if (lower == "function_call_output" || lower == "tool_search_output" ||
-                lower.EndsWith("_output"))
+            else if (GeneratedHaloSpec.IsToolOutput(lower) || lower.EndsWith("_output"))
             {
                 if (inFlightTools > 0)
                 {
@@ -647,40 +625,6 @@ namespace CodexHalo
                     }
                 }
             }
-        }
-
-        private static string FriendlyAction(string raw)
-        {
-            string value = (raw ?? String.Empty).ToLowerInvariant();
-            if (value.Contains("shell") || value.Contains("command"))
-            {
-                return "Running command";
-            }
-            if (value.Contains("apply_patch") || value.Contains("edit") || value.Contains("write"))
-            {
-                return "Editing files";
-            }
-            if (value.Contains("web_search") || value.Contains("search_query"))
-            {
-                return "Searching";
-            }
-            if (value.Contains("tool_search"))
-            {
-                return "Finding a tool";
-            }
-            if (value.Contains("browser"))
-            {
-                return "Using browser";
-            }
-            if (value.Contains("image"))
-            {
-                return "Working with image";
-            }
-            if (value.Contains("plan"))
-            {
-                return "Updating plan";
-            }
-            return "Executing";
         }
 
         private static DateTime ParseTimestamp(string value)
@@ -877,28 +821,12 @@ namespace CodexHalo
 
         public static int StatePriority(HaloState state)
         {
-            switch (state)
-            {
-                case HaloState.Error: return 0;
-                case HaloState.Attention: return 1;
-                case HaloState.Working: return 2;
-                case HaloState.Thinking: return 3;
-                case HaloState.Done: return 4;
-                default: return 5;
-            }
+            return GeneratedHaloSpec.State(state).Priority;
         }
 
         public static string StateLabel(HaloState state)
         {
-            switch (state)
-            {
-                case HaloState.Thinking: return "THINKING";
-                case HaloState.Working: return "EXECUTING";
-                case HaloState.Done: return "COMPLETE";
-                case HaloState.Attention: return "NEEDS YOU";
-                case HaloState.Error: return "INTERRUPTED";
-                default: return "READY";
-            }
+            return GeneratedHaloSpec.State(state).Label;
         }
 
         public void Dispose()
@@ -973,7 +901,7 @@ namespace CodexHalo
             label = "READY";
             energy = TargetEnergy(HaloState.Idle);
             outerPhase = 97;
-            gapSeparation = 150;
+            gapSeparation = GeneratedHaloSpec.MaximumGapSeparation;
             innerPhase = outerPhase + gapSeparation;
             smallGapAnchor = innerPhase;
             SnapsToDevicePixels = false;
@@ -1377,42 +1305,24 @@ namespace CodexHalo
 
         private static double TargetPowered(HaloState value, double localTime)
         {
-            if (value == HaloState.Thinking)
+            SharedStateParameters parameters = GeneratedHaloSpec.State(value);
+            if (parameters.PoweredMaximum > 0)
             {
-                return LivingBreath(localTime, 5.5, 1.0, 0.18, 0.70);
-            }
-            if (value == HaloState.Working)
-            {
-                return LivingBreath(localTime, 7.2, 1.0, 0.16, 0.78);
-            }
-            if (value == HaloState.Done)
-            {
-                return LivingBreath(localTime, 9.2, 0.84, 0.09, 0.76);
+                return LivingBreath(localTime, parameters.BreathPeriod,
+                    parameters.PoweredMaximum, parameters.PoweredMinimum,
+                    parameters.BrightShare);
             }
             return 0;
         }
 
         private static double CoreWhiteFor(HaloState value)
         {
-            switch (value)
-            {
-                case HaloState.Thinking: return 0.90;
-                case HaloState.Working: return 0.86;
-                case HaloState.Error: return 0.91;
-                case HaloState.Done: return 0.84;
-                default: return 0.82;
-            }
+            return GeneratedHaloSpec.State(value).CoreWhite;
         }
 
         private static double GlowGainFor(HaloState value)
         {
-            switch (value)
-            {
-                case HaloState.Thinking: return 1.13;
-                case HaloState.Working: return 1.07;
-                case HaloState.Error: return 1.12;
-                default: return 1.0;
-            }
+            return GeneratedHaloSpec.State(value).GlowGain;
         }
 
         private static void DrawDynamicRing(DrawingContext dc, MediaPoint center,
@@ -1445,13 +1355,14 @@ namespace CodexHalo
                 gapRepulsionElapsed += delta;
                 double progress = Clamp(gapRepulsionElapsed /
                     Math.Max(0.01, gapRepulsionDuration), 0, 1);
-                gapSeparation = Lerp(gapRepulsionStart, 150,
+                gapSeparation = Lerp(gapRepulsionStart,
+                    GeneratedHaloSpec.MaximumGapSeparation,
                     MagneticRepulsionEase(progress));
                 innerPhase = outerPhase + gapSeparation;
                 if (progress >= 1)
                 {
                     gapRepelling = false;
-                    gapSeparation = 150;
+                    gapSeparation = GeneratedHaloSpec.MaximumGapSeparation;
                     innerPhase = outerPhase + gapSeparation;
                     smallGapAnchor = innerPhase;
                     smallGapDriftElapsed = 0;
@@ -1473,7 +1384,7 @@ namespace CodexHalo
                 gapSeparation = PositiveModulo(innerPhase - outerPhase, 360);
                 if (gapSeparation <= 41.5 || gapSeparation > 300)
                 {
-                    gapSeparation = 40;
+                    gapSeparation = GeneratedHaloSpec.MinimumGapSeparation;
                     innerPhase = outerPhase + gapSeparation;
                     gapRepelling = true;
                     gapRepulsionElapsed = 0;
@@ -1906,18 +1817,19 @@ namespace CodexHalo
 
         private static double TransitionLight(double from, double to, double progress)
         {
-            const double low = 0.08;
-            if (progress < 0.36)
+            double low = GeneratedHaloSpec.TransitionLowPowered;
+            if (progress < GeneratedHaloSpec.TransitionDimEnd)
             {
                 return Lerp(from, Math.Min(from, low),
-                    SmootherStep(progress / 0.36));
+                    SmootherStep(progress / GeneratedHaloSpec.TransitionDimEnd));
             }
-            if (progress < 0.58)
+            if (progress < GeneratedHaloSpec.TransitionColorBlendEnd)
             {
                 return Math.Min(from, low);
             }
             return Lerp(Math.Min(from, low), to,
-                SmootherStep((progress - 0.58) / 0.42));
+                SmootherStep((progress - GeneratedHaloSpec.TransitionColorBlendEnd) /
+                    (1 - GeneratedHaloSpec.TransitionColorBlendEnd)));
         }
 
         private double TransitionProgress(double time)
@@ -1932,61 +1844,31 @@ namespace CodexHalo
 
         private static double TransitionDuration(HaloState from, HaloState to)
         {
-            if (to == HaloState.Error)
-            {
-                return 0.92;
-            }
-            if (to == HaloState.Attention)
-            {
-                return 1.02;
-            }
-            if (to == HaloState.Done)
-            {
-                return 1.72;
-            }
-            if (to == HaloState.Working)
-            {
-                return 1.48;
-            }
-            if (to == HaloState.Thinking)
-            {
-                return 1.68;
-            }
-            return 1.78;
+            return GeneratedHaloSpec.TransitionDuration(to);
         }
 
         private static double TargetGapVelocityA(HaloState value)
         {
-            switch (value)
-            {
-                case HaloState.Thinking: return 78;
-                case HaloState.Working: return 106;
-                case HaloState.Attention: return 46;
-                case HaloState.Error: return 60;
-                case HaloState.Done: return 38;
-                default: return 27;
-            }
+            return GeneratedHaloSpec.State(value).OrbitVelocity;
         }
 
         private static double RepulsionDurationFromOrbit(double orbitVelocity)
         {
-            double speed = Clamp(Math.Abs(orbitVelocity), 14, 92);
-            return Clamp(1.42 * Math.Sqrt(72 / speed), 1.28, 3.05);
+            double speed = Clamp(Math.Abs(orbitVelocity),
+                GeneratedHaloSpec.RepulsionSpeedMinimum,
+                GeneratedHaloSpec.RepulsionSpeedMaximum);
+            return Clamp(GeneratedHaloSpec.RepulsionDurationFactor *
+                Math.Sqrt(GeneratedHaloSpec.RepulsionReferenceSpeed / speed),
+                GeneratedHaloSpec.RepulsionDurationMinimum,
+                GeneratedHaloSpec.RepulsionDurationMaximum);
         }
 
         private static double SmallGapDriftOffset(HaloState value, double time,
             int cycle)
         {
-            double amplitude = value == HaloState.Working ? 8.5 :
-                value == HaloState.Thinking ? 7.0 :
-                value == HaloState.Error ? 7.5 :
-                value == HaloState.Attention ? 6.5 :
-                value == HaloState.Done ? 4.2 : 5.2;
-            double period = value == HaloState.Working ? 2.8 :
-                value == HaloState.Thinking ? 3.6 :
-                value == HaloState.Error ? 2.6 :
-                value == HaloState.Attention ? 3.3 :
-                value == HaloState.Done ? 5.5 : 4.8;
+            SharedStateParameters parameters = GeneratedHaloSpec.State(value);
+            double amplitude = parameters.DriftAmplitude;
+            double period = parameters.DriftPeriod;
             double direction = cycle % 2 == 0 ? 1 : -1;
             double primary = Math.Sin(time * Math.PI * 2 / period);
             double secondary = 0.22 * (Math.Sin(time * Math.PI * 2 /
@@ -1996,20 +1878,14 @@ namespace CodexHalo
 
         private static double RepulsionExitVelocityFromOrbit(double orbitVelocity)
         {
-            return Clamp(Math.Abs(orbitVelocity) * 0.42, 9, 38);
+            return Clamp(Math.Abs(orbitVelocity) * GeneratedHaloSpec.ExitVelocityScale,
+                GeneratedHaloSpec.ExitVelocityMinimum,
+                GeneratedHaloSpec.ExitVelocityMaximum);
         }
 
         private static double SmallGapInertiaDamping(HaloState value)
         {
-            switch (value)
-            {
-                case HaloState.Working: return 0.72;
-                case HaloState.Thinking: return 0.66;
-                case HaloState.Error: return 0.84;
-                case HaloState.Attention: return 0.76;
-                case HaloState.Done: return 0.58;
-                default: return 0.62;
-            }
+            return GeneratedHaloSpec.State(value).InertiaDamping;
         }
 
         private static double MagneticRepulsionEase(double value)
@@ -2022,16 +1898,7 @@ namespace CodexHalo
 
         private static double GapVelocityEnvelopeA(HaloState value, double time)
         {
-            double period;
-            switch (value)
-            {
-                case HaloState.Working: period = 2.2; break;
-                case HaloState.Thinking: period = 4.2; break;
-                case HaloState.Attention: period = 4.1; break;
-                case HaloState.Error: period = 1.75; break;
-                case HaloState.Done: period = 8.5; break;
-                default: period = 7.6; break;
-            }
+            double period = GeneratedHaloSpec.State(value).EnvelopePeriod;
             double primary = SoftWave(time / period);
             double secondary = SoftWave(time / (period * 0.47) + 0.29);
             return 0.18 + 0.92 * Math.Pow(primary, 1.65) + 0.22 * secondary;
@@ -2063,12 +1930,14 @@ namespace CodexHalo
                     (1 - Math.Exp(-damping * cycle));
                 double drift = SmallGapDriftOffset(dominant, cycle,
                     (int)Math.Floor(time / cycleDuration));
-                gapB = cycleStartA + 150 + inertiaOffset + drift;
+                gapB = cycleStartA + GeneratedHaloSpec.MaximumGapSeparation +
+                    inertiaOffset + drift;
             }
             else
             {
                 double repelProgress = (cycle - repelStart) / repelDuration;
-                double separation = Lerp(40, 150,
+                double separation = Lerp(GeneratedHaloSpec.MinimumGapSeparation,
+                    GeneratedHaloSpec.MaximumGapSeparation,
                     MagneticRepulsionEase(repelProgress));
                 gapB = gapA + separation;
             }
@@ -2096,7 +1965,9 @@ namespace CodexHalo
 
         public static double DiagnosticGapSeparation(double phase)
         {
-            return Lerp(40, 150, MagneticRepulsionEase(Clamp(phase, 0, 1)));
+            return Lerp(GeneratedHaloSpec.MinimumGapSeparation,
+                GeneratedHaloSpec.MaximumGapSeparation,
+                MagneticRepulsionEase(Clamp(phase, 0, 1)));
         }
 
         public static double DiagnosticRepulsionDuration(double orbitVelocity)
@@ -2111,13 +1982,7 @@ namespace CodexHalo
 
         public static double DiagnosticPowered(HaloState value, double time)
         {
-            if (value == HaloState.Thinking)
-                return LivingBreath(time, 5.5, 1.0, 0.18, 0.70);
-            if (value == HaloState.Working)
-                return LivingBreath(time, 7.2, 1.0, 0.16, 0.78);
-            if (value == HaloState.Done)
-                return LivingBreath(time, 9.2, 0.84, 0.09, 0.76);
-            return 0;
+            return TargetPowered(value, time);
         }
 
         public static double DiagnosticAttentionPulse(double time)
@@ -2127,10 +1992,9 @@ namespace CodexHalo
 
         public static double DiagnosticBrightDuration(HaloState value)
         {
-            if (value == HaloState.Thinking) return 5.5 * 0.70;
-            if (value == HaloState.Working) return 7.2 * 0.78;
-            if (value == HaloState.Done) return 9.2 * 0.76;
-            return 0;
+            SharedStateParameters parameters = GeneratedHaloSpec.State(value);
+            return parameters.PoweredMaximum > 0
+                ? parameters.BreathPeriod * parameters.BrightShare : 0;
         }
 
         public static double DiagnosticCoreWhite(HaloState value)
@@ -2166,21 +2030,24 @@ namespace CodexHalo
 
         private static double StateBreath(HaloState value, double time)
         {
-            switch (value)
+            if (value == HaloState.Attention)
             {
-                case HaloState.Thinking:
-                    return LivingBreath(time, 5.5, 1.0, 0.26, 0.70);
-                case HaloState.Working:
-                    return LivingBreath(time, 7.2, 1.0, 0.22, 0.78);
-                case HaloState.Done:
-                    return LivingBreath(time, 9.2, 0.92, 0.22, 0.76);
-                case HaloState.Attention:
-                    return 0.18 + 0.82 * AttentionPulse(time);
-                case HaloState.Error:
-                    return ErrorPulse(time, ErrorPresentation.Flashing);
-                default:
-                    return 0.18 + 0.22 * SoftWave(time / 6.8);
+                return 0.18 + 0.82 * AttentionPulse(time);
             }
+            if (value == HaloState.Error)
+            {
+                return ErrorPulse(time, ErrorPresentation.Flashing);
+            }
+            SharedStateParameters parameters = GeneratedHaloSpec.State(value);
+            if (value == HaloState.Idle)
+            {
+                return parameters.VisualMinimum +
+                    (parameters.VisualMaximum - parameters.VisualMinimum) *
+                    SoftWave(time / parameters.BreathPeriod);
+            }
+            return LivingBreath(time, parameters.BreathPeriod,
+                parameters.VisualMaximum, parameters.VisualMinimum,
+                parameters.BrightShare);
         }
 
         private static bool UsesGenericCore(HaloState value)
@@ -2191,15 +2058,8 @@ namespace CodexHalo
 
         public static MediaColor StateColor(HaloState state)
         {
-            switch (state)
-            {
-                case HaloState.Thinking: return MediaColor.FromRgb(226, 170, 31);
-                case HaloState.Working: return MediaColor.FromRgb(52, 158, 199);
-                case HaloState.Done: return MediaColor.FromRgb(38, 198, 108);
-                case HaloState.Attention: return MediaColor.FromRgb(213, 103, 55);
-                case HaloState.Error: return MediaColor.FromRgb(218, 50, 86);
-                default: return MediaColor.FromRgb(113, 132, 140);
-            }
+            SharedStateParameters parameters = GeneratedHaloSpec.State(state);
+            return MediaColor.FromRgb(parameters.Red, parameters.Green, parameters.Blue);
         }
 
         private static MediaColor WithAlpha(MediaColor color, byte alpha)
@@ -2369,20 +2229,33 @@ namespace CodexHalo
 
         private static double AttentionPulse(double time)
         {
-            double cycle = PositiveModulo(time, 5.8) / 5.8;
-            double first = SmoothPulse(cycle, 0.16, 0.095);
-            double second = SmoothPulse(cycle, 0.38, 0.11) * 0.82;
-            double livingBase = 0.08 + 0.05 * SoftWave(cycle + 0.18);
+            double cycle = PositiveModulo(time, GeneratedHaloSpec.AttentionPeriod) /
+                GeneratedHaloSpec.AttentionPeriod;
+            double first = SmoothPulse(cycle, GeneratedHaloSpec.AttentionFirstCenter,
+                GeneratedHaloSpec.AttentionFirstWidth) *
+                GeneratedHaloSpec.AttentionFirstStrength;
+            double second = SmoothPulse(cycle, GeneratedHaloSpec.AttentionSecondCenter,
+                GeneratedHaloSpec.AttentionSecondWidth) *
+                GeneratedHaloSpec.AttentionSecondStrength;
+            double livingBase = GeneratedHaloSpec.AttentionLivingBase +
+                GeneratedHaloSpec.AttentionLivingAmplitude *
+                SoftWave(cycle + GeneratedHaloSpec.AttentionLivingPhase);
             return Clamp(livingBase + first + second, 0, 1);
         }
 
         private static double ErrorPulse(double time, ErrorPresentation presentation)
         {
-            if (presentation == ErrorPresentation.Bright) return 0.92;
-            if (presentation == ErrorPresentation.Dim) return 0.04;
-            double cycle = PositiveModulo(time, 1.55);
-            double first = Math.Exp(-Math.Pow((cycle - 0.12) / 0.055, 2));
-            double second = Math.Exp(-Math.Pow((cycle - 0.34) / 0.065, 2));
+            if (presentation == ErrorPresentation.Bright)
+                return GeneratedHaloSpec.ErrorBrightPower;
+            if (presentation == ErrorPresentation.Dim)
+                return GeneratedHaloSpec.ErrorDimPower;
+            double cycle = PositiveModulo(time, GeneratedHaloSpec.ErrorFlashPeriod);
+            double first = Math.Exp(-Math.Pow(
+                (cycle - GeneratedHaloSpec.ErrorFirstCenter) /
+                GeneratedHaloSpec.ErrorFirstWidth, 2));
+            double second = Math.Exp(-Math.Pow(
+                (cycle - GeneratedHaloSpec.ErrorSecondCenter) /
+                GeneratedHaloSpec.ErrorSecondWidth, 2));
             return Clamp(first + second, 0, 1);
         }
 
@@ -2538,7 +2411,8 @@ namespace CodexHalo
                         if (tab <= 0) continue;
                         long seconds;
                         if (!long.TryParse(line.Substring(0, tab), out seconds)) continue;
-                        string matched = FailureDetail(line.Substring(tab + 1).ToLowerInvariant());
+                        string matched = GeneratedHaloSpec.ClassifyFailure(
+                            line.Substring(tab + 1));
                         if (matched == null) continue;
                         detail = matched;
                         eventUtc = DateTimeOffset.FromUnixTimeSeconds(seconds).UtcDateTime;
@@ -2550,27 +2424,6 @@ namespace CodexHalo
             {
             }
             return false;
-        }
-
-        private static string FailureDetail(string text)
-        {
-            if (ContainsAny(text, "authentication failed", "unauthorized", "invalid token",
-                "sign in again")) return "认证已失效";
-            if (ContainsAny(text, "rate limit reached", "usage limit", "quota exceeded",
-                "rate_limit_reached")) return "额度已用尽";
-            if (ContainsAny(text, "service unavailable", "server overloaded", "overloaded",
-                "bad gateway")) return "服务暂时不可用";
-            if (ContainsAny(text, "connection failed", "network error", "connection aborted",
-                "request timed out", "connect timeout")) return "连接 Codex 失败";
-            return null;
-        }
-
-        private static bool ContainsAny(string text, params string[] values)
-        {
-            return values.Any(delegate(string value)
-            {
-                return text.IndexOf(value, StringComparison.Ordinal) >= 0;
-            });
         }
 
     }
@@ -2596,33 +2449,41 @@ namespace CodexHalo
                         return Directory.GetFiles(root, "*.jsonl", SearchOption.AllDirectories);
                     })
                     .OrderByDescending(File.GetLastWriteTimeUtc)
-                    .Take(16);
+                    .Take(GeneratedHaloSpec.RateLimitRecentFileCount);
                 foreach (string path in files)
                 {
                     string[] lines = ReadTailLines(path);
-                    for (int index = lines.Length - 1; index >= Math.Max(0, lines.Length - 300);
+                    for (int index = lines.Length - 1; index >= Math.Max(0,
+                        lines.Length - GeneratedHaloSpec.RateLimitRecentLineCount);
                         index--)
                     {
-                        if (!lines[index].Contains("\"rate_limits\""))
+                        if (!lines[index].Contains(GeneratedHaloSpec.RateLimitMarker))
                         {
                             continue;
                         }
                         object parsed = new JavaScriptSerializer().DeserializeObject(lines[index]);
                         Dictionary<string, object> rootObject = parsed as Dictionary<string, object>;
-                        Dictionary<string, object> payload = Child(rootObject, "payload");
-                        Dictionary<string, object> info = Child(payload, "info");
-                        Dictionary<string, object> limits = Child(payload, "rate_limits");
+                        Dictionary<string, object> payload = Child(rootObject,
+                            GeneratedHaloSpec.RatePayloadKey);
+                        Dictionary<string, object> info = Child(payload,
+                            GeneratedHaloSpec.RateInfoKey);
+                        Dictionary<string, object> limits = Child(payload,
+                            GeneratedHaloSpec.RateLimitsKey);
                         if (limits == null)
                         {
-                            limits = Child(info, "rate_limits");
+                            limits = Child(info, GeneratedHaloSpec.RateLimitsKey);
                         }
-                        Dictionary<string, object> primary = Child(limits, "primary");
-                        Dictionary<string, object> secondary = Child(limits, "secondary");
+                        Dictionary<string, object> primary = Child(limits,
+                            GeneratedHaloSpec.RatePrimaryKey);
+                        Dictionary<string, object> secondary = Child(limits,
+                            GeneratedHaloSpec.RateSecondaryKey);
                         if (primary != null && secondary != null)
                         {
-                            primaryUsed = Convert.ToDouble(primary["used_percent"],
+                            primaryUsed = Convert.ToDouble(
+                                primary[GeneratedHaloSpec.RateUsedPercentKey],
                                 CultureInfo.InvariantCulture);
-                            secondaryUsed = Convert.ToDouble(secondary["used_percent"],
+                            secondaryUsed = Convert.ToDouble(
+                                secondary[GeneratedHaloSpec.RateUsedPercentKey],
                                 CultureInfo.InvariantCulture);
                             return true;
                         }
@@ -2637,7 +2498,7 @@ namespace CodexHalo
 
         private static string[] ReadTailLines(string path)
         {
-            const int tailBytes = 1024 * 1024;
+            int tailBytes = GeneratedHaloSpec.RateLimitTailBytes;
             using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read,
                 FileShare.ReadWrite | FileShare.Delete))
             {
@@ -3745,6 +3606,16 @@ namespace CodexHalo
                 tracker.Refresh();
                 Assert(tracker.Snapshot.State == HaloState.Done, "task complete -> done");
                 Assert(!tracker.Snapshot.Active, "task complete deactivates session");
+                Assert(GeneratedHaloSpec.ContractVersion == 2,
+                    "generated shared contract version");
+                Assert(GeneratedHaloSpec.ReleaseVersion == "0.12.0",
+                    "generated shared release version");
+                Assert(GeneratedHaloSpec.State(HaloState.Attention).Label == "NEEDS YOU",
+                    "generated state labels");
+                Assert(GeneratedHaloSpec.FriendlyAction("apply_patch") == "Editing files",
+                    "generated action rules");
+                Assert(GeneratedHaloSpec.ClassifyFailure("server overloaded") ==
+                    "服务暂时不可用", "generated failure rules");
                 Assert(Math.Abs(HaloVisual.DiagnosticGapSeparation(0) - 40) < 0.001,
                     "magnetic repulsion starts at minimum separation");
                 Assert(Math.Abs(HaloVisual.DiagnosticGapSeparation(1) - 150) < 0.001,

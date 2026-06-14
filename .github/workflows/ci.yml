@@ -1,0 +1,46 @@
+name: cross-platform-contract
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  shared:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r scripts/requirements-ci.txt
+      - run: python scripts/validate_schema.py
+      - run: python scripts/generate_shared.py --check
+      - run: python scripts/check_shared.py
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python scripts/generate_shared.py --check
+      - shell: powershell
+        run: |
+          ./build.ps1
+          Start-Process -FilePath ./outputs/AgentHalo/AgentHalo.exe `
+            -ArgumentList "--self-test", "./outputs/windows-self-test.txt" -Wait
+          Get-Content ./outputs/windows-self-test.txt
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python scripts/generate_shared.py --check
+      - working-directory: mac
+        run: swift run AgentHaloCoreChecks
+      - working-directory: mac
+        run: swift build -c release --product AgentHaloMac

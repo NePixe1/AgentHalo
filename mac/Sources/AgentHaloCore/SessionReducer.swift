@@ -76,13 +76,13 @@ public struct SessionReducer: Sendable {
     }
 
     private mutating func reduceEvent(_ type: String, eventAt: Date, now: Date) {
-        if type == "task_started" || type == "user_message" {
+        if GeneratedHaloSpec.isTaskStartEvent(type) {
             inFlightTools = 0
             workingVisibleUntil = nil
             snapshot.active = true
             snapshot.state = .thinking
             snapshot.action = "Planning"
-        } else if type == "task_complete" {
+        } else if GeneratedHaloSpec.isTaskCompleteEvent(type) {
             inFlightTools = 0
             workingVisibleUntil = nil
             snapshot.active = false
@@ -94,18 +94,18 @@ public struct SessionReducer: Sendable {
                 inFlightTools -= 1
             }
             applyActiveThinkingOrWorking(now: now)
-        } else if type.contains("approval") || type.contains("request_user") || type.contains("needs_input") {
+        } else if GeneratedHaloSpec.isAttentionEvent(type) {
             snapshot.active = true
             snapshot.state = .attention
             snapshot.action = "Needs you"
-        } else if ["turn_aborted", "turn_failed", "task_failed", "task_cancelled", "task_interrupted", "fatal_error"].contains(type) {
+        } else if GeneratedHaloSpec.isFatalEvent(type) {
             snapshot.active = false
             snapshot.state = .error
             snapshot.action = "Interrupted"
         } else if type.hasSuffix("_begin") || type.hasSuffix("_start") {
             snapshot.active = true
             snapshot.state = .working
-            snapshot.action = Self.friendlyAction(type)
+            snapshot.action = GeneratedHaloSpec.friendlyAction(type)
         }
     }
 
@@ -120,15 +120,15 @@ public struct SessionReducer: Sendable {
                 inFlightTools += 1
                 extendWorkingVisibility(seconds: 2.2, now: now)
                 snapshot.state = .working
-                snapshot.action = Self.friendlyAction(name)
+                snapshot.action = GeneratedHaloSpec.friendlyAction(name)
             }
-        } else if type == "web_search_call" || type == "tool_search_call" || type.hasSuffix("_call") {
+        } else if GeneratedHaloSpec.isToolCall(type) || type.hasSuffix("_call") {
             inFlightTools += 1
             extendWorkingVisibility(seconds: 2.2, now: now)
             snapshot.active = true
             snapshot.state = .working
-            snapshot.action = Self.friendlyAction(type)
-        } else if type == "function_call_output" || type == "tool_search_output" || type.hasSuffix("_output") {
+            snapshot.action = GeneratedHaloSpec.friendlyAction(type)
+        } else if GeneratedHaloSpec.isToolOutput(type) || type.hasSuffix("_output") {
             if inFlightTools > 0 {
                 inFlightTools -= 1
             }
@@ -199,31 +199,6 @@ public struct SessionReducer: Sendable {
         return plain.date(from: value)
     }
 
-    private static func friendlyAction(_ raw: String) -> String {
-        let value = raw.lowercased()
-        if value.contains("shell") || value.contains("command") {
-            return "Running command"
-        }
-        if value.contains("apply_patch") || value.contains("edit") || value.contains("write") {
-            return "Editing files"
-        }
-        if value.contains("web_search") || value.contains("search_query") {
-            return "Searching"
-        }
-        if value.contains("tool_search") {
-            return "Finding a tool"
-        }
-        if value.contains("browser") {
-            return "Using browser"
-        }
-        if value.contains("image") {
-            return "Working with image"
-        }
-        if value.contains("plan") {
-            return "Updating plan"
-        }
-        return "Executing"
-    }
 }
 
 fileprivate extension Dictionary where Key == String, Value == Any {

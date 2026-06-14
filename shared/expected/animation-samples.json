@@ -1,0 +1,14 @@
+{
+  "tolerance": 0.000001,
+  "samples": [
+    {"state": "thinking", "time": 1.0, "breath": 1.0, "powered": 1.0},
+    {"state": "thinking", "time": 4.6, "breath": 0.26, "powered": 0.18},
+    {"state": "working", "time": 0.8, "breath": 1.0, "powered": 1.0},
+    {"state": "working", "time": 6.35, "breath": 0.22, "powered": 0.16},
+    {"state": "done", "time": 2.0, "breath": 0.92, "powered": 0.84},
+    {"state": "done", "time": 8.0, "breath": 0.22, "powered": 0.09},
+    {"state": "attention", "time": 0.93, "breath": 1.0, "powered": 1.0},
+    {"state": "attention", "time": 2.2, "breath": 0.9493048963896598, "powered": 0.9493048963896598},
+    {"state": "attention", "time": 4.5, "breath": 0.08030001484997029, "powered": 0.08030001484997029}
+  ]
+}

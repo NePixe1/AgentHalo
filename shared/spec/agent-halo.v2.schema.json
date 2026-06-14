@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/NePixe1/AgentHalo/shared/spec/agent-halo.v2.schema.json",
+  "title": "Agent Halo cross-platform behavior contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractVersion", "releaseVersion", "algorithms", "states", "transitions",
+    "attentionPulse", "errorPresentations", "gapMotion", "eventRules",
+    "actionRules", "failureRules", "rateLimit", "settings", "platformExtensions"
+  ],
+  "properties": {
+    "contractVersion": {"const": 2},
+    "releaseVersion": {"type": "string", "pattern": "^0\\.[0-9]+\\.[0-9]+$"},
+    "algorithms": {"type": "object"},
+    "states": {
+      "type": "object",
+      "required": ["idle", "thinking", "working", "done", "attention", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "idle": {"$ref": "#/$defs/state"},
+        "thinking": {"$ref": "#/$defs/state"},
+        "working": {"$ref": "#/$defs/state"},
+        "done": {"$ref": "#/$defs/state"},
+        "attention": {"$ref": "#/$defs/state"},
+        "error": {"$ref": "#/$defs/state"}
+      }
+    },
+    "transitions": {"type": "object"},
+    "attentionPulse": {"type": "object"},
+    "errorPresentations": {"type": "object"},
+    "gapMotion": {"type": "object"},
+    "eventRules": {"type": "object"},
+    "actionRules": {"type": "array", "items": {"$ref": "#/$defs/matchRule"}},
+    "failureRules": {"type": "array", "items": {"$ref": "#/$defs/failureRule"}},
+    "rateLimit": {"type": "object"},
+    "settings": {"type": "object"},
+    "platformExtensions": {"type": "object", "required": ["windows", "macos"]}
+  },
+  "$defs": {
+    "state": {
+      "type": "object",
+      "required": ["priority", "label", "color", "breath", "orbit", "coreWhite", "glowGain"],
+      "properties": {
+        "priority": {"type": "integer", "minimum": 0},
+        "label": {"type": "string"},
+        "color": {
+          "type": "array",
+          "prefixItems": [
+            {"type": "integer", "minimum": 0, "maximum": 255},
+            {"type": "integer", "minimum": 0, "maximum": 255},
+            {"type": "integer", "minimum": 0, "maximum": 255}
+          ],
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "breath": {"type": "object"},
+        "orbit": {"type": "object"},
+        "coreWhite": {"type": "number"},
+        "glowGain": {"type": "number"}
+      }
+    },
+    "matchRule": {
+      "type": "object",
+      "required": ["containsAny", "label"],
+      "properties": {
+        "containsAny": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "label": {"type": "string"}
+      }
+    },
+    "failureRule": {
+      "type": "object",
+      "required": ["kind", "detail", "containsAny"],
+      "properties": {
+        "kind": {"type": "string"},
+        "detail": {"type": "string"},
+        "containsAny": {"type": "array", "items": {"type": "string"}, "minItems": 1}
+      }
+    }
+  }
+}

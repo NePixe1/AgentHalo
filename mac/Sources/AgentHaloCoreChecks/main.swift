@@ -316,6 +316,11 @@ func testDiagnosticsCreatesParentDirectoryForOutput() throws {
 }
 
 func testHaloMathMatchesProgramConstants() {
+    expect(GeneratedHaloSpec.contractVersion, 2, "generated shared contract version")
+    expect(GeneratedHaloSpec.releaseVersion, "0.12.0", "generated shared release version")
+    expect(GeneratedHaloSpec.state(.attention).label, "NEEDS YOU", "generated state labels")
+    expect(GeneratedHaloSpec.friendlyAction("apply_patch"), "Editing files", "generated action rules")
+    expect(GeneratedHaloSpec.classifyFailure("server overloaded"), "服务暂时不可用", "generated failure rules")
     expectAlmost(HaloMath.stateBreath(.thinking, time: 1.0), 1.0, tolerance: 0.08, "thinking bright plateau")
     expect(HaloMath.targetPowered(.done, time: 8.0) < 0.20, "done powered should dip close to dark")
     expect(HaloMath.transitionLight(from: 0.9, to: 0.0, progress: 0.99) < 0.01, "steady green transition should finish dark")
