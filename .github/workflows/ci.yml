@@ -8,11 +8,21 @@ jobs:
   shared:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - run: python -m pip install -r scripts/requirements-ci.txt
+      - name: Install schema validator
+        run: |
+          set -o pipefail
+          python -m pip install -r scripts/requirements-ci.txt 2>&1 | tee /tmp/pip.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            tail -n 20 /tmp/pip.log | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+            exit "$status"
+          fi
       - run: python scripts/validate_schema.py
       - run: python scripts/generate_shared.py --check
       - run: python scripts/check_shared.py
@@ -20,8 +30,8 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: python scripts/generate_shared.py --check
@@ -35,12 +45,22 @@ jobs:
   macos:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: python scripts/generate_shared.py --check
-      - working-directory: mac
-        run: swift run AgentHaloCoreChecks
+      - name: Run macOS core checks
+        working-directory: mac
+        run: |
+          set -o pipefail
+          swift run AgentHaloCoreChecks 2>&1 | tee /tmp/agenthalo-swift.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            tail -n 30 /tmp/agenthalo-swift.log | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+            exit "$status"
+          fi
       - working-directory: mac
         run: swift build -c release --product AgentHaloMac
