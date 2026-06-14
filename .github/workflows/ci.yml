@@ -14,6 +14,7 @@ jobs:
           python-version: "3.12"
       - name: Install schema validator
         run: |
+          set +e
           set -o pipefail
           python -m pip install -r scripts/requirements-ci.txt 2>&1 | tee /tmp/pip.log
           status=${PIPESTATUS[0]}
@@ -53,6 +54,7 @@ jobs:
       - name: Run macOS core checks
         working-directory: mac
         run: |
+          set +e
           set -o pipefail
           swift run AgentHaloCoreChecks 2>&1 | tee /tmp/agenthalo-swift.log
           status=${PIPESTATUS[0]}
