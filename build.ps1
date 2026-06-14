@@ -1,8 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$repo = Split-Path -Parent (Split-Path -Parent $root)
-$output = Join-Path $repo "outputs\AgentHalo"
+$output = Join-Path $root "outputs\AgentHalo"
 $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 
 if (-not (Test-Path -LiteralPath $csc)) {
@@ -86,7 +85,7 @@ $hashLine = "$hash  AgentHalo.exe"
 Set-Content -LiteralPath (Join-Path $output "SHA256.txt") -Value $hashLine `
     -Encoding ascii -NoNewline
 
-$archive = Join-Path (Split-Path -Parent $output) "AgentHalo-Windows-v0.11.0.zip"
+$archive = Join-Path (Split-Path -Parent $output) "AgentHalo-Windows-v0.11.1.zip"
 Remove-Item -LiteralPath $archive -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $output "*") -DestinationPath $archive `
     -CompressionLevel Optimal

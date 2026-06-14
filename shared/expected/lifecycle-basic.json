@@ -1,0 +1,17 @@
+{
+  "projectName": "agent-halo",
+  "sequence": [
+    "idle",
+    "thinking",
+    "working",
+    "working",
+    "attention",
+    "thinking",
+    "done"
+  ],
+  "final": {
+    "state": "done",
+    "active": false,
+    "action": "Complete"
+  }
+}

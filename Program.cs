@@ -29,8 +29,8 @@ using MediaPoint = System.Windows.Point;
 [assembly: System.Reflection.AssemblyDescription("Ambient desktop status light for coding agents")]
 [assembly: System.Reflection.AssemblyCompany("Agent Halo")]
 [assembly: System.Reflection.AssemblyProduct("Agent Halo")]
-[assembly: System.Reflection.AssemblyVersion("0.11.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.11.0.0")]
+[assembly: System.Reflection.AssemblyVersion("0.11.1.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.11.1.0")]
 
 namespace CodexHalo
 {

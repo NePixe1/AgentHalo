@@ -6,9 +6,12 @@ A local, always-on-top status halo for the Codex desktop app.
 
 The current release supports Codex, with Claude Code detection planned next.
 
-Version: `0.10.2` (Pre-release)
+Version: `0.11.1` (Pre-release)
 
 English | [简体中文](README.zh-CN.md)
+
+Cross-platform behavior is tracked in [`shared/`](shared/), while platform-specific
+rendering remains native. See the [macOS difference report](docs/MACOS_DIFFERENCES.md).
 
 ---
 
