@@ -11,3 +11,5 @@ obj/
 *.suo
 outputs/
 mac/.build/
+__pycache__/
+*.pyc
