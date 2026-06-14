@@ -6,7 +6,7 @@ Codex 桌面端的本地常驻状态光环。
 
 当前版本支持 Codex；后续计划加入 Claude Code（CC）状态识别。
 
-版本：`0.12.0`（开发中）
+版本：`0.12.0`
 
 [English](README.md) | 简体中文
 

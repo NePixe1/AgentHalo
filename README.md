@@ -6,7 +6,7 @@ A local, always-on-top status halo for the Codex desktop app.
 
 The current release supports Codex, with Claude Code detection planned next.
 
-Version: `0.12.0` (Development)
+Version: `0.12.0`
 
 English | [简体中文](README.zh-CN.md)
 
