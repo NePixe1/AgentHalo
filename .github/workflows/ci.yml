@@ -16,7 +16,7 @@ jobs:
         run: |
           set +e
           set -o pipefail
-          python -m pip install -r scripts/requirements-ci.txt 2>&1 | tee /tmp/pip.log
+          python -m pip install -r scripts/requirements-ci.in 2>&1 | tee /tmp/pip.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
             tail -n 20 /tmp/pip.log | while IFS= read -r line; do
@@ -44,7 +44,7 @@ jobs:
           Get-Content ./outputs/windows-self-test.txt
 
   macos:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6

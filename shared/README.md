@@ -22,7 +22,7 @@ python scripts/generate_shared.py --check
 python scripts/check_shared.py
 ```
 
-CI additionally installs `scripts/requirements-ci.txt` and validates the contract
+CI additionally installs `scripts/requirements-ci.in` and validates the contract
 against `spec/agent-halo.v2.schema.json`.
 
 Generated outputs are committed:
