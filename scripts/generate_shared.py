@@ -28,6 +28,11 @@ def number(value: object) -> str:
     return result if "." in result else result + ".0"
 
 
+def real_number(value: object) -> str:
+    result = format(float(value), ".15g")
+    return result if "." in result else result + ".0"
+
+
 def csharp_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
@@ -396,37 +401,37 @@ public enum GeneratedHaloSpec {{
     public static let contractVersion = {spec['contractVersion']}
     public static let releaseVersion = {swift_string(spec['releaseVersion'])}
     public static let specSha256 = {swift_string(digest)}
-    public static let transitionDimEnd = {number(transition['dimEnd'])}
-    public static let transitionColorBlendEnd = {number(transition['colorBlendEnd'])}
-    public static let transitionLowPowered = {number(transition['lowPowered'])}
-    public static let attentionPeriod = {number(attention['period'])}
-    public static let attentionFirstCenter = {number(attention['first']['center'])}
-    public static let attentionFirstWidth = {number(attention['first']['width'])}
-    public static let attentionFirstStrength = {number(attention['first']['strength'])}
-    public static let attentionSecondCenter = {number(attention['second']['center'])}
-    public static let attentionSecondWidth = {number(attention['second']['width'])}
-    public static let attentionSecondStrength = {number(attention['second']['strength'])}
-    public static let attentionLivingBase = {number(attention['livingBase'])}
-    public static let attentionLivingAmplitude = {number(attention['livingAmplitude'])}
-    public static let attentionLivingPhase = {number(attention['livingPhase'])}
-    public static let errorBrightPower = {number(error['brightPower'])}
-    public static let errorDimPower = {number(error['dimPower'])}
-    public static let errorFlashPeriod = {number(error['flashPeriod'])}
-    public static let errorFirstCenter = {number(error['first']['center'])}
-    public static let errorFirstWidth = {number(error['first']['width'])}
-    public static let errorSecondCenter = {number(error['second']['center'])}
-    public static let errorSecondWidth = {number(error['second']['width'])}
-    public static let minimumGapSeparation = {number(gap['minimumSeparationDegrees'])}
-    public static let maximumGapSeparation = {number(gap['maximumSeparationDegrees'])}
-    public static let repulsionSpeedMinimum = {number(gap['repulsionSpeedMinimum'])}
-    public static let repulsionSpeedMaximum = {number(gap['repulsionSpeedMaximum'])}
-    public static let repulsionDurationFactor = {number(gap['repulsionDurationFactor'])}
-    public static let repulsionReferenceSpeed = {number(gap['repulsionReferenceSpeed'])}
-    public static let repulsionDurationMinimum = {number(gap['repulsionDurationMinimum'])}
-    public static let repulsionDurationMaximum = {number(gap['repulsionDurationMaximum'])}
-    public static let exitVelocityScale = {number(gap['exitVelocityScale'])}
-    public static let exitVelocityMinimum = {number(gap['exitVelocityMinimum'])}
-    public static let exitVelocityMaximum = {number(gap['exitVelocityMaximum'])}
+    public static let transitionDimEnd = {real_number(transition['dimEnd'])}
+    public static let transitionColorBlendEnd = {real_number(transition['colorBlendEnd'])}
+    public static let transitionLowPowered = {real_number(transition['lowPowered'])}
+    public static let attentionPeriod = {real_number(attention['period'])}
+    public static let attentionFirstCenter = {real_number(attention['first']['center'])}
+    public static let attentionFirstWidth = {real_number(attention['first']['width'])}
+    public static let attentionFirstStrength = {real_number(attention['first']['strength'])}
+    public static let attentionSecondCenter = {real_number(attention['second']['center'])}
+    public static let attentionSecondWidth = {real_number(attention['second']['width'])}
+    public static let attentionSecondStrength = {real_number(attention['second']['strength'])}
+    public static let attentionLivingBase = {real_number(attention['livingBase'])}
+    public static let attentionLivingAmplitude = {real_number(attention['livingAmplitude'])}
+    public static let attentionLivingPhase = {real_number(attention['livingPhase'])}
+    public static let errorBrightPower = {real_number(error['brightPower'])}
+    public static let errorDimPower = {real_number(error['dimPower'])}
+    public static let errorFlashPeriod = {real_number(error['flashPeriod'])}
+    public static let errorFirstCenter = {real_number(error['first']['center'])}
+    public static let errorFirstWidth = {real_number(error['first']['width'])}
+    public static let errorSecondCenter = {real_number(error['second']['center'])}
+    public static let errorSecondWidth = {real_number(error['second']['width'])}
+    public static let minimumGapSeparation = {real_number(gap['minimumSeparationDegrees'])}
+    public static let maximumGapSeparation = {real_number(gap['maximumSeparationDegrees'])}
+    public static let repulsionSpeedMinimum = {real_number(gap['repulsionSpeedMinimum'])}
+    public static let repulsionSpeedMaximum = {real_number(gap['repulsionSpeedMaximum'])}
+    public static let repulsionDurationFactor = {real_number(gap['repulsionDurationFactor'])}
+    public static let repulsionReferenceSpeed = {real_number(gap['repulsionReferenceSpeed'])}
+    public static let repulsionDurationMinimum = {real_number(gap['repulsionDurationMinimum'])}
+    public static let repulsionDurationMaximum = {real_number(gap['repulsionDurationMaximum'])}
+    public static let exitVelocityScale = {real_number(gap['exitVelocityScale'])}
+    public static let exitVelocityMinimum = {real_number(gap['exitVelocityMinimum'])}
+    public static let exitVelocityMaximum = {real_number(gap['exitVelocityMaximum'])}
     public static let rateLimitMarker = {swift_string(rate['marker'])}
     public static let ratePayloadKey = {swift_string(direct_path[0])}
     public static let rateInfoKey = {swift_string(nested_path[1])}
