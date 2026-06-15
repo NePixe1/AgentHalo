@@ -9,6 +9,11 @@ obj/
 *.user
 *.suo
 outputs/
-src/macos/.build/
+.build/
+
+# python
 __pycache__/
 *.pyc
+
+# agent
+.codex/environments/environment.toml
