@@ -27,12 +27,12 @@ Shared:
 Windows-only:
 
 - WPF window, tray menu, hit testing, multi-display recovery, and startup integration
-- dark/lit tube material, white core, and completion double flash rendering
+- Windows foreground detection and tray-specific menu hosting
 
 macOS-only:
 
 - AppKit panels, menu bar integration, launch agent, and application activation
-- ring radius/width/gap morph, secondary contour, bloom, and edge highlights
+- macOS display-link rendering and native menu bar hosting
 
 ## Change workflow
 
@@ -51,17 +51,14 @@ edited manually.
 `releaseVersion` follows the application release. Platform extension data may evolve
 without requiring pixel-identical rendering across operating systems.
 
-## Platform rendering differences
+## Platform implementation differences
 
-- macOS morphs ring radius, body width, gap opening, gap skew, and a secondary
-  contour. Windows keeps stable tube geometry and emphasizes brightness, color,
-  orbit speed, and gap motion.
-- macOS currently uses a fixed 60 Hz AppKit timer. Windows uses WPF composition
-  callbacks and follows the desktop compositor when available.
-- macOS has edge highlights, secondary contours, and persistent colored bloom.
-  Windows uses dark/lit tube materials, a bright white core, and no emitted glow
-  for steady green.
-- Windows implements dim/blend/power-up transitions and completion double flash.
-  These visual behaviors are not yet fully equivalent on macOS.
+- macOS and Windows both use the dark/lit tube material, bright white core,
+  dim/blend/power-up transitions, and completion double flash behavior.
+- macOS uses `CVDisplayLink`; Windows uses WPF composition callbacks. Both
+  advance animation from display timing and clamp frame delta to avoid jumps.
+- macOS exposes the same full control menu from the menu bar and halo right
+  click. Windows exposes the same controls from its tray menu and halo right
+  click.
 - Platform-specific window, menu, startup, hit-testing, and display behavior
   remain native and intentionally separate.
