@@ -1,11 +1,6 @@
 {
   "files.exclude": {
-    ".github": true,
-    ".vscode": true,
-    "outputs": true,
     "**/__pycache__": true,
-    "src/windows/GeneratedHaloSpec.cs": true,
-    "src/macos/Sources/AgentHaloCore/GeneratedHaloSpec.swift": true
   },
   "search.exclude": {
     "outputs": true,
