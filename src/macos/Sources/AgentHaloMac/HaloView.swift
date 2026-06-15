@@ -1,5 +1,7 @@
 import AppKit
 import AgentHaloCore
+import CoreVideo
+import QuartzCore
 
 @MainActor
 final class HaloView: NSView {
@@ -24,14 +26,22 @@ final class HaloView: NSView {
     var onMouseExited: (() -> Void)?
     private var dragStart: NSPoint?
     private var windowStart: NSPoint?
-    private var animationTimer: Timer?
+    nonisolated(unsafe) private var displayLink: CVDisplayLink?
+    private var lastFrameTimestamp = CACurrentMediaTime()
     private var visualState: HaloState = .idle
     private var errorPresentation: ErrorPresentation = .flashing
     private var steadyDone = false
+    private var transitionFromVisual = HaloVisualModel.targetVisual(
+        state: .idle,
+        time: 0,
+        errorPresentation: .flashing,
+        steadyDone: false
+    )
     private var previewMode = false
     private var animationTime = 0.0
     private var sinceState = 0.0
     private var transitionProgress = 1.0
+    private var transitionDuration = 1.0
     private var gapA = 97.0
     private var gapB = 247.0
     private var outerVelocity = 0.0
@@ -50,13 +60,7 @@ final class HaloView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
-        animationTimer = Timer.scheduledTimer(
-            timeInterval: 1.0 / 60.0,
-            target: self,
-            selector: #selector(stepAnimation),
-            userInfo: nil,
-            repeats: true
-        )
+        startDisplayLink()
     }
 
     required init?(coder: NSCoder) {
@@ -65,8 +69,40 @@ final class HaloView: NSView {
 
     override var isOpaque: Bool { false }
 
-    @objc private func stepAnimation() {
-        let delta = 1.0 / 60.0
+    deinit {
+        if let displayLink {
+            CVDisplayLinkStop(displayLink)
+        }
+    }
+
+    private func startDisplayLink() {
+        var link: CVDisplayLink?
+        guard CVDisplayLinkCreateWithActiveCGDisplays(&link) == kCVReturnSuccess, let link else {
+            return
+        }
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        CVDisplayLinkSetOutputCallback(link, { _, _, _, _, _, context in
+            guard let context else {
+                return kCVReturnSuccess
+            }
+            let view = Unmanaged<HaloView>.fromOpaque(context).takeUnretainedValue()
+            DispatchQueue.main.async {
+                view.displayLinkDidFire()
+            }
+            return kCVReturnSuccess
+        }, context)
+        CVDisplayLinkStart(link)
+        displayLink = link
+    }
+
+    private func displayLinkDidFire() {
+        let now = CACurrentMediaTime()
+        let delta = HaloMath.clamp(now - lastFrameTimestamp, 0.001, 0.08)
+        lastFrameTimestamp = now
+        stepAnimation(delta: delta)
+    }
+
+    private func stepAnimation(delta: Double) {
         animationTime += max(0.001, min(delta, 0.08))
         sinceState += max(0.001, min(delta, 0.08))
         let targetVelocity = HaloMath.targetGapVelocity(visualState) *
@@ -127,7 +163,7 @@ final class HaloView: NSView {
             gapB -= 36_000
             smallGapAnchor -= 36_000
         }
-        transitionProgress = min(1, transitionProgress + delta / 0.56)
+        transitionProgress = min(1, transitionProgress + delta / max(0.01, transitionDuration))
         needsDisplay = true
     }
 
@@ -142,13 +178,28 @@ final class HaloView: NSView {
     }
 
     private func applyVisualState(_ state: HaloState, presentation: ErrorPresentation) {
-        if visualState != state {
+        let nextSteadyDone = state == .done && aggregate.sessions.isEmpty
+        let nextPresentation: ErrorPresentation = state == .error ? presentation : .flashing
+        if visualState != state || steadyDone != nextSteadyDone || errorPresentation != nextPresentation {
+            transitionFromVisual = HaloVisualModel.targetVisual(
+                state: visualState,
+                time: sinceState,
+                errorPresentation: errorPresentation,
+                steadyDone: steadyDone
+            )
             sinceState = 0
             transitionProgress = 0
+            if visualState == state && state == .error && errorPresentation != nextPresentation {
+                transitionDuration = nextPresentation == .flashing ? 0.82 : 1.24
+            } else if state == .done && nextSteadyDone {
+                transitionDuration = 1.45
+            } else {
+                transitionDuration = GeneratedHaloSpec.transitionDuration(target: state)
+            }
         }
         visualState = state
-        errorPresentation = state == .error ? presentation : .flashing
-        steadyDone = state == .done && aggregate.sessions.isEmpty
+        errorPresentation = nextPresentation
+        steadyDone = nextSteadyDone
         needsDisplay = true
     }
 
@@ -165,9 +216,10 @@ final class HaloView: NSView {
                 state: visualState,
                 errorPresentation: errorPresentation,
                 steadyDone: steadyDone,
+                transitionFrom: transitionFromVisual,
                 time: animationTime,
                 sinceState: sinceState,
-                transition: transitionProgress,
+                transition: HaloMath.smootherStep(transitionProgress),
                 gapA: gapA,
                 gapB: gapB
             )

@@ -12,43 +12,6 @@ public struct HaloRGB: Equatable, Sendable {
     }
 }
 
-public struct HaloRingMorph: Equatable, Sendable {
-    public var radiusOffset: Double
-    public var bodyWidthOffset: Double
-    public var secondaryOpacity: Double
-    public var gapOpen: Double
-    public var gapSkew: Double
-    public var glowBoost: Double
-
-    public init(
-        radiusOffset: Double,
-        bodyWidthOffset: Double,
-        secondaryOpacity: Double,
-        gapOpen: Double,
-        gapSkew: Double,
-        glowBoost: Double
-    ) {
-        self.radiusOffset = radiusOffset
-        self.bodyWidthOffset = bodyWidthOffset
-        self.secondaryOpacity = secondaryOpacity
-        self.gapOpen = gapOpen
-        self.gapSkew = gapSkew
-        self.glowBoost = glowBoost
-    }
-}
-
-public struct HaloRingStroke: Equatable, Sendable {
-    public var radius: Double
-    public var width: Double
-    public var alphaScale: Double
-
-    public init(radius: Double, width: Double, alphaScale: Double) {
-        self.radius = radius
-        self.width = width
-        self.alphaScale = alphaScale
-    }
-}
-
 public enum HaloMath {
     public static func clamp(_ value: Double, _ lower: Double, _ upper: Double) -> Double {
         min(max(value, lower), upper)
@@ -266,81 +229,6 @@ public enum HaloMath {
     public static func magneticRepulsionEase(_ value: Double) -> Double {
         let value = clamp(value, 0, 1)
         return clamp(smootherStep(value) + sin(value * .pi) * 0.055, 0, 1)
-    }
-
-    public static func ringMorph(state: HaloState, time: Double) -> HaloRingMorph {
-        ringMorph(
-            state: state,
-            time: time,
-            breath: stateBreath(state, time: time),
-            powered: targetPowered(state, time: time)
-        )
-    }
-
-    public static func ringMorph(
-        state: HaloState,
-        time: Double,
-        breath: Double,
-        powered: Double
-    ) -> HaloRingMorph {
-        let pace: Double
-        let shapeAmount: Double
-        switch state {
-        case .working:
-            pace = 3.2
-            shapeAmount = 1.0
-        case .thinking:
-            pace = 4.8
-            shapeAmount = 0.86
-        case .done:
-            pace = 6.7
-            shapeAmount = 0.62
-        case .attention:
-            pace = 3.9
-            shapeAmount = 0.92
-        case .error:
-            pace = 2.4
-            shapeAmount = 0.95
-        case .idle:
-            pace = 7.2
-            shapeAmount = 0.42
-        }
-
-        let cycle = positiveModulo(time, pace) / pace
-        let swell = 0.5 - 0.5 * cos(cycle * .pi * 2)
-        let folded = softWave(cycle + 0.08)
-        let split = smoothPulse(phase: cycle, center: 0.33, width: 0.24)
-        let secondSplit = smoothPulse(phase: cycle, center: 0.78, width: 0.18) * 0.55
-        let powerBias = 0.34 + 0.66 * clamp(powered, 0, 1)
-        let living = clamp(0.45 * swell + 0.35 * folded + 0.20 * clamp(breath, 0, 1), 0, 1)
-        let secondary = clamp((split + secondSplit) * shapeAmount * (0.46 + 0.54 * powerBias), 0, 1)
-
-        return HaloRingMorph(
-            radiusOffset: shapeAmount * (-0.85 + 1.7 * living),
-            bodyWidthOffset: shapeAmount * (-1.05 + 2.1 * swell) * (0.72 + 0.28 * powerBias),
-            secondaryOpacity: secondary,
-            gapOpen: clamp(0.18 + 0.72 * folded + 0.24 * secondary, 0, 1),
-            gapSkew: shapeAmount * (4.6 * sin(cycle * .pi * 2) + 1.8 * sin(cycle * .pi * 4 + 0.7)),
-            glowBoost: 0.08 * shapeAmount * secondary + 0.045 * shapeAmount * swell
-        )
-    }
-
-    public static func ringHighlightStrokes(radius: Double, bodyWidth: Double, scale: Double) -> [HaloRingStroke] {
-        let bodyWidth = max(bodyWidth, scale)
-        let innerWidth = max(scale * 0.95, min(scale * 1.75, bodyWidth * 0.18))
-        let outerWidth = max(scale * 0.80, min(scale * 1.35, bodyWidth * 0.14))
-        return [
-            HaloRingStroke(
-                radius: radius - bodyWidth * 0.34,
-                width: innerWidth,
-                alphaScale: 0.52
-            ),
-            HaloRingStroke(
-                radius: radius + bodyWidth * 0.31,
-                width: outerWidth,
-                alphaScale: 0.30
-            )
-        ]
     }
 
     public static func mixColor(_ from: HaloRGB, _ to: HaloRGB, amount: Double) -> HaloRGB {

@@ -40,11 +40,11 @@ enum Diagnostics {
         lines.append(HaloMath.diagnosticBrightDuration(.thinking) < HaloMath.diagnosticBrightDuration(.working) ? "PASS bright-duration" : "FAIL bright-duration")
         lines.append(abs(HaloMath.diagnosticGapSeparation(0) - 40) < 0.001 ? "PASS gap-start" : "FAIL gap-start")
         lines.append(abs(HaloMath.diagnosticGapSeparation(1) - 150) < 0.001 ? "PASS gap-end" : "FAIL gap-end")
-        lines.append(HaloMath.ringMorph(state: .working, time: 1.6).bodyWidthOffset > HaloMath.ringMorph(state: .working, time: 3.2).bodyWidthOffset + 1.5 ? "PASS ring-width-morph" : "FAIL ring-width-morph")
-        lines.append(HaloMath.ringMorph(state: .working, time: 1.05).secondaryOpacity > 0.50 ? "PASS ring-secondary-contour" : "FAIL ring-secondary-contour")
-        lines.append(abs(HaloMath.ringMorph(state: .thinking, time: 2.15).gapOpen - HaloMath.ringMorph(state: .thinking, time: 4.55).gapOpen) > 0.35 ? "PASS ring-gap-morph" : "FAIL ring-gap-morph")
-        let highlights = HaloMath.ringHighlightStrokes(radius: 51.2, bodyWidth: 14.0, scale: 1.45)
-        lines.append(highlights.allSatisfy { abs($0.radius - 51.2) >= 14.0 * 0.25 && $0.width <= 14.0 * 0.28 } ? "PASS ring-edge-highlights" : "FAIL ring-edge-highlights")
+        lines.append(HaloVisualModel.completionDoubleFlash(sinceState: 0.28) > 0.95 ? "PASS completion-double-flash" : "FAIL completion-double-flash")
+        let working = HaloVisualModel.targetVisual(state: .working, time: 0.8, errorPresentation: .flashing, steadyDone: false)
+        let material = HaloVisualModel.materialSnapshot(color: working.color, visual: working, intensity: 1.0)
+        lines.append(material.poweredCore.red > working.color.red ? "PASS powered-white-core" : "FAIL powered-white-core")
+        lines.append(material.whiteSparkAlpha > 180 ? "PASS white-center-spark" : "FAIL white-center-spark")
         let failed = lines.contains { $0.hasPrefix("FAIL") }
         try DiagnosticsOutput.write(lines.joined(separator: "\n") + "\n", to: path)
         if failed { exit(1) }
@@ -87,8 +87,15 @@ enum Diagnostics {
             state: state,
             errorPresentation: state == .error ? .bright : .flashing,
             steadyDone: false,
+            transitionFrom: HaloVisualModel.targetVisual(
+                state: state,
+                time: 0,
+                errorPresentation: state == .error ? .bright : .flashing,
+                steadyDone: false
+            ),
             time: 2.4,
             sinceState: state == .done ? 0.55 : 2.4,
+            transition: 1,
             gapA: 97,
             gapB: 247
         ))
@@ -100,8 +107,15 @@ enum Diagnostics {
             state: state,
             errorPresentation: .flashing,
             steadyDone: name.contains("standby"),
+            transitionFrom: HaloVisualModel.targetVisual(
+                state: .done,
+                time: 0,
+                errorPresentation: .flashing,
+                steadyDone: false
+            ),
             time: time,
             sinceState: time,
+            transition: HaloMath.smootherStep(min(1, time / 1.45)),
             gapA: 97 + time * 38,
             gapB: 247 + time * 38
         ))

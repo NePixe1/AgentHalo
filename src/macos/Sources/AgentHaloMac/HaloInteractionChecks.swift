@@ -41,10 +41,13 @@ private func testRightClickInvokesContextMenuCallback() {
 private func testHaloContextMenuContainsCloseAction() {
     let delegate = AppDelegate()
     let menu = delegate.makeHaloContextMenu()
-    let item = menu.item(at: 0)
+    let titles = menu.items.map(\.title)
 
-    expect(menu.items.count == 1, "halo context menu should contain one item")
-    expect(item?.title == "关闭圆环", "halo context menu should label the close item")
-    expect(item?.target as AnyObject === delegate, "halo context menu close item should target app delegate")
-    expect(item?.action.map(NSStringFromSelector) == "quit", "halo context menu close item should quit")
+    expect(menu.items.count >= 10, "halo context menu should expose the full control menu")
+    expect(titles.contains("确认已完成任务"), "halo context menu should include completion acknowledgement")
+    expect(titles.contains("始终置顶"), "halo context menu should include always-on-top")
+    expect(titles.contains("暂停状态监听"), "halo context menu should include pause")
+    expect(titles.contains("预览状态"), "halo context menu should include preview submenu")
+    expect(titles.contains("切换到 Codex"), "halo context menu should include Codex activation")
+    expect(titles.contains("退出 Agent Halo"), "halo context menu should include quit")
 }

@@ -145,9 +145,10 @@
       "completionDoubleFlash": true
     },
     "macos": {
-      "materialModel": "coloredBloomEdgeHighlightV1",
-      "ringMorph": "radiusWidthGapSecondaryContourV1",
-      "fixedRefreshHz": 60
+      "materialModel": "darkLitTubeWhiteCoreV1",
+      "completionDoubleFlash": true,
+      "refreshDriver": "displayLinkV1",
+      "contextMenu": "fullControlMenuV1"
     }
   }
 }

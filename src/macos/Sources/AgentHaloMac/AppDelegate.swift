@@ -119,6 +119,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateStatusMenu() {
+        statusItem.menu = makeControlMenu()
+        let rgb = HaloVisualModel.stateColor(aggregate.state)
+        let color = NSColor(calibratedRed: rgb.red / 255, green: rgb.green / 255, blue: rgb.blue / 255, alpha: 1)
+        statusItem.button?.image = StatusIcon.image(color: color)
+    }
+
+    private func makeControlMenu() -> NSMenu {
         let menu = NSMenu()
         addMenuItem("确认已完成任务", #selector(dismissCompleted), enabled: aggregate.sessions.contains { $0.state == .done }, to: menu)
         addMenuItem("确认当前错误", #selector(dismissError), enabled: aggregate.state == .error, to: menu)
@@ -143,10 +150,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         addMenuItem("切换到 Codex", #selector(bringCodexForward), enabled: true, to: menu)
         addMenuItem("退出 Agent Halo", #selector(quit), enabled: true, to: menu)
-        statusItem.menu = menu
-        let rgb = HaloVisualModel.stateColor(aggregate.state)
-        let color = NSColor(calibratedRed: rgb.red / 255, green: rgb.green / 255, blue: rgb.blue / 255, alpha: 1)
-        statusItem.button?.image = StatusIcon.image(color: color)
+        return menu
     }
 
     @objc private func togglePause() {
@@ -210,11 +214,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func makeHaloContextMenu() -> NSMenu {
-        let menu = NSMenu()
-        let closeItem = NSMenuItem(title: "关闭圆环", action: #selector(quit), keyEquivalent: "")
-        closeItem.target = self
-        menu.addItem(closeItem)
-        return menu
+        makeControlMenu()
     }
 
     private func saveWindowPosition() {

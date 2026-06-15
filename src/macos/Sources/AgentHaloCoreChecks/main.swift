@@ -330,41 +330,6 @@ func testHaloMathMatchesProgramConstants() {
     expect(HaloMath.repulsionDurationFromOrbit(28) > HaloMath.repulsionDurationFromOrbit(80), "slow orbit uses longer repulsion")
 }
 
-func testHaloRingMorphChangesShapeOverTime() {
-    let workingWide = HaloMath.ringMorph(state: .working, time: 1.6)
-    let workingNarrow = HaloMath.ringMorph(state: .working, time: 3.2)
-    expect(workingWide.bodyWidthOffset > workingNarrow.bodyWidthOffset + 1.5, "working ring width should breathe visibly")
-
-    let thinkingLarge = HaloMath.ringMorph(state: .thinking, time: 2.3)
-    let thinkingSmall = HaloMath.ringMorph(state: .thinking, time: 4.7)
-    expect(abs(thinkingLarge.radiusOffset - thinkingSmall.radiusOffset) > 0.8, "thinking ring radius should breathe")
-
-    let split = HaloMath.ringMorph(state: .working, time: 1.05)
-    let single = HaloMath.ringMorph(state: .working, time: 3.45)
-    expect(split.secondaryOpacity > 0.50, "working ring should expose a secondary contour")
-    expect(single.secondaryOpacity < 0.20, "working ring should return to a mostly single contour")
-
-    let openGap = HaloMath.ringMorph(state: .thinking, time: 2.15)
-    let closedGap = HaloMath.ringMorph(state: .thinking, time: 4.55)
-    expect(abs(openGap.gapOpen - closedGap.gapOpen) > 0.35, "thinking gaps should open and close")
-}
-
-func testRingHighlightStrokesAvoidCenterLine() {
-    let radius = 51.2
-    let bodyWidth = 14.0
-    let scale = 1.45
-    let strokes = HaloMath.ringHighlightStrokes(radius: radius, bodyWidth: bodyWidth, scale: scale)
-
-    expect(strokes.count >= 2, "ring should keep separate edge highlights")
-    expect(strokes.contains { $0.radius < radius }, "ring should have an inner edge highlight")
-    expect(strokes.contains { $0.radius > radius }, "ring should have an outer edge highlight")
-
-    for stroke in strokes {
-        expect(abs(stroke.radius - radius) >= bodyWidth * 0.25, "highlight should not sit on the ring centerline")
-        expect(stroke.width <= bodyWidth * 0.28, "highlight should not fill the ring body")
-    }
-}
-
 func testLinearSRGBMixAvoidsGammaLerp() {
     let mixed = HaloMath.mixColor(
         HaloRGB(red: 226, green: 170, blue: 31),
@@ -373,6 +338,35 @@ func testLinearSRGBMixAvoidsGammaLerp() {
     )
     expect(mixed.red > 150, "linear red midpoint should be brighter than gamma midpoint")
     expect(mixed.blue > 145, "linear blue midpoint should be brighter than gamma midpoint")
+}
+
+func testWindowsStyleVisualTransitionAndMaterial() {
+    let from = HaloVisualModel.targetVisual(
+        state: .thinking,
+        time: 1.0,
+        errorPresentation: .flashing,
+        steadyDone: false
+    )
+    let to = HaloVisualModel.targetVisual(
+        state: .working,
+        time: 0.8,
+        errorPresentation: .flashing,
+        steadyDone: false
+    )
+    let dimmed = HaloVisualModel.transitionVisual(from: from, to: to, progress: 0.48)
+    expect(dimmed.powered < 0.12, "transition should dim before power-up")
+    expect(dimmed.coreWhite > min(from.coreWhite, to.coreWhite) && dimmed.coreWhite < max(from.coreWhite, to.coreWhite), "core white should transition as a scalar")
+
+    let material = HaloVisualModel.materialSnapshot(color: to.color, visual: to, intensity: 1.0)
+    expect(material.poweredCore.red > to.color.red, "powered core should move toward white")
+    expect(material.glowAlphas[1] > material.glowAlphas[0], "middle glow should be brighter than outer glow")
+    expect(material.whiteSparkAlpha > 180, "powered visual should retain a white center spark")
+}
+
+func testCompletionDoubleFlashMatchesWindowsCadence() {
+    expect(HaloVisualModel.completionDoubleFlash(sinceState: 0.28) > 0.95, "first completion flash should peak early")
+    expect(HaloVisualModel.completionDoubleFlash(sinceState: 0.92) > 0.80, "second completion flash should peak later")
+    expect(HaloVisualModel.completionDoubleFlash(sinceState: 1.45) < 0.02, "completion flash should fade out")
 }
 
 func expectAlmost(_ actual: Double, _ expected: Double, tolerance: Double, _ message: String) {
@@ -408,7 +402,7 @@ do {
     fatalError("\(error)")
 }
 testHaloMathMatchesProgramConstants()
-testHaloRingMorphChangesShapeOverTime()
-testRingHighlightStrokesAvoidCenterLine()
 testLinearSRGBMixAvoidsGammaLerp()
+testWindowsStyleVisualTransitionAndMaterial()
+testCompletionDoubleFlashMatchesWindowsCadence()
 print("PASS AgentHaloCore checks")
