@@ -1,21 +1,20 @@
 # Agent Halo
 
-![Agent Halo READY status banner](assets/agent-halo-readme-banner.png)
+![Agent Halo READY status banner](docs/assets/agent-halo-readme-banner.png)
 
 A local, always-on-top status halo for the Codex desktop app.
 
 The current release supports Codex, with Claude Code detection planned next.
 
-Version: `0.12.0`
+Version: `0.13.0`
 
 English | [简体中文](README.zh-CN.md)
 
 Cross-platform behavior is generated from
-[`shared/spec/agent-halo.v2.json`](shared/spec/agent-halo.v2.json), while
+[`src/shared/spec/agent-halo.v2.json`](src/shared/spec/agent-halo.v2.json), while
 platform-specific rendering remains native. See the
-[shared contract guide](shared/README.md) and
-[architecture notes](docs/CROSS_PLATFORM_SHARED_CONTRACT.md). The macOS maintainer
-can use the checked-in [Codex review prompt](docs/MACOS_CODEX_REVIEW_PROMPT.md).
+[shared contract guide](src/shared/README.md) and
+[architecture notes](docs/CROSS_PLATFORM_SHARED_CONTRACT.md).
 
 ---
 
@@ -30,7 +29,7 @@ can use the checked-in [Codex review prompt](docs/MACOS_CODEX_REVIEW_PROMPT.md).
 Run and verify:
 
 ```bash
-./script/build_and_run.sh --verify
+bash ./scripts/run-macos.sh --verify
 ```
 
 The app is a menu bar accessory app and does not show a Dock icon. Quit it from the Agent Halo menu bar icon, or run:
@@ -42,7 +41,7 @@ pkill -x AgentHaloMac
 Diagnostics:
 
 ```bash
-cd mac
+cd src/macos
 swift run AgentHaloDiagnostics --self-test /tmp/agent-halo-self-test.txt
 swift run AgentHaloDiagnostics --render-states /tmp/agent-halo-states
 swift run AgentHaloDiagnostics --transition-strip /tmp/agent-halo-transitions
@@ -65,7 +64,7 @@ OpenAI API key.
 - Completed green breathes until Codex returns to the foreground, then settles
   into a non-glowing standby green.
 - Right-click for state previews, pause, startup, and exit controls.
-- Use the `光环大小` submenu to select `75% / 100% / 125% / 150%`;
+- Use the `光环大小` submenu to select `75% / 100% / 125%`;
   the selected size persists across restarts.
 - If a disconnected display leaves the halo off-screen, right-click its system
   tray icon and select `脱离卡死` to move it to the primary display.

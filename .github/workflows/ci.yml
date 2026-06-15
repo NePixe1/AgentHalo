@@ -38,7 +38,7 @@ jobs:
       - run: python scripts/generate_shared.py --check
       - shell: powershell
         run: |
-          ./build.ps1
+          ./scripts/build-windows.ps1
           Start-Process -FilePath ./outputs/AgentHalo/AgentHalo.exe `
             -ArgumentList "--self-test", "./outputs/windows-self-test.txt" -Wait
           Get-Content ./outputs/windows-self-test.txt
@@ -52,7 +52,7 @@ jobs:
           python-version: "3.12"
       - run: python scripts/generate_shared.py --check
       - name: Run macOS core checks
-        working-directory: mac
+        working-directory: src/macos
         run: |
           set +e
           set -o pipefail
@@ -64,5 +64,5 @@ jobs:
             done
             exit "$status"
           fi
-      - working-directory: mac
+      - working-directory: src/macos
         run: swift build -c release --product AgentHaloMac

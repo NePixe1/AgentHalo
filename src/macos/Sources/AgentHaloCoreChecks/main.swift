@@ -317,7 +317,7 @@ func testDiagnosticsCreatesParentDirectoryForOutput() throws {
 
 func testHaloMathMatchesProgramConstants() {
     expect(GeneratedHaloSpec.contractVersion, 2, "generated shared contract version")
-    expect(GeneratedHaloSpec.releaseVersion, "0.12.0", "generated shared release version")
+    expect(GeneratedHaloSpec.releaseVersion, "0.13.0", "generated shared release version")
     expect(GeneratedHaloSpec.state(.attention).label, "NEEDS YOU", "generated state labels")
     expect(GeneratedHaloSpec.friendlyAction("apply_patch"), "Editing files", "generated action rules")
     expect(GeneratedHaloSpec.classifyFailure("server overloaded"), "服务暂时不可用", "generated failure rules")

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/NePixe1/AgentHalo/shared/spec/agent-halo.v2.schema.json",
+  "$id": "https://github.com/NePixe1/AgentHalo/src/shared/spec/agent-halo.v2.schema.json",
   "title": "Agent Halo cross-platform behavior contract",
   "type": "object",
   "additionalProperties": false,

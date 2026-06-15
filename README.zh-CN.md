@@ -1,21 +1,20 @@
 # Agent Halo
 
-![Agent Halo READY 状态横幅](assets/agent-halo-readme-banner.png)
+![Agent Halo READY 状态横幅](docs/assets/agent-halo-readme-banner.png)
 
 Codex 桌面端的本地常驻状态光环。
 
 当前版本支持 Codex；后续计划加入 Claude Code（CC）状态识别。
 
-版本：`0.12.0`
+版本：`0.13.0`
 
 [English](README.md) | 简体中文
 
 跨平台行为以
-[`shared/spec/agent-halo.v2.json`](shared/spec/agent-halo.v2.json)
+[`src/shared/spec/agent-halo.v2.json`](src/shared/spec/agent-halo.v2.json)
 为唯一参数来源，并生成 C# 与 Swift 常量；Windows 和 macOS 继续使用各自的原生渲染。
-详见 [共享契约说明](shared/README.md)与
-[跨平台架构说明](docs/CROSS_PLATFORM_SHARED_CONTRACT.md)。macOS 维护者可直接使用
-[Codex 审阅提示词](docs/MACOS_CODEX_REVIEW_PROMPT.md)。
+详见 [共享契约说明](src/shared/README.md)与
+[跨平台架构说明](docs/CROSS_PLATFORM_SHARED_CONTRACT.md)。
 
 ---
 
@@ -30,7 +29,7 @@ Codex 桌面端的本地常驻状态光环。
 运行并验证：
 
 ```bash
-./script/build_and_run.sh --verify
+bash ./scripts/run-macos.sh --verify
 ```
 
 应用是菜单栏辅助应用，不显示 Dock 图标。可以从菜单栏 Agent Halo 图标退出，也可以执行：
@@ -42,7 +41,7 @@ pkill -x AgentHaloMac
 诊断命令：
 
 ```bash
-cd mac
+cd src/macos
 swift run AgentHaloDiagnostics --self-test /tmp/agent-halo-self-test.txt
 swift run AgentHaloDiagnostics --render-states /tmp/agent-halo-states
 swift run AgentHaloDiagnostics --transition-strip /tmp/agent-halo-transitions
@@ -62,7 +61,7 @@ swift run AgentHaloDiagnostics --transition-strip /tmp/agent-halo-transitions
 - 鼠标悬停：查看当前状态、5 小时额度和周额度。
 - 任务完成后绿色会缓慢呼吸；再次打开 Codex 后自动确认并变为不发光的稳定绿色。
 - 右键单击：打开状态预览、暂停监听、开机启动和退出菜单。
-- 右键“光环大小”：选择 `75% / 100% / 125% / 150%`，重启后保持设置。
+- 右键“光环大小”：选择 `75% / 100% / 125%`，重启后保持设置。
 - 光环因拔掉副屏而消失时，从系统托盘右键选择“脱离卡死”，可移回主屏右上角。
 - 双击：将 Codex 窗口切到前台。
 

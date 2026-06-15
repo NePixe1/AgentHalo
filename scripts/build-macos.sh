@@ -2,8 +2,8 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "$script_dir/../.." && pwd)"
-mac_root="$repo_root/mac"
+repo_root="$(cd "$script_dir/.." && pwd)"
+mac_root="$repo_root/src/macos"
 output_root="$repo_root/outputs/AgentHalo-macOS"
 app_dir="$output_root/AgentHalo.app"
 binary="$mac_root/.build/release/AgentHaloMac"
@@ -37,7 +37,7 @@ cat > "$app_dir/Contents/Info.plist" <<'PLIST'
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.12.0</string>
+  <string>0.13.0</string>
   <key>CFBundleVersion</key>
   <string>1</string>
   <key>LSMinimumSystemVersion</key>

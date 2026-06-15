@@ -11,9 +11,9 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC_PATH = ROOT / "shared" / "spec" / "agent-halo.v2.json"
-CS_PATH = ROOT / "windows" / "GeneratedHaloSpec.cs"
-SWIFT_PATH = ROOT / "mac" / "Sources" / "AgentHaloCore" / "GeneratedHaloSpec.swift"
+SPEC_PATH = ROOT / "src" / "shared" / "spec" / "agent-halo.v2.json"
+CS_PATH = ROOT / "src" / "windows" / "GeneratedHaloSpec.cs"
+SWIFT_PATH = ROOT / "src" / "macos" / "Sources" / "AgentHaloCore" / "GeneratedHaloSpec.swift"
 STATE_ORDER = ["idle", "thinking", "working", "done", "attention", "error"]
 
 

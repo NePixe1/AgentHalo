@@ -15,6 +15,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Microsoft.Win32;
@@ -29,8 +30,8 @@ using MediaPoint = System.Windows.Point;
 [assembly: System.Reflection.AssemblyDescription("Ambient desktop status light for coding agents")]
 [assembly: System.Reflection.AssemblyCompany("Agent Halo")]
 [assembly: System.Reflection.AssemblyProduct("Agent Halo")]
-[assembly: System.Reflection.AssemblyVersion("0.12.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.12.0.0")]
+[assembly: System.Reflection.AssemblyVersion("0.13.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.13.0.0")]
 
 namespace CodexHalo
 {
@@ -871,6 +872,11 @@ namespace CodexHalo
         private double frameIntervalMaxMs;
         private long frameIntervalCount;
         private long slowFrameCount;
+        private long renderingCallbackCount;
+        private long duplicateRenderingTimeCount;
+        private int gen0AtReset;
+        private int gen1AtReset;
+        private int gen2AtReset;
         private double outerPhase;
         private double innerPhase;
         private double outerVelocity;
@@ -931,8 +937,15 @@ namespace CodexHalo
                 double averageMs = frameIntervalCount <= 0 ? 0 :
                     frameIntervalSumMs / frameIntervalCount;
                 return String.Format(CultureInfo.InvariantCulture,
-                    "{0:F1} FPS\nAverage frame: {1:F2} ms\nWorst frame: {2:F2} ms\nFrames over 25 ms: {3}",
-                    MeasuredFps, averageMs, frameIntervalMaxMs, slowFrameCount);
+                    "{0:F1} FPS\nAverage frame: {1:F2} ms\nWorst frame: {2:F2} ms\n" +
+                    "Frames over 25 ms: {3}\nWPF render tier: {4}\nGC collections: {5}/{6}/{7}\n" +
+                    "Rendering callbacks: {8}\nDuplicate rendering times: {9}",
+                    MeasuredFps, averageMs, frameIntervalMaxMs, slowFrameCount,
+                    RenderCapability.Tier >> 16,
+                    GC.CollectionCount(0) - gen0AtReset,
+                    GC.CollectionCount(1) - gen1AtReset,
+                    GC.CollectionCount(2) - gen2AtReset,
+                    renderingCallbackCount, duplicateRenderingTimeCount);
             }
         }
 
@@ -943,7 +956,12 @@ namespace CodexHalo
             frameIntervalMaxMs = 0;
             frameIntervalCount = 0;
             slowFrameCount = 0;
+            renderingCallbackCount = 0;
+            duplicateRenderingTimeCount = 0;
             lastRenderingTime = TimeSpan.Zero;
+            gen0AtReset = GC.CollectionCount(0);
+            gen1AtReset = GC.CollectionCount(1);
+            gen2AtReset = GC.CollectionCount(2);
         }
 
         public void SetState(HaloState value, string stateLabel, int sessionCount)
@@ -1111,6 +1129,7 @@ namespace CodexHalo
 
         private void OnRendering(object sender, EventArgs e)
         {
+            renderingCallbackCount++;
             double now = clock.Elapsed.TotalSeconds;
             RenderingEventArgs rendering = e as RenderingEventArgs;
             double animationDelta;
@@ -1118,6 +1137,7 @@ namespace CodexHalo
             {
                 if (rendering.RenderingTime == lastRenderingTime)
                 {
+                    duplicateRenderingTimeCount++;
                     return;
                 }
                 animationDelta = (rendering.RenderingTime - lastRenderingTime).TotalSeconds;
@@ -1215,16 +1235,18 @@ namespace CodexHalo
             MediaColor glowColor = MixColor(emissionColor,
                 MediaColor.FromRgb(242, 248, 249), 0.18 + 0.08 * powered);
             double glowGain = visual.GlowGain;
-            DrawDynamicRing(dc, center, radius, gapA, gapB,
+            StreamGeometry[] ringGeometry = CreateDynamicRingGeometry(center,
+                radius, gapA, gapB);
+            DrawDynamicRing(dc, ringGeometry,
                 NewPen(WithAlpha(emissionColor,
                     Alpha((12 + 39 * powered) * intensity * glowGain)), 19.5));
-            DrawDynamicRing(dc, center, radius, gapA, gapB,
+            DrawDynamicRing(dc, ringGeometry,
                 NewPen(WithAlpha(emissionColor,
                     Alpha((22 + 52 * powered) * intensity * glowGain)), 14.5));
-            DrawDynamicRing(dc, center, radius, gapA, gapB,
+            DrawDynamicRing(dc, ringGeometry,
                 NewPen(WithAlpha(emissionColor,
                     Alpha((38 + 70 * powered) * intensity * glowGain)), 11.2));
-            DrawDynamicRing(dc, center, radius, gapA, gapB,
+            DrawDynamicRing(dc, ringGeometry,
                 NewPen(WithAlpha(glowColor,
                     Alpha(82 * powered * intensity * glowGain)), 9.8));
 
@@ -1234,19 +1256,19 @@ namespace CodexHalo
                 MediaColor.FromRgb(250, 253, 252), 0.56);
             MediaColor poweredMaterial = MixColor(darkMaterial, litMaterial,
                 0.24 + 0.76 * powered);
-            DrawDynamicRing(dc, center, radius, gapA, gapB,
+            DrawDynamicRing(dc, ringGeometry,
                 NewPen(WithAlpha(darkMaterial, Alpha(242 * intensity)),
                     bodyWidth + 1.15));
-            DrawDynamicRing(dc, center, radius, gapA, gapB,
+            DrawDynamicRing(dc, ringGeometry,
                 NewPen(WithAlpha(poweredMaterial,
                     Alpha((182 + 73 * powered) * intensity)), bodyWidth));
             MediaColor poweredCore = MixColor(emissionColor,
                 MediaColor.FromRgb(253, 255, 255), visual.CoreWhite);
-            DrawDynamicRing(dc, center, radius, gapA, gapB,
+            DrawDynamicRing(dc, ringGeometry,
                 NewPen(WithAlpha(poweredCore,
                     Alpha((5 + 235 * powered) * intensity)),
                     bodyWidth - 2.25));
-            DrawDynamicRing(dc, center, radius, gapA, gapB,
+            DrawDynamicRing(dc, ringGeometry,
                 NewPen(WithAlpha(MediaColor.FromRgb(255, 255, 255),
                     Alpha(205 * powered * intensity)), 1.65));
         }
@@ -1325,8 +1347,8 @@ namespace CodexHalo
             return GeneratedHaloSpec.State(value).GlowGain;
         }
 
-        private static void DrawDynamicRing(DrawingContext dc, MediaPoint center,
-            double radius, double gapA, double gapB, MediaPen pen)
+        private static StreamGeometry[] CreateDynamicRingGeometry(MediaPoint center,
+            double radius, double gapA, double gapB)
         {
             // The visible clearances account for the thick rounded arc caps.
             // Both remain unmistakable at 112 px while retaining unequal sizes.
@@ -1336,10 +1358,51 @@ namespace CodexHalo
             double bStart = gapB - gapBSize / 2;
             double bEnd = gapB + gapBSize / 2;
             double aStart = gapA - gapASize / 2;
-            DrawArc(dc, center, radius, aEnd,
-                PositiveModulo(bStart - aEnd, 360), pen);
-            DrawArc(dc, center, radius, bEnd,
-                PositiveModulo(aStart - bEnd, 360), pen);
+            return new StreamGeometry[]
+            {
+                CreateArcGeometry(center, radius, aEnd,
+                    PositiveModulo(bStart - aEnd, 360)),
+                CreateArcGeometry(center, radius, bEnd,
+                    PositiveModulo(aStart - bEnd, 360))
+            };
+        }
+
+        private static StreamGeometry CreateArcGeometry(MediaPoint center,
+            double radius, double startDegrees, double sweepDegrees)
+        {
+            StreamGeometry geometry = new StreamGeometry();
+            using (StreamGeometryContext context = geometry.Open())
+            {
+                AddArcFigure(context, center, radius, startDegrees,
+                    sweepDegrees);
+            }
+            geometry.Freeze();
+            return geometry;
+        }
+
+        private static void AddArcFigure(StreamGeometryContext context,
+            MediaPoint center, double radius, double startDegrees,
+            double sweepDegrees)
+        {
+            if (sweepDegrees <= 0.001)
+            {
+                return;
+            }
+            MediaPoint start = PointOnCircle(center, radius, startDegrees);
+            MediaPoint end = PointOnCircle(center, radius,
+                startDegrees + sweepDegrees);
+            context.BeginFigure(start, false, false);
+            context.ArcTo(end, new System.Windows.Size(radius, radius), 0,
+                sweepDegrees > 180, SweepDirection.Clockwise, true, false);
+        }
+
+        private static void DrawDynamicRing(DrawingContext dc,
+            StreamGeometry[] geometry, MediaPen pen)
+        {
+            for (int i = 0; i < geometry.Length; i++)
+            {
+                dc.DrawGeometry(null, pen, geometry[i]);
+            }
         }
 
         private void AdvanceAnimation(double delta, double now)
@@ -2059,6 +2122,11 @@ namespace CodexHalo
         public static MediaColor StateColor(HaloState state)
         {
             SharedStateParameters parameters = GeneratedHaloSpec.State(state);
+            if (state == HaloState.Working)
+            {
+                // Windows keeps execution blue as saturated as the completed green.
+                return MediaColor.FromRgb(39, 161, 211);
+            }
             return MediaColor.FromRgb(parameters.Red, parameters.Green, parameters.Blue);
         }
 
@@ -2428,12 +2496,53 @@ namespace CodexHalo
 
     }
 
+    public sealed class UsageMetrics
+    {
+        public bool HasPrimary;
+        public bool HasSecondary;
+        public double PrimaryUsedPercent;
+        public double SecondaryUsedPercent;
+        public DateTime PrimaryResetUtc;
+        public DateTime SecondaryResetUtc;
+        public long ContextInputTokens;
+        public long ContextWindowTokens;
+
+        public bool HasContext
+        {
+            get { return ContextInputTokens >= 0 && ContextWindowTokens > 0; }
+        }
+
+        public double ContextUsedPercent
+        {
+            get
+            {
+                if (!HasContext)
+                {
+                    return 0;
+                }
+                return Math.Max(0, Math.Min(100,
+                    ContextInputTokens * 100.0 / ContextWindowTokens));
+            }
+        }
+    }
+
     public static class RateLimitReader
     {
         public static bool TryRead(out double primaryUsed, out double secondaryUsed)
         {
-            primaryUsed = 0;
-            secondaryUsed = 0;
+            UsageMetrics metrics;
+            bool result = TryRead(out metrics);
+            primaryUsed = metrics.PrimaryUsedPercent;
+            secondaryUsed = metrics.SecondaryUsedPercent;
+            return result && metrics.HasPrimary && metrics.HasSecondary;
+        }
+
+        public static bool TryRead(out UsageMetrics metrics)
+        {
+            metrics = new UsageMetrics
+            {
+                ContextInputTokens = -1
+            };
             try
             {
                 string codexRoot = Path.Combine(Environment.GetFolderPath(
@@ -2477,14 +2586,34 @@ namespace CodexHalo
                             GeneratedHaloSpec.RatePrimaryKey);
                         Dictionary<string, object> secondary = Child(limits,
                             GeneratedHaloSpec.RateSecondaryKey);
-                        if (primary != null && secondary != null)
+                        if (primary != null)
                         {
-                            primaryUsed = Convert.ToDouble(
-                                primary[GeneratedHaloSpec.RateUsedPercentKey],
-                                CultureInfo.InvariantCulture);
-                            secondaryUsed = Convert.ToDouble(
-                                secondary[GeneratedHaloSpec.RateUsedPercentKey],
-                                CultureInfo.InvariantCulture);
+                            metrics.PrimaryUsedPercent = Number(primary,
+                                GeneratedHaloSpec.RateUsedPercentKey);
+                            metrics.PrimaryResetUtc = UnixTime(primary, "resets_at");
+                            metrics.HasPrimary = true;
+                        }
+                        if (secondary != null)
+                        {
+                            metrics.SecondaryUsedPercent = Number(secondary,
+                                GeneratedHaloSpec.RateUsedPercentKey);
+                            metrics.SecondaryResetUtc = UnixTime(secondary, "resets_at");
+                            metrics.HasSecondary = true;
+                        }
+                        Dictionary<string, object> lastUsage = Child(info,
+                            "last_token_usage");
+                        if (lastUsage != null && info != null &&
+                            lastUsage.ContainsKey("input_tokens") &&
+                            info.ContainsKey("model_context_window"))
+                        {
+                            metrics.ContextInputTokens = Convert.ToInt64(
+                                lastUsage["input_tokens"], CultureInfo.InvariantCulture);
+                            metrics.ContextWindowTokens = Convert.ToInt64(
+                                info["model_context_window"], CultureInfo.InvariantCulture);
+                        }
+                        if (metrics.HasPrimary || metrics.HasSecondary ||
+                            metrics.HasContext)
+                        {
                             return true;
                         }
                     }
@@ -2494,6 +2623,34 @@ namespace CodexHalo
             {
             }
             return false;
+        }
+
+        private static double Number(Dictionary<string, object> source, string key)
+        {
+            object value;
+            return source != null && source.TryGetValue(key, out value)
+                ? Convert.ToDouble(value, CultureInfo.InvariantCulture) : 0;
+        }
+
+        private static DateTime UnixTime(Dictionary<string, object> source, string key)
+        {
+            object value;
+            long seconds;
+            if (source == null || !source.TryGetValue(key, out value) ||
+                !Int64.TryParse(Convert.ToString(value, CultureInfo.InvariantCulture),
+                    NumberStyles.Integer, CultureInfo.InvariantCulture, out seconds) ||
+                seconds <= 0)
+            {
+                return DateTime.MinValue;
+            }
+            try
+            {
+                return DateTimeOffset.FromUnixTimeSeconds(seconds).UtcDateTime;
+            }
+            catch
+            {
+                return DateTime.MinValue;
+            }
         }
 
         private static string[] ReadTailLines(string path)
@@ -2524,6 +2681,45 @@ namespace CodexHalo
         }
     }
 
+    public sealed class RoundedMeter : FrameworkElement
+    {
+        public static readonly DependencyProperty ValueProperty =
+            DependencyProperty.Register("Value", typeof(double), typeof(RoundedMeter),
+                new FrameworkPropertyMetadata(0.0,
+                    FrameworkPropertyMetadataOptions.AffectsRender));
+
+        public double Value
+        {
+            get { return (double)GetValue(ValueProperty); }
+            set { SetValue(ValueProperty, value); }
+        }
+
+        protected override System.Windows.Size MeasureOverride(
+            System.Windows.Size availableSize)
+        {
+            return new System.Windows.Size(
+                Double.IsInfinity(availableSize.Width) ? 100 : availableSize.Width, 4);
+        }
+
+        protected override void OnRender(DrawingContext drawingContext)
+        {
+            base.OnRender(drawingContext);
+            double width = Math.Max(0, ActualWidth);
+            double height = Math.Max(0, ActualHeight);
+            double radius = height / 2;
+            drawingContext.DrawRoundedRectangle(
+                new SolidColorBrush(MediaColor.FromArgb(92, 184, 202, 211)), null,
+                new Rect(0, 0, width, height), radius, radius);
+            double fill = width * Math.Max(0, Math.Min(100, Value)) / 100.0;
+            if (fill > 0)
+            {
+                drawingContext.DrawRoundedRectangle(
+                    new SolidColorBrush(MediaColor.FromRgb(73, 174, 201)), null,
+                    new Rect(0, 0, Math.Max(height, fill), height), radius, radius);
+            }
+        }
+    }
+
     public sealed class DetailsWindow : Window
     {
         private readonly TextBlock headline;
@@ -2531,13 +2727,17 @@ namespace CodexHalo
         private readonly Border shell;
         private readonly TextBlock fiveHourValue;
         private readonly TextBlock weekValue;
-        private readonly ProgressBar fiveHourBar;
-        private readonly ProgressBar weekBar;
+        private readonly TextBlock fiveHourReset;
+        private readonly TextBlock weekReset;
+        private readonly TextBlock contextValue;
+        private readonly RoundedMeter fiveHourBar;
+        private readonly RoundedMeter weekBar;
         private readonly DispatcherTimer quotaTimer;
+        private UsageMetrics previewMetrics;
 
         public DetailsWindow()
         {
-            Width = 282;
+            Width = 320;
             SizeToContent = SizeToContent.Height;
             WindowStyle = WindowStyle.None;
             AllowsTransparency = true;
@@ -2545,36 +2745,70 @@ namespace CodexHalo
             ShowInTaskbar = false;
             ResizeMode = ResizeMode.NoResize;
             Topmost = true;
+            UseLayoutRounding = true;
+            SnapsToDevicePixels = true;
 
             shell = new Border();
-            shell.CornerRadius = new CornerRadius(18);
-            shell.Padding = new Thickness(17, 14, 17, 15);
-            shell.Background = new SolidColorBrush(MediaColor.FromArgb(224, 250, 252, 253));
-            shell.BorderBrush = new SolidColorBrush(MediaColor.FromArgb(176, 205, 214, 220));
+            shell.CornerRadius = new CornerRadius(16);
+            shell.Padding = new Thickness(17, 13, 17, 14);
+            shell.Background = CreateFallbackGlassBrush();
+            shell.BorderBrush = new SolidColorBrush(
+                MediaColor.FromArgb(46, 183, 199, 207));
             shell.BorderThickness = new Thickness(1);
+            shell.Margin = new Thickness(9);
+            shell.Effect = new DropShadowEffect
+            {
+                BlurRadius = 18,
+                ShadowDepth = 0,
+                Direction = 270,
+                Opacity = 0.12,
+                Color = MediaColor.FromRgb(151, 174, 184)
+            };
 
             StackPanel content = new StackPanel();
-            TextBlock brand = NewText("Agent Halo", 11.5, MediaColor.FromRgb(112, 126, 135),
+            Grid top = new Grid();
+            top.ColumnDefinitions.Add(new ColumnDefinition());
+            top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            TextBlock brand = NewText("Agent Halo", 11.5, MediaColor.FromRgb(101, 119, 129),
                 FontWeights.SemiBold);
-            brand.Margin = new Thickness(0, 0, 0, 8);
-            content.Children.Add(brand);
+            brand.VerticalAlignment = VerticalAlignment.Center;
+            top.Children.Add(brand);
+            Border contextPill = new Border
+            {
+                CornerRadius = new CornerRadius(9),
+                Padding = new Thickness(8, 3, 8, 3),
+                Background = new SolidColorBrush(MediaColor.FromArgb(78, 100, 194, 216)),
+                BorderBrush = new SolidColorBrush(MediaColor.FromArgb(80, 83, 174, 197)),
+                BorderThickness = new Thickness(1)
+            };
+            contextValue = NewText("上下文 --", 10.5, MediaColor.FromRgb(53, 125, 145),
+                FontWeights.Normal, true);
+            contextPill.Child = contextValue;
+            Grid.SetColumn(contextPill, 1);
+            top.Children.Add(contextPill);
+            top.Margin = new Thickness(0, 0, 0, 7);
+            content.Children.Add(top);
 
             headline = NewText("READY", 20, MediaColor.FromRgb(40, 52, 60),
                 FontWeights.Bold);
             content.Children.Add(headline);
             subtitle = NewText("Codex is standing by", 13,
-                MediaColor.FromRgb(103, 117, 126), FontWeights.Normal);
-            subtitle.Margin = new Thickness(0, 2, 0, 13);
+                MediaColor.FromRgb(103, 117, 126), FontWeights.Normal, true);
+            subtitle.Margin = new Thickness(0, 1, 0, 11);
             content.Children.Add(subtitle);
 
-            Grid fiveHour = CreateQuotaRow("5 小时额度", out fiveHourValue, out fiveHourBar);
+            Grid fiveHour = CreateQuotaRow("5 小时额度", out fiveHourReset,
+                out fiveHourValue, out fiveHourBar);
             content.Children.Add(fiveHour);
-            Grid week = CreateQuotaRow("周额度", out weekValue, out weekBar);
-            week.Margin = new Thickness(0, 7, 0, 0);
+            Grid week = CreateQuotaRow("周额度", out weekReset, out weekValue, out weekBar);
+            week.Margin = new Thickness(0, 8, 0, 0);
             content.Children.Add(week);
 
-            shell.Child = content;
+            Grid layers = new Grid();
+            layers.Children.Add(content);
+            shell.Child = layers;
             Content = shell;
+            Closed += delegate { quotaTimer.Stop(); };
             quotaTimer = new DispatcherTimer();
             quotaTimer.Interval = TimeSpan.FromSeconds(3);
             quotaTimer.Tick += delegate
@@ -2631,77 +2865,397 @@ namespace CodexHalo
 
         private void RefreshQuota()
         {
-            double primary;
-            double secondary;
-            if (RateLimitReader.TryRead(out primary, out secondary))
+            UsageMetrics metrics;
+            if (previewMetrics != null)
             {
-                fiveHourBar.Value = 100 - primary;
-                weekBar.Value = 100 - secondary;
-                fiveHourValue.Text = String.Format(CultureInfo.InvariantCulture,
-                    "剩余 {0:0}%", 100 - primary);
-                weekValue.Text = String.Format(CultureInfo.InvariantCulture,
-                    "剩余 {0:0}%", 100 - secondary);
+                metrics = previewMetrics;
+            }
+            else if (!RateLimitReader.TryRead(out metrics))
+            {
+                metrics = null;
+            }
+            if (metrics != null)
+            {
+                ApplyQuota(metrics.HasPrimary, metrics.PrimaryUsedPercent,
+                    metrics.PrimaryResetUtc, fiveHourValue, fiveHourReset, fiveHourBar);
+                ApplyQuota(metrics.HasSecondary, metrics.SecondaryUsedPercent,
+                    metrics.SecondaryResetUtc, weekValue, weekReset, weekBar);
+                contextValue.Text = metrics.HasContext
+                    ? String.Format(CultureInfo.InvariantCulture, "上下文 {0:0}%",
+                        metrics.ContextUsedPercent)
+                    : "上下文 --";
             }
             else
             {
                 fiveHourValue.Text = "暂无数据";
                 weekValue.Text = "暂无数据";
+                fiveHourReset.Text = String.Empty;
+                weekReset.Text = String.Empty;
+                fiveHourReset.Visibility = Visibility.Collapsed;
+                weekReset.Visibility = Visibility.Collapsed;
+                contextValue.Text = "上下文 --";
                 fiveHourBar.Value = 0;
                 weekBar.Value = 0;
             }
         }
 
-        private static Grid CreateQuotaRow(string title, out TextBlock value,
-            out ProgressBar bar)
+        public void SetPreviewMetrics(UsageMetrics metrics)
+        {
+            previewMetrics = metrics;
+            RefreshQuota();
+        }
+
+        private static void ApplyQuota(bool available, double usedPercent,
+            DateTime resetUtc, TextBlock value, TextBlock reset, RoundedMeter bar)
+        {
+            if (!available)
+            {
+                value.Text = "暂无数据";
+                reset.Text = String.Empty;
+                reset.Visibility = Visibility.Collapsed;
+                bar.Value = 0;
+                return;
+            }
+            double remaining = Math.Max(0, Math.Min(100, 100 - usedPercent));
+            value.Text = String.Format(CultureInfo.InvariantCulture,
+                "剩余 {0:0}%", remaining);
+            reset.Text = FormatResetTime(resetUtc);
+            reset.Visibility = String.IsNullOrEmpty(reset.Text)
+                ? Visibility.Collapsed : Visibility.Visible;
+            bar.Value = remaining;
+        }
+
+        public static string FormatResetTime(DateTime resetUtc)
+        {
+            if (resetUtc == DateTime.MinValue)
+            {
+                return String.Empty;
+            }
+            DateTime local = resetUtc.ToLocalTime();
+            return local.Date == DateTime.Now.Date
+                ? local.ToString("HH:mm '刷新'", CultureInfo.CurrentCulture)
+                : local.ToString("M月d日 HH:mm '刷新'", CultureInfo.CurrentCulture);
+        }
+
+        private static Grid CreateQuotaRow(string title, out TextBlock reset,
+            out TextBlock value, out RoundedMeter bar)
         {
             Grid grid = new Grid();
             grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             Grid labels = new Grid();
+            labels.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             labels.ColumnDefinitions.Add(new ColumnDefinition());
             labels.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             TextBlock name = NewText(title, 12, MediaColor.FromRgb(99, 112, 120),
-                FontWeights.Medium);
+                FontWeights.Normal, true);
             labels.Children.Add(name);
+            reset = NewText(String.Empty, 10.5, MediaColor.FromRgb(130, 145, 153),
+                FontWeights.Normal, true);
+            reset.Margin = new Thickness(6, 1, 6, 0);
+            reset.VerticalAlignment = VerticalAlignment.Center;
+            reset.Visibility = Visibility.Collapsed;
+            Grid.SetColumn(reset, 1);
+            labels.Children.Add(reset);
             value = NewText("暂无数据", 12, MediaColor.FromRgb(48, 60, 68),
-                FontWeights.SemiBold);
-            Grid.SetColumn(value, 1);
+                FontWeights.SemiBold, true);
+            value.HorizontalAlignment = HorizontalAlignment.Right;
+            Grid.SetColumn(value, 2);
             labels.Children.Add(value);
             grid.Children.Add(labels);
-            bar = new ProgressBar
+            bar = new RoundedMeter
             {
-                Height = 5,
-                Minimum = 0,
-                Maximum = 100,
-                Margin = new Thickness(0, 5, 0, 0),
-                Foreground = new SolidColorBrush(MediaColor.FromRgb(76, 178, 205)),
-                Background = new SolidColorBrush(MediaColor.FromArgb(110, 210, 218, 223)),
-                BorderThickness = new Thickness(0)
+                Height = 4,
+                Margin = new Thickness(0, 5, 0, 0)
             };
             Grid.SetRow(bar, 1);
             grid.Children.Add(bar);
             return grid;
         }
 
+        private static MediaBrush CreateFallbackGlassBrush()
+        {
+            System.Windows.Media.LinearGradientBrush brush =
+                new System.Windows.Media.LinearGradientBrush();
+            brush.StartPoint = new MediaPoint(0, 0);
+            brush.EndPoint = new MediaPoint(0, 1);
+            brush.GradientStops.Add(new GradientStop(
+                MediaColor.FromArgb(244, 255, 255, 255), 0));
+            brush.GradientStops.Add(new GradientStop(
+                MediaColor.FromArgb(235, 250, 252, 253), 0.58));
+            brush.GradientStops.Add(new GradientStop(
+                MediaColor.FromArgb(241, 255, 255, 255), 1));
+            return brush;
+        }
+
         private static TextBlock NewText(string text, double size, MediaColor color,
             FontWeight weight)
         {
-            return new TextBlock
+            return NewText(text, size, color, weight, false);
+        }
+
+        private static TextBlock NewText(string text, double size, MediaColor color,
+            FontWeight weight, bool chineseUi)
+        {
+            TextBlock block = new TextBlock
             {
                 Text = text,
-                FontFamily = new System.Windows.Media.FontFamily("Segoe UI Variable Text, Segoe UI"),
+                FontFamily = new System.Windows.Media.FontFamily(
+                    chineseUi ? "Microsoft YaHei UI" : "Segoe UI Variable Text"),
                 FontSize = size,
                 FontWeight = weight,
                 Foreground = new SolidColorBrush(color),
                 TextTrimming = TextTrimming.CharacterEllipsis
             };
+            block.Language = System.Windows.Markup.XmlLanguage.GetLanguage(
+                chineseUi ? "zh-CN" : "en-US");
+            TextOptions.SetTextFormattingMode(block, TextFormattingMode.Display);
+            TextOptions.SetTextRenderingMode(block, TextRenderingMode.Auto);
+            return block;
+        }
+    }
+
+    public sealed class Win11MenuColorTable : Forms.ProfessionalColorTable
+    {
+        public override DrawingColor MenuItemSelected
+        {
+            get { return DrawingColor.FromArgb(232, 242, 246); }
+        }
+
+        public override DrawingColor MenuItemBorder
+        {
+            get { return DrawingColor.Transparent; }
+        }
+
+        public override DrawingColor ToolStripDropDownBackground
+        {
+            get { return DrawingColor.FromArgb(250, 252, 253); }
+        }
+
+        public override DrawingColor ImageMarginGradientBegin
+        {
+            get { return ToolStripDropDownBackground; }
+        }
+
+        public override DrawingColor ImageMarginGradientMiddle
+        {
+            get { return ToolStripDropDownBackground; }
+        }
+
+        public override DrawingColor ImageMarginGradientEnd
+        {
+            get { return ToolStripDropDownBackground; }
+        }
+
+        public override DrawingColor SeparatorDark
+        {
+            get { return DrawingColor.FromArgb(223, 229, 232); }
+        }
+
+        public override DrawingColor SeparatorLight
+        {
+            get { return DrawingColor.Transparent; }
+        }
+    }
+
+    public sealed class Win11MenuRenderer : Forms.ToolStripProfessionalRenderer
+    {
+        private static readonly DrawingColor Surface =
+            DrawingColor.FromArgb(250, 252, 253);
+        private static readonly DrawingColor Hover =
+            DrawingColor.FromArgb(228, 240, 245);
+        private static readonly DrawingColor Text =
+            DrawingColor.FromArgb(42, 53, 60);
+        private static readonly DrawingColor Muted =
+            DrawingColor.FromArgb(102, 117, 126);
+        private static readonly DrawingColor Accent =
+            DrawingColor.FromArgb(48, 169, 205);
+
+        public Win11MenuRenderer() : base(new Win11MenuColorTable())
+        {
+            RoundedEdges = true;
+        }
+
+        protected override void OnRenderToolStripBackground(
+            Forms.ToolStripRenderEventArgs e)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using (GraphicsPath path = RoundedRectangle(
+                new System.Drawing.Rectangle(0, 0,
+                    Math.Max(1, e.ToolStrip.Width - 1),
+                    Math.Max(1, e.ToolStrip.Height - 1)), 10))
+            using (System.Drawing.Brush brush = new SolidBrush(Surface))
+            {
+                e.Graphics.FillPath(brush, path);
+            }
+        }
+
+        protected override void OnRenderToolStripBorder(
+            Forms.ToolStripRenderEventArgs e)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using (GraphicsPath path = RoundedRectangle(
+                new System.Drawing.Rectangle(0, 0,
+                    Math.Max(1, e.ToolStrip.Width - 1),
+                    Math.Max(1, e.ToolStrip.Height - 1)), 10))
+            using (System.Drawing.Pen pen = new System.Drawing.Pen(
+                DrawingColor.FromArgb(215, 222, 226)))
+            {
+                e.Graphics.DrawPath(pen, path);
+            }
+        }
+
+        protected override void OnRenderMenuItemBackground(
+            Forms.ToolStripItemRenderEventArgs e)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            DrawingColor color = e.Item.Selected ? Hover : DrawingColor.Transparent;
+            if (color.A == 0)
+            {
+                return;
+            }
+            System.Drawing.Rectangle bounds = new System.Drawing.Rectangle(
+                5, 2, Math.Max(1, e.Item.Width - 10), Math.Max(1, e.Item.Height - 4));
+            using (GraphicsPath path = RoundedRectangle(bounds, 7))
+            using (System.Drawing.Brush brush = new SolidBrush(color))
+            {
+                e.Graphics.FillPath(brush, path);
+            }
+        }
+
+        protected override void OnRenderItemText(Forms.ToolStripItemTextRenderEventArgs e)
+        {
+            e.TextColor = e.Item.Enabled ? Text : DrawingColor.FromArgb(155, 164, 169);
+            base.OnRenderItemText(e);
+        }
+
+        protected override void OnRenderItemCheck(
+            Forms.ToolStripItemImageRenderEventArgs e)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            float centerX = 15;
+            float centerY = e.Item.Height / 2.0f;
+            using (System.Drawing.Pen pen = new System.Drawing.Pen(Accent, 1.9f))
+            {
+                pen.StartCap = LineCap.Round;
+                pen.EndCap = LineCap.Round;
+                e.Graphics.DrawLines(pen, new[]
+                {
+                    new System.Drawing.PointF(centerX - 4.0f, centerY),
+                    new System.Drawing.PointF(centerX - 1.0f, centerY + 3.0f),
+                    new System.Drawing.PointF(centerX + 5.0f, centerY - 4.0f)
+                });
+            }
+        }
+
+        protected override void OnRenderArrow(Forms.ToolStripArrowRenderEventArgs e)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            float x = e.ArrowRectangle.Left + 3;
+            float y = e.ArrowRectangle.Top + e.ArrowRectangle.Height / 2.0f;
+            using (System.Drawing.Pen pen = new System.Drawing.Pen(Muted, 1.5f))
+            {
+                pen.StartCap = LineCap.Round;
+                pen.EndCap = LineCap.Round;
+                e.Graphics.DrawLines(pen, new[]
+                {
+                    new System.Drawing.PointF(x, y - 3),
+                    new System.Drawing.PointF(x + 3, y),
+                    new System.Drawing.PointF(x, y + 3)
+                });
+            }
+        }
+
+        protected override void OnRenderSeparator(
+            Forms.ToolStripSeparatorRenderEventArgs e)
+        {
+            int y = e.Item.Height / 2;
+            using (System.Drawing.Pen pen = new System.Drawing.Pen(
+                DrawingColor.FromArgb(224, 230, 233)))
+            {
+                e.Graphics.DrawLine(pen, 12, y, Math.Max(12, e.Item.Width - 12), y);
+            }
+        }
+
+        public static void Apply(Forms.ToolStripDropDown menu)
+        {
+            menu.Renderer = new Win11MenuRenderer();
+            menu.BackColor = Surface;
+            menu.ForeColor = Text;
+            menu.Font = new System.Drawing.Font("Microsoft YaHei UI", 9.5f,
+                System.Drawing.FontStyle.Regular, GraphicsUnit.Point);
+            menu.Padding = new Forms.Padding(6);
+            menu.DropShadowEnabled = true;
+            Forms.ToolStripDropDownMenu dropDownMenu =
+                menu as Forms.ToolStripDropDownMenu;
+            if (dropDownMenu != null)
+            {
+                dropDownMenu.ShowImageMargin = false;
+                dropDownMenu.ShowCheckMargin = true;
+            }
+            menu.Opened += delegate { ApplyRoundedRegion(menu); };
+            menu.SizeChanged += delegate { ApplyRoundedRegion(menu); };
+            foreach (Forms.ToolStripItem item in menu.Items)
+            {
+                Forms.ToolStripSeparator separator = item as Forms.ToolStripSeparator;
+                if (separator != null)
+                {
+                    separator.AutoSize = false;
+                    separator.Height = 9;
+                    continue;
+                }
+                item.Padding = new Forms.Padding(8, 6, 8, 6);
+                item.Margin = new Forms.Padding(0);
+                Forms.ToolStripMenuItem menuItem = item as Forms.ToolStripMenuItem;
+                if (menuItem != null && menuItem.HasDropDownItems)
+                {
+                    Apply(menuItem.DropDown);
+                }
+            }
+            ApplyRoundedRegion(menu);
+        }
+
+        private static void ApplyRoundedRegion(Forms.ToolStripDropDown menu)
+        {
+            if (menu.Width <= 0 || menu.Height <= 0)
+            {
+                return;
+            }
+            using (GraphicsPath path = RoundedRectangle(
+                new System.Drawing.Rectangle(0, 0, menu.Width, menu.Height), 10))
+            {
+                Region previous = menu.Region;
+                menu.Region = new Region(path);
+                if (previous != null)
+                {
+                    previous.Dispose();
+                }
+            }
+        }
+
+        private static GraphicsPath RoundedRectangle(
+            System.Drawing.Rectangle bounds, int radius)
+        {
+            GraphicsPath path = new GraphicsPath();
+            int diameter = Math.Max(2, radius * 2);
+            System.Drawing.Rectangle arc = new System.Drawing.Rectangle(
+                bounds.X, bounds.Y, diameter, diameter);
+            path.AddArc(arc, 180, 90);
+            arc.X = bounds.Right - diameter;
+            path.AddArc(arc, 270, 90);
+            arc.Y = bounds.Bottom - diameter;
+            path.AddArc(arc, 0, 90);
+            arc.X = bounds.Left;
+            path.AddArc(arc, 90, 90);
+            path.CloseFigure();
+            return path;
         }
     }
 
     public sealed class HaloWindow : Window
     {
         private const double HaloSize = 112;
-        private static readonly int[] HaloScalePresets = { 75, 100, 125, 150 };
+        private static readonly int[] HaloScalePresets = { 75, 100, 125 };
         private readonly HaloSettings settings;
         private readonly CodexSessionMonitor monitor;
         private readonly HaloVisual visual;
@@ -2737,7 +3291,16 @@ namespace CodexHalo
 
             visual = new HaloVisual();
             Grid hitSurface = new Grid();
-            hitSurface.Background = new SolidColorBrush(MediaColor.FromArgb(1, 0, 0, 0));
+            hitSurface.Background = System.Windows.Media.Brushes.Transparent;
+            Border centerHitSurface = new Border();
+            centerHitSurface.Width = 64;
+            centerHitSurface.Height = 64;
+            centerHitSurface.CornerRadius = new CornerRadius(32);
+            centerHitSurface.HorizontalAlignment = HorizontalAlignment.Center;
+            centerHitSurface.VerticalAlignment = VerticalAlignment.Center;
+            centerHitSurface.Background = new SolidColorBrush(
+                MediaColor.FromArgb(1, 255, 255, 255));
+            hitSurface.Children.Add(centerHitSurface);
             hitSurface.Children.Add(visual);
             Content = hitSurface;
             details = new DetailsWindow();
@@ -3270,7 +3833,6 @@ namespace CodexHalo
         private void BuildTrayMenu()
         {
             Forms.ContextMenuStrip menu = new Forms.ContextMenuStrip();
-            menu.RenderMode = Forms.ToolStripRenderMode.System;
             menu.Items.Add("确认已完成任务", null, delegate
             {
                 Dispatcher.BeginInvoke(new Action(AcknowledgeCompleted));
@@ -3374,6 +3936,7 @@ namespace CodexHalo
             {
                 Dispatcher.BeginInvoke(new Action(Close));
             });
+            Win11MenuRenderer.Apply(menu);
             tray.ContextMenuStrip = menu;
         }
 
@@ -3608,7 +4171,7 @@ namespace CodexHalo
                 Assert(!tracker.Snapshot.Active, "task complete deactivates session");
                 Assert(GeneratedHaloSpec.ContractVersion == 2,
                     "generated shared contract version");
-                Assert(GeneratedHaloSpec.ReleaseVersion == "0.12.0",
+                Assert(GeneratedHaloSpec.ReleaseVersion == "0.13.0",
                     "generated shared release version");
                 Assert(GeneratedHaloSpec.State(HaloState.Attention).Label == "NEEDS YOU",
                     "generated state labels");
@@ -3661,13 +4224,43 @@ namespace CodexHalo
                     "100 percent halo size");
                 Assert(Math.Abs(HaloWindow.DiagnosticSizeForScale(125) - 140) < 0.001,
                     "125 percent halo size");
-                Assert(Math.Abs(HaloWindow.DiagnosticSizeForScale(150) - 168) < 0.001,
-                    "150 percent halo size");
+                Assert(Math.Abs(HaloWindow.DiagnosticSizeForScale(150) - 112) < 0.001,
+                    "removed 150 percent size falls back to 100 percent");
                 Assert(Math.Abs(HaloWindow.DiagnosticSizeForScale(99) - 112) < 0.001,
                     "invalid halo size falls back to 100 percent");
+                MediaColor workingBlue = HaloVisual.StateColor(HaloState.Working);
+                MediaColor completedGreen = HaloVisual.StateColor(HaloState.Done);
+                Assert(ColorSaturation(workingBlue) >=
+                    ColorSaturation(completedGreen) - 0.02,
+                    "Windows execution blue matches completed green saturation");
+                using (Forms.ContextMenuStrip menu = new Forms.ContextMenuStrip())
+                {
+                    Forms.ToolStripMenuItem checkedItem =
+                        new Forms.ToolStripMenuItem("始终置顶");
+                    checkedItem.Checked = true;
+                    menu.Items.Add(checkedItem);
+                    Win11MenuRenderer.Apply(menu);
+                    Assert(menu.Renderer is Win11MenuRenderer,
+                        "Windows 11 menu renderer is applied");
+                    Assert(checkedItem.Padding.Left == 8 &&
+                        checkedItem.Padding.Top == 6,
+                        "Windows 11 menu items use compact inset padding");
+                }
+                UsageMetrics usage = new UsageMetrics
+                {
+                    ContextInputTokens = 202600,
+                    ContextWindowTokens = 258400
+                };
+                Assert(Math.Abs(usage.ContextUsedPercent - 78.405) < 0.01,
+                    "context uses latest input tokens rather than cumulative usage");
+                DateTime localReset = DateTime.Today.AddHours(14).AddMinutes(58);
+                Assert(DetailsWindow.FormatResetTime(localReset.ToUniversalTime()) ==
+                    "14:58 刷新", "same-day quota reset formatting");
+                Assert(String.IsNullOrEmpty(DetailsWindow.FormatResetTime(
+                    DateTime.MinValue)), "missing reset time stays hidden");
                 File.Delete(temp);
                 File.WriteAllText(outputPath,
-                    "PASS\nCodex lifecycle reducer, incremental reader, and gap bounds passed.\n",
+                    "PASS\nLifecycle, usage metrics, panel formatting, and animation checks passed.\n",
                     Encoding.UTF8);
                 return 0;
             }
@@ -3717,6 +4310,13 @@ namespace CodexHalo
             }
         }
 
+        private static double ColorSaturation(MediaColor color)
+        {
+            double maximum = Math.Max(color.R, Math.Max(color.G, color.B));
+            double minimum = Math.Min(color.R, Math.Min(color.G, color.B));
+            return maximum <= 0 ? 0 : (maximum - minimum) / maximum;
+        }
+
         public static int RenderStates(string outputDirectory)
         {
             try
@@ -3762,6 +4362,7 @@ namespace CodexHalo
                     }
                 }
                 RenderPanelPreview(outputDirectory);
+                RenderMenuPreview(outputDirectory);
                 RenderRingBackdropPreview(outputDirectory);
                 RenderPeakBrightnessComparison(outputDirectory);
                 RenderSizePresetComparison(outputDirectory);
@@ -3849,6 +4450,18 @@ namespace CodexHalo
             };
 
             DetailsWindow panel = new DetailsWindow();
+            panel.SetPreviewMetrics(new UsageMetrics
+            {
+                HasPrimary = true,
+                HasSecondary = true,
+                PrimaryUsedPercent = 47,
+                SecondaryUsedPercent = 76,
+                PrimaryResetUtc = DateTime.Today.AddHours(14).AddMinutes(58).ToUniversalTime(),
+                SecondaryResetUtc = DateTime.Today.AddDays(3).AddHours(9)
+                    .AddMinutes(36).ToUniversalTime(),
+                ContextInputTokens = 202600,
+                ContextWindowTokens = 258400
+            });
             panel.UpdateContent(aggregate, sessions);
             FrameworkElement panelContent = panel.Content as FrameworkElement;
             panel.Content = null;
@@ -3875,6 +4488,52 @@ namespace CodexHalo
                 encoder.Save(stream);
             }
             panel.Close();
+        }
+
+        private static void RenderMenuPreview(string outputDirectory)
+        {
+            using (Forms.ContextMenuStrip menu = new Forms.ContextMenuStrip())
+            {
+                menu.Items.Add("确认已完成任务");
+                menu.Items.Add(new Forms.ToolStripSeparator());
+                Forms.ToolStripMenuItem topmost =
+                    new Forms.ToolStripMenuItem("始终置顶");
+                topmost.Checked = true;
+                menu.Items.Add(topmost);
+                menu.Items.Add("开机自动启动");
+                Forms.ToolStripMenuItem size =
+                    new Forms.ToolStripMenuItem("光环大小");
+                size.DropDownItems.Add("75%");
+                Forms.ToolStripMenuItem current =
+                    new Forms.ToolStripMenuItem("100%");
+                current.Checked = true;
+                size.DropDownItems.Add(current);
+                size.DropDownItems.Add("125%");
+                menu.Items.Add(size);
+                menu.Items.Add(new Forms.ToolStripSeparator());
+                menu.Items.Add("退出 Agent Halo");
+                Win11MenuRenderer.Apply(menu);
+                menu.CreateControl();
+                System.Drawing.Size preferred = menu.GetPreferredSize(
+                    new System.Drawing.Size(250, 0));
+                menu.Size = preferred;
+                menu.PerformLayout();
+                using (Bitmap menuBitmap = new Bitmap(menu.Width, menu.Height,
+                    System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                {
+                    menu.DrawToBitmap(menuBitmap,
+                        new System.Drawing.Rectangle(0, 0, menu.Width, menu.Height));
+                    using (Bitmap stage = new Bitmap(menu.Width + 48, menu.Height + 48,
+                        System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                    using (Graphics graphics = Graphics.FromImage(stage))
+                    {
+                        graphics.Clear(DrawingColor.FromArgb(239, 242, 244));
+                        graphics.DrawImageUnscaled(menuBitmap, 24, 24);
+                        stage.Save(Path.Combine(outputDirectory, "menu-win11.png"),
+                            System.Drawing.Imaging.ImageFormat.Png);
+                    }
+                }
+            }
         }
 
         private static void RenderGapMotionStrip(string outputDirectory,
@@ -4094,7 +4753,7 @@ namespace CodexHalo
 
         private static void RenderSizePresetComparison(string outputDirectory)
         {
-            int[] percents = { 75, 100, 125, 150 };
+            int[] percents = { 75, 100, 125 };
             const double cellSize = 190;
             Grid strip = new Grid();
             strip.Width = cellSize * percents.Length;

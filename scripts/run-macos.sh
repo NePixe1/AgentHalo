@@ -7,7 +7,7 @@ bundle_name="AgentHalo.app"
 bundle_id="local.agenthalo.mac"
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-build_script="$root_dir/mac/scripts/build-macos.sh"
+build_script="$root_dir/scripts/build-macos.sh"
 app_bundle="$root_dir/outputs/AgentHalo-macOS/$bundle_name"
 app_binary="$app_bundle/Contents/MacOS/$app_name"
 
@@ -20,7 +20,7 @@ stop_running_app() {
 }
 
 build_app() {
-  "$build_script"
+  bash "$build_script"
 }
 
 open_app() {
@@ -51,7 +51,7 @@ case "$mode" in
     pgrep -x "$app_name" >/dev/null
     diag_dir="$root_dir/outputs/AgentHalo-macOS/diagnostics"
     mkdir -p "$diag_dir"
-    (cd "$root_dir/mac" && swift run AgentHaloDiagnostics --snapshot "$diag_dir/snapshot.txt")
+    (cd "$root_dir/src/macos" && swift run AgentHaloDiagnostics --snapshot "$diag_dir/snapshot.txt")
     test -s "$diag_dir/snapshot.txt"
     echo "Verified $app_name is running from $app_bundle"
     ;;

@@ -1,6 +1,8 @@
 $ErrorActionPreference = "Stop"
 
-$root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$scripts = Split-Path -Parent $MyInvocation.MyCommand.Path
+$root = Split-Path -Parent $scripts
+$windows = Join-Path $root "src\windows"
 $output = Join-Path $root "outputs\AgentHalo"
 $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 
@@ -11,11 +13,11 @@ if (-not (Test-Path -LiteralPath $csc)) {
 New-Item -ItemType Directory -Force -Path $output | Out-Null
 
 $sqliteVersion = "3530200"
-$sqliteExe = Join-Path $root "tools\sqlite3.exe"
+$cacheRoot = Join-Path $env:LOCALAPPDATA "AgentHalo\build-cache"
+$sqliteExe = Join-Path $cacheRoot "sqlite3-$sqliteVersion.exe"
 if (-not (Test-Path -LiteralPath $sqliteExe)) {
-    $tools = Split-Path -Parent $sqliteExe
     $zip = Join-Path $env:TEMP "sqlite-tools-win-x64-$sqliteVersion.zip"
-    New-Item -ItemType Directory -Force -Path $tools | Out-Null
+    New-Item -ItemType Directory -Force -Path $cacheRoot | Out-Null
     Invoke-WebRequest "https://sqlite.org/2026/sqlite-tools-win-x64-$sqliteVersion.zip" `
         -OutFile $zip
     $extract = Join-Path $env:TEMP "agenthalo-sqlite-$sqliteVersion"
@@ -40,7 +42,7 @@ $references = @(
     (Join-Path $framework "System.Xaml.dll")
 )
 
-$iconPath = Join-Path $root "AgentHalo.ico"
+$iconPath = Join-Path $env:TEMP "AgentHalo-build.ico"
 Add-Type -AssemblyName System.Drawing
 $bitmap = New-Object System.Drawing.Bitmap 64, 64
 $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
@@ -69,8 +71,8 @@ $referenceArgs = $references | ForEach-Object { "/reference:$_" }
 $exe = Join-Path $output "AgentHalo.exe"
 
 & $csc /nologo /target:winexe /platform:anycpu /optimize+ `
-    /out:$exe /win32manifest:"$root\app.manifest" /win32icon:$iconPath `
-    $referenceArgs "$root\windows\GeneratedHaloSpec.cs" "$root\Program.cs"
+    /out:$exe /win32manifest:"$windows\app.manifest" /win32icon:$iconPath `
+    $referenceArgs "$windows\GeneratedHaloSpec.cs" "$windows\Program.cs"
 
 if ($LASTEXITCODE -ne 0) {
     throw "Compilation failed with exit code $LASTEXITCODE"
@@ -85,7 +87,7 @@ $hashLine = "$hash  AgentHalo.exe"
 Set-Content -LiteralPath (Join-Path $output "SHA256.txt") -Value $hashLine `
     -Encoding ascii -NoNewline
 
-$archive = Join-Path (Split-Path -Parent $output) "AgentHalo-Windows-v0.12.0.zip"
+$archive = Join-Path (Split-Path -Parent $output) "AgentHalo-Windows-v0.13.0.zip"
 Remove-Item -LiteralPath $archive -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $output "*") -DestinationPath $archive `
     -CompressionLevel Optimal

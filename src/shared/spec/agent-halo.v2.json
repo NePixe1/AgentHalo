@@ -1,6 +1,6 @@
 {
   "contractVersion": 2,
-  "releaseVersion": "0.12.0",
+  "releaseVersion": "0.13.0",
   "algorithms": {
     "breath": "livingBreathV1",
     "attentionPulse": "attentionDoublePulseV1",

@@ -83,7 +83,7 @@ def read_path(document: dict, path: list[str]):
 def reduce_lifecycle(spec: dict) -> list[str]:
     result = ["idle"]
     rules = spec["eventRules"]
-    for raw in (ROOT / "shared" / "fixtures" / "lifecycle-basic.jsonl").read_text(
+    for raw in (ROOT / "src" / "shared" / "fixtures" / "lifecycle-basic.jsonl").read_text(
         encoding="utf-8"
     ).splitlines():
         root = json.loads(raw)
@@ -111,14 +111,14 @@ def main() -> int:
     validate(spec)
 
     expected_lifecycle = json.loads(
-        (ROOT / "shared" / "expected" / "lifecycle-basic.json").read_text(encoding="utf-8")
+        (ROOT / "src" / "shared" / "expected" / "lifecycle-basic.json").read_text(encoding="utf-8")
     )
     actual_sequence = reduce_lifecycle(spec)
     if actual_sequence != expected_lifecycle["sequence"]:
         raise AssertionError(f"lifecycle mismatch: {actual_sequence}")
 
     failures = json.loads(
-        (ROOT / "shared" / "fixtures" / "failure-cases.json").read_text(encoding="utf-8")
+        (ROOT / "src" / "shared" / "fixtures" / "failure-cases.json").read_text(encoding="utf-8")
     )
     for case in failures:
         actual = classify_failure(case["input"], spec["failureRules"])
@@ -126,7 +126,7 @@ def main() -> int:
             raise AssertionError(f"failure case mismatch: {case['input']!r} -> {actual!r}")
 
     rate_cases = json.loads(
-        (ROOT / "shared" / "fixtures" / "rate-limit-cases.json").read_text(encoding="utf-8")
+        (ROOT / "src" / "shared" / "fixtures" / "rate-limit-cases.json").read_text(encoding="utf-8")
     )
     rate = spec["rateLimit"]
     for case in rate_cases:
@@ -150,7 +150,7 @@ def main() -> int:
             raise AssertionError(f"rate case mismatch: {case['name']} -> {actual!r}")
 
     expected_animation = json.loads(
-        (ROOT / "shared" / "expected" / "animation-samples.json").read_text(encoding="utf-8")
+        (ROOT / "src" / "shared" / "expected" / "animation-samples.json").read_text(encoding="utf-8")
     )
     tolerance = expected_animation["tolerance"]
     for sample in expected_animation["samples"]:
