@@ -10,10 +10,11 @@ obj/
 *.suo
 outputs/
 .build/
+.DS_Store
 
 # python
 __pycache__/
 *.pyc
 
 # agent
-.codex/environments/environment.toml
+.codex/environments/
