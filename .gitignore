@@ -1,5 +1,4 @@
 CodexHalo.ico
-AgentHalo.ico
 *.txt
 *renders*/
 *-package-*/
@@ -10,6 +9,6 @@ obj/
 *.user
 *.suo
 outputs/
-mac/.build/
+src/macos/.build/
 __pycache__/
 *.pyc

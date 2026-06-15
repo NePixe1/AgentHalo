@@ -27,8 +27,8 @@ against `spec/agent-halo.v2.schema.json`.
 
 Generated outputs are committed:
 
-- `windows/GeneratedHaloSpec.cs`
-- `mac/Sources/AgentHaloCore/GeneratedHaloSpec.swift`
+- `src/windows/GeneratedHaloSpec.cs`
+- `src/macos/Sources/AgentHaloCore/GeneratedHaloSpec.swift`
 
 Do not edit generated files by hand. Both applications compile the generated source
 and do not read the JSON contract at runtime.
