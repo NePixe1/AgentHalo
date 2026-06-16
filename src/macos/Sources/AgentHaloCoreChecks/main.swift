@@ -320,6 +320,21 @@ func testRateLimitReaderFindsNewestTailRateLimit() throws {
     expect(snapshot, RateLimitSnapshot(primaryUsedPercent: 25, secondaryUsedPercent: 80), "rate limit")
 }
 
+func testRateLimitReaderFindsContextUsageAndResetTimes() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-usage-\(UUID().uuidString)", isDirectory: true)
+    let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+    try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+    let file = sessions.appendingPathComponent("usage.jsonl")
+    let line = #"{"type":"event_msg","payload":{"info":{"rate_limits":{"primary":{"used_percent":47,"resets_at":1781765880},"secondary":{"used_percent":76,"resets_at":1781938560}},"last_token_usage":{"input_tokens":202600},"model_context_window":258400}}}"#
+    try Data((line + "\n").utf8).write(to: file)
+
+    let snapshot = RateLimitReader(roots: [sessions]).read()
+    expect(snapshot?.primaryResetAt, Date(timeIntervalSince1970: 1_781_765_880), "primary reset time")
+    expect(snapshot?.secondaryResetAt, Date(timeIntervalSince1970: 1_781_938_560), "secondary reset time")
+    expectAlmost(snapshot?.contextUsedPercent ?? 0, 78.405, tolerance: 0.01, "context usage")
+}
+
 func testAggregatorInjectsUnacknowledgedCodexFailureWhenIdle() {
     let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
     let failure = CodexFailure(detail: "认证已失效", eventAt: now)
@@ -436,6 +451,11 @@ testAggregatorHidesAcknowledgedErrorsAndShowsStandbyInput()
 testFailureClassification()
 do {
     try testRateLimitReaderFindsNewestTailRateLimit()
+} catch {
+    fatalError("\(error)")
+}
+do {
+    try testRateLimitReaderFindsContextUsageAndResetTimes()
 } catch {
     fatalError("\(error)")
 }

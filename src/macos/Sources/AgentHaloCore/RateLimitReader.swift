@@ -33,7 +33,13 @@ public struct RateLimitReader: @unchecked Sendable {
                       let secondaryUsed = Self.number(secondary[GeneratedHaloSpec.rateUsedPercentKey]) else {
                     continue
                 }
-                return RateLimitSnapshot(primaryUsedPercent: primaryUsed, secondaryUsedPercent: secondaryUsed)
+                return RateLimitSnapshot(
+                    primaryUsedPercent: primaryUsed,
+                    secondaryUsedPercent: secondaryUsed,
+                    primaryResetAt: Self.unixTime(primary["resets_at"]),
+                    secondaryResetAt: Self.unixTime(secondary["resets_at"]),
+                    contextUsedPercent: Self.contextUsedPercent(info: info)
+                )
             }
         }
         return nil
@@ -81,8 +87,27 @@ public struct RateLimitReader: @unchecked Sendable {
     private static func number(_ value: Any?) -> Double? {
         if let double = value as? Double { return double }
         if let int = value as? Int { return Double(int) }
+        if let number = value as? NSNumber { return number.doubleValue }
         if let string = value as? String { return Double(string) }
         return nil
+    }
+
+    private static func unixTime(_ value: Any?) -> Date? {
+        guard let seconds = number(value), seconds > 0 else {
+            return nil
+        }
+        return Date(timeIntervalSince1970: seconds)
+    }
+
+    private static func contextUsedPercent(info: [String: Any]?) -> Double? {
+        guard let info,
+              let usage = info["last_token_usage"] as? [String: Any],
+              let inputTokens = number(usage["input_tokens"]),
+              let contextWindow = number(info["model_context_window"]),
+              contextWindow > 0 else {
+            return nil
+        }
+        return min(100, max(0, inputTokens * 100 / contextWindow))
     }
 
     private func modificationDate(_ url: URL) -> Date {

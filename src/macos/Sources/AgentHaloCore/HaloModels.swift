@@ -48,10 +48,22 @@ public struct AggregateSnapshot: Equatable, Sendable {
 public struct RateLimitSnapshot: Equatable, Sendable {
     public var primaryUsedPercent: Double
     public var secondaryUsedPercent: Double
+    public var primaryResetAt: Date?
+    public var secondaryResetAt: Date?
+    public var contextUsedPercent: Double?
 
-    public init(primaryUsedPercent: Double, secondaryUsedPercent: Double) {
+    public init(
+        primaryUsedPercent: Double,
+        secondaryUsedPercent: Double,
+        primaryResetAt: Date? = nil,
+        secondaryResetAt: Date? = nil,
+        contextUsedPercent: Double? = nil
+    ) {
         self.primaryUsedPercent = primaryUsedPercent
         self.secondaryUsedPercent = secondaryUsedPercent
+        self.primaryResetAt = primaryResetAt
+        self.secondaryResetAt = secondaryResetAt
+        self.contextUsedPercent = contextUsedPercent
     }
 }
 
