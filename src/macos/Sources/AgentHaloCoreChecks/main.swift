@@ -23,6 +23,7 @@ func testReducesPlanningWorkingAttentionErrorAndCompleteEvents() {
     expect(reducer.snapshot.state, .thinking, "task_started state")
     expect(reducer.snapshot.action, "Planning", "task_started action")
     expect(reducer.snapshot.active, "task_started should be active")
+    expect(reducer.snapshot.agent, .codex, "Codex reducer should stamp Codex agent")
 
     reducer.consume(jsonLine: #"{"timestamp":"2026-06-13T01:00:02Z","type":"response_item","payload":{"type":"function_call","name":"shell_command"}}"#)
     expect(reducer.snapshot.state, .working, "function_call state")
@@ -311,6 +312,7 @@ func testMonitorHandlesPendingLinesAndTruncation() throws {
     }
     _ = monitor.refresh(now: now.addingTimeInterval(1))
     expect(monitor.snapshots().first?.state == .thinking, "completed pending line should parse")
+    expect(monitor.snapshots().first?.agent, .codex, "Codex monitor snapshots should carry Codex agent")
 
     try Data(#"{"timestamp":"2026-06-13T02:00:02Z","type":"event_msg","payload":{"type":"task_complete"}}"#.utf8).write(to: file)
     _ = monitor.refresh(now: now.addingTimeInterval(2))
@@ -441,6 +443,7 @@ func testClaudeReducerMapsTranscriptEvents() {
     expect(reducer.snapshot.state, .thinking, "Claude prompt state")
     expect(reducer.snapshot.action, "Thinking", "Claude prompt action")
     expect(reducer.snapshot.active, "Claude prompt should be active")
+    expect(reducer.snapshot.agent, .claudeCode, "Claude reducer should stamp Claude Code agent")
 
     reducer.consume(jsonLine: #"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"swift build"}}]},"uuid":"assistant-1","timestamp":"2026-06-13T02:00:01Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"claude-thread"}"#, now: now.addingTimeInterval(1))
     expect(reducer.snapshot.state, .working, "Claude tool use state")
@@ -481,6 +484,7 @@ func testClaudeMonitorHandlesDiscoveryPendingLinesAndTruncation() throws {
     _ = monitor.refresh(now: now.addingTimeInterval(1))
     expect(monitor.snapshots().first?.state == .thinking, "Claude completed pending line should parse")
     expect(monitor.snapshots().first?.projectName, "AgentHalo", "Claude monitor project name")
+    expect(monitor.snapshots().first?.agent, .claudeCode, "Claude monitor snapshots should carry Claude Code agent")
 
     try Data(#"{"type":"system","subtype":"turn_duration","durationMs":3000,"timestamp":"2026-06-13T02:00:02Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"claude-monitor"}"#.utf8).write(to: file)
     _ = monitor.refresh(now: now.addingTimeInterval(2))

@@ -15,7 +15,8 @@ public struct SessionReducer: Sendable {
             action: "Ready",
             lastEventAt: now,
             completedAt: nil,
-            active: false
+            active: false,
+            agent: .codex
         )
         self.liveTracking = liveTracking
     }
