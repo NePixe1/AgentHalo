@@ -104,8 +104,8 @@
     "taskCompleteExact": ["task_complete"],
     "attentionContains": ["approval", "request_user", "needs_input"],
     "fatalExact": ["turn_aborted", "turn_failed", "task_failed", "task_cancelled", "task_interrupted", "fatal_error"],
-    "toolOutputExact": ["function_call_output", "tool_search_output"],
-    "toolCallExact": ["web_search_call", "tool_search_call"]
+    "toolOutputExact": ["function_call_output", "custom_tool_call_output", "tool_search_output"],
+    "toolCallExact": ["custom_tool_call", "web_search_call", "tool_search_call"]
   },
   "actionRules": [
     {"containsAny": ["shell", "command"], "label": "Running command"},
