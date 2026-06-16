@@ -556,7 +556,7 @@ namespace CodexHalo
         private void ReduceResponse(string payloadType, Dictionary<string, object> payload, DateTime eventUtc)
         {
             string lower = (payloadType ?? String.Empty).ToLowerInvariant();
-            if (lower == "function_call")
+            if (lower == "function_call" || lower == "custom_tool_call")
             {
                 string name = GetString(payload, "name");
                 Snapshot.Active = true;
@@ -665,8 +665,16 @@ namespace CodexHalo
     {
         private readonly string root;
         private readonly Dictionary<string, SessionTracker> trackers;
-        private readonly DispatcherTimer timer;
+        private readonly CodexRealtimeActivityReader realtimeActivity;
+        private readonly System.Threading.Timer timer;
+        private readonly Dispatcher dispatcher;
+        private readonly object sync;
         private DateTime lastDiscoveryUtc;
+        private DateTime nextRealtimePollUtc;
+        private HaloState realtimeState;
+        private string realtimeAction;
+        private bool hasRealtimeActivity;
+        private int pollInProgress;
 
         public event EventHandler Changed;
 
@@ -675,39 +683,81 @@ namespace CodexHalo
             root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                 ".codex", "sessions");
             trackers = new Dictionary<string, SessionTracker>(StringComparer.OrdinalIgnoreCase);
-            timer = new DispatcherTimer(DispatcherPriority.Background);
-            timer.Interval = TimeSpan.FromMilliseconds(220);
-            timer.Tick += OnTick;
+            realtimeActivity = new CodexRealtimeActivityReader();
+            realtimeAction = String.Empty;
+            dispatcher = Dispatcher.CurrentDispatcher;
+            sync = new object();
+            timer = new System.Threading.Timer(OnTick, null,
+                Timeout.Infinite, Timeout.Infinite);
         }
 
         public void Start()
         {
-            Discover();
-            timer.Start();
+            timer.Change(0, 220);
         }
 
         public void Stop()
         {
-            timer.Stop();
+            timer.Change(Timeout.Infinite, Timeout.Infinite);
         }
 
-        private void OnTick(object sender, EventArgs e)
+        private void OnTick(object state)
         {
-            bool changed = false;
-            if ((DateTime.UtcNow - lastDiscoveryUtc).TotalSeconds >= 2)
+            if (Interlocked.Exchange(ref pollInProgress, 1) != 0)
             {
-                changed = Discover();
+                return;
             }
-            foreach (SessionTracker tracker in trackers.Values.ToList())
+            bool changed = false;
+            try
             {
-                if (File.Exists(tracker.FilePath) && tracker.Refresh())
+                lock (sync)
                 {
-                    changed = true;
+                    if ((DateTime.UtcNow - lastDiscoveryUtc).TotalSeconds >= 2)
+                    {
+                        changed = Discover();
+                    }
+                    foreach (SessionTracker tracker in trackers.Values.ToList())
+                    {
+                        if (File.Exists(tracker.FilePath) && tracker.Refresh())
+                        {
+                            changed = true;
+                        }
+                    }
+                    if (DateTime.UtcNow >= nextRealtimePollUtc)
+                    {
+                        nextRealtimePollUtc = DateTime.UtcNow.AddMilliseconds(300);
+                        HaloState activeState;
+                        string activeAction;
+                        bool active = realtimeActivity.TryReadActive(out activeState,
+                            out activeAction);
+                        if (active != hasRealtimeActivity ||
+                            activeState != realtimeState ||
+                            !String.Equals(activeAction, realtimeAction,
+                                StringComparison.Ordinal))
+                        {
+                            hasRealtimeActivity = active;
+                            realtimeState = activeState;
+                            realtimeAction = activeAction ?? String.Empty;
+                            changed = true;
+                        }
+                    }
                 }
+            }
+            finally
+            {
+                Interlocked.Exchange(ref pollInProgress, 0);
             }
             if (changed && Changed != null)
             {
-                Changed(this, EventArgs.Empty);
+                dispatcher.BeginInvoke(DispatcherPriority.Background,
+                    new Action(delegate
+                    {
+                        EventHandler handler = Changed;
+                        if (handler != null)
+                        {
+                            handler(this, EventArgs.Empty);
+                        }
+                    }));
             }
         }
 
@@ -762,9 +812,14 @@ namespace CodexHalo
 
         public AggregateSnapshot GetAggregate(HaloSettings settings)
         {
-            DateTime now = DateTime.UtcNow;
-            List<SessionSnapshot> sessions = trackers.Values
-                .Select(delegate(SessionTracker tracker) { return tracker.Snapshot; })
+            lock (sync)
+            {
+                DateTime now = DateTime.UtcNow;
+                List<SessionSnapshot> sessions = trackers.Values
+                .Select(delegate(SessionTracker tracker)
+                {
+                    return CloneSnapshot(tracker.Snapshot);
+                })
                 .Where(delegate(SessionSnapshot snapshot)
                 {
                     if (snapshot.State == HaloState.Done)
@@ -781,35 +836,56 @@ namespace CodexHalo
                 .ThenByDescending(delegate(SessionSnapshot snapshot) { return snapshot.LastEventUtc; })
                 .ToList();
 
-            AggregateSnapshot result = new AggregateSnapshot();
-            result.Sessions = sessions;
-            if (settings.Paused)
-            {
-                result.State = HaloState.Idle;
-                result.Label = "PAUSED";
-                result.Detail = "Monitoring paused";
-                return result;
-            }
-            if (sessions.Count == 0)
-            {
-                result.State = HaloState.Idle;
-                result.Label = "READY";
-                result.Detail = "Codex is standing by";
-                return result;
-            }
+                AggregateSnapshot result = new AggregateSnapshot();
+                result.Sessions = sessions;
+                if (settings.Paused)
+                {
+                    result.State = HaloState.Idle;
+                    result.Label = "PAUSED";
+                    result.Detail = "Monitoring paused";
+                    return result;
+                }
+                bool hasBlockingState = sessions.Any(delegate(SessionSnapshot snapshot)
+                {
+                    return snapshot.State == HaloState.Error ||
+                        snapshot.State == HaloState.Attention;
+                });
+                if (hasRealtimeActivity && !hasBlockingState)
+                {
+                    SessionSnapshot current = sessions.FirstOrDefault();
+                    result.State = realtimeState;
+                    result.Label = StateLabel(realtimeState);
+                    result.Detail = (current == null ? "Codex" : current.ProjectName) +
+                        " · " + realtimeAction;
+                    return result;
+                }
+                if (sessions.Count == 0)
+                {
+                    result.State = HaloState.Idle;
+                    result.Label = "READY";
+                    result.Detail = "Codex is standing by";
+                    return result;
+                }
 
-            SessionSnapshot primary = sessions[0];
-            result.State = primary.State;
-            result.Label = StateLabel(primary.State);
-            result.Detail = sessions.Count == 1
-                ? primary.ProjectName + " · " + primary.Action
-                : primary.ProjectName + " +" + (sessions.Count - 1).ToString(CultureInfo.InvariantCulture);
-            return result;
+                SessionSnapshot primary = sessions[0];
+                result.State = primary.State;
+                result.Label = StateLabel(primary.State);
+                result.Detail = sessions.Count == 1
+                    ? primary.ProjectName + " · " + primary.Action
+                    : primary.ProjectName + " +" +
+                        (sessions.Count - 1).ToString(CultureInfo.InvariantCulture);
+                return result;
+            }
         }
 
         public List<SessionSnapshot> GetAllRecent()
         {
-            return trackers.Values.Select(delegate(SessionTracker tracker) { return tracker.Snapshot; })
+            lock (sync)
+            {
+                return trackers.Values.Select(delegate(SessionTracker tracker)
+                {
+                    return CloneSnapshot(tracker.Snapshot);
+                })
                 .Where(delegate(SessionSnapshot snapshot)
                 {
                     return snapshot.LastEventUtc >= DateTime.UtcNow.AddHours(-24);
@@ -818,6 +894,22 @@ namespace CodexHalo
                 .ThenByDescending(delegate(SessionSnapshot snapshot) { return snapshot.LastEventUtc; })
                 .Take(8)
                 .ToList();
+            }
+        }
+
+        private static SessionSnapshot CloneSnapshot(SessionSnapshot snapshot)
+        {
+            return new SessionSnapshot
+            {
+                ThreadId = snapshot.ThreadId,
+                ProjectName = snapshot.ProjectName,
+                WorkingDirectory = snapshot.WorkingDirectory,
+                State = snapshot.State,
+                Action = snapshot.Action,
+                LastEventUtc = snapshot.LastEventUtc,
+                CompletedUtc = snapshot.CompletedUtc,
+                Active = snapshot.Active
+            };
         }
 
         public static int StatePriority(HaloState state)
@@ -832,7 +924,7 @@ namespace CodexHalo
 
         public void Dispose()
         {
-            timer.Stop();
+            timer.Dispose();
         }
     }
 
@@ -2434,6 +2526,237 @@ namespace CodexHalo
         }
     }
 
+    public sealed class CodexRealtimeActivityReader
+    {
+        private const int SqliteOpenReadOnly = 0x00000001;
+        private const int SqliteRow = 100;
+        private readonly JavaScriptSerializer serializer;
+        private readonly string database;
+        private bool unavailable;
+
+        public CodexRealtimeActivityReader()
+        {
+            serializer = new JavaScriptSerializer();
+            serializer.MaxJsonLength = Int32.MaxValue;
+            database = Path.Combine(Environment.GetFolderPath(
+                Environment.SpecialFolder.UserProfile), ".codex", "logs_2.sqlite");
+        }
+
+        public bool TryReadActive(out HaloState state, out string action)
+        {
+            state = HaloState.Working;
+            action = String.Empty;
+            if (unavailable || !File.Exists(database))
+            {
+                return false;
+            }
+
+            IntPtr connection = IntPtr.Zero;
+            IntPtr statement = IntPtr.Zero;
+            try
+            {
+                int opened = sqlite3_open_v2(database, out connection,
+                    SqliteOpenReadOnly, null);
+                if (opened != 0 || connection == IntPtr.Zero)
+                {
+                    return false;
+                }
+                sqlite3_busy_timeout(connection, 80);
+                long cutoff = DateTimeOffset.UtcNow.AddMinutes(-5).ToUnixTimeSeconds();
+                string query = "select feedback_log_body from logs where ts >= " +
+                    cutoff.ToString(CultureInfo.InvariantCulture) +
+                    " and target='codex_api::sse::responses' and " +
+                    "feedback_log_body like 'SSE event: {\"type\":\"response.output_item.%' " +
+                    "order by id desc limit 96;";
+                if (sqlite3_prepare_v2(connection, query, -1, out statement,
+                    IntPtr.Zero) != 0 || statement == IntPtr.Zero)
+                {
+                    return false;
+                }
+
+                List<string> rows = new List<string>();
+                while (sqlite3_step(statement) == SqliteRow)
+                {
+                    string value = ReadUtf8Column(statement, 0);
+                    if (!String.IsNullOrEmpty(value))
+                    {
+                        rows.Add(value);
+                    }
+                }
+                return FindActive(rows, out state, out action);
+            }
+            catch (DllNotFoundException)
+            {
+                unavailable = true;
+            }
+            catch (EntryPointNotFoundException)
+            {
+                unavailable = true;
+            }
+            catch
+            {
+            }
+            finally
+            {
+                if (statement != IntPtr.Zero)
+                {
+                    sqlite3_finalize(statement);
+                }
+                if (connection != IntPtr.Zero)
+                {
+                    sqlite3_close(connection);
+                }
+            }
+            return false;
+        }
+
+        public bool FindActive(IEnumerable<string> newestFirst, out HaloState state,
+            out string action)
+        {
+            state = HaloState.Working;
+            action = String.Empty;
+            HashSet<string> completed = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
+            foreach (string body in newestFirst)
+            {
+                string eventType;
+                string itemId;
+                string itemType;
+                string name;
+                if (!TryParseToolEvent(body, out eventType, out itemId,
+                    out itemType, out name))
+                {
+                    continue;
+                }
+                if (eventType == "response.output_item.done")
+                {
+                    completed.Add(itemId);
+                    continue;
+                }
+                if (eventType != "response.output_item.added" ||
+                    completed.Contains(itemId))
+                {
+                    continue;
+                }
+                if (String.Equals(name, "request_user_input",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    state = HaloState.Attention;
+                    action = "Needs you";
+                }
+                else
+                {
+                    state = HaloState.Working;
+                    action = GeneratedHaloSpec.FriendlyAction(
+                        String.IsNullOrEmpty(name) ? itemType : name);
+                }
+                return true;
+            }
+            return false;
+        }
+
+        private bool TryParseToolEvent(string body, out string eventType,
+            out string itemId, out string itemType, out string name)
+        {
+            eventType = String.Empty;
+            itemId = String.Empty;
+            itemType = String.Empty;
+            name = String.Empty;
+            try
+            {
+                int jsonStart = body.IndexOf('{');
+                if (jsonStart < 0)
+                {
+                    return false;
+                }
+                Dictionary<string, object> root = serializer.DeserializeObject(
+                    body.Substring(jsonStart)) as Dictionary<string, object>;
+                if (root == null)
+                {
+                    return false;
+                }
+                eventType = ReadString(root, "type");
+                Dictionary<string, object> item = ReadDictionary(root, "item");
+                if (item == null)
+                {
+                    return false;
+                }
+                itemId = ReadString(item, "id");
+                itemType = ReadString(item, "type").ToLowerInvariant();
+                name = ReadString(item, "name");
+                return !String.IsNullOrEmpty(itemId) &&
+                    (itemType == "function_call" ||
+                     itemType == "custom_tool_call" ||
+                     itemType == "tool_search_call");
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static string ReadString(Dictionary<string, object> dictionary,
+            string key)
+        {
+            object value;
+            return dictionary != null && dictionary.TryGetValue(key, out value) &&
+                value != null
+                ? Convert.ToString(value, CultureInfo.InvariantCulture)
+                : String.Empty;
+        }
+
+        private static Dictionary<string, object> ReadDictionary(
+            Dictionary<string, object> dictionary, string key)
+        {
+            object value;
+            return dictionary != null && dictionary.TryGetValue(key, out value)
+                ? value as Dictionary<string, object>
+                : null;
+        }
+
+        private static string ReadUtf8Column(IntPtr statement, int column)
+        {
+            IntPtr pointer = sqlite3_column_text(statement, column);
+            int length = sqlite3_column_bytes(statement, column);
+            if (pointer == IntPtr.Zero || length <= 0)
+            {
+                return String.Empty;
+            }
+            byte[] bytes = new byte[length];
+            Marshal.Copy(pointer, bytes, 0, length);
+            return Encoding.UTF8.GetString(bytes);
+        }
+
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl,
+            CharSet = CharSet.Ansi)]
+        private static extern int sqlite3_open_v2(string filename,
+            out IntPtr database, int flags, string vfs);
+
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl,
+            CharSet = CharSet.Ansi)]
+        private static extern int sqlite3_prepare_v2(IntPtr database, string sql,
+            int byteCount, out IntPtr statement, IntPtr tail);
+
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int sqlite3_step(IntPtr statement);
+
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr sqlite3_column_text(IntPtr statement, int column);
+
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int sqlite3_column_bytes(IntPtr statement, int column);
+
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int sqlite3_finalize(IntPtr statement);
+
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int sqlite3_close(IntPtr database);
+
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int sqlite3_busy_timeout(IntPtr database,
+            int milliseconds);
+    }
+
     public static class CodexFailureReader
     {
         public static bool TryReadRecent(out string detail, out DateTime eventUtc)
@@ -3263,6 +3586,7 @@ namespace CodexHalo
         private readonly Forms.NotifyIcon tray;
         private readonly DispatcherTimer foregroundTimer;
         private readonly DispatcherTimer hoverHideTimer;
+        private readonly DispatcherTimer performanceTimer;
         private AggregateSnapshot aggregate;
         private MediaPoint dragStart;
         private MediaPoint windowStart;
@@ -3319,6 +3643,20 @@ namespace CodexHalo
                     details.Hide();
                 }
             };
+            string performanceLogPath = Environment.GetEnvironmentVariable(
+                "AGENTHALO_PERF_LOG");
+            if (!String.IsNullOrWhiteSpace(performanceLogPath))
+            {
+                performanceTimer = new DispatcherTimer(DispatcherPriority.Background);
+                performanceTimer.Interval = TimeSpan.FromSeconds(5);
+                performanceTimer.Tick += delegate
+                {
+                    File.WriteAllText(performanceLogPath,
+                        DateTime.Now.ToString("o", CultureInfo.InvariantCulture) +
+                        Environment.NewLine + visual.PerformanceSummary,
+                        Encoding.UTF8);
+                };
+            }
             MouseEnter += delegate
             {
                 hoverHideTimer.Stop();
@@ -3384,6 +3722,11 @@ namespace CodexHalo
             RefreshState();
             codexWasForeground = IsCodexForeground();
             foregroundTimer.Start();
+            if (performanceTimer != null)
+            {
+                visual.ResetPerformanceMetrics();
+                performanceTimer.Start();
+            }
         }
 
         private void OnForegroundTick(object sender, EventArgs e)
@@ -3979,6 +4322,10 @@ namespace CodexHalo
         {
             foregroundTimer.Stop();
             hoverHideTimer.Stop();
+            if (performanceTimer != null)
+            {
+                performanceTimer.Stop();
+            }
             SavePosition();
             details.Close();
             monitor.Dispose();
@@ -4125,6 +4472,44 @@ namespace CodexHalo
                 tracker.Refresh();
                 Assert(tracker.Snapshot.State == HaloState.Thinking,
                     "recoverable tool failure does not become fatal error");
+
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\"," +
+                    "\"name\":\"apply_patch\",\"status\":\"completed\"}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Working,
+                    "custom tool call -> working");
+                Assert(tracker.Snapshot.Action == "Editing files",
+                    "apply_patch shows editing action");
+
+                CodexRealtimeActivityReader realtime =
+                    new CodexRealtimeActivityReader();
+                string realtimeAdded =
+                    "SSE event: {\"type\":\"response.output_item.added\",\"item\":{" +
+                    "\"id\":\"ctc-test\",\"type\":\"custom_tool_call\"," +
+                    "\"status\":\"in_progress\",\"name\":\"apply_patch\"}}";
+                string realtimeDone =
+                    "SSE event: {\"type\":\"response.output_item.done\",\"item\":{" +
+                    "\"id\":\"ctc-test\",\"type\":\"custom_tool_call\"," +
+                    "\"status\":\"completed\",\"name\":\"apply_patch\"}}";
+                HaloState realtimeState;
+                string realtimeAction;
+                Assert(realtime.FindActive(new[] { realtimeAdded },
+                    out realtimeState, out realtimeAction) &&
+                    realtimeState == HaloState.Working &&
+                    realtimeAction == "Editing files",
+                    "live apply_patch start -> working");
+                Assert(!realtime.FindActive(new[] { realtimeDone, realtimeAdded },
+                    out realtimeState, out realtimeAction),
+                    "live apply_patch done clears realtime working");
+
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call_output\"}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Working,
+                    "custom tool output keeps working visible");
 
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"approval_requested\"}}\n",
