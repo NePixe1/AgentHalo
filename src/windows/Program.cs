@@ -3599,14 +3599,7 @@ namespace CodexHalo
             }
             else
             {
-                if (aggregate != null && aggregate.State == HaloState.Done && !demoState.HasValue)
-                {
-                    AcknowledgeCompleted();
-                }
-                else
-                {
-                    ToggleDetails();
-                }
+                BringCodexForward();
             }
         }
 
@@ -3833,12 +3826,6 @@ namespace CodexHalo
         private void BuildTrayMenu()
         {
             Forms.ContextMenuStrip menu = new Forms.ContextMenuStrip();
-            menu.Items.Add("确认已完成任务", null, delegate
-            {
-                Dispatcher.BeginInvoke(new Action(AcknowledgeCompleted));
-            });
-            menu.Items.Add(new Forms.ToolStripSeparator());
-
             Forms.ToolStripMenuItem topmost = new Forms.ToolStripMenuItem("始终置顶");
             topmost.Checked = settings.AlwaysOnTop;
             topmost.CheckOnClick = true;
@@ -3928,11 +3915,7 @@ namespace CodexHalo
             menu.Items.Add(preview);
 
             menu.Items.Add(new Forms.ToolStripSeparator());
-            menu.Items.Add("切换到 Codex", null, delegate
-            {
-                Dispatcher.BeginInvoke(new Action(BringCodexForward));
-            });
-            menu.Items.Add("退出 Agent Halo", null, delegate
+            menu.Items.Add("退出", null, delegate
             {
                 Dispatcher.BeginInvoke(new Action(Close));
             });
@@ -4494,8 +4477,6 @@ namespace CodexHalo
         {
             using (Forms.ContextMenuStrip menu = new Forms.ContextMenuStrip())
             {
-                menu.Items.Add("确认已完成任务");
-                menu.Items.Add(new Forms.ToolStripSeparator());
                 Forms.ToolStripMenuItem topmost =
                     new Forms.ToolStripMenuItem("始终置顶");
                 topmost.Checked = true;
@@ -4511,7 +4492,7 @@ namespace CodexHalo
                 size.DropDownItems.Add("125%");
                 menu.Items.Add(size);
                 menu.Items.Add(new Forms.ToolStripSeparator());
-                menu.Items.Add("退出 Agent Halo");
+                menu.Items.Add("退出");
                 Win11MenuRenderer.Apply(menu);
                 menu.CreateControl();
                 System.Drawing.Size preferred = menu.GetPreferredSize(

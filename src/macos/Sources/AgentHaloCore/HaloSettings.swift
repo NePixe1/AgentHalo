@@ -1,20 +1,36 @@
 import Foundation
 
 public struct HaloSettings: Codable, Equatable, Sendable {
+    public static let currentAlwaysOnTopBehaviorVersion = 1
+
     public var hasPosition: Bool
     public var left: Double
     public var top: Double
     public var alwaysOnTop: Bool
+    public var alwaysOnTopBehaviorVersion: Int
     public var paused: Bool
     public var installedAt: Date
     public var acknowledged: [String: Date]
     public var acknowledgedErrorAt: Date?
+
+    private enum CodingKeys: String, CodingKey {
+        case hasPosition
+        case left
+        case top
+        case alwaysOnTop
+        case alwaysOnTopBehaviorVersion
+        case paused
+        case installedAt
+        case acknowledged
+        case acknowledgedErrorAt
+    }
 
     public init(
         hasPosition: Bool = false,
         left: Double = 0,
         top: Double = 0,
         alwaysOnTop: Bool = true,
+        alwaysOnTopBehaviorVersion: Int = HaloSettings.currentAlwaysOnTopBehaviorVersion,
         paused: Bool = false,
         installedAt: Date = Date(),
         acknowledged: [String: Date] = [:],
@@ -24,10 +40,27 @@ public struct HaloSettings: Codable, Equatable, Sendable {
         self.left = left
         self.top = top
         self.alwaysOnTop = alwaysOnTop
+        self.alwaysOnTopBehaviorVersion = alwaysOnTopBehaviorVersion
         self.paused = paused
         self.installedAt = installedAt
         self.acknowledged = acknowledged
         self.acknowledgedErrorAt = acknowledgedErrorAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.hasPosition = try container.decodeIfPresent(Bool.self, forKey: .hasPosition) ?? false
+        self.left = try container.decodeIfPresent(Double.self, forKey: .left) ?? 0
+        self.top = try container.decodeIfPresent(Double.self, forKey: .top) ?? 0
+        self.alwaysOnTop = try container.decodeIfPresent(Bool.self, forKey: .alwaysOnTop) ?? true
+        self.alwaysOnTopBehaviorVersion = try container.decodeIfPresent(
+            Int.self,
+            forKey: .alwaysOnTopBehaviorVersion
+        ) ?? 0
+        self.paused = try container.decodeIfPresent(Bool.self, forKey: .paused) ?? false
+        self.installedAt = try container.decodeIfPresent(Date.self, forKey: .installedAt) ?? Date()
+        self.acknowledged = try container.decodeIfPresent([String: Date].self, forKey: .acknowledged) ?? [:]
+        self.acknowledgedErrorAt = try container.decodeIfPresent(Date.self, forKey: .acknowledgedErrorAt)
     }
 
     public func acknowledgingCompletedSessions(_ sessions: [SessionSnapshot]) -> HaloSettings {
@@ -71,6 +104,11 @@ public struct SettingsStore: Sendable {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         if var settings = try? decoder.decode(HaloSettings.self, from: data) {
+            if settings.alwaysOnTopBehaviorVersion < HaloSettings.currentAlwaysOnTopBehaviorVersion {
+                settings.alwaysOnTop = true
+                settings.alwaysOnTopBehaviorVersion = HaloSettings.currentAlwaysOnTopBehaviorVersion
+                save(settings)
+            }
             settings.paused = false
             return settings
         }

@@ -57,8 +57,7 @@ without requiring pixel-identical rendering across operating systems.
   dim/blend/power-up transitions, and completion double flash behavior.
 - macOS uses `CVDisplayLink`; Windows uses WPF composition callbacks. Both
   advance animation from display timing and clamp frame delta to avoid jumps.
-- macOS exposes the same full control menu from the menu bar and halo right
-  click. Windows exposes the same controls from its tray menu and halo right
-  click.
+- macOS exposes the same control menu from the menu bar and halo right click.
+  Windows exposes the same controls from its tray menu and halo right click.
 - Platform-specific window, menu, startup, hit-testing, and display behavior
   remain native and intentionally separate.

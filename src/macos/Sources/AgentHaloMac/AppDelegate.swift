@@ -23,8 +23,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let rateLimitReader = RateLimitReader()
     private let failureReader = CodexFailureReader()
     private let instanceLock = InstanceLock()
+    private let codexActivator: () -> Void
 
-    override init() {
+    init(codexActivator: @escaping () -> Void = CodexAppDetector.activateCodex) {
+        self.codexActivator = codexActivator
         self.settings = settingsStore.load()
         super.init()
     }
@@ -86,7 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         haloView.onMouseEntered = { [weak self] in self?.showDetails() }
         haloView.onMouseExited = { [weak self] in self?.scheduleHideDetails() }
-        haloView.onClick = { [weak self] in self?.toggleDetailsOrAcknowledge() }
+        haloView.onClick = { [weak self] in self?.handleHaloPrimaryClick() }
         haloView.onRightClick = { [weak self] event in
             self?.showHaloContextMenu(for: event)
         }
@@ -127,9 +129,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func makeControlMenu() -> NSMenu {
         let menu = NSMenu()
-        addMenuItem("确认已完成任务", #selector(dismissCompleted), enabled: aggregate.sessions.contains { $0.state == .done }, to: menu)
-        addMenuItem("确认当前错误", #selector(dismissError), enabled: aggregate.state == .error, to: menu)
-        menu.addItem(.separator())
         addCheckItem("始终置顶", checked: settings.alwaysOnTop, action: #selector(toggleAlwaysOnTop), to: menu)
         addCheckItem("开机自动启动", checked: StartupManager.isEnabled(), action: #selector(toggleStartup), to: menu)
         addCheckItem("暂停状态监听", checked: settings.paused, action: #selector(togglePause), to: menu)
@@ -148,8 +147,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         preview.submenu = submenu
         menu.addItem(preview)
         menu.addItem(.separator())
-        addMenuItem("切换到 Codex", #selector(bringCodexForward), enabled: true, to: menu)
-        addMenuItem("退出 Agent Halo", #selector(quit), enabled: true, to: menu)
+        addMenuItem("退出", #selector(quit), enabled: true, to: menu)
         return menu
     }
 
@@ -180,26 +178,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func bringCodexForward() {
-        CodexAppDetector.activateCodex()
+        codexActivator()
     }
 
-    @objc private func dismissCompleted() {
-        settings = settings.acknowledgingCompletedSessions(aggregate.sessions)
-        settingsStore.save(settings)
-        tick()
-    }
-
-    @objc private func dismissError() {
-        let newestErrorAt = aggregate.sessions
-            .filter { $0.state == .error }
-            .map(\.lastEventAt)
-            .max()
-        guard let newestErrorAt else {
-            return
-        }
-        settings = settings.acknowledgingError(at: newestErrorAt)
-        settingsStore.save(settings)
-        tick()
+    func handleHaloPrimaryClick() {
+        bringCodexForward()
     }
 
     @objc private func quit() {
@@ -271,18 +254,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         detailsPanel.setFrameOrigin(CGPoint(x: max(area.minX + 8, min(x, area.maxX - detailsPanel.frame.width - 8)), y: y))
     }
 
-    private func toggleDetailsOrAcknowledge() {
-        if aggregate.state == .done {
-            dismissCompleted()
-        } else if aggregate.state == .error {
-            dismissError()
-        } else if detailsPanel.isVisible {
-            detailsPanel.orderOut(nil)
-        } else {
-            showDetails()
-        }
-    }
-
     private func displayAggregate() -> AggregateSnapshot {
         aggregate
     }
@@ -320,9 +291,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func applyWindowLevels() {
-        let level: NSWindow.Level = settings.alwaysOnTop ? .floating : .normal
+        let level = Self.haloWindowLevel(alwaysOnTop: settings.alwaysOnTop)
         panel?.level = level
         detailsPanel.level = level
+        panel?.orderFrontRegardless()
+    }
+
+    static func haloWindowLevel(alwaysOnTop: Bool) -> NSWindow.Level {
+        alwaysOnTop ? .screenSaver : .normal
     }
 
     private struct PreviewPayload {

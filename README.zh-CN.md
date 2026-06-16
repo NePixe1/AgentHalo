@@ -63,7 +63,7 @@ swift run AgentHaloDiagnostics --transition-strip /tmp/agent-halo-transitions
 - 右键单击：打开状态预览、暂停监听、开机启动和退出菜单。
 - 右键“光环大小”：选择 `75% / 100% / 125%`，重启后保持设置。
 - 光环因拔掉副屏而消失时，从系统托盘右键选择“脱离卡死”，可移回主屏右上角。
-- 双击：将 Codex 窗口切到前台。
+- 单击光环：将 Codex 窗口切到前台。
 
 ## 状态含义
 

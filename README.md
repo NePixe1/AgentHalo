@@ -68,7 +68,7 @@ OpenAI API key.
   the selected size persists across restarts.
 - If a disconnected display leaves the halo off-screen, right-click its system
   tray icon and select `脱离卡死` to move it to the primary display.
-- Double-click to bring the Codex window forward.
+- Click the halo to bring the Codex window forward.
 
 ## Status language
 

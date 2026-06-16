@@ -164,6 +164,51 @@ func testSettingsPersistFormalFieldsAndNormalizePaused() {
     expect(loaded.acknowledgedErrorAt, acknowledgedErrorAt, "acknowledgedErrorAt should persist")
 }
 
+func testSettingsMigratesLegacyAlwaysOnTopOffToDefaultOn() {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-legacy-topmost-\(UUID().uuidString)", isDirectory: true)
+    let url = root.appendingPathComponent("settings.json")
+    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    try! """
+    {
+      "acknowledged" : {},
+      "alwaysOnTop" : false,
+      "hasPosition" : true,
+      "installedAt" : "2026-06-13T12:47:19Z",
+      "left" : 1341,
+      "paused" : false,
+      "top" : 817
+    }
+    """.data(using: .utf8)!.write(to: url)
+
+    let loaded = SettingsStore(settingsURL: url).load()
+
+    expect(loaded.alwaysOnTop, true, "legacy settings should migrate alwaysOnTop back to true")
+    expect(
+        loaded.alwaysOnTopBehaviorVersion,
+        HaloSettings.currentAlwaysOnTopBehaviorVersion,
+        "legacy settings should record the always-on-top behavior version"
+    )
+}
+
+func testSettingsPreservesExplicitAlwaysOnTopOffAfterMigrationVersion() {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-current-topmost-\(UUID().uuidString)", isDirectory: true)
+    let url = root.appendingPathComponent("settings.json")
+    let store = SettingsStore(settingsURL: url)
+    let settings = HaloSettings(alwaysOnTop: false)
+
+    store.save(settings)
+    let loaded = store.load()
+
+    expect(loaded.alwaysOnTop, false, "current settings should preserve an explicit alwaysOnTop off choice")
+    expect(
+        loaded.alwaysOnTopBehaviorVersion,
+        HaloSettings.currentAlwaysOnTopBehaviorVersion,
+        "current settings should persist the always-on-top behavior version"
+    )
+}
+
 func testAcknowledgedErrorVisibilityUsesLatestErrorTime() {
     let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
     let earlier = now.addingTimeInterval(-60)
