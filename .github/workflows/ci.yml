@@ -2,7 +2,15 @@ name: cross-platform-contract
 
 on:
   push:
+    paths:
+      - 'src/**'
+      - 'scripts/**'
+      - '.github/workflows/**'
   pull_request:
+    paths:
+      - 'src/**'
+      - 'scripts/**'
+      - '.github/workflows/**'
 
 jobs:
   shared:
