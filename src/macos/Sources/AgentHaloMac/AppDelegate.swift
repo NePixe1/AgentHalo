@@ -289,6 +289,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         detailsPanel.onMouseExited = { [weak self] in
             self?.scheduleHideDetails()
         }
+        detailsPanel.onAgentSelected = { [weak self] agent in
+            self?.setFocusedAgent(agent)
+        }
         positionDetailsPanel()
         detailsPanel.orderFrontRegardless()
     }

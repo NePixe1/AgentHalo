@@ -24,6 +24,9 @@ func runHaloInteractionChecks() {
     testFocusSubmenuMarksCodexInitially()
     testFocusSubmenuSwitchesToClaudeCode()
     testSingleClickDoesNotActivateCodexWhenClaudeCodeFocused()
+    testDetailsPanelShowsCodexQuotaAndIdleCopy()
+    testDetailsPanelHidesQuotaForClaudeCode()
+    testDetailsPanelSwitchCallbackSelectsClaudeCode()
 }
 
 @MainActor
@@ -182,4 +185,68 @@ private func menuItem(titled title: String, in menu: NSMenu) -> NSMenuItem {
         fatalError("\(title) menu item should exist")
     }
     return item
+}
+
+@MainActor
+private func testDetailsPanelShowsCodexQuotaAndIdleCopy() {
+    let panel = DetailsPanel()
+    let aggregate = AggregateSnapshot(
+        state: .idle,
+        label: "READY",
+        detail: AgentKind.codex.standbyDetail,
+        sessions: [],
+        focusedAgent: .codex
+    )
+
+    panel.update(
+        aggregate: aggregate,
+        quota: RateLimitSnapshot(primaryUsedPercent: 30, secondaryUsedPercent: 60, contextUsedPercent: 42)
+    )
+
+    expect(panel.focusedAgentForTesting == .codex, "details panel should select Codex")
+    expect(panel.detailTextForTesting == "Codex 正在待命", "Codex idle copy should be localized")
+    expect(panel.contextPillHiddenForTesting == false, "Codex context pill should be visible")
+    expect(panel.primaryQuotaHiddenForTesting == false, "Codex primary quota should be visible")
+    expect(panel.secondaryQuotaHiddenForTesting == false, "Codex secondary quota should be visible")
+}
+
+@MainActor
+private func testDetailsPanelHidesQuotaForClaudeCode() {
+    let panel = DetailsPanel()
+    let aggregate = AggregateSnapshot(
+        state: .idle,
+        label: "READY",
+        detail: AgentKind.claudeCode.standbyDetail,
+        sessions: [],
+        focusedAgent: .claudeCode
+    )
+
+    panel.update(aggregate: aggregate, quota: nil)
+
+    expect(panel.focusedAgentForTesting == .claudeCode, "details panel should select Claude Code")
+    expect(panel.detailTextForTesting == "Claude Code 正在待命", "Claude Code idle copy should be localized")
+    expect(panel.contextPillHiddenForTesting == true, "Claude Code context pill should be hidden")
+    expect(panel.primaryQuotaHiddenForTesting == true, "Claude Code primary quota should be hidden")
+    expect(panel.secondaryQuotaHiddenForTesting == true, "Claude Code secondary quota should be hidden")
+}
+
+@MainActor
+private func testDetailsPanelSwitchCallbackSelectsClaudeCode() {
+    let panel = DetailsPanel()
+    var selected: AgentKind?
+    panel.onAgentSelected = { selected = $0 }
+    panel.update(
+        aggregate: AggregateSnapshot(
+            state: .idle,
+            label: "READY",
+            detail: AgentKind.codex.standbyDetail,
+            sessions: [],
+            focusedAgent: .codex
+        ),
+        quota: nil
+    )
+
+    panel.selectAgentForTesting(.claudeCode)
+
+    expect(selected == .claudeCode, "details panel switch should emit selected agent")
 }
