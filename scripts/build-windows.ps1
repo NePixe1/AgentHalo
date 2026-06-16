@@ -69,10 +69,13 @@ $bitmap.Dispose()
 
 $referenceArgs = $references | ForEach-Object { "/reference:$_" }
 $exe = Join-Path $output "AgentHalo.exe"
+$sources = Get-ChildItem -LiteralPath $windows -Filter *.cs |
+    Sort-Object Name |
+    ForEach-Object { $_.FullName }
 
 & $csc /nologo /target:winexe /platform:anycpu /optimize+ `
     /out:$exe /win32manifest:"$windows\app.manifest" /win32icon:$iconPath `
-    $referenceArgs "$windows\GeneratedHaloSpec.cs" "$windows\Program.cs"
+    $referenceArgs $sources
 
 if ($LASTEXITCODE -ne 0) {
     throw "Compilation failed with exit code $LASTEXITCODE"
