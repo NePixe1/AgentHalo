@@ -8,8 +8,9 @@ final class HaloView: NSView {
     var aggregate = AggregateSnapshot(
         state: .idle,
         label: "READY",
-        detail: "Codex is standing by",
-        sessions: []
+        detail: AgentKind.codex.standbyDetail,
+        sessions: [],
+        focusedAgent: .codex
     ) {
         didSet {
             guard !previewMode else {
