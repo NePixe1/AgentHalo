@@ -2,9 +2,9 @@
 
 ![Agent Halo READY status banner](assets/agent-halo-readme-banner.png)
 
-A local, always-on-top status halo for the Codex desktop app.
+A local, always-on-top status halo for coding agents.
 
-The current release supports Codex, with Claude Code detection planned next.
+The current release supports Codex and macOS Claude Code transcript detection.
 
 Version: `0.13.0`
 
@@ -21,7 +21,7 @@ platform-specific rendering remains native. See the
 ## Requirements
 
 - Windows 10 or Windows 11
-- The Codex desktop app installed and in use
+- The Codex desktop app installed and in use, or Claude Code on macOS
 - .NET Framework 4.8, normally included with current Windows 10/11 systems
 
 ## macOS development build
@@ -61,6 +61,8 @@ OpenAI API key.
 
 - Drag the halo to reposition it; it gently snaps to display edges.
 - Hover to inspect the current state plus five-hour and weekly usage limits.
+- Hover details include a `Codex / CC` switch. Agent Halo keeps watching both tools, while the halo color, status text, and quota rows follow the selected focused agent.
+- Codex quota and context rows are Codex-only. When `CC` is focused, the hover panel shows Claude Code session state without Codex balance information.
 - Completed green breathes until Codex returns to the foreground, then settles
   into a non-glowing standby green.
 - Right-click for state previews, pause, startup, and exit controls.
@@ -72,15 +74,15 @@ OpenAI API key.
 
 ## Status language
 
-- Amber long-bright/short-dim breathing: Codex is thinking or planning.
-- Blue long-bright/short-dim breathing: Codex is running a command, search,
+- Amber long-bright/short-dim breathing: an agent is thinking or planning.
+- Blue long-bright/short-dim breathing: an agent is running a command, search,
   edit, or tool.
-- Green double flash: Codex finished, then breathes slowly until Codex returns to the foreground.
-- Coral double pulse: Codex is waiting for approval, confirmation, or input.
+- Green double flash: an agent finished, then breathes slowly until acknowledged.
+- Coral double pulse: an agent is waiting for approval, confirmation, or input.
 - Red: a blocking failure. It flashes while unseen, stays brightly lit when
   Codex is foregrounded, and becomes dim red after you leave.
-- Stable green: Codex is running with no active task.
-- Dim white: Codex is not running.
+- Stable green: a monitored agent is running with no active task.
+- Dim white: no monitored agent activity is visible.
 
 The large gap chases a small gap that drifts gently back and forth. Near 40° of
 separation, the small gap is smoothly repelled toward roughly 150°, then coasts with
@@ -99,9 +101,10 @@ still produce a readable execution state.
 ## Privacy
 
 Agent Halo locally reads lifecycle and usage events from
-`%USERPROFILE%\.codex\sessions`. It also performs read-only structured queries
-against `logs_2.sqlite` for connection and service failures. It does not upload data,
-call a network service, display conversation content, or read/store an OpenAI API key.
+`%USERPROFILE%\.codex\sessions` and, on macOS, Claude Code transcripts under
+`~/.claude/projects`. It also performs read-only structured queries against
+`logs_2.sqlite` for Codex connection and service failures. It does not upload data,
+call a network service, or read/store API keys.
 
 ## Windows security notice
 
