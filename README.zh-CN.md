@@ -1,6 +1,6 @@
 # Agent Halo
 
-![Agent Halo READY 状态横幅](docs/assets/agent-halo-readme-banner.png)
+![Agent Halo READY 状态横幅](assets/agent-halo-readme-banner.png)
 
 Codex 桌面端的本地常驻状态光环。
 

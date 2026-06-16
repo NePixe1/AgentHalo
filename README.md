@@ -1,6 +1,6 @@
 # Agent Halo
 
-![Agent Halo READY status banner](docs/assets/agent-halo-readme-banner.png)
+![Agent Halo READY status banner](assets/agent-halo-readme-banner.png)
 
 A local, always-on-top status halo for the Codex desktop app.
 
