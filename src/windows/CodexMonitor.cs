@@ -38,6 +38,8 @@ public sealed class SessionTracker
         private int inFlightTools;
         private DateTime workingVisibleUntilUtc;
         private bool liveTracking;
+        private bool currentTurnIsPlanMode;
+        private bool planFinalAnswerSeen;
 
         public string FilePath { get; private set; }
         public SessionSnapshot Snapshot { get; private set; }
@@ -252,6 +254,11 @@ public sealed class SessionTracker
                     Snapshot.LastEventUtc = eventUtc;
                 }
 
+                if (topType == "turn_context" && payload != null)
+                {
+                    UpdatePlanModeFromTurnContext(payload);
+                    return;
+                }
                 if (topType == "session_meta" && payload != null)
                 {
                     string cwd = GetString(payload, "cwd");
@@ -277,7 +284,7 @@ public sealed class SessionTracker
                 string payloadType = GetString(payload, "type");
                 if (topType == "event_msg")
                 {
-                    ReduceEvent(payloadType, eventUtc);
+                    ReduceEvent(payloadType, payload, eventUtc);
                 }
                 else if (topType == "response_item")
                 {
@@ -290,13 +297,30 @@ public sealed class SessionTracker
             }
         }
 
-        private void ReduceEvent(string payloadType, DateTime eventUtc)
+        private void UpdatePlanModeFromTurnContext(Dictionary<string, object> payload)
+        {
+            Dictionary<string, object> collaborationMode =
+                GetDictionary(payload, "collaboration_mode");
+            string mode = GetString(collaborationMode, "mode");
+            if (String.Equals(mode, "plan", StringComparison.OrdinalIgnoreCase))
+            {
+                currentTurnIsPlanMode = true;
+            }
+        }
+
+        private void ReduceEvent(string payloadType,
+            Dictionary<string, object> payload, DateTime eventUtc)
         {
             string lower = (payloadType ?? String.Empty).ToLowerInvariant();
             if (GeneratedHaloSpec.IsTaskStartEvent(lower))
             {
                 inFlightTools = 0;
                 workingVisibleUntilUtc = DateTime.MinValue;
+                if (lower == "task_started")
+                {
+                    currentTurnIsPlanMode = IsPlanModePayload(payload);
+                }
+                planFinalAnswerSeen = false;
                 Snapshot.Active = true;
                 Snapshot.State = HaloState.Thinking;
                 Snapshot.Action = "Planning";
@@ -305,9 +329,18 @@ public sealed class SessionTracker
             {
                 inFlightTools = 0;
                 workingVisibleUntilUtc = DateTime.MinValue;
-                Snapshot.Active = false;
-                Snapshot.State = HaloState.Done;
-                Snapshot.Action = "Complete";
+                if (currentTurnIsPlanMode && planFinalAnswerSeen)
+                {
+                    Snapshot.Active = true;
+                    Snapshot.State = HaloState.Attention;
+                    Snapshot.Action = "Waiting for your choice";
+                }
+                else
+                {
+                    Snapshot.Active = false;
+                    Snapshot.State = HaloState.Done;
+                    Snapshot.Action = "Complete";
+                }
                 Snapshot.CompletedUtc = eventUtc == DateTime.MinValue ? DateTime.UtcNow : eventUtc;
             }
             else if (lower == "agent_message" || lower.EndsWith("_end"))
@@ -316,7 +349,17 @@ public sealed class SessionTracker
                 {
                     inFlightTools--;
                 }
-                if (Snapshot.Active)
+                if (lower == "agent_message" && IsFinalAnswerPayload(payload))
+                {
+                    if (currentTurnIsPlanMode)
+                    {
+                        planFinalAnswerSeen = true;
+                    }
+                    Snapshot.Active = true;
+                    Snapshot.State = HaloState.Working;
+                    Snapshot.Action = "Writing answer";
+                }
+                else if (Snapshot.Active)
                 {
                     if (inFlightTools > 0)
                     {
@@ -374,6 +417,16 @@ public sealed class SessionTracker
                     Snapshot.Action = GeneratedHaloSpec.FriendlyAction(name);
                 }
             }
+            else if (lower == "message" && IsFinalAnswerPayload(payload))
+            {
+                if (currentTurnIsPlanMode)
+                {
+                    planFinalAnswerSeen = true;
+                }
+                Snapshot.Active = true;
+                Snapshot.State = HaloState.Working;
+                Snapshot.Action = "Writing answer";
+            }
             else if (GeneratedHaloSpec.IsToolCall(lower) || lower.EndsWith("_call"))
             {
                 inFlightTools++;
@@ -427,6 +480,19 @@ public sealed class SessionTracker
                     }
                 }
             }
+        }
+
+        private static bool IsPlanModePayload(Dictionary<string, object> payload)
+        {
+            string mode = GetString(payload, "collaboration_mode_kind");
+            return String.Equals(mode, "plan", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsFinalAnswerPayload(Dictionary<string, object> payload)
+        {
+            string phase = GetString(payload, "phase");
+            return String.Equals(phase, "final_answer",
+                StringComparison.OrdinalIgnoreCase);
         }
 
         private static DateTime ParseTimestamp(string value)
@@ -850,8 +916,10 @@ public sealed class CodexRealtimeActivityReader
                 else
                 {
                     state = HaloState.Working;
-                    action = GeneratedHaloSpec.FriendlyAction(
-                        String.IsNullOrEmpty(name) ? itemType : name);
+                    action = itemType == "message"
+                        ? "Writing answer"
+                        : GeneratedHaloSpec.FriendlyAction(
+                            String.IsNullOrEmpty(name) ? itemType : name);
                 }
                 return true;
             }
@@ -890,7 +958,8 @@ public sealed class CodexRealtimeActivityReader
                 return !String.IsNullOrEmpty(itemId) &&
                     (itemType == "function_call" ||
                      itemType == "custom_tool_call" ||
-                     itemType == "tool_search_call");
+                     itemType == "tool_search_call" ||
+                     itemType == "message");
             }
             catch
             {

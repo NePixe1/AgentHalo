@@ -105,6 +105,28 @@ public static class Diagnostics
                 Assert(!realtime.FindActive(new[] { realtimeDone, realtimeAdded },
                     out realtimeState, out realtimeAction),
                     "live apply_patch done clears realtime working");
+                string realtimeMessageAdded =
+                    "SSE event: {\"type\":\"response.output_item.added\",\"item\":{" +
+                    "\"id\":\"msg-test\",\"type\":\"message\",\"status\":\"in_progress\"}}";
+                string realtimeMessageDone =
+                    "SSE event: {\"type\":\"response.output_item.done\",\"item\":{" +
+                    "\"id\":\"msg-test\",\"type\":\"message\",\"status\":\"completed\"}}";
+                Assert(realtime.FindActive(new[] { realtimeMessageAdded },
+                    out realtimeState, out realtimeAction) &&
+                    realtimeState == HaloState.Working &&
+                    realtimeAction == "Writing answer",
+                    "live final answer message -> working");
+                Assert(!realtime.FindActive(new[] { realtimeMessageDone, realtimeMessageAdded },
+                    out realtimeState, out realtimeAction),
+                    "live final answer done clears realtime working");
+                string realtimeInputAdded =
+                    "SSE event: {\"type\":\"response.output_item.added\",\"item\":{" +
+                    "\"id\":\"input-test\",\"type\":\"function_call\"," +
+                    "\"status\":\"in_progress\",\"name\":\"request_user_input\"}}";
+                Assert(realtime.FindActive(new[] { realtimeInputAdded },
+                    out realtimeState, out realtimeAction) &&
+                    realtimeState == HaloState.Attention,
+                    "live request_user_input -> attention");
 
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call_output\"}}\n",
@@ -112,6 +134,14 @@ public static class Diagnostics
                 tracker.Refresh();
                 Assert(tracker.Snapshot.State == HaloState.Working,
                     "custom tool output keeps working visible");
+
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\"," +
+                    "\"name\":\"request_user_input\"}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Attention,
+                    "request_user_input -> attention");
 
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"approval_requested\"}}\n",
@@ -134,11 +164,50 @@ public static class Diagnostics
                     "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
                     Encoding.UTF8);
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\"," +
+                    "\"role\":\"assistant\",\"phase\":\"final_answer\"," +
+                    "\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Working &&
+                    tracker.Snapshot.Action == "Writing answer",
+                    "normal final answer -> working");
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\"," +
+                    "\"phase\":\"final_answer\",\"message\":\"done\"}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Working,
+                    "final answer agent message stays working");
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
                     Encoding.UTF8);
                 tracker.Refresh();
                 Assert(tracker.Snapshot.State == HaloState.Done, "task complete -> done");
                 Assert(!tracker.Snapshot.Active, "task complete deactivates session");
+
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"," +
+                    "\"collaboration_mode_kind\":\"plan\"}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Thinking,
+                    "plan task starts thinking");
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\"," +
+                    "\"role\":\"assistant\",\"phase\":\"final_answer\"," +
+                    "\"content\":[{\"type\":\"output_text\",\"text\":\"<proposed_plan>\"}]}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Working,
+                    "plan final answer outputs as working");
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Attention &&
+                    tracker.Snapshot.Active,
+                    "plan complete waits for user choice");
                 Assert(GeneratedHaloSpec.ContractVersion == 2,
                     "generated shared contract version");
                 Assert(GeneratedHaloSpec.ReleaseVersion == "0.13.0",
