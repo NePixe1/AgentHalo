@@ -104,9 +104,10 @@ public struct ClaudeSessionReducer: Sendable {
 
     private func isLocalCommandUserRecord(_ root: [String: Any]) -> Bool {
         let content = messageContentString(root)
-        return content.contains("<local-command-caveat>")
+        return content.contains("<local-command-")
             || content.contains("<command-name>")
             || content.contains("<command-message>")
+            || content.contains("<command-args>")
     }
 
     private mutating func reduceAssistant(_ root: [String: Any], now: Date) {
