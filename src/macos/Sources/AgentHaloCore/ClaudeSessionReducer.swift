@@ -73,6 +73,9 @@ public struct ClaudeSessionReducer: Sendable {
     }
 
     private mutating func reduceUser(_ root: [String: Any], now: Date) {
+        if isLocalCommandUserRecord(root) {
+            return
+        }
         if firstContentType(root) == "tool_result" {
             if inFlightTools > 0 {
                 inFlightTools -= 1
@@ -97,6 +100,13 @@ public struct ClaudeSessionReducer: Sendable {
         snapshot.active = true
         snapshot.state = .thinking
         snapshot.action = "Thinking"
+    }
+
+    private func isLocalCommandUserRecord(_ root: [String: Any]) -> Bool {
+        let content = messageContentString(root)
+        return content.contains("<local-command-caveat>")
+            || content.contains("<command-name>")
+            || content.contains("<command-message>")
     }
 
     private mutating func reduceAssistant(_ root: [String: Any], now: Date) {
@@ -161,6 +171,13 @@ public struct ClaudeSessionReducer: Sendable {
             return ""
         }
         return Self.string(first[key])
+    }
+
+    private func messageContentString(_ root: [String: Any]) -> String {
+        guard let message = root["message"] as? [String: Any] else {
+            return ""
+        }
+        return Self.string(message["content"])
     }
 
     private static func normalizedToolName(_ name: String) -> String {

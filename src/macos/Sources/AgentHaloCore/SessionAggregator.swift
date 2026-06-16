@@ -1,6 +1,9 @@
 import Foundation
 
 public enum SessionAggregator {
+    private static let claudeCompletedVisibleDuration: TimeInterval = 8
+    private static let codexCompletedVisibleDuration: TimeInterval = 86_400
+
     public static func aggregate(
         snapshots: [SessionSnapshot],
         settings: HaloSettings,
@@ -44,7 +47,7 @@ public enum SessionAggregator {
                 let acknowledgedAt = settings.acknowledged[snapshot.threadId] ?? .distantPast
                 return completedAt > acknowledgedAt
                     && completedAt >= settings.installedAt
-                    && completedAt >= now.addingTimeInterval(-86_400)
+                    && completedAt >= now.addingTimeInterval(-completedVisibleDuration(for: snapshot.agent))
             }
             if snapshot.state == .error {
                 if !settings.shouldShowError(eventAt: snapshot.lastEventAt) {
@@ -114,5 +117,14 @@ public enum SessionAggregator {
 
     public static func priority(_ state: HaloState) -> Int {
         GeneratedHaloSpec.state(state).priority
+    }
+
+    private static func completedVisibleDuration(for agent: AgentKind) -> TimeInterval {
+        switch agent {
+        case .claudeCode:
+            return claudeCompletedVisibleDuration
+        case .codex:
+            return codexCompletedVisibleDuration
+        }
     }
 }

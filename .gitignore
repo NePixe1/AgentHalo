@@ -18,3 +18,4 @@ __pycache__/
 
 # agent
 .codex/environments/
+.superpowers/
