@@ -4,6 +4,7 @@ public enum SessionAggregator {
     public static func aggregate(
         snapshots: [SessionSnapshot],
         settings: HaloSettings,
+        focusedAgent: AgentKind = .codex,
         now: Date = Date()
     ) -> AggregateSnapshot {
         aggregate(
@@ -11,6 +12,7 @@ public enum SessionAggregator {
             settings: settings,
             recentFailure: nil,
             codexRunning: false,
+            focusedAgent: focusedAgent,
             now: now
         )
     }
@@ -20,6 +22,7 @@ public enum SessionAggregator {
         settings: HaloSettings,
         recentFailure: CodexFailure?,
         codexRunning: Bool,
+        focusedAgent: AgentKind = .codex,
         now: Date = Date()
     ) -> AggregateSnapshot {
         if settings.paused {
@@ -27,11 +30,13 @@ public enum SessionAggregator {
                 state: .idle,
                 label: "PAUSED",
                 detail: "Monitoring paused",
-                sessions: []
+                sessions: [],
+                focusedAgent: focusedAgent
             )
         }
 
-        let visible = snapshots.filter { snapshot in
+        let focusedSnapshots = snapshots.filter { $0.agent == focusedAgent }
+        let visible = focusedSnapshots.filter { snapshot in
             if snapshot.state == .done {
                 guard let completedAt = snapshot.completedAt else {
                     return false
@@ -59,7 +64,8 @@ public enum SessionAggregator {
         }
 
         guard let primary = visible.first else {
-            if codexRunning,
+            if focusedAgent == .codex,
+               codexRunning,
                let recentFailure,
                settings.shouldShowError(eventAt: recentFailure.eventAt) {
                 let synthetic = SessionSnapshot(
@@ -70,20 +76,23 @@ public enum SessionAggregator {
                     action: recentFailure.detail,
                     lastEventAt: recentFailure.eventAt,
                     completedAt: nil,
-                    active: false
+                    active: false,
+                    agent: .codex
                 )
                 return AggregateSnapshot(
                     state: .error,
                     label: label(for: .error),
                     detail: recentFailure.detail,
-                    sessions: [synthetic]
+                    sessions: [synthetic],
+                    focusedAgent: focusedAgent
                 )
             }
             return AggregateSnapshot(
                 state: .idle,
                 label: "READY",
-                detail: "Codex is standing by",
-                sessions: []
+                detail: focusedAgent.standbyDetail,
+                sessions: [],
+                focusedAgent: focusedAgent
             )
         }
 
@@ -94,7 +103,8 @@ public enum SessionAggregator {
             state: primary.state,
             label: label(for: primary.state),
             detail: detail,
-            sessions: visible
+            sessions: visible,
+            focusedAgent: focusedAgent
         )
     }
 

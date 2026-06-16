@@ -381,6 +381,7 @@ func testAggregatorInjectsUnacknowledgedCodexFailureWhenIdle() {
         settings: HaloSettings(installedAt: now.addingTimeInterval(-600)),
         recentFailure: failure,
         codexRunning: true,
+        focusedAgent: .codex,
         now: now
     )
 
@@ -394,12 +395,13 @@ func testAggregatorInjectsUnacknowledgedCodexFailureWhenIdle() {
         settings: HaloSettings(installedAt: now.addingTimeInterval(-600), acknowledgedErrorAt: now),
         recentFailure: failure,
         codexRunning: true,
+        focusedAgent: .codex,
         now: now
     )
     expect(acknowledged.state, .idle, "acknowledged failure should hide")
 }
 
-func testAggregatorCombinesCodexAndClaudeSnapshots() {
+func testAggregatorFiltersByFocusedAgent() {
     let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
     let codexDone = SessionSnapshot(
         threadId: "codex-done",
@@ -409,7 +411,8 @@ func testAggregatorCombinesCodexAndClaudeSnapshots() {
         action: "Complete",
         lastEventAt: now,
         completedAt: now,
-        active: false
+        active: false,
+        agent: .codex
     )
     let claudeWorking = SessionSnapshot(
         threadId: "claude-working",
@@ -419,18 +422,68 @@ func testAggregatorCombinesCodexAndClaudeSnapshots() {
         action: "Running command",
         lastEventAt: now.addingTimeInterval(1),
         completedAt: nil,
-        active: true
+        active: true,
+        agent: .claudeCode
     )
 
-    let aggregate = SessionAggregator.aggregate(
+    let codexAggregate = SessionAggregator.aggregate(
         snapshots: [codexDone, claudeWorking],
         settings: HaloSettings(paused: false, installedAt: now.addingTimeInterval(-60), acknowledged: [:]),
+        focusedAgent: .codex,
         now: now.addingTimeInterval(2)
     )
+    expect(codexAggregate.focusedAgent, .codex, "Codex aggregate should stamp focus")
+    expect(codexAggregate.state, .done, "Codex focus should ignore active Claude state")
+    expect(codexAggregate.detail, "CodexProject - Complete", "Codex focus detail")
+    expect(codexAggregate.sessions.map(\.threadId), ["codex-done"], "Codex focus sessions")
 
-    expect(aggregate.state, .working, "mixed aggregate should use active Claude state")
-    expect(aggregate.detail, "ClaudeProject +1", "mixed aggregate detail")
-    expect(aggregate.sessions.map(\.threadId), ["claude-working", "codex-done"], "mixed aggregate ordering")
+    let claudeAggregate = SessionAggregator.aggregate(
+        snapshots: [codexDone, claudeWorking],
+        settings: HaloSettings(paused: false, installedAt: now.addingTimeInterval(-60), acknowledged: [:]),
+        focusedAgent: .claudeCode,
+        now: now.addingTimeInterval(2)
+    )
+    expect(claudeAggregate.focusedAgent, .claudeCode, "Claude aggregate should stamp focus")
+    expect(claudeAggregate.state, .working, "Claude focus should use Claude state")
+    expect(claudeAggregate.detail, "ClaudeProject - Running command", "Claude focus detail")
+    expect(claudeAggregate.sessions.map(\.threadId), ["claude-working"], "Claude focus sessions")
+}
+
+func testAggregatorIdleDetailUsesFocusedAgent() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
+
+    let codexAggregate = SessionAggregator.aggregate(
+        snapshots: [],
+        settings: HaloSettings(installedAt: now.addingTimeInterval(-60)),
+        focusedAgent: .codex,
+        now: now
+    )
+    let claudeAggregate = SessionAggregator.aggregate(
+        snapshots: [],
+        settings: HaloSettings(installedAt: now.addingTimeInterval(-60)),
+        focusedAgent: .claudeCode,
+        now: now
+    )
+
+    expect(codexAggregate.detail, "Codex is standing by", "Codex standby detail")
+    expect(claudeAggregate.detail, "Claude Code is standing by", "Claude standby detail")
+}
+
+func testAggregatorDoesNotInjectCodexFailureForClaudeFocus() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
+    let failure = CodexFailure(detail: "认证已失效", eventAt: now)
+    let aggregate = SessionAggregator.aggregate(
+        snapshots: [],
+        settings: HaloSettings(installedAt: now.addingTimeInterval(-600)),
+        recentFailure: failure,
+        codexRunning: true,
+        focusedAgent: .claudeCode,
+        now: now
+    )
+
+    expect(aggregate.state, .idle, "Claude focus should ignore Codex synthetic failure")
+    expect(aggregate.detail, "Claude Code is standing by", "Claude focus should keep Claude standby")
+    expect(aggregate.sessions.isEmpty, "Claude focus should not include synthetic Codex session")
 }
 
 func testClaudeReducerMapsTranscriptEvents() {
@@ -596,7 +649,9 @@ do {
     fatalError("\(error)")
 }
 testAggregatorInjectsUnacknowledgedCodexFailureWhenIdle()
-testAggregatorCombinesCodexAndClaudeSnapshots()
+testAggregatorFiltersByFocusedAgent()
+testAggregatorIdleDetailUsesFocusedAgent()
+testAggregatorDoesNotInjectCodexFailureForClaudeFocus()
 testClaudeReducerMapsTranscriptEvents()
 do {
     try testClaudeMonitorHandlesDiscoveryPendingLinesAndTruncation()
