@@ -9,6 +9,7 @@ public struct HaloSettings: Codable, Equatable, Sendable {
     public var alwaysOnTop: Bool
     public var alwaysOnTopBehaviorVersion: Int
     public var paused: Bool
+    public var focusedAgent: AgentKind
     public var installedAt: Date
     public var acknowledged: [String: Date]
     public var acknowledgedErrorAt: Date?
@@ -20,6 +21,7 @@ public struct HaloSettings: Codable, Equatable, Sendable {
         case alwaysOnTop
         case alwaysOnTopBehaviorVersion
         case paused
+        case focusedAgent
         case installedAt
         case acknowledged
         case acknowledgedErrorAt
@@ -32,6 +34,7 @@ public struct HaloSettings: Codable, Equatable, Sendable {
         alwaysOnTop: Bool = true,
         alwaysOnTopBehaviorVersion: Int = HaloSettings.currentAlwaysOnTopBehaviorVersion,
         paused: Bool = false,
+        focusedAgent: AgentKind = .codex,
         installedAt: Date = Date(),
         acknowledged: [String: Date] = [:],
         acknowledgedErrorAt: Date? = nil
@@ -42,6 +45,7 @@ public struct HaloSettings: Codable, Equatable, Sendable {
         self.alwaysOnTop = alwaysOnTop
         self.alwaysOnTopBehaviorVersion = alwaysOnTopBehaviorVersion
         self.paused = paused
+        self.focusedAgent = focusedAgent
         self.installedAt = installedAt
         self.acknowledged = acknowledged
         self.acknowledgedErrorAt = acknowledgedErrorAt
@@ -58,6 +62,7 @@ public struct HaloSettings: Codable, Equatable, Sendable {
             forKey: .alwaysOnTopBehaviorVersion
         ) ?? 0
         self.paused = try container.decodeIfPresent(Bool.self, forKey: .paused) ?? false
+        self.focusedAgent = try container.decodeIfPresent(AgentKind.self, forKey: .focusedAgent) ?? .codex
         self.installedAt = try container.decodeIfPresent(Date.self, forKey: .installedAt) ?? Date()
         self.acknowledged = try container.decodeIfPresent([String: Date].self, forKey: .acknowledged) ?? [:]
         self.acknowledgedErrorAt = try container.decodeIfPresent(Date.self, forKey: .acknowledgedErrorAt)

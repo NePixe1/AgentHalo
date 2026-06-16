@@ -209,6 +209,42 @@ func testSettingsPreservesExplicitAlwaysOnTopOffAfterMigrationVersion() {
     )
 }
 
+func testSettingsDefaultsFocusedAgentToCodexWhenMissing() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-focus-legacy-\(UUID().uuidString)", isDirectory: true)
+    let url = root.appendingPathComponent("settings.json")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    try """
+    {
+      "acknowledged" : {},
+      "alwaysOnTop" : true,
+      "alwaysOnTopBehaviorVersion" : 1,
+      "hasPosition" : false,
+      "installedAt" : "2026-06-13T02:00:00Z",
+      "left" : 0,
+      "paused" : false,
+      "top" : 0
+    }
+    """.data(using: .utf8)!.write(to: url)
+
+    let loaded = SettingsStore(settingsURL: url).load()
+
+    expect(loaded.focusedAgent, .codex, "legacy settings should default focus to Codex")
+}
+
+func testSettingsPersistsFocusedAgent() {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-focus-persist-\(UUID().uuidString)", isDirectory: true)
+    let url = root.appendingPathComponent("settings.json")
+    let store = SettingsStore(settingsURL: url)
+    let settings = HaloSettings(focusedAgent: .claudeCode)
+
+    store.save(settings)
+    let loaded = store.load()
+
+    expect(loaded.focusedAgent, .claudeCode, "focused agent should persist")
+}
+
 func testAcknowledgedErrorVisibilityUsesLatestErrorTime() {
     let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
     let earlier = now.addingTimeInterval(-60)
@@ -361,6 +397,96 @@ func testAggregatorInjectsUnacknowledgedCodexFailureWhenIdle() {
     expect(acknowledged.state, .idle, "acknowledged failure should hide")
 }
 
+func testAggregatorCombinesCodexAndClaudeSnapshots() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
+    let codexDone = SessionSnapshot(
+        threadId: "codex-done",
+        projectName: "CodexProject",
+        workingDirectory: "",
+        state: .done,
+        action: "Complete",
+        lastEventAt: now,
+        completedAt: now,
+        active: false
+    )
+    let claudeWorking = SessionSnapshot(
+        threadId: "claude-working",
+        projectName: "ClaudeProject",
+        workingDirectory: "",
+        state: .working,
+        action: "Running command",
+        lastEventAt: now.addingTimeInterval(1),
+        completedAt: nil,
+        active: true
+    )
+
+    let aggregate = SessionAggregator.aggregate(
+        snapshots: [codexDone, claudeWorking],
+        settings: HaloSettings(paused: false, installedAt: now.addingTimeInterval(-60), acknowledged: [:]),
+        now: now.addingTimeInterval(2)
+    )
+
+    expect(aggregate.state, .working, "mixed aggregate should use active Claude state")
+    expect(aggregate.detail, "ClaudeProject +1", "mixed aggregate detail")
+    expect(aggregate.sessions.map(\.threadId), ["claude-working", "codex-done"], "mixed aggregate ordering")
+}
+
+func testClaudeReducerMapsTranscriptEvents() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
+    var reducer = ClaudeSessionReducer(filePath: "/tmp/304976ed-0876-44e9-99ce-2c9a74ab4ee2.jsonl", now: now)
+
+    reducer.consume(jsonLine: #"{"type":"user","message":{"role":"user","content":"Build Claude status"},"uuid":"user-1","timestamp":"2026-06-13T02:00:00Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"claude-thread"}"#, now: now)
+    expect(reducer.snapshot.threadId, "claude-thread", "Claude thread id")
+    expect(reducer.snapshot.projectName, "AgentHalo", "Claude project name")
+    expect(reducer.snapshot.state, .thinking, "Claude prompt state")
+    expect(reducer.snapshot.action, "Thinking", "Claude prompt action")
+    expect(reducer.snapshot.active, "Claude prompt should be active")
+
+    reducer.consume(jsonLine: #"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"swift build"}}]},"uuid":"assistant-1","timestamp":"2026-06-13T02:00:01Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"claude-thread"}"#, now: now.addingTimeInterval(1))
+    expect(reducer.snapshot.state, .working, "Claude tool use state")
+    expect(reducer.snapshot.action, "Running command", "Claude tool use action")
+
+    reducer.consume(jsonLine: #"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_1","type":"tool_result","content":"ok","is_error":false}]},"uuid":"tool-result-1","timestamp":"2026-06-13T02:00:02Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"claude-thread"}"#, now: now.addingTimeInterval(2))
+    expect(reducer.snapshot.state, .working, "Claude tool result visible state")
+    expect(reducer.snapshot.action, "Reviewing result", "Claude tool result action")
+
+    reducer.applyWorkingVisibility(now: now.addingTimeInterval(4))
+    expect(reducer.snapshot.state, .thinking, "Claude tool result should return to thinking")
+
+    reducer.consume(jsonLine: #"{"type":"system","subtype":"turn_duration","durationMs":3000,"timestamp":"2026-06-13T02:00:05Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"claude-thread"}"#, now: now.addingTimeInterval(5))
+    expect(reducer.snapshot.state, .done, "Claude turn duration state")
+    expect(reducer.snapshot.action, "Complete", "Claude turn duration action")
+    expect(!reducer.snapshot.active, "Claude completion should be inactive")
+    expect(reducer.snapshot.completedAt != nil, "Claude completion should set completion time")
+}
+
+func testClaudeMonitorHandlesDiscoveryPendingLinesAndTruncation() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-claude-monitor-\(UUID().uuidString)", isDirectory: true)
+    let projects = root.appendingPathComponent("projects", isDirectory: true)
+    let project = projects.appendingPathComponent("-Users-wjs-work-pyproj-AgentHalo", isDirectory: true)
+    try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+    let file = project.appendingPathComponent("\(UUID().uuidString).jsonl")
+    let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
+    try Data(#"{"type":"user","message":{"role":"user","content":"Build Claude status"},"timestamp":"2026-06-13T02:00:00Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"claude-monitor"}"#.utf8).write(to: file)
+
+    let monitor = ClaudeSessionMonitor(projectsRoot: projects)
+    _ = monitor.refresh(now: now)
+    expect(monitor.snapshots().first?.state == .idle, "Claude partial line should wait for newline")
+
+    try FileHandle(forWritingTo: file).withClose {
+        try $0.seekToEnd()
+        try $0.write(contentsOf: Data("\n".utf8))
+    }
+    _ = monitor.refresh(now: now.addingTimeInterval(1))
+    expect(monitor.snapshots().first?.state == .thinking, "Claude completed pending line should parse")
+    expect(monitor.snapshots().first?.projectName, "AgentHalo", "Claude monitor project name")
+
+    try Data(#"{"type":"system","subtype":"turn_duration","durationMs":3000,"timestamp":"2026-06-13T02:00:02Z","cwd":"/Users/wjs/work/pyproj/AgentHalo","sessionId":"claude-monitor"}"#.utf8).write(to: file)
+    _ = monitor.refresh(now: now.addingTimeInterval(2))
+    expect(monitor.snapshots().first?.state == .idle, "Claude truncated partial line should not parse")
+}
+
 func testStartupExecutablePathUsesAppBundleRoot() {
     let bundleURL = URL(fileURLWithPath: "/tmp/AgentHalo.app")
     let path = StartupLaunchAgent.executablePath(appBundleURL: bundleURL)
@@ -439,6 +565,12 @@ testReducesPlanningWorkingAttentionErrorAndCompleteEvents()
 testAggregatePrioritizesActionableSessions()
 testAcknowledgingCompletedSessionsStoresLatestVisibleCompletionOnly()
 testSettingsPersistFormalFieldsAndNormalizePaused()
+do {
+    try testSettingsDefaultsFocusedAgentToCodexWhenMissing()
+} catch {
+    fatalError("\(error)")
+}
+testSettingsPersistsFocusedAgent()
 testAcknowledgedErrorVisibilityUsesLatestErrorTime()
 testWorkingVisibilityLiveCallOutputAndInitialTail()
 testToolFailedDoesNotBecomeFatalError()
@@ -460,6 +592,13 @@ do {
     fatalError("\(error)")
 }
 testAggregatorInjectsUnacknowledgedCodexFailureWhenIdle()
+testAggregatorCombinesCodexAndClaudeSnapshots()
+testClaudeReducerMapsTranscriptEvents()
+do {
+    try testClaudeMonitorHandlesDiscoveryPendingLinesAndTruncation()
+} catch {
+    fatalError("\(error)")
+}
 testStartupExecutablePathUsesAppBundleRoot()
 do {
     try testDiagnosticsCreatesParentDirectoryForOutput()
