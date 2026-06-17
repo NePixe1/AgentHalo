@@ -868,6 +868,38 @@ func testClaudeStatusMergerSurvivesDuplicateThreadIds() {
     expect(merged.first?.state, .thinking, "duplicate-threadId merge keeps the newer snapshot")
 }
 
+func testClaudeHookStopShowsDoneThenReadyWhileWaitingForInput() {
+    let start = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
+    var reducer = ClaudeHookStatusReducer(threadId: "done-ready", now: start)
+    let settings = HaloSettings(
+        paused: false,
+        focusedAgent: .claudeCode,
+        installedAt: start.addingTimeInterval(-60)
+    )
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"done-ready","cwd":"/Users/wjs/work/pyproj/AgentHalo","source":"claude-hook"}"#, now: start)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:02Z","event":"Stop","sessionId":"done-ready","cwd":"/Users/wjs/work/pyproj/AgentHalo","source":"claude-hook"}"#, now: start.addingTimeInterval(2))
+
+    let fresh = SessionAggregator.aggregate(
+        snapshots: [reducer.snapshot],
+        settings: settings,
+        focusedAgent: .claudeCode,
+        now: start.addingTimeInterval(3)
+    )
+    expect(fresh.state, .done, "Claude Stop should show Done immediately")
+    expect(fresh.label, "COMPLETE", "Claude Stop label")
+
+    let settled = SessionAggregator.aggregate(
+        snapshots: [reducer.snapshot],
+        settings: settings,
+        focusedAgent: .claudeCode,
+        now: start.addingTimeInterval(11)
+    )
+    expect(settled.state, .idle, "Claude waiting for user input should settle to Ready")
+    expect(settled.label, "READY", "Claude settled label")
+    expect(settled.detail, "Claude Code is standing by", "Claude waiting-for-input detail")
+}
+
 func testStartupExecutablePathUsesAppBundleRoot() {
     let bundleURL = URL(fileURLWithPath: "/tmp/AgentHalo.app")
     let path = StartupLaunchAgent.executablePath(appBundleURL: bundleURL)
@@ -1004,6 +1036,7 @@ do {
 testClaudeStatusMergerPrefersHookDoneOverTranscriptThinking()
 testClaudeStatusMergerUsesTranscriptCompletionWhenHookStopWasMissed()
 testClaudeStatusMergerSurvivesDuplicateThreadIds()
+testClaudeHookStopShowsDoneThenReadyWhileWaitingForInput()
 testStartupExecutablePathUsesAppBundleRoot()
 do {
     try testDiagnosticsCreatesParentDirectoryForOutput()
