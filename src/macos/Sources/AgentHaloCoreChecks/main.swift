@@ -698,6 +698,37 @@ func testClaudeHookReducerStuckPreToolUseRecoversAfterSafetyTimeout() {
     expect(reducer.snapshot.action, "Thinking", "safety-net fade action")
 }
 
+func testClaudeHookReducerPreCompactShowsExecutingThenRestoresToThinking() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-17T04:00:00Z")!
+    var reducer = ClaudeHookStatusReducer(threadId: "compact", now: now)
+
+    // Start a normal turn.
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:00Z","event":"UserPromptSubmit","sessionId":"compact","cwd":"/tmp","source":"claude-hook"}"#, now: now)
+    expect(reducer.snapshot.state, .thinking, "start in thinking")
+
+    // PreCompact should switch to working with "Compressing context".
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:01Z","event":"PreCompact","sessionId":"compact","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
+    expect(reducer.snapshot.state, .working, "PreCompact should show Executing")
+    expect(reducer.snapshot.action, "Compressing context", "PreCompact action")
+    expect(reducer.snapshot.active, true, "PreCompact keeps the turn active")
+
+    // PostCompact should restore to thinking.
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:02Z","event":"PostCompact","sessionId":"compact","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(2))
+    expect(reducer.snapshot.state, .thinking, "PostCompact should restore to thinking")
+    expect(reducer.snapshot.action, "Thinking", "PostCompact action")
+    expect(reducer.snapshot.active, true, "PostCompact keeps the turn active")
+
+    // Safety net: PreCompact without PostCompact should force-fade like PreToolUse.
+    var reducer2 = ClaudeHookStatusReducer(threadId: "compact-stuck", now: now)
+    reducer2.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:00Z","event":"UserPromptSubmit","sessionId":"compact-stuck","cwd":"/tmp","source":"claude-hook"}"#, now: now)
+    reducer2.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:01Z","event":"PreCompact","sessionId":"compact-stuck","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
+    expect(reducer2.snapshot.state, .working, "PreCompact shows working")
+
+    // After >30 s with no PostCompact, safety net recovers.
+    reducer2.applyWorkingVisibility(now: now.addingTimeInterval(32))
+    expect(reducer2.snapshot.state, .thinking, "stuck PreCompact should force-fade to thinking after >30 s")
+}
+
 func testClaudeHookMonitorPrunesStaleReducers() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-claude-hook-prune-\(UUID().uuidString)", isDirectory: true)
@@ -1070,6 +1101,7 @@ testClaudeHookReducerPermissionPromptHoldsUntilResolved()
 testClaudeHookReducerIdlePromptShowsAwaitingReply()
 testClaudeHookReducerStopFailureMapsToError()
 testClaudeHookReducerStuckPreToolUseRecoversAfterSafetyTimeout()
+testClaudeHookReducerPreCompactShowsExecutingThenRestoresToThinking()
 do {
     try testClaudeHookMonitorPrunesStaleReducers()
 } catch {

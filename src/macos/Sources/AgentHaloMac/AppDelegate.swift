@@ -43,6 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.terminate(nil)
             return
         }
+        ClaudeHookConfigurator.configure()
         NSApp.setActivationPolicy(.accessory)
         createStatusItem()
         createHaloPanel()
@@ -260,10 +261,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func claudeSnapshots() -> [SessionSnapshot] {
-        ClaudeStatusSourceMerger.merge(
-            hookSnapshots: claudeHookMonitor.snapshots(),
-            transcriptSnapshots: claudeMonitor.snapshots()
-        )
+        // Hook and transcript are mutually exclusive sources — never merge them.
+        // Merging causes priority inversion (e.g. transcript .thinking (pri 3)
+        // outranks hook .done (pri 4), hiding the Stop completion).
+        let hookSnapshots = claudeHookMonitor.snapshots()
+        if !hookSnapshots.isEmpty {
+            return hookSnapshots
+        }
+        return claudeMonitor.snapshots()
     }
 
     private func acknowledgeCompletedSessions(_ sessions: [SessionSnapshot]) {

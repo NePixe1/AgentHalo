@@ -39,10 +39,15 @@ public struct ClaudeHookStatusReducer: Sendable {
 
         switch Self.string(root["event"]) {
         case "SessionStart":
-            if !snapshot.active && snapshot.state != .done {
-                snapshot.state = .idle
-                snapshot.action = "Ready"
-            }
+            // A new session always resets to idle regardless of prior state.
+            // Without this, a previous Stop (→ .done) blocks every subsequent
+            // SessionStart and the reducer can never return to idle on replay.
+            isPermissionPrompt = false
+            workingVisibleUntil = nil
+            snapshot.active = false
+            snapshot.state = .idle
+            snapshot.action = "Ready"
+            snapshot.completedAt = nil
         case "UserPromptSubmit":
             workingVisibleUntil = nil
             isPermissionPrompt = false
@@ -105,6 +110,25 @@ public struct ClaudeHookStatusReducer: Sendable {
             snapshot.active = false
             snapshot.state = .error
             snapshot.action = "Claude Code stopped with an error"
+            snapshot.completedAt = nil
+        case "PreCompact":
+            // Compaction is a transient background operation — show Executing while
+            // CC compresses the context, then let PostCompact restore to Thinking.
+            isPermissionPrompt = false
+            workingVisibleUntil = nil
+            snapshot.active = true
+            snapshot.state = .working
+            snapshot.action = "Compressing context"
+            snapshot.completedAt = nil
+        case "PostCompact":
+            // Context compaction finished — return to Thinking as the default
+            // active state. The next hook event (PreToolUse, UserPromptSubmit, …)
+            // will refine the state further.
+            isPermissionPrompt = false
+            workingVisibleUntil = nil
+            snapshot.active = true
+            snapshot.state = .thinking
+            snapshot.action = "Thinking"
             snapshot.completedAt = nil
         case "SessionEnd":
             isPermissionPrompt = false
