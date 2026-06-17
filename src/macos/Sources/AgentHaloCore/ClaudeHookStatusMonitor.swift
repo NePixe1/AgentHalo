@@ -37,6 +37,7 @@ public final class ClaudeHookStatusMonitor {
             for key in reducers.keys {
                 reducers[key]?.applyWorkingVisibility(now: now)
             }
+            pruneStaleReducers(now: now)
             return false
         }
 
@@ -77,6 +78,7 @@ public final class ClaudeHookStatusMonitor {
             for key in reducers.keys {
                 reducers[key]?.applyWorkingVisibility(now: now)
             }
+            pruneStaleReducers(now: now)
             return !lines.isEmpty
         } catch {
             AgentHaloLogger.log("Claude hook status refresh failed: \(error)")
@@ -85,15 +87,13 @@ public final class ClaudeHookStatusMonitor {
     }
 
     public func snapshots() -> [SessionSnapshot] {
-        // When no complete hook line has been parsed yet (file missing, empty, partial line
-        // pending, or freshly truncated), surface a default `.idle` Claude Code snapshot.
-        // This keeps `monitor.snapshots().first?.state == .idle` true before the first event,
-        // satisfying the partial-line/truncation contract in
-        // `testClaudeHookMonitorHandlesPendingLinesAndTruncation`. The aggregator filters
-        // non-active idle snapshots, so the phantom is invisible at the user-facing halo —
-        // do not remove without updating that test and the aggregator's filter.
+        // Return empty when no hook data is available (file missing, empty, partial
+        // line pending, or freshly truncated). The merger then falls through to the
+        // transcript source, which becomes the sole authority. A phantom idle snapshot
+        // with a synthetic threadId would NOT match transcript threadIds and would
+        // let stale transcript states leak through.
         if reducers.isEmpty {
-            return [ClaudeHookStatusReducer().snapshot]
+            return []
         }
         return reducers.values.map(\.snapshot)
     }
@@ -106,6 +106,18 @@ public final class ClaudeHookStatusMonitor {
         }
         let sessionId = String(describing: value)
         return sessionId.isEmpty ? "claude-code" : sessionId
+    }
+
+    private func pruneStaleReducers(now: Date) {
+        let activeStaleThreshold = now.addingTimeInterval(-60)
+        let inactiveStaleThreshold = now.addingTimeInterval(-300)
+        reducers = reducers.filter { _, reducer in
+            let t = reducer.snapshot.lastEventAt
+            if reducer.snapshot.active {
+                return t >= activeStaleThreshold
+            }
+            return t >= inactiveStaleThreshold
+        }
     }
 
     private func fileSize(_ url: URL) -> UInt64 {

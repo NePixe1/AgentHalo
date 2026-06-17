@@ -677,6 +677,57 @@ func testClaudeHookReducerStopFailureMapsToError() {
     expect(reducer.snapshot.active, false, "StopFailure should deactivate")
 }
 
+func testClaudeHookReducerStuckPreToolUseRecoversAfterSafetyTimeout() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
+    var reducer = ClaudeHookStatusReducer(threadId: "stuck-pretool", now: now)
+
+    // Simulate a PreToolUse event that is never followed by PostToolUse
+    // (e.g. crash, test noise, hook misconfiguration).
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"stuck-pretool","cwd":"/tmp","source":"claude-hook"}"#, now: now)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:01Z","event":"PreToolUse","sessionId":"stuck-pretool","cwd":"/tmp","toolName":"Bash","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
+
+    expect(reducer.snapshot.state, .working, "PreToolUse should enter working")
+
+    // After 10 seconds, still working — tool may legitimately be running.
+    reducer.applyWorkingVisibility(now: now.addingTimeInterval(11))
+    expect(reducer.snapshot.state, .working, "10 s after PreToolUse should keep working (tool may run long)")
+
+    // After 31 seconds with no follow-up event, safety net forces fade to thinking.
+    reducer.applyWorkingVisibility(now: now.addingTimeInterval(32))
+    expect(reducer.snapshot.state, .thinking, ">30 s after PreToolUse with no PostToolUse should force-fade to thinking")
+    expect(reducer.snapshot.action, "Thinking", "safety-net fade action")
+}
+
+func testClaudeHookMonitorPrunesStaleReducers() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-claude-hook-prune-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let statusFile = root.appendingPathComponent("claude-code-status.jsonl")
+    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
+
+    // Write two completions from different sessions, both long ago.
+    let old = [
+        #"{"timestamp":"2026-06-16T03:50:00Z","event":"UserPromptSubmit","sessionId":"old-session","cwd":"/tmp","source":"claude-hook"}"#,
+        #"{"timestamp":"2026-06-16T03:50:01Z","event":"PreToolUse","sessionId":"old-session","cwd":"/tmp","toolName":"Bash","source":"claude-hook"}"#,
+        #"{"timestamp":"2026-06-16T03:55:00Z","event":"UserPromptSubmit","sessionId":"newer-session","cwd":"/tmp","source":"claude-hook"}"#,
+        #"{"timestamp":"2026-06-16T03:55:01Z","event":"Stop","sessionId":"newer-session","cwd":"/tmp","source":"claude-hook"}"#,
+    ].joined(separator: "\n") + "\n"
+    try Data(old.utf8).write(to: statusFile)
+
+    let monitor = ClaudeHookStatusMonitor(statusURL: statusFile)
+    _ = monitor.refresh(now: now.addingTimeInterval(-30))
+    // Both sessions processed: old-session is active+working, newer-session is done.
+    let before = monitor.snapshots()
+    expect(before.count >= 1, true, "at least one snapshot before pruning")
+
+    // Advance time > 5 minutes. The old active session (>60 s stale) and the done
+    // session (>300 s stale) should both be pruned, leaving an empty reducer map
+    // which triggers the default-idle fallback.
+    _ = monitor.refresh(now: now.addingTimeInterval(400))
+    let after = monitor.snapshots()
+    expect(after.isEmpty, true, "stale reducers pruned → empty snapshots, falls through to transcript")
+}
+
 func testClaudeMonitorHandlesDiscoveryPendingLinesAndTruncation() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-claude-monitor-\(UUID().uuidString)", isDirectory: true)
@@ -716,7 +767,7 @@ func testClaudeHookMonitorHandlesPendingLinesAndTruncation() throws {
 
     let monitor = ClaudeHookStatusMonitor(statusURL: statusFile)
     _ = monitor.refresh(now: now)
-    expect(monitor.snapshots().first?.state == .idle, "partial hook line should wait for newline")
+    expect(monitor.snapshots().isEmpty, true, "partial hook line should not produce a snapshot")
 
     try FileHandle(forWritingTo: statusFile).withClose {
         try $0.seekToEnd()
@@ -728,7 +779,7 @@ func testClaudeHookMonitorHandlesPendingLinesAndTruncation() throws {
 
     try Data(#"{"timestamp":"2026-06-16T04:00:02Z","event":"Stop","sessionId":"hook-monitor","cwd":"/Users/wjs/work/pyproj/AgentHalo","source":"claude-hook"}"#.utf8).write(to: statusFile)
     _ = monitor.refresh(now: now.addingTimeInterval(2))
-    expect(monitor.snapshots().first?.state == .idle, "truncated partial hook line should not parse")
+    expect(monitor.snapshots().isEmpty, true, "truncated partial hook line should not produce a snapshot")
 }
 
 func testClaudeMonitorIgnoresSubagentTranscripts() throws {
@@ -1018,6 +1069,12 @@ testClaudeHookReducerPostToolUseFailureSurfacesThenSettles()
 testClaudeHookReducerPermissionPromptHoldsUntilResolved()
 testClaudeHookReducerIdlePromptShowsAwaitingReply()
 testClaudeHookReducerStopFailureMapsToError()
+testClaudeHookReducerStuckPreToolUseRecoversAfterSafetyTimeout()
+do {
+    try testClaudeHookMonitorPrunesStaleReducers()
+} catch {
+    fatalError("\(error)")
+}
 do {
     try testClaudeMonitorHandlesDiscoveryPendingLinesAndTruncation()
 } catch {

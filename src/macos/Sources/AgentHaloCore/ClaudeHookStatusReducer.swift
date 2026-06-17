@@ -7,6 +7,11 @@ public struct ClaudeHookStatusReducer: Sendable {
     /// delayed Halo tick or a startup replay still settles correctly. `nil` means
     /// "do not auto-fade" (e.g. permission_prompt holds indefinitely).
     private var workingVisibleUntil: Date?
+    /// Tracks whether the current `.working` state was entered via a permission_prompt
+    /// notification. Per the plan, permission prompts must never auto-fade — the user
+    /// must explicitly approve or reject. Distinguished from PreToolUse so the stuck-
+    /// tool safety net can recover PreToolUse hangs without breaking permission holds.
+    private var isPermissionPrompt = false
 
     public init(threadId: String = "claude-code", now: Date = Date()) {
         self.snapshot = SessionSnapshot(
@@ -40,11 +45,16 @@ public struct ClaudeHookStatusReducer: Sendable {
             }
         case "UserPromptSubmit":
             workingVisibleUntil = nil
+            isPermissionPrompt = false
             snapshot.active = true
             snapshot.state = .thinking
             snapshot.action = "Thinking"
             snapshot.completedAt = nil
         case "PreToolUse":
+            isPermissionPrompt = false
+            // No auto-fade timeout during tool execution — the tool may run for
+            // many seconds. If PostToolUse never arrives (crash, stale data),
+            // the safety net in applyWorkingVisibility recovers after 30 s.
             workingVisibleUntil = nil
             snapshot.active = true
             snapshot.state = .working
@@ -67,6 +77,7 @@ public struct ClaudeHookStatusReducer: Sendable {
             switch Self.string(root["notificationType"]) {
             case "permission_prompt":
                 // Block on user approval. No auto-fade — only the next PreToolUse / Stop clears this.
+                isPermissionPrompt = true
                 workingVisibleUntil = nil
                 snapshot.active = true
                 snapshot.state = .working
@@ -82,18 +93,21 @@ public struct ClaudeHookStatusReducer: Sendable {
                 break
             }
         case "Stop":
+            isPermissionPrompt = false
             workingVisibleUntil = nil
             snapshot.active = false
             snapshot.state = .done
             snapshot.action = "Complete"
             snapshot.completedAt = eventAt
         case "StopFailure":
+            isPermissionPrompt = false
             workingVisibleUntil = nil
             snapshot.active = false
             snapshot.state = .error
             snapshot.action = "Claude Code stopped with an error"
             snapshot.completedAt = nil
         case "SessionEnd":
+            isPermissionPrompt = false
             if snapshot.active {
                 snapshot.active = false
                 snapshot.state = .idle
@@ -105,13 +119,29 @@ public struct ClaudeHookStatusReducer: Sendable {
     }
 
     public mutating func applyWorkingVisibility(now: Date = Date()) {
-        if snapshot.active,
-           snapshot.state == .working,
-           let until = workingVisibleUntil,
-           now >= until {
+        guard snapshot.active, snapshot.state == .working else { return }
+
+        // Normal PostToolUse / PostToolUseFailure fade: anchored on event time.
+        if let until = workingVisibleUntil, now >= until {
             workingVisibleUntil = nil
             snapshot.state = .thinking
             snapshot.action = "Thinking"
+            return
+        }
+
+        // Safety net: when workingVisibleUntil is nil and this is NOT a permission
+        // prompt, the reducer is stuck (PreToolUse without PostToolUse, stale test
+        // data, etc.). Force-fade after 30 seconds of inactivity so the ring can
+        // recover without an explicit Stop event.
+        //
+        // Permission prompts are exempt — the plan requires them to hold until the
+        // user explicitly approves or rejects (tested in
+        // testClaudeHookReducerPermissionPromptHoldsUntilResolved).
+        if workingVisibleUntil == nil, !isPermissionPrompt {
+            if now.timeIntervalSince(snapshot.lastEventAt) > 30 {
+                snapshot.state = .thinking
+                snapshot.action = "Thinking"
+            }
         }
     }
 
