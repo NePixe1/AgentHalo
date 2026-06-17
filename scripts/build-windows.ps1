@@ -18,8 +18,33 @@ $sqliteExe = Join-Path $cacheRoot "sqlite3-$sqliteVersion.exe"
 if (-not (Test-Path -LiteralPath $sqliteExe)) {
     $zip = Join-Path $env:TEMP "sqlite-tools-win-x64-$sqliteVersion.zip"
     New-Item -ItemType Directory -Force -Path $cacheRoot | Out-Null
-    Invoke-WebRequest "https://sqlite.org/2026/sqlite-tools-win-x64-$sqliteVersion.zip" `
-        -OutFile $zip
+    [Net.ServicePointManager]::SecurityProtocol = `
+        [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $sqliteUrls = @(
+        "https://sqlite.org/2026/sqlite-tools-win-x64-$sqliteVersion.zip",
+        "https://www.sqlite.org/2026/sqlite-tools-win-x64-$sqliteVersion.zip"
+    )
+    $downloaded = $false
+    $lastError = $null
+    foreach ($url in $sqliteUrls) {
+        for ($attempt = 1; $attempt -le 5; $attempt++) {
+            try {
+                Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing `
+                    -TimeoutSec 60
+                $downloaded = $true
+                break
+            } catch {
+                $lastError = $_
+                Write-Host ("sqlite download attempt {0} from {1} failed: {2}" `
+                    -f $attempt, $url, $_.Exception.Message)
+                Start-Sleep -Seconds ([Math]::Min(30, [Math]::Pow(2, $attempt)))
+            }
+        }
+        if ($downloaded) { break }
+    }
+    if (-not $downloaded) {
+        throw "Failed to download sqlite tools after retries: $lastError"
+    }
     $extract = Join-Path $env:TEMP "agenthalo-sqlite-$sqliteVersion"
     Remove-Item -LiteralPath $extract -Recurse -Force -ErrorAction SilentlyContinue
     Expand-Archive -LiteralPath $zip -DestinationPath $extract
