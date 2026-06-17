@@ -1031,6 +1031,10 @@ public sealed class CodexRealtimeActivityReader
 
 public static class CodexFailureReader
     {
+        private const int SqliteOpenReadOnly = 0x00000001;
+        private const int SqliteRow = 100;
+        private static bool unavailable;
+
         public static bool TryReadRecent(out string detail, out DateTime eventUtc)
         {
             detail = null;
@@ -1038,13 +1042,21 @@ public static class CodexFailureReader
             string root = Path.Combine(Environment.GetFolderPath(
                 Environment.SpecialFolder.UserProfile), ".codex");
             string database = Path.Combine(root, "logs_2.sqlite");
-            string sqlite = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "sqlite3.exe");
-            if (!File.Exists(database) || !File.Exists(sqlite))
+            if (unavailable || !File.Exists(database))
             {
                 return false;
             }
+            IntPtr connection = IntPtr.Zero;
+            IntPtr statement = IntPtr.Zero;
             try
             {
+                int opened = sqlite3_open_v2(database, out connection,
+                    SqliteOpenReadOnly, null);
+                if (opened != 0 || connection == IntPtr.Zero)
+                {
+                    return false;
+                }
+                sqlite3_busy_timeout(connection, 80);
                 long cutoff = DateTimeOffset.UtcNow.AddMinutes(-2).ToUnixTimeSeconds();
                 string query = "select ts || char(9) || replace(replace(" +
                     "coalesce(feedback_log_body,''),char(10),' '),char(13),' ') from logs " +
@@ -1053,41 +1065,92 @@ public static class CodexFailureReader
                     "lower(target) like '%client%' or lower(target) like '%auth%' or " +
                     "lower(target) like '%response%' or lower(target) like '%session%') " +
                     "order by id desc limit 24;";
-                ProcessStartInfo start = new ProcessStartInfo
+                if (sqlite3_prepare_v2(connection, query, -1, out statement,
+                    IntPtr.Zero) != 0 || statement == IntPtr.Zero)
                 {
-                    FileName = sqlite,
-                    Arguments = "-readonly -batch \"" + database.Replace("\"", "\"\"") +
-                        "\" \"" + query.Replace("\"", "\"\"") + "\"",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true
-                };
-                using (Process process = Process.Start(start))
-                {
-                    string output = process.StandardOutput.ReadToEnd();
-                    process.WaitForExit(1500);
-                    foreach (string line in output.Split(new[] { '\r', '\n' },
-                        StringSplitOptions.RemoveEmptyEntries))
-                    {
-                        int tab = line.IndexOf('\t');
-                        if (tab <= 0) continue;
-                        long seconds;
-                        if (!long.TryParse(line.Substring(0, tab), out seconds)) continue;
-                        string matched = GeneratedHaloSpec.ClassifyFailure(
-                            line.Substring(tab + 1));
-                        if (matched == null) continue;
-                        detail = matched;
-                        eventUtc = DateTimeOffset.FromUnixTimeSeconds(seconds).UtcDateTime;
-                        return true;
-                    }
+                    return false;
                 }
+                while (sqlite3_step(statement) == SqliteRow)
+                {
+                    string line = ReadUtf8Column(statement, 0);
+                    int tab = line.IndexOf('\t');
+                    if (tab <= 0) continue;
+                    long seconds;
+                    if (!long.TryParse(line.Substring(0, tab), out seconds)) continue;
+                    string matched = GeneratedHaloSpec.ClassifyFailure(
+                        line.Substring(tab + 1));
+                    if (matched == null) continue;
+                    detail = matched;
+                    eventUtc = DateTimeOffset.FromUnixTimeSeconds(seconds).UtcDateTime;
+                    return true;
+                }
+            }
+            catch (DllNotFoundException)
+            {
+                unavailable = true;
+            }
+            catch (EntryPointNotFoundException)
+            {
+                unavailable = true;
             }
             catch
             {
             }
+            finally
+            {
+                if (statement != IntPtr.Zero)
+                {
+                    sqlite3_finalize(statement);
+                }
+                if (connection != IntPtr.Zero)
+                {
+                    sqlite3_close(connection);
+                }
+            }
             return false;
         }
+
+        private static string ReadUtf8Column(IntPtr statement, int column)
+        {
+            IntPtr pointer = sqlite3_column_text(statement, column);
+            int length = sqlite3_column_bytes(statement, column);
+            if (pointer == IntPtr.Zero || length <= 0)
+            {
+                return String.Empty;
+            }
+            byte[] bytes = new byte[length];
+            Marshal.Copy(pointer, bytes, 0, length);
+            return Encoding.UTF8.GetString(bytes);
+        }
+
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl,
+            CharSet = CharSet.Ansi)]
+        private static extern int sqlite3_open_v2(string filename,
+            out IntPtr database, int flags, string vfs);
+
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl,
+            CharSet = CharSet.Ansi)]
+        private static extern int sqlite3_prepare_v2(IntPtr database, string sql,
+            int byteCount, out IntPtr statement, IntPtr tail);
+
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int sqlite3_step(IntPtr statement);
+
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr sqlite3_column_text(IntPtr statement, int column);
+
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int sqlite3_column_bytes(IntPtr statement, int column);
+
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int sqlite3_finalize(IntPtr statement);
+
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int sqlite3_close(IntPtr database);
+
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int sqlite3_busy_timeout(IntPtr database,
+            int milliseconds);
 
     }
 

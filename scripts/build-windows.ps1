@@ -12,21 +12,6 @@ if (-not (Test-Path -LiteralPath $csc)) {
 
 New-Item -ItemType Directory -Force -Path $output | Out-Null
 
-$sqliteVersion = "3530200"
-$cacheRoot = Join-Path $env:LOCALAPPDATA "AgentHalo\build-cache"
-$sqliteExe = Join-Path $cacheRoot "sqlite3-$sqliteVersion.exe"
-if (-not (Test-Path -LiteralPath $sqliteExe)) {
-    $zip = Join-Path $env:TEMP "sqlite-tools-win-x64-$sqliteVersion.zip"
-    New-Item -ItemType Directory -Force -Path $cacheRoot | Out-Null
-    Invoke-WebRequest "https://sqlite.org/2026/sqlite-tools-win-x64-$sqliteVersion.zip" `
-        -OutFile $zip
-    $extract = Join-Path $env:TEMP "agenthalo-sqlite-$sqliteVersion"
-    Remove-Item -LiteralPath $extract -Recurse -Force -ErrorAction SilentlyContinue
-    Expand-Archive -LiteralPath $zip -DestinationPath $extract
-    Copy-Item -LiteralPath (Get-ChildItem $extract -Recurse -Filter sqlite3.exe |
-        Select-Object -First 1).FullName -Destination $sqliteExe
-}
-
 $framework = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319"
 $wpf = Join-Path $framework "WPF"
 $references = @(
@@ -82,8 +67,8 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Copy-Item -LiteralPath "$root\README.md" -Destination "$output\README.md" -Force
-Copy-Item -LiteralPath $sqliteExe -Destination "$output\sqlite3.exe" -Force
 Remove-Item -LiteralPath (Join-Path $output "AgentHalo.pdb") -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $output "sqlite3.exe") -ErrorAction SilentlyContinue
 
 $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
 $hashLine = "$hash  AgentHalo.exe"
