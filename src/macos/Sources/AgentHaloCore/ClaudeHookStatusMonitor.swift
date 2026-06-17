@@ -85,6 +85,13 @@ public final class ClaudeHookStatusMonitor {
     }
 
     public func snapshots() -> [SessionSnapshot] {
+        // When no complete hook line has been parsed yet (file missing, empty, partial line
+        // pending, or freshly truncated), surface a default `.idle` Claude Code snapshot.
+        // This keeps `monitor.snapshots().first?.state == .idle` true before the first event,
+        // satisfying the partial-line/truncation contract in
+        // `testClaudeHookMonitorHandlesPendingLinesAndTruncation`. The aggregator filters
+        // non-active idle snapshots, so the phantom is invisible at the user-facing halo —
+        // do not remove without updating that test and the aggregator's filter.
         if reducers.isEmpty {
             return [ClaudeHookStatusReducer().snapshot]
         }
