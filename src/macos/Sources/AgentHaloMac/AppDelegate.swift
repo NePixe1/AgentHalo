@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let settingsStore: SettingsStore
     private var settings: HaloSettings
     private let monitor = CodexSessionMonitor()
+    private let claudeHookMonitor = ClaudeHookStatusMonitor()
     private let claudeMonitor = ClaudeSessionMonitor()
     private var selectedPreview = PreviewPayload.live
     private var aggregate: AggregateSnapshot
@@ -60,6 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func tick() {
         _ = monitor.refresh()
+        _ = claudeHookMonitor.refresh()
         _ = claudeMonitor.refresh()
         acknowledgeCompletedIfCodexIsForeground()
         aggregate = SessionAggregator.aggregate(
@@ -258,7 +260,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func claudeSnapshots() -> [SessionSnapshot] {
-        claudeMonitor.snapshots()
+        ClaudeStatusSourceMerger.merge(
+            hookSnapshots: claudeHookMonitor.snapshots(),
+            transcriptSnapshots: claudeMonitor.snapshots()
+        )
     }
 
     private func acknowledgeCompletedSessions(_ sessions: [SessionSnapshot]) {
@@ -330,7 +335,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func allSnapshots() -> [SessionSnapshot] {
-        monitor.snapshots() + claudeMonitor.snapshots()
+        monitor.snapshots() + claudeSnapshots()
     }
 
     private func addMenuItem(_ title: String, _ action: Selector, enabled: Bool, to menu: NSMenu) {
