@@ -587,6 +587,96 @@ func testClaudeReducerIgnoresLocalCommandUserRecords() {
     expect(!reducer.snapshot.active, "Claude local command should not activate the session")
 }
 
+func testClaudeHookReducerMapsLifecycleEvents() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
+    var reducer = ClaudeHookStatusReducer(threadId: "hook-thread", now: now)
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"hook-thread","cwd":"/Users/wjs/work/pyproj/AgentHalo","source":"claude-hook"}"#, now: now)
+    expect(reducer.snapshot.threadId, "hook-thread", "hook thread id")
+    expect(reducer.snapshot.projectName, "AgentHalo", "hook project name")
+    expect(reducer.snapshot.state, .thinking, "UserPromptSubmit should enter thinking")
+    expect(reducer.snapshot.action, "Thinking", "UserPromptSubmit action")
+    expect(reducer.snapshot.active, true, "UserPromptSubmit should activate")
+    expect(reducer.snapshot.agent, .claudeCode, "hook reducer should stamp Claude Code agent")
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:01Z","event":"PreToolUse","sessionId":"hook-thread","cwd":"/Users/wjs/work/pyproj/AgentHalo","toolName":"Bash","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
+    expect(reducer.snapshot.state, .working, "PreToolUse should enter working")
+    expect(reducer.snapshot.action, "Running command", "PreToolUse should map Bash to friendly command action")
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:02Z","event":"PostToolUse","sessionId":"hook-thread","cwd":"/Users/wjs/work/pyproj/AgentHalo","toolName":"Bash","source":"claude-hook"}"#, now: now.addingTimeInterval(2))
+    expect(reducer.snapshot.state, .working, "PostToolUse should remain briefly working")
+    expect(reducer.snapshot.action, "Reviewing result", "PostToolUse action")
+
+    // Visibility window is anchored on the event timestamp (04:00:02 + 1.8s = 04:00:03.8),
+    // not on `now`. A delayed tick at 04:00:04 must already see the fade.
+    reducer.applyWorkingVisibility(now: now.addingTimeInterval(4))
+    expect(reducer.snapshot.state, .thinking, "PostToolUse should settle back to thinking")
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:05Z","event":"Stop","sessionId":"hook-thread","cwd":"/Users/wjs/work/pyproj/AgentHalo","source":"claude-hook"}"#, now: now.addingTimeInterval(5))
+    expect(reducer.snapshot.state, .done, "Stop should enter done")
+    expect(reducer.snapshot.action, "Complete", "Stop action")
+    expect(reducer.snapshot.active, false, "Stop should deactivate")
+    expect(reducer.snapshot.completedAt, now.addingTimeInterval(5), "Stop should set completedAt")
+}
+
+func testClaudeHookReducerPostToolUseFailureSurfacesThenSettles() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
+    var reducer = ClaudeHookStatusReducer(threadId: "tool-failure", now: now)
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"tool-failure","cwd":"/tmp","source":"claude-hook"}"#, now: now)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:01Z","event":"PreToolUse","sessionId":"tool-failure","cwd":"/tmp","toolName":"Bash","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:02Z","event":"PostToolUseFailure","sessionId":"tool-failure","cwd":"/tmp","toolName":"Bash","errorText":"exit 1","source":"claude-hook"}"#, now: now.addingTimeInterval(2))
+
+    expect(reducer.snapshot.state, .working, "PostToolUseFailure should stay briefly working")
+    expect(reducer.snapshot.action, "Tool failed", "PostToolUseFailure action")
+    expect(reducer.snapshot.active, true, "PostToolUseFailure keeps the turn active")
+
+    reducer.applyWorkingVisibility(now: now.addingTimeInterval(4))
+    expect(reducer.snapshot.state, .thinking, "PostToolUseFailure fades back to thinking after the visibility window")
+}
+
+func testClaudeHookReducerPermissionPromptHoldsUntilResolved() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
+    var reducer = ClaudeHookStatusReducer(threadId: "perm", now: now)
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"perm","cwd":"/tmp","source":"claude-hook"}"#, now: now)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:01Z","event":"Notification","sessionId":"perm","cwd":"/tmp","notificationType":"permission_prompt","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
+
+    expect(reducer.snapshot.state, .working, "permission_prompt should show working")
+    expect(reducer.snapshot.action, "Awaiting permission", "permission_prompt action")
+    expect(reducer.snapshot.active, true, "permission_prompt keeps the turn active")
+
+    // No fade-out: even minutes later, the state must still reflect the pending prompt
+    // until a real PreToolUse / Stop arrives.
+    reducer.applyWorkingVisibility(now: now.addingTimeInterval(120))
+    expect(reducer.snapshot.state, .working, "permission_prompt should not fade automatically")
+    expect(reducer.snapshot.action, "Awaiting permission", "permission_prompt action persists")
+}
+
+func testClaudeHookReducerIdlePromptShowsAwaitingReply() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
+    var reducer = ClaudeHookStatusReducer(threadId: "idle", now: now)
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"idle","cwd":"/tmp","source":"claude-hook"}"#, now: now)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:01Z","event":"Notification","sessionId":"idle","cwd":"/tmp","notificationType":"idle_prompt","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
+
+    expect(reducer.snapshot.state, .thinking, "idle_prompt should keep thinking")
+    expect(reducer.snapshot.action, "Awaiting reply", "idle_prompt action")
+    expect(reducer.snapshot.active, true, "idle_prompt keeps the turn active")
+}
+
+func testClaudeHookReducerStopFailureMapsToError() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
+    var reducer = ClaudeHookStatusReducer(threadId: "hook-failure", now: now)
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"hook-failure","cwd":"/tmp","source":"claude-hook"}"#, now: now)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:01Z","event":"StopFailure","sessionId":"hook-failure","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
+
+    expect(reducer.snapshot.state, .error, "StopFailure should become error")
+    expect(reducer.snapshot.action, "Claude Code stopped with an error", "StopFailure action")
+    expect(reducer.snapshot.active, false, "StopFailure should deactivate")
+}
+
 func testClaudeMonitorHandlesDiscoveryPendingLinesAndTruncation() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-claude-monitor-\(UUID().uuidString)", isDirectory: true)
@@ -760,6 +850,11 @@ testAggregatorReturnsReadyAfterCompletedSessionSettles()
 testAggregatorKeepsCodexCompletionVisibleUntilAcknowledged()
 testClaudeReducerMapsTranscriptEvents()
 testClaudeReducerIgnoresLocalCommandUserRecords()
+testClaudeHookReducerMapsLifecycleEvents()
+testClaudeHookReducerPostToolUseFailureSurfacesThenSettles()
+testClaudeHookReducerPermissionPromptHoldsUntilResolved()
+testClaudeHookReducerIdlePromptShowsAwaitingReply()
+testClaudeHookReducerStopFailureMapsToError()
 do {
     try testClaudeMonitorHandlesDiscoveryPendingLinesAndTruncation()
 } catch {
