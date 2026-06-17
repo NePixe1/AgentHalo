@@ -763,6 +763,111 @@ func testClaudeMonitorIgnoresSubagentTranscripts() throws {
     expect(monitor.snapshots().first?.state, .done, "main Claude transcript should still be visible as done")
 }
 
+func testClaudeStatusMergerPrefersHookDoneOverTranscriptThinking() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:10Z")!
+    let hookDone = SessionSnapshot(
+        threadId: "same-thread",
+        projectName: "AgentHalo",
+        workingDirectory: "/Users/wjs/work/pyproj/AgentHalo",
+        state: .done,
+        action: "Complete",
+        lastEventAt: now.addingTimeInterval(-1),
+        completedAt: now.addingTimeInterval(-1),
+        active: false,
+        agent: .claudeCode
+    )
+    let transcriptThinking = SessionSnapshot(
+        threadId: "same-thread",
+        projectName: "AgentHalo",
+        workingDirectory: "/Users/wjs/work/pyproj/AgentHalo",
+        state: .thinking,
+        action: "Thinking",
+        lastEventAt: now,
+        completedAt: nil,
+        active: true,
+        agent: .claudeCode
+    )
+
+    let merged = ClaudeStatusSourceMerger.merge(
+        hookSnapshots: [hookDone],
+        transcriptSnapshots: [transcriptThinking],
+        now: now
+    )
+
+    expect(merged.map(\.state), [.done], "recent hook completion should suppress transcript reactivation")
+}
+
+func testClaudeStatusMergerUsesTranscriptCompletionWhenHookStopWasMissed() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:10Z")!
+    let hookWorking = SessionSnapshot(
+        threadId: "same-thread",
+        projectName: "AgentHalo",
+        workingDirectory: "/Users/wjs/work/pyproj/AgentHalo",
+        state: .working,
+        action: "Running command",
+        lastEventAt: now.addingTimeInterval(-5),
+        completedAt: nil,
+        active: true,
+        agent: .claudeCode
+    )
+    let transcriptDone = SessionSnapshot(
+        threadId: "same-thread",
+        projectName: "AgentHalo",
+        workingDirectory: "/Users/wjs/work/pyproj/AgentHalo",
+        state: .done,
+        action: "Complete",
+        lastEventAt: now.addingTimeInterval(-1),
+        completedAt: now.addingTimeInterval(-1),
+        active: false,
+        agent: .claudeCode
+    )
+
+    let merged = ClaudeStatusSourceMerger.merge(
+        hookSnapshots: [hookWorking],
+        transcriptSnapshots: [transcriptDone],
+        now: now
+    )
+
+    expect(merged.map(\.state), [.done], "newer transcript completion should recover from a missed hook Stop")
+}
+
+func testClaudeStatusMergerSurvivesDuplicateThreadIds() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:10Z")!
+    let older = SessionSnapshot(
+        threadId: "dup",
+        projectName: "AgentHalo",
+        workingDirectory: "/tmp",
+        state: .working,
+        action: "Running command",
+        lastEventAt: now.addingTimeInterval(-10),
+        completedAt: nil,
+        active: true,
+        agent: .claudeCode
+    )
+    let newer = SessionSnapshot(
+        threadId: "dup",
+        projectName: "AgentHalo",
+        workingDirectory: "/tmp",
+        state: .thinking,
+        action: "Thinking",
+        lastEventAt: now,
+        completedAt: nil,
+        active: true,
+        agent: .claudeCode
+    )
+
+    // Two snapshots sharing the same threadId from a single source must NOT crash;
+    // the newer one (by lastEventAt) wins.
+    let merged = ClaudeStatusSourceMerger.merge(
+        hookSnapshots: [older, newer],
+        transcriptSnapshots: [],
+        now: now
+    )
+
+    expect(merged.count, 1, "duplicate threadIds collapse to one entry")
+    expect(merged.first?.state, .thinking, "duplicate-threadId merge keeps the newer snapshot")
+}
+
 func testStartupExecutablePathUsesAppBundleRoot() {
     let bundleURL = URL(fileURLWithPath: "/tmp/AgentHalo.app")
     let path = StartupLaunchAgent.executablePath(appBundleURL: bundleURL)
@@ -896,6 +1001,9 @@ do {
 } catch {
     fatalError("\(error)")
 }
+testClaudeStatusMergerPrefersHookDoneOverTranscriptThinking()
+testClaudeStatusMergerUsesTranscriptCompletionWhenHookStopWasMissed()
+testClaudeStatusMergerSurvivesDuplicateThreadIds()
 testStartupExecutablePathUsesAppBundleRoot()
 do {
     try testDiagnosticsCreatesParentDirectoryForOutput()
