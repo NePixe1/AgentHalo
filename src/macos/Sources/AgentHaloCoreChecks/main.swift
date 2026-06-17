@@ -705,6 +705,32 @@ func testClaudeMonitorHandlesDiscoveryPendingLinesAndTruncation() throws {
     expect(monitor.snapshots().first?.state == .idle, "Claude truncated partial line should not parse")
 }
 
+func testClaudeHookMonitorHandlesPendingLinesAndTruncation() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-claude-hook-monitor-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let statusFile = root.appendingPathComponent("claude-code-status.jsonl")
+    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
+
+    try Data(#"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"hook-monitor","cwd":"/Users/wjs/work/pyproj/AgentHalo","source":"claude-hook"}"#.utf8).write(to: statusFile)
+
+    let monitor = ClaudeHookStatusMonitor(statusURL: statusFile)
+    _ = monitor.refresh(now: now)
+    expect(monitor.snapshots().first?.state == .idle, "partial hook line should wait for newline")
+
+    try FileHandle(forWritingTo: statusFile).withClose {
+        try $0.seekToEnd()
+        try $0.write(contentsOf: Data("\n".utf8))
+    }
+    _ = monitor.refresh(now: now.addingTimeInterval(1))
+    expect(monitor.snapshots().first?.state == .thinking, "completed hook line should parse")
+    expect(monitor.snapshots().first?.agent, .claudeCode, "hook monitor snapshots should carry Claude Code agent")
+
+    try Data(#"{"timestamp":"2026-06-16T04:00:02Z","event":"Stop","sessionId":"hook-monitor","cwd":"/Users/wjs/work/pyproj/AgentHalo","source":"claude-hook"}"#.utf8).write(to: statusFile)
+    _ = monitor.refresh(now: now.addingTimeInterval(2))
+    expect(monitor.snapshots().first?.state == .idle, "truncated partial hook line should not parse")
+}
+
 func testClaudeMonitorIgnoresSubagentTranscripts() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-claude-subagents-\(UUID().uuidString)", isDirectory: true)
@@ -857,6 +883,11 @@ testClaudeHookReducerIdlePromptShowsAwaitingReply()
 testClaudeHookReducerStopFailureMapsToError()
 do {
     try testClaudeMonitorHandlesDiscoveryPendingLinesAndTruncation()
+} catch {
+    fatalError("\(error)")
+}
+do {
+    try testClaudeHookMonitorHandlesPendingLinesAndTruncation()
 } catch {
     fatalError("\(error)")
 }
