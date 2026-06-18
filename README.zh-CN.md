@@ -75,7 +75,11 @@ swift run AgentHaloDiagnostics --transition-strip /tmp/agent-halo-transitions
 - 稳定绿色：Codex 已运行且当前没有活动任务。
 - 暗白色：Codex 未运行。
 
-详细动效规则见 [Windows 视觉行为说明](docs/WINDOWS_VISUAL_BEHAVIOR.md)。
+详细动效规则按平台拆分：
+
+- [Windows 视觉行为说明](docs/WINDOWS_VISUAL_BEHAVIOR.md)
+- [macOS 视觉行为说明](docs/MACOS_VISUAL_BEHAVIOR.md)
+- 共享状态机契约见 [CROSS_PLATFORM_SHARED_CONTRACT.md](docs/CROSS_PLATFORM_SHARED_CONTRACT.md)。
 
 ## 隐私
 

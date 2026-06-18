@@ -367,6 +367,87 @@ func testStartupExecutablePathUsesAppBundleRoot() {
     expect(path, "/tmp/AgentHalo.app/Contents/MacOS/AgentHaloMac", "startup executable path")
 }
 
+// MARK: - Plan Mode 收尾保持等待用户确认
+
+func testPlanModeFromTaskStartedHoldsAttentionAtTaskComplete() {
+    var reducer = SessionReducer(filePath: "/tmp/session-019c6e27-e55b-73d1-87d8-4e01f1f75044.jsonl")
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T01:00:00Z","type":"event_msg","payload":{"type":"task_started","collaboration_mode_kind":"plan"}}"#)
+    expect(reducer.snapshot.state, .thinking, "plan task_started state")
+
+    // Plan 中产出最终答案。视觉状态遵循当前实现(由 final_answer 不锁蓝),
+    // 但 plan_final_answer_seen 被置位,用于驱动 task_complete 的分支。
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T01:00:01Z","type":"event_msg","payload":{"type":"agent_message","phase":"final_answer"}}"#)
+    expect(reducer.snapshot.active, "plan agent_message keeps active")
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T01:00:02Z","type":"event_msg","payload":{"type":"task_complete"}}"#)
+    expect(reducer.snapshot.state, .attention, "plan task_complete -> attention")
+    expect(reducer.snapshot.action, "Waiting for your choice", "plan task_complete action")
+    expect(reducer.snapshot.active, "plan task_complete keeps active")
+}
+
+func testPlanModeFromTurnContextHoldsAttentionAtTaskComplete() {
+    var reducer = SessionReducer(filePath: "/tmp/session-019c6e27-e55b-73d1-87d8-4e01f1f75045.jsonl")
+
+    // turn_context 在 task_started 之前到达。
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T02:00:00Z","type":"turn_context","payload":{"collaboration_mode":{"mode":"plan"}}}"#)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T02:00:01Z","type":"event_msg","payload":{"type":"task_started"}}"#)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T02:00:02Z","type":"response_item","payload":{"type":"message","phase":"final_answer"}}"#)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T02:00:03Z","type":"event_msg","payload":{"type":"task_complete"}}"#)
+    expect(reducer.snapshot.state, .attention, "turn_context plan -> attention at task_complete")
+    expect(reducer.snapshot.action, "Waiting for your choice", "turn_context plan action")
+}
+
+func testNonPlanTaskCompleteStillTurnsGreen() {
+    var reducer = SessionReducer(filePath: "/tmp/session-019c6e27-e55b-73d1-87d8-4e01f1f75046.jsonl")
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T03:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T03:00:01Z","type":"event_msg","payload":{"type":"agent_message","phase":"final_answer"}}"#)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T03:00:02Z","type":"event_msg","payload":{"type":"task_complete"}}"#)
+    expect(reducer.snapshot.state, .done, "non-plan task_complete stays done")
+    expect(reducer.snapshot.action, "Complete", "non-plan task_complete action")
+    expect(!reducer.snapshot.active, "non-plan task_complete inactive")
+}
+
+func testPlanModeWithoutFinalAnswerStillTurnsGreen() {
+    // Plan 模式但本轮没有产出 final_answer(被打断或仅做工具调用),
+    // 视为普通完成,仍走 .done 绿色,避免假阳性等待。
+    var reducer = SessionReducer(filePath: "/tmp/session-019c6e27-e55b-73d1-87d8-4e01f1f75047.jsonl")
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T04:00:00Z","type":"event_msg","payload":{"type":"task_started","collaboration_mode_kind":"plan"}}"#)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T04:00:01Z","type":"event_msg","payload":{"type":"task_complete"}}"#)
+    expect(reducer.snapshot.state, .done, "plan w/o final_answer -> done")
+}
+
+func testPlanModeFlagResetsAcrossTurns() {
+    // 第 1 轮 plan + final_answer -> attention;
+    // 第 2 轮普通 task -> 必须回到 .done,不应残留 plan 标志。
+    var reducer = SessionReducer(filePath: "/tmp/session-019c6e27-e55b-73d1-87d8-4e01f1f75048.jsonl")
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T05:00:00Z","type":"event_msg","payload":{"type":"task_started","collaboration_mode_kind":"plan"}}"#)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T05:00:01Z","type":"event_msg","payload":{"type":"agent_message","phase":"final_answer"}}"#)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T05:00:02Z","type":"event_msg","payload":{"type":"task_complete"}}"#)
+    expect(reducer.snapshot.state, .attention, "round 1 attention")
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T05:00:10Z","type":"event_msg","payload":{"type":"task_started"}}"#)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T05:00:11Z","type":"event_msg","payload":{"type":"task_complete"}}"#)
+    expect(reducer.snapshot.state, .done, "round 2 falls back to done")
+}
+
+func testPlanModeFlagResetsAfterFatalTurn() {
+    var reducer = SessionReducer(filePath: "/tmp/session-019c6e27-e55b-73d1-87d8-4e01f1f75049.jsonl")
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T06:00:00Z","type":"event_msg","payload":{"type":"task_started","collaboration_mode_kind":"plan"}}"#)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T06:00:01Z","type":"event_msg","payload":{"type":"turn_failed"}}"#)
+    expect(reducer.snapshot.state, .error, "plan fatal turn becomes error")
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T06:00:10Z","type":"event_msg","payload":{"type":"task_started"}}"#)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T06:00:11Z","type":"response_item","payload":{"type":"message","phase":"final_answer"}}"#)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T06:00:12Z","type":"event_msg","payload":{"type":"task_complete"}}"#)
+    expect(reducer.snapshot.state, .done, "normal turn after plan fatal should not inherit plan mode")
+    expect(!reducer.snapshot.active, "normal turn after plan fatal should deactivate")
+}
+
 func testDiagnosticsCreatesParentDirectoryForOutput() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-diagnostics-\(UUID().uuidString)", isDirectory: true)
@@ -470,4 +551,10 @@ testHaloMathMatchesProgramConstants()
 testLinearSRGBMixAvoidsGammaLerp()
 testWindowsStyleVisualTransitionAndMaterial()
 testCompletionDoubleFlashMatchesWindowsCadence()
+testPlanModeFromTaskStartedHoldsAttentionAtTaskComplete()
+testPlanModeFromTurnContextHoldsAttentionAtTaskComplete()
+testNonPlanTaskCompleteStillTurnsGreen()
+testPlanModeWithoutFinalAnswerStillTurnsGreen()
+testPlanModeFlagResetsAcrossTurns()
+testPlanModeFlagResetsAfterFatalTurn()
 print("PASS AgentHaloCore checks")

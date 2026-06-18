@@ -82,6 +82,12 @@ OpenAI API key.
 - Stable green: Codex is running with no active task.
 - Dim white: Codex is not running.
 
+For the full motion, material, breathing, and Plan Mode rules, see
+[Windows visual behavior](docs/WINDOWS_VISUAL_BEHAVIOR.md) and
+[macOS visual behavior](docs/MACOS_VISUAL_BEHAVIOR.md). The shared state-machine
+contract is documented in
+[CROSS_PLATFORM_SHARED_CONTRACT.md](docs/CROSS_PLATFORM_SHARED_CONTRACT.md).
+
 The large gap chases a small gap that drifts gently back and forth. Near 40° of
 separation, the small gap is smoothly repelled toward roughly 150°, then coasts with
 decaying momentum before returning to its bounded drift. Thinking and working

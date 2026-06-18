@@ -169,16 +169,15 @@ public static class Diagnostics
                     "\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}}\n",
                     Encoding.UTF8);
                 tracker.Refresh();
-                Assert(tracker.Snapshot.State == HaloState.Working &&
-                    tracker.Snapshot.Action == "Writing answer",
-                    "normal final answer -> working");
+                Assert(tracker.Snapshot.State == HaloState.Thinking,
+                    "normal final answer keeps existing active flow");
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\"," +
                     "\"phase\":\"final_answer\",\"message\":\"done\"}}\n",
                     Encoding.UTF8);
                 tracker.Refresh();
-                Assert(tracker.Snapshot.State == HaloState.Working,
-                    "final answer agent message stays working");
+                Assert(tracker.Snapshot.State == HaloState.Thinking,
+                    "final answer agent message keeps thinking flow");
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
                     Encoding.UTF8);
@@ -199,8 +198,8 @@ public static class Diagnostics
                     "\"content\":[{\"type\":\"output_text\",\"text\":\"<proposed_plan>\"}]}}\n",
                     Encoding.UTF8);
                 tracker.Refresh();
-                Assert(tracker.Snapshot.State == HaloState.Working,
-                    "plan final answer outputs as working");
+                Assert(tracker.Snapshot.State == HaloState.Thinking,
+                    "plan final answer keeps existing active flow");
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
                     Encoding.UTF8);
@@ -208,6 +207,79 @@ public static class Diagnostics
                 Assert(tracker.Snapshot.State == HaloState.Attention &&
                     tracker.Snapshot.Active,
                     "plan complete waits for user choice");
+
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"turn_context\",\"payload\":{\"collaboration_mode\":{" +
+                    "\"mode\":\"plan\"}}}\n",
+                    Encoding.UTF8);
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+                    Encoding.UTF8);
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\"," +
+                    "\"phase\":\"final_answer\"}}\n",
+                    Encoding.UTF8);
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Attention,
+                    "turn_context plan task complete -> attention");
+
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"," +
+                    "\"collaboration_mode_kind\":\"plan\"}}\n",
+                    Encoding.UTF8);
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Done,
+                    "plan without final answer -> done");
+
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"," +
+                    "\"collaboration_mode_kind\":\"plan\"}}\n",
+                    Encoding.UTF8);
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\"," +
+                    "\"phase\":\"final_answer\"}}\n",
+                    Encoding.UTF8);
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Attention,
+                    "plan round 1 attention");
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+                    Encoding.UTF8);
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Done,
+                    "plan flag resets across turns");
+
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"," +
+                    "\"collaboration_mode_kind\":\"plan\"}}\n",
+                    Encoding.UTF8);
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"turn_failed\"}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Error,
+                    "plan fatal turn -> error");
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+                    Encoding.UTF8);
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Done,
+                    "fatal turn clears plan flag");
                 Assert(GeneratedHaloSpec.ContractVersion == 2,
                     "generated shared contract version");
                 Assert(GeneratedHaloSpec.ReleaseVersion == "0.13.0",
@@ -1071,4 +1143,3 @@ public static class Diagnostics
         }
     }
 }
-

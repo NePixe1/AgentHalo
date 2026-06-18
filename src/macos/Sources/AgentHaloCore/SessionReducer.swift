@@ -5,6 +5,8 @@ public struct SessionReducer: Sendable {
     private var inFlightTools = 0
     private var workingVisibleUntil: Date?
     private var liveTracking: Bool
+    private var currentTurnIsPlanMode = false
+    private var planFinalAnswerSeen = false
 
     public init(filePath: String, now: Date = Date(), liveTracking: Bool = true) {
         self.snapshot = SessionSnapshot(
@@ -31,6 +33,11 @@ public struct SessionReducer: Sendable {
         let eventAt = Self.parseDate(root.string("timestamp")) ?? now
         snapshot.lastEventAt = eventAt
 
+        if topType == "turn_context", let payload {
+            updatePlanModeFromTurnContext(payload)
+            return
+        }
+
         if topType == "session_meta", let payload {
             let cwd = payload.string("cwd")
             if !cwd.isEmpty {
@@ -53,7 +60,7 @@ public struct SessionReducer: Sendable {
 
         let payloadType = payload.string("type")
         if topType == "event_msg" {
-            reduceEvent(payloadType.lowercased(), eventAt: eventAt, now: now)
+            reduceEvent(payloadType.lowercased(), payload: payload, eventAt: eventAt, now: now)
         } else if topType == "response_item" {
             reduceResponse(payloadType.lowercased(), payload: payload, now: now)
         }
@@ -75,23 +82,44 @@ public struct SessionReducer: Sendable {
         }
     }
 
-    private mutating func reduceEvent(_ type: String, eventAt: Date, now: Date) {
+    private mutating func reduceEvent(_ type: String, payload: [String: Any], eventAt: Date, now: Date) {
         if GeneratedHaloSpec.isTaskStartEvent(type) {
             inFlightTools = 0
             workingVisibleUntil = nil
+            if type == "task_started" {
+                // task_started 自身可能携带 collaboration_mode_kind="plan"。
+                // 与提前到达的 turn_context 标志位取并集,允许两种事件顺序。
+                if Self.isPlanModePayload(payload) {
+                    currentTurnIsPlanMode = true
+                }
+                // 注意:不在此处清掉 currentTurnIsPlanMode,以兼容 turn_context 早于 task_started 的情况。
+                // task_complete 末尾会做最终清理,确保不会跨轮次残留。
+            }
+            planFinalAnswerSeen = false
             snapshot.active = true
             snapshot.state = .thinking
             snapshot.action = "Planning"
         } else if GeneratedHaloSpec.isTaskCompleteEvent(type) {
             inFlightTools = 0
             workingVisibleUntil = nil
-            snapshot.active = false
-            snapshot.state = .done
-            snapshot.action = "Complete"
+            if currentTurnIsPlanMode && planFinalAnswerSeen {
+                snapshot.active = true
+                snapshot.state = .attention
+                snapshot.action = "Waiting for your choice"
+            } else {
+                snapshot.active = false
+                snapshot.state = .done
+                snapshot.action = "Complete"
+            }
             snapshot.completedAt = eventAt
+            currentTurnIsPlanMode = false
+            planFinalAnswerSeen = false
         } else if type == "agent_message" || type.hasSuffix("_end") {
             if type.hasSuffix("_end"), inFlightTools > 0 {
                 inFlightTools -= 1
+            }
+            if type == "agent_message", currentTurnIsPlanMode, Self.isFinalAnswerPayload(payload) {
+                planFinalAnswerSeen = true
             }
             applyActiveThinkingOrWorking(now: now)
         } else if GeneratedHaloSpec.isAttentionEvent(type) {
@@ -99,6 +127,10 @@ public struct SessionReducer: Sendable {
             snapshot.state = .attention
             snapshot.action = "Needs you"
         } else if GeneratedHaloSpec.isFatalEvent(type) {
+            inFlightTools = 0
+            workingVisibleUntil = nil
+            currentTurnIsPlanMode = false
+            planFinalAnswerSeen = false
             snapshot.active = false
             snapshot.state = .error
             snapshot.action = "Interrupted"
@@ -122,6 +154,13 @@ public struct SessionReducer: Sendable {
                 snapshot.state = .working
                 snapshot.action = GeneratedHaloSpec.friendlyAction(name)
             }
+        } else if type == "message", Self.isFinalAnswerPayload(payload) {
+            // Plan Mode 下,会议响应中的最终答案也算作 plan_final_answer_seen。
+            // 仅置标志位,保持原有 .thinking/.working 视觉状态。
+            if currentTurnIsPlanMode {
+                planFinalAnswerSeen = true
+            }
+            applyActiveThinkingOrWorking(now: now)
         } else if GeneratedHaloSpec.isToolCall(type) || type.hasSuffix("_call") {
             inFlightTools += 1
             extendWorkingVisibility(seconds: 2.2, now: now)
@@ -172,6 +211,24 @@ public struct SessionReducer: Sendable {
         if workingVisibleUntil == nil || candidate > workingVisibleUntil! {
             workingVisibleUntil = candidate
         }
+    }
+
+    private mutating func updatePlanModeFromTurnContext(_ payload: [String: Any]) {
+        let collaborationMode = payload.dictionary("collaboration_mode")
+        let mode = collaborationMode?.string("mode") ?? ""
+        if mode.caseInsensitiveCompare("plan") == .orderedSame {
+            currentTurnIsPlanMode = true
+        }
+    }
+
+    private static func isPlanModePayload(_ payload: [String: Any]) -> Bool {
+        let mode = payload.string("collaboration_mode_kind")
+        return mode.caseInsensitiveCompare("plan") == .orderedSame
+    }
+
+    private static func isFinalAnswerPayload(_ payload: [String: Any]) -> Bool {
+        let phase = payload.string("phase")
+        return phase.caseInsensitiveCompare("final_answer") == .orderedSame
     }
 
     private static func threadId(from filePath: String) -> String {

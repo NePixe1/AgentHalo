@@ -1,0 +1,64 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AgentHalo}/src/macos",
+            "name": "Debug AgentHaloMac (src/macos)",
+            "target": "AgentHaloMac",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug AgentHaloMac (src/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AgentHalo}/src/macos",
+            "name": "Release AgentHaloMac (src/macos)",
+            "target": "AgentHaloMac",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release AgentHaloMac (src/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AgentHalo}/src/macos",
+            "name": "Debug AgentHaloCoreChecks (src/macos)",
+            "target": "AgentHaloCoreChecks",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug AgentHaloCoreChecks (src/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AgentHalo}/src/macos",
+            "name": "Release AgentHaloCoreChecks (src/macos)",
+            "target": "AgentHaloCoreChecks",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release AgentHaloCoreChecks (src/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AgentHalo}/src/macos",
+            "name": "Debug AgentHaloDiagnostics (src/macos)",
+            "target": "AgentHaloDiagnostics",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug AgentHaloDiagnostics (src/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AgentHalo}/src/macos",
+            "name": "Release AgentHaloDiagnostics (src/macos)",
+            "target": "AgentHaloDiagnostics",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release AgentHaloDiagnostics (src/macos)"
+        }
+    ]
+}

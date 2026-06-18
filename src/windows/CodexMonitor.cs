@@ -316,9 +316,9 @@ public sealed class SessionTracker
             {
                 inFlightTools = 0;
                 workingVisibleUntilUtc = DateTime.MinValue;
-                if (lower == "task_started")
+                if (lower == "task_started" && IsPlanModePayload(payload))
                 {
-                    currentTurnIsPlanMode = IsPlanModePayload(payload);
+                    currentTurnIsPlanMode = true;
                 }
                 planFinalAnswerSeen = false;
                 Snapshot.Active = true;
@@ -342,6 +342,7 @@ public sealed class SessionTracker
                     Snapshot.Action = "Complete";
                 }
                 Snapshot.CompletedUtc = eventUtc == DateTime.MinValue ? DateTime.UtcNow : eventUtc;
+                ClearPlanModeState();
             }
             else if (lower == "agent_message" || lower.EndsWith("_end"))
             {
@@ -355,27 +356,8 @@ public sealed class SessionTracker
                     {
                         planFinalAnswerSeen = true;
                     }
-                    Snapshot.Active = true;
-                    Snapshot.State = HaloState.Working;
-                    Snapshot.Action = "Writing answer";
                 }
-                else if (Snapshot.Active)
-                {
-                    if (inFlightTools > 0)
-                    {
-                        Snapshot.State = HaloState.Working;
-                    }
-                    else if (DateTime.UtcNow < workingVisibleUntilUtc)
-                    {
-                        Snapshot.State = HaloState.Working;
-                        Snapshot.Action = "Reviewing result";
-                    }
-                    else
-                    {
-                        Snapshot.State = HaloState.Thinking;
-                        Snapshot.Action = "Thinking";
-                    }
-                }
+                ApplyActiveThinkingOrWorking();
             }
             else if (GeneratedHaloSpec.IsAttentionEvent(lower))
             {
@@ -385,6 +367,9 @@ public sealed class SessionTracker
             }
             else if (GeneratedHaloSpec.IsFatalEvent(lower))
             {
+                inFlightTools = 0;
+                workingVisibleUntilUtc = DateTime.MinValue;
+                ClearPlanModeState();
                 Snapshot.Active = false;
                 Snapshot.State = HaloState.Error;
                 Snapshot.Action = "Interrupted";
@@ -423,9 +408,7 @@ public sealed class SessionTracker
                 {
                     planFinalAnswerSeen = true;
                 }
-                Snapshot.Active = true;
-                Snapshot.State = HaloState.Working;
-                Snapshot.Action = "Writing answer";
+                ApplyActiveThinkingOrWorking();
             }
             else if (GeneratedHaloSpec.IsToolCall(lower) || lower.EndsWith("_call"))
             {
@@ -462,24 +445,36 @@ public sealed class SessionTracker
             }
             else if (lower == "reasoning")
             {
-                if (Snapshot.Active)
-                {
-                    if (inFlightTools > 0)
-                    {
-                        Snapshot.State = HaloState.Working;
-                    }
-                    else if (DateTime.UtcNow < workingVisibleUntilUtc)
-                    {
-                        Snapshot.State = HaloState.Working;
-                        Snapshot.Action = "Reviewing result";
-                    }
-                    else
-                    {
-                        Snapshot.State = HaloState.Thinking;
-                        Snapshot.Action = "Thinking";
-                    }
-                }
+                ApplyActiveThinkingOrWorking();
             }
+        }
+
+        private void ApplyActiveThinkingOrWorking()
+        {
+            if (!Snapshot.Active)
+            {
+                return;
+            }
+            if (inFlightTools > 0)
+            {
+                Snapshot.State = HaloState.Working;
+            }
+            else if (DateTime.UtcNow < workingVisibleUntilUtc)
+            {
+                Snapshot.State = HaloState.Working;
+                Snapshot.Action = "Reviewing result";
+            }
+            else
+            {
+                Snapshot.State = HaloState.Thinking;
+                Snapshot.Action = "Thinking";
+            }
+        }
+
+        private void ClearPlanModeState()
+        {
+            currentTurnIsPlanMode = false;
+            planFinalAnswerSeen = false;
         }
 
         private static bool IsPlanModePayload(Dictionary<string, object> payload)
@@ -1309,4 +1304,3 @@ public static class RateLimitReader
         }
     }
 }
-
