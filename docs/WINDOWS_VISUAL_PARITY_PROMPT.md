@@ -83,7 +83,7 @@ Use these actual Windows colors:
 | Working | commands, tools, search, file edits | `39,161,211` | saturated blue, longer bright phase than yellow |
 | Done | newly completed task | `38,198,108` | two bright completion flashes, then slow living breath |
 | Steady done | Codex is running with no active task, or completion acknowledged | `38,198,108` | green material only, `powered = 0`, no emitted glow |
-| Attention | Yes, approval, confirmation, or input required | `213,103,55` | coral-orange soft double pulse, second pulse weaker |
+| Attention | Yes, approval, confirmation, or input required | `142,108,236` | violet soft double pulse, second pulse weaker |
 | Error | a blocking failure | `218,50,86` | flashing, bright constant, or dim red presentation |
 
 The state priority is:
@@ -208,7 +208,7 @@ smootherStep(x) = x^3 * (x * (x*6 - 15) + 10)
 
 ## Attention double pulse
 
-The orange Attention state is a soft aviation-style double breath, not a
+The violet Attention state is a soft aviation-style double breath, not a
 binary blink:
 
 ```text
@@ -231,7 +231,7 @@ bodyWidth = 8.6 + 0.30 * pulse
 ```
 
 The first pulse is full strength. The second is slightly weaker and broader.
-Between pairs, retain a very low orange living movement instead of freezing.
+Between pairs, retain a very low violet living movement instead of freezing.
 
 ## Error presentations
 
@@ -688,7 +688,7 @@ It is complete when:
   degrees, and continues with speed-scaled inertia
 - yellow, blue, and completed green breathe with long bright and short dark
   phases without visible curve corners
-- orange clearly performs two soft pulses
+- violet clearly performs two soft pulses
 - bright red, yellow, and blue reach the same perceived full-power class
 - state changes dim, recolor, and relight without a hard frame
 - file creation and patch application count as blue execution, not yellow reasoning

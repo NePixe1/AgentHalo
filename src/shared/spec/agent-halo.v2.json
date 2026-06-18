@@ -48,7 +48,7 @@
     "attention": {
       "priority": 1,
       "label": "NEEDS YOU",
-      "color": [213, 103, 55],
+      "color": [142, 108, 236],
       "breath": {"period": 5.8, "visualMaximum": 1.0, "visualMinimum": 0.18, "poweredMaximum": 1.0, "poweredMinimum": 0.10, "brightShare": 0.44},
       "orbit": {"velocity": 46, "envelopePeriod": 4.1, "driftAmplitude": 6.5, "driftPeriod": 3.3, "inertiaDamping": 0.76},
       "coreWhite": 0.82,

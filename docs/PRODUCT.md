@@ -23,7 +23,7 @@ right now?"
 | Thinking | Turn active, no tool currently running | amber | gap drift and ring-body breathing |
 | Working | Tool, command, search, or edit running | electric blue | fast gap orbit and ring-body breathing |
 | Done | Turn completed and not acknowledged | mint | double flash, then slow ring-body breathing |
-| Needs you | Explicit input/approval tool requested | coral red | paired pulse |
+| Needs you | Explicit input/approval tool requested | violet | paired pulse |
 | Error | Turn interrupted or errored | crimson | broken ring and sharp pulse |
 
 ## MVP
@@ -54,4 +54,3 @@ Repulsion duration and exit momentum derive from the current orbit velocity, kee
 slow states organic. Animation advances on every desktop composition frame.
 State is communicated through color, breathing intensity, and chase-and-repel motion.
 No separate highlight travels around the ring.
-

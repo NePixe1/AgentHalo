@@ -39,7 +39,7 @@ public sealed class SessionTracker
         private DateTime workingVisibleUntilUtc;
         private bool liveTracking;
         private bool currentTurnIsPlanMode;
-        private bool planFinalAnswerSeen;
+        private bool planProposalSeen;
 
         public string FilePath { get; private set; }
         public SessionSnapshot Snapshot { get; private set; }
@@ -320,7 +320,7 @@ public sealed class SessionTracker
                 {
                     currentTurnIsPlanMode = true;
                 }
-                planFinalAnswerSeen = false;
+                planProposalSeen = false;
                 Snapshot.Active = true;
                 Snapshot.State = HaloState.Thinking;
                 Snapshot.Action = "Planning";
@@ -329,7 +329,7 @@ public sealed class SessionTracker
             {
                 inFlightTools = 0;
                 workingVisibleUntilUtc = DateTime.MinValue;
-                if (currentTurnIsPlanMode && planFinalAnswerSeen)
+                if (currentTurnIsPlanMode && planProposalSeen)
                 {
                     Snapshot.Active = true;
                     Snapshot.State = HaloState.Attention;
@@ -352,9 +352,9 @@ public sealed class SessionTracker
                 }
                 if (lower == "agent_message" && IsFinalAnswerPayload(payload))
                 {
-                    if (currentTurnIsPlanMode)
+                    if (currentTurnIsPlanMode && ContainsProposedPlan(payload))
                     {
-                        planFinalAnswerSeen = true;
+                        planProposalSeen = true;
                     }
                 }
                 ApplyActiveThinkingOrWorking();
@@ -364,6 +364,13 @@ public sealed class SessionTracker
                 Snapshot.Active = true;
                 Snapshot.State = HaloState.Attention;
                 Snapshot.Action = "Needs you";
+            }
+            else if (lower == "item_completed")
+            {
+                if (currentTurnIsPlanMode && IsCompletedPlanItem(payload))
+                {
+                    planProposalSeen = true;
+                }
             }
             else if (GeneratedHaloSpec.IsFatalEvent(lower))
             {
@@ -404,9 +411,9 @@ public sealed class SessionTracker
             }
             else if (lower == "message" && IsFinalAnswerPayload(payload))
             {
-                if (currentTurnIsPlanMode)
+                if (currentTurnIsPlanMode && ContainsProposedPlan(payload))
                 {
-                    planFinalAnswerSeen = true;
+                    planProposalSeen = true;
                 }
                 ApplyActiveThinkingOrWorking();
             }
@@ -474,7 +481,7 @@ public sealed class SessionTracker
         private void ClearPlanModeState()
         {
             currentTurnIsPlanMode = false;
-            planFinalAnswerSeen = false;
+            planProposalSeen = false;
         }
 
         private static bool IsPlanModePayload(Dictionary<string, object> payload)
@@ -488,6 +495,54 @@ public sealed class SessionTracker
             string phase = GetString(payload, "phase");
             return String.Equals(phase, "final_answer",
                 StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsCompletedPlanItem(Dictionary<string, object> payload)
+        {
+            Dictionary<string, object> item = GetDictionary(payload, "item");
+            return item != null &&
+                String.Equals(GetString(item, "type"), "Plan",
+                    StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool ContainsProposedPlan(object value)
+        {
+            if (value == null)
+            {
+                return false;
+            }
+            string text = value as string;
+            if (text != null)
+            {
+                return text.IndexOf("<proposed_plan",
+                    StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+            Dictionary<string, object> dictionary =
+                value as Dictionary<string, object>;
+            if (dictionary != null)
+            {
+                foreach (object child in dictionary.Values)
+                {
+                    if (ContainsProposedPlan(child))
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            System.Collections.IEnumerable enumerable =
+                value as System.Collections.IEnumerable;
+            if (enumerable != null)
+            {
+                foreach (object child in enumerable)
+                {
+                    if (ContainsProposedPlan(child))
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
         }
 
         private static DateTime ParseTimestamp(string value)

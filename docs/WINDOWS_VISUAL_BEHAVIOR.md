@@ -28,10 +28,10 @@
 
 ## Plan Mode 收尾
 
-当 Codex 以 Plan Mode 启动并产出最终答案后，光环会在 `task_complete`
-时停在珊瑚色 `attention` 状态（提示文本 "Waiting for your choice"），
+当 Codex 以 Plan Mode 启动并产出 proposed plan 后，光环会在 `task_complete`
+时停在紫色 `attention` 状态（提示文本 "Waiting for your choice"），
 而不是直接转绿色 `done`，提醒你回到 Codex 选择「实施 / 编辑」。
-普通任务完成仍按原有逻辑直接转绿。
+普通 final answer 或普通任务完成仍按原有逻辑直接转绿。
 
 详细字段约定与 reducer 标志位见
 [Cross-Platform Shared Contract](CROSS_PLATFORM_SHARED_CONTRACT.md#plan-mode-lifecycle-cross-platform)。

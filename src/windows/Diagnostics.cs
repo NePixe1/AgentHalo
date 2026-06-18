@@ -195,6 +195,26 @@ public static class Diagnostics
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\"," +
                     "\"role\":\"assistant\",\"phase\":\"final_answer\"," +
+                    "\"content\":[{\"type\":\"output_text\",\"text\":\"plain answer\"}]}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Working,
+                    "plain plan final answer outputs as working");
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Done &&
+                    !tracker.Snapshot.Active,
+                    "plain plan complete becomes done");
+
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"," +
+                    "\"collaboration_mode_kind\":\"plan\"}}\n",
+                    Encoding.UTF8);
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\"," +
+                    "\"role\":\"assistant\",\"phase\":\"final_answer\"," +
                     "\"content\":[{\"type\":\"output_text\",\"text\":\"<proposed_plan>\"}]}}\n",
                     Encoding.UTF8);
                 tracker.Refresh();
@@ -217,7 +237,8 @@ public static class Diagnostics
                     Encoding.UTF8);
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\"," +
-                    "\"phase\":\"final_answer\"}}\n",
+                    "\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\"," +
+                    "\"text\":\"<proposed_plan>\"}]}}\n",
                     Encoding.UTF8);
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
@@ -243,7 +264,8 @@ public static class Diagnostics
                     Encoding.UTF8);
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\"," +
-                    "\"phase\":\"final_answer\"}}\n",
+                    "\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\"," +
+                    "\"text\":\"<proposed_plan>\"}]}}\n",
                     Encoding.UTF8);
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
@@ -260,6 +282,21 @@ public static class Diagnostics
                 tracker.Refresh();
                 Assert(tracker.Snapshot.State == HaloState.Done,
                     "plan flag resets across turns");
+
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"," +
+                    "\"collaboration_mode_kind\":\"plan\"}}\n",
+                    Encoding.UTF8);
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\"," +
+                    "\"item\":{\"type\":\"Plan\",\"text\":\"Plan body\"}}}\n",
+                    Encoding.UTF8);
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Attention,
+                    "completed plan item waits for user choice");
 
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"," +
