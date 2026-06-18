@@ -6,7 +6,7 @@ public struct SessionReducer: Sendable {
     private var workingVisibleUntil: Date?
     private var liveTracking: Bool
     private var currentTurnIsPlanMode = false
-    private var planFinalAnswerSeen = false
+    private var planProposalSeen = false
 
     public init(filePath: String, now: Date = Date(), liveTracking: Bool = true) {
         self.snapshot = SessionSnapshot(
@@ -95,14 +95,14 @@ public struct SessionReducer: Sendable {
                 // 注意:不在此处清掉 currentTurnIsPlanMode,以兼容 turn_context 早于 task_started 的情况。
                 // task_complete 末尾会做最终清理,确保不会跨轮次残留。
             }
-            planFinalAnswerSeen = false
+            planProposalSeen = false
             snapshot.active = true
             snapshot.state = .thinking
             snapshot.action = "Planning"
         } else if GeneratedHaloSpec.isTaskCompleteEvent(type) {
             inFlightTools = 0
             workingVisibleUntil = nil
-            if currentTurnIsPlanMode && planFinalAnswerSeen {
+            if currentTurnIsPlanMode && planProposalSeen {
                 snapshot.active = true
                 snapshot.state = .attention
                 snapshot.action = "Waiting for your choice"
@@ -113,24 +113,31 @@ public struct SessionReducer: Sendable {
             }
             snapshot.completedAt = eventAt
             currentTurnIsPlanMode = false
-            planFinalAnswerSeen = false
+            planProposalSeen = false
         } else if type == "agent_message" || type.hasSuffix("_end") {
             if type.hasSuffix("_end"), inFlightTools > 0 {
                 inFlightTools -= 1
             }
-            if type == "agent_message", currentTurnIsPlanMode, Self.isFinalAnswerPayload(payload) {
-                planFinalAnswerSeen = true
+            if type == "agent_message",
+               currentTurnIsPlanMode,
+               Self.isFinalAnswerPayload(payload),
+               Self.containsProposedPlan(payload) {
+                planProposalSeen = true
             }
             applyActiveThinkingOrWorking(now: now)
         } else if GeneratedHaloSpec.isAttentionEvent(type) {
             snapshot.active = true
             snapshot.state = .attention
             snapshot.action = "Needs you"
+        } else if type == "item_completed" {
+            if currentTurnIsPlanMode, Self.isCompletedPlanItem(payload) {
+                planProposalSeen = true
+            }
         } else if GeneratedHaloSpec.isFatalEvent(type) {
             inFlightTools = 0
             workingVisibleUntil = nil
             currentTurnIsPlanMode = false
-            planFinalAnswerSeen = false
+            planProposalSeen = false
             snapshot.active = false
             snapshot.state = .error
             snapshot.action = "Interrupted"
@@ -155,10 +162,10 @@ public struct SessionReducer: Sendable {
                 snapshot.action = GeneratedHaloSpec.friendlyAction(name)
             }
         } else if type == "message", Self.isFinalAnswerPayload(payload) {
-            // Plan Mode 下,会议响应中的最终答案也算作 plan_final_answer_seen。
+            // Plan Mode 下,只有真正的 proposed plan 才会在结束时等待选择。
             // 仅置标志位,保持原有 .thinking/.working 视觉状态。
-            if currentTurnIsPlanMode {
-                planFinalAnswerSeen = true
+            if currentTurnIsPlanMode, Self.containsProposedPlan(payload) {
+                planProposalSeen = true
             }
             applyActiveThinkingOrWorking(now: now)
         } else if GeneratedHaloSpec.isToolCall(type) || type.hasSuffix("_call") {
@@ -229,6 +236,26 @@ public struct SessionReducer: Sendable {
     private static func isFinalAnswerPayload(_ payload: [String: Any]) -> Bool {
         let phase = payload.string("phase")
         return phase.caseInsensitiveCompare("final_answer") == .orderedSame
+    }
+
+    private static func isCompletedPlanItem(_ payload: [String: Any]) -> Bool {
+        guard let item = payload.dictionary("item") else {
+            return false
+        }
+        return item.string("type").caseInsensitiveCompare("Plan") == .orderedSame
+    }
+
+    private static func containsProposedPlan(_ value: Any) -> Bool {
+        if let text = value as? String {
+            return text.range(of: "<proposed_plan", options: .caseInsensitive) != nil
+        }
+        if let dictionary = value as? [String: Any] {
+            return dictionary.values.contains(where: containsProposedPlan)
+        }
+        if let array = value as? [Any] {
+            return array.contains(where: containsProposedPlan)
+        }
+        return false
     }
 
     private static func threadId(from filePath: String) -> String {
