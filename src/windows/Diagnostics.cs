@@ -196,6 +196,26 @@ public static class Diagnostics
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\"," +
                     "\"role\":\"assistant\",\"phase\":\"final_answer\"," +
+                    "\"content\":[{\"type\":\"output_text\",\"text\":\"plain answer\"}]}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Working,
+                    "plain plan final answer outputs as working");
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Done &&
+                    !tracker.Snapshot.Active,
+                    "plain plan complete becomes done");
+
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"," +
+                    "\"collaboration_mode_kind\":\"plan\"}}\n",
+                    Encoding.UTF8);
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\"," +
+                    "\"role\":\"assistant\",\"phase\":\"final_answer\"," +
                     "\"content\":[{\"type\":\"output_text\",\"text\":\"<proposed_plan>\"}]}}\n",
                     Encoding.UTF8);
                 tracker.Refresh();
@@ -208,6 +228,20 @@ public static class Diagnostics
                 Assert(tracker.Snapshot.State == HaloState.Attention &&
                     tracker.Snapshot.Active,
                     "plan complete waits for user choice");
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"," +
+                    "\"collaboration_mode_kind\":\"plan\"}}\n",
+                    Encoding.UTF8);
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\"," +
+                    "\"item\":{\"type\":\"Plan\",\"text\":\"# Plan\"}}}\n",
+                    Encoding.UTF8);
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Attention,
+                    "completed plan item waits for user choice");
                 Assert(GeneratedHaloSpec.ContractVersion == 2,
                     "generated shared contract version");
                 Assert(GeneratedHaloSpec.ReleaseVersion == "0.13.0",
