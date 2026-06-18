@@ -1,15 +1,15 @@
 import Foundation
 
 /// Writes (or updates) Claude Code hook configuration on first launch so the user
-/// never has to manually edit ``~/.claude.json``.
+/// never has to manually edit ``~/.claude/settings.json``.
 ///
 /// Design:
 /// - Copies the bundled ``ClaudeCodeStatusHook`` binary to
 ///   ``~/.agent-halo/claude-code-status-hook`` — a stable path that survives
 ///   app-bundle moves.
-/// - Merges hook entries into ``~/.claude.json`` at the **user** level so every
+/// - Merges hook entries into ``~/.claude/settings.json`` at the **user** level so every
 ///   Claude Code project inherits the hooks automatically.
-/// - Idempotent: if the hook command is already present for all nine events,
+/// - Idempotent: if the hook command is already present for all lifecycle events,
 ///   the file is left untouched.
 /// - Catches all errors — a broken config write must never prevent the app from
 ///   starting.
@@ -17,18 +17,27 @@ public enum ClaudeHookConfigurator {
 
     // MARK: - Public API
 
-    /// Ensure the hook binary and user-level ``~/.claude.json`` are configured.
+    /// Ensure the hook binary and user-level ``~/.claude/settings.json`` are configured.
     ///
     /// Safe to call on every launch; the implementation short-circuits when
     /// everything is already in place.
     public static func configure() {
         let home = FileManager.default.homeDirectoryForCurrentUser
+        configure(homeDirectory: home, bundledHookBinary: bundledHookBinary())
+    }
+
+    /// Ensure hook configuration for a specific home directory.
+    ///
+    /// Exposed for the self-check target so configuration behavior can be tested
+    /// without touching the user's real Claude Code settings.
+    public static func configure(homeDirectory home: URL, bundledHookBinary bundledBinary: URL?) {
         let destDir = home.appendingPathComponent(".agent-halo", isDirectory: true)
         let destBinary = destDir.appendingPathComponent("claude-code-status-hook")
-        let claudeJson = home.appendingPathComponent(".claude.json")
+        let claudeSettings = home.appendingPathComponent(".claude", isDirectory: true)
+            .appendingPathComponent("settings.json")
 
         // -- 1. Stage the hook binary -------------------------------------------
-        guard let bundledBinary = bundledHookBinary(),
+        guard let bundledBinary,
               FileManager.default.fileExists(atPath: bundledBinary.path) else {
             AgentHaloLogger.log("ClaudeHookConfigurator: bundled binary not found — skipping hook setup (development mode?)")
             return
@@ -57,9 +66,9 @@ public enum ClaudeHookConfigurator {
 
         let hookCommand = "\(destBinary.path)"
 
-        // -- 2. Read existing ~/.claude.json -----------------------------------
+        // -- 2. Read existing ~/.claude/settings.json --------------------------
         var config: [String: Any]
-        if let data = try? Data(contentsOf: claudeJson),
+        if let data = try? Data(contentsOf: claudeSettings),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             config = json
         } else {
@@ -68,7 +77,7 @@ public enum ClaudeHookConfigurator {
 
         var hooks = (config["hooks"] as? [String: Any]) ?? [:]
 
-        // -- 3. Merge our nine events -------------------------------------------
+        // -- 3. Merge our lifecycle events --------------------------------------
         var changed = false
         for spec in hookSpecs {
             var entries = (hooks[spec.event] as? [[String: Any]]) ?? []
@@ -123,14 +132,19 @@ public enum ClaudeHookConfigurator {
 
         // -- 4. Write back -----------------------------------------------------
         do {
+            try FileManager.default.createDirectory(
+                at: claudeSettings.deletingLastPathComponent(),
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
             let data = try JSONSerialization.data(
                 withJSONObject: config,
                 options: [.prettyPrinted, .sortedKeys]
             )
-            try data.write(to: claudeJson, options: [.atomic])
-            AgentHaloLogger.log("ClaudeHookConfigurator: wrote \(claudeJson.path)")
+            try data.write(to: claudeSettings, options: [.atomic])
+            AgentHaloLogger.log("ClaudeHookConfigurator: wrote \(claudeSettings.path)")
         } catch {
-            AgentHaloLogger.log("ClaudeHookConfigurator: failed to write \(claudeJson.path): \(error)")
+            AgentHaloLogger.log("ClaudeHookConfigurator: failed to write \(claudeSettings.path): \(error)")
         }
     }
 

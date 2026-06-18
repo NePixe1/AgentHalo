@@ -286,6 +286,43 @@ func testToolFailedDoesNotBecomeFatalError() {
     expect(reducer.snapshot.active, true, "tool_failed should not deactivate session")
 }
 
+func testClaudeHookConfiguratorWritesUserSettingsNotLegacyClaudeJson() throws {
+    let home = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-hook-config-\(UUID().uuidString)", isDirectory: true)
+    let claudeDir = home.appendingPathComponent(".claude", isDirectory: true)
+    let settingsURL = claudeDir.appendingPathComponent("settings.json")
+    let legacyURL = home.appendingPathComponent(".claude.json")
+    let bundledHook = home.appendingPathComponent("bundle-hook")
+    try FileManager.default.createDirectory(at: claudeDir, withIntermediateDirectories: true)
+    try Data("fake hook".utf8).write(to: bundledHook)
+    try Data(#"{"hooks":{"PreToolUse":[{"matcher":".*","hooks":[{"type":"command","command":"/old/claude-code-status-hook PreToolUse"}]}]}}"#.utf8)
+        .write(to: legacyURL)
+    try Data(
+        #"{"env":{"AGENT_HALO_TEST":"1"},"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/usr/local/bin/existing-hook PreToolUse"}]}]}}"#.utf8
+    ).write(to: settingsURL)
+
+    ClaudeHookConfigurator.configure(homeDirectory: home, bundledHookBinary: bundledHook)
+
+    let settings = try JSONSerialization.jsonObject(with: Data(contentsOf: settingsURL)) as? [String: Any]
+    let hooks = settings?["hooks"] as? [String: Any]
+    let preToolUse = hooks?["PreToolUse"] as? [[String: Any]]
+    expect(preToolUse?.count, 2, "existing PreToolUse hook should be preserved and Agent Halo should append one entry")
+    let existingHooks = preToolUse?.first?["hooks"] as? [[String: Any]]
+    let existingCommand = existingHooks?.first?["command"] as? String
+    expect(existingCommand, "/usr/local/bin/existing-hook PreToolUse", "existing user hook should not be overwritten")
+    let agentHaloHooks = preToolUse?.last?["hooks"] as? [[String: Any]]
+    let command = agentHaloHooks?.first?["command"] as? String
+    expect(command, "\(home.path)/.agent-halo/claude-code-status-hook PreToolUse", "Agent Halo hook should be appended to ~/.claude/settings.json")
+    expect(settings?["env"] as? [String: String], ["AGENT_HALO_TEST": "1"], "existing settings should be preserved")
+
+    let legacy = try JSONSerialization.jsonObject(with: Data(contentsOf: legacyURL)) as? [String: Any]
+    let legacyHooks = legacy?["hooks"] as? [String: Any]
+    let legacyPreToolUse = legacyHooks?["PreToolUse"] as? [[String: Any]]
+    let legacyEntryHooks = legacyPreToolUse?.first?["hooks"] as? [[String: Any]]
+    let legacyCommand = legacyEntryHooks?.first?["command"] as? String
+    expect(legacyCommand, "/old/claude-code-status-hook PreToolUse", "legacy ~/.claude.json should not be rewritten")
+}
+
 extension FileHandle {
     func withClose(_ body: (FileHandle) throws -> Void) rethrows {
         defer { try? close() }
@@ -1091,6 +1128,11 @@ testSettingsPersistsFocusedAgent()
 testAcknowledgedErrorVisibilityUsesLatestErrorTime()
 testWorkingVisibilityLiveCallOutputAndInitialTail()
 testToolFailedDoesNotBecomeFatalError()
+do {
+    try testClaudeHookConfiguratorWritesUserSettingsNotLegacyClaudeJson()
+} catch {
+    fatalError("\(error)")
+}
 do {
     try testMonitorHandlesPendingLinesAndTruncation()
 } catch {
