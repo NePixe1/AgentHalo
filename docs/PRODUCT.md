@@ -3,7 +3,7 @@
 ## Product promise
 
 Agent Halo is a quiet, always-visible desktop vital sign for coding agents. The
-current release monitors Codex; the next provider target is Claude Code. It answers
+current release monitors Codex and macOS Claude Code transcripts. It answers
 one question without making the user return to the agent window: "What needs me
 right now?"
 
@@ -11,9 +11,9 @@ right now?"
 
 1. Ambient first: readable in peripheral vision, silent by default.
 2. One organ, many states: a single original light form instead of a dashboard.
-3. Persistent completion: green breathes until Codex returns to the foreground or the user acknowledges it.
+3. Persistent completion: green breathes until the relevant completion is acknowledged.
 4. Honest state: infer lifecycle activity, never claim to expose hidden reasoning.
-5. Local only: read event metadata from local Codex JSONL sessions; never send content.
+5. Local only: read event metadata from local agent JSONL sessions; never send content.
 
 ## State model
 
@@ -31,13 +31,20 @@ right now?"
 - Windows desktop, native WPF, transparent and always on top.
 - Smooth composition-clock animation.
 - Real-time monitoring of `%USERPROFILE%\.codex\sessions`.
+- macOS Claude Code transcript monitoring from `~/.claude/projects`.
 - Multiple-session aggregation with priority ordering.
 - Click-to-inspect compact session panel.
 - Persistent completion acknowledgement.
 - Tray controls, pause, live/demo modes, startup toggle, and exit.
 - Position memory and edge snapping.
-- Provider architecture prepared for future Claude Code lifecycle detection.
+- Provider architecture prepared for additional agent lifecycle detection.
 - No pets, chat content, cost meter, or cloud service.
+
+## Focused Agent
+
+Agent Halo monitors Codex and Claude Code concurrently, but renders one focused agent at a time. The focused agent defaults to Codex and can be changed from the hover details segmented switch or the menu item `监控对象`.
+
+Codex-only affordances remain scoped to Codex focus: quota/context rows, synthetic Codex failure surfacing, and click-to-activate Codex. Claude Code focus shows Claude Code session status without Codex quota rows and does not attempt to foreground a Claude Code app.
 
 ## Visual language
 

@@ -2,9 +2,9 @@
 
 ![Agent Halo READY 状态横幅](assets/agent-halo-readme-banner.png)
 
-Codex 桌面端的本地常驻状态光环。
+编码 Agent 的本地常驻状态光环。
 
-当前版本支持 Codex；后续计划加入 Claude Code（CC）状态识别。
+当前版本支持 Codex，并在 macOS 上支持 Claude Code（CC）转录日志状态识别。
 
 版本：`0.13.0`
 
@@ -21,7 +21,7 @@ Codex 桌面端的本地常驻状态光环。
 ## 系统要求
 
 - Windows 10 或 Windows 11
-- 已安装并使用 Codex 桌面端
+- 已安装并使用 Codex 桌面端，或在 macOS 上使用 Claude Code
 - .NET Framework 4.8（目前的 Windows 10/11 通常已自带）
 
 ## macOS 开发版
@@ -59,21 +59,23 @@ swift run AgentHaloDiagnostics --transition-strip /tmp/agent-halo-transitions
 
 - 拖动光环：调整位置，靠近屏幕边缘时会自动吸附。
 - 鼠标悬停：查看当前状态、5 小时额度和周额度。
+- 悬停详情面板提供 `Codex / CC` 切换。Agent Halo 会同时监听两个工具，但光环颜色、状态文案和额度行只跟随当前选中的监控对象。
+- Codex 额度和上下文占用只在 `Codex` 视图显示。切到 `CC` 时，详情面板只显示 Claude Code 会话状态，不混入 Codex 余额信息。
 - 任务完成后绿色会缓慢呼吸；再次打开 Codex 后自动确认并变为不发光的稳定绿色。
 - 右键单击：打开状态预览、暂停监听、开机启动和退出菜单。
-- 右键“光环大小”：选择 `75% / 100% / 125%`，重启后保持设置。
-- 光环因拔掉副屏而消失时，从系统托盘右键选择“脱离卡死”，可移回主屏右上角。
+- 右键”光环大小”：选择 `75% / 100% / 125%`，重启后保持设置。
+- 光环因拔掉副屏而消失时，从系统托盘右键选择”脱离卡死”，可移回主屏右上角。
 - 单击光环：将 Codex 窗口切到前台。
 
 ## 状态含义
 
-- 黄色长亮短暗：Codex 正在思考或规划。
-- 蓝色长亮短暗：Codex 正在执行命令、搜索、编辑文件或调用工具。
-- 绿色双闪：Codex 已完成；高亮两次后持续缓慢呼吸，直到你再次打开 Codex。
-- 珊瑚橙双脉冲：Codex 正在等待 Yes、授权、确认或输入。
+- 黄色长亮短暗：Agent 正在思考或规划。
+- 蓝色长亮短暗：Agent 正在执行命令、搜索、编辑文件或调用工具。
+- 绿色双闪：Agent 已完成；高亮两次后持续缓慢呼吸，直到被确认。
+- 珊瑚橙双脉冲：Agent 正在等待 Yes、授权、确认或输入。
 - 红色：仅表示阻止任务继续的故障；未查看时爆闪，打开 Codex 后常亮，离开后变为暗红。
-- 稳定绿色：Codex 已运行且当前没有活动任务。
-- 暗白色：Codex 未运行。
+- 稳定绿色：被监听的 Agent 已运行且当前没有活动任务。
+- 暗白色：当前没有可见的 Agent 活动。
 
 详细动效规则按平台拆分：
 
@@ -84,9 +86,9 @@ swift run AgentHaloDiagnostics --transition-strip /tmp/agent-halo-transitions
 ## 隐私
 
 Agent Halo 只在本机读取 `%USERPROFILE%\.codex\sessions` 中的生命周期事件、
-额度信息，以及 `logs_2.sqlite` 中结构化的连接和服务故障记录。SQLite 数据库仅以
-只读方式查询。程序不会上传数据、调用网络服务、显示聊天内容，也不会读取或保存
-OpenAI API Key。
+额度信息，以及 macOS 上 `~/.claude/projects` 中的 Claude Code 转录日志。
+它还会只读查询 `logs_2.sqlite` 中结构化的 Codex 连接和服务故障记录。
+程序不会上传数据、调用网络服务，也不会读取或保存 API Key。
 
 ## Windows 安全提示
 
