@@ -158,14 +158,15 @@ public struct ClaudeHookStatusReducer: Sendable {
 
         // Safety net: when workingVisibleUntil is nil and this is NOT a permission
         // prompt, the reducer is stuck (PreToolUse without PostToolUse, stale test
-        // data, etc.). Force-fade after 30 seconds of inactivity so the ring can
-        // recover without an explicit Stop event.
+        // data, etc.). Force-fade after 180 seconds of inactivity so the ring can
+        // recover without an explicit Stop event. Picked to comfortably exceed a
+        // slow model turn so a transient request hiccup does NOT trip the fade.
         //
         // Permission prompts are exempt — the plan requires them to hold until the
         // user explicitly approves or rejects (tested in
         // testClaudeHookReducerPermissionPromptHoldsUntilResolved).
         if workingVisibleUntil == nil, !isPermissionPrompt {
-            if now.timeIntervalSince(snapshot.lastEventAt) > 30 {
+            if now.timeIntervalSince(snapshot.lastEventAt) > 180 {
                 snapshot.state = .thinking
                 snapshot.action = "Thinking"
             }

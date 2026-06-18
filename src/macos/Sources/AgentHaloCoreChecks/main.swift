@@ -749,13 +749,13 @@ func testClaudeHookReducerStuckPreToolUseRecoversAfterSafetyTimeout() {
 
     expect(reducer.snapshot.state, .working, "PreToolUse should enter working")
 
-    // After 10 seconds, still working — tool may legitimately be running.
-    reducer.applyWorkingVisibility(now: now.addingTimeInterval(11))
-    expect(reducer.snapshot.state, .working, "10 s after PreToolUse should keep working (tool may run long)")
+    // After 60 seconds, still working — tool may legitimately be running.
+    reducer.applyWorkingVisibility(now: now.addingTimeInterval(61))
+    expect(reducer.snapshot.state, .working, "60 s after PreToolUse should keep working (tool may run long)")
 
-    // After 31 seconds with no follow-up event, safety net forces fade to thinking.
-    reducer.applyWorkingVisibility(now: now.addingTimeInterval(32))
-    expect(reducer.snapshot.state, .thinking, ">30 s after PreToolUse with no PostToolUse should force-fade to thinking")
+    // After 181 seconds with no follow-up event, safety net forces fade to thinking.
+    reducer.applyWorkingVisibility(now: now.addingTimeInterval(182))
+    expect(reducer.snapshot.state, .thinking, ">180 s after PreToolUse with no PostToolUse should force-fade to thinking")
     expect(reducer.snapshot.action, "Thinking", "safety-net fade action")
 }
 
@@ -785,9 +785,9 @@ func testClaudeHookReducerPreCompactShowsExecutingThenRestoresToThinking() {
     reducer2.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:01Z","event":"PreCompact","sessionId":"compact-stuck","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
     expect(reducer2.snapshot.state, .working, "PreCompact shows working")
 
-    // After >30 s with no PostCompact, safety net recovers.
-    reducer2.applyWorkingVisibility(now: now.addingTimeInterval(32))
-    expect(reducer2.snapshot.state, .thinking, "stuck PreCompact should force-fade to thinking after >30 s")
+    // After >180 s with no PostCompact, safety net recovers.
+    reducer2.applyWorkingVisibility(now: now.addingTimeInterval(182))
+    expect(reducer2.snapshot.state, .thinking, "stuck PreCompact should force-fade to thinking after >180 s")
 }
 
 func testClaudeHookMonitorPrunesStaleReducers() throws {
@@ -812,9 +812,11 @@ func testClaudeHookMonitorPrunesStaleReducers() throws {
     let before = monitor.snapshots()
     expect(before.count >= 1, true, "at least one snapshot before pruning")
 
-    // Advance time > 5 minutes. The old active session (>60 s stale) and the done
-    // session (>300 s stale) should both be pruned, leaving no Claude hook state.
-    _ = monitor.refresh(now: now.addingTimeInterval(400))
+    // Advance time so both reducers exceed their stale thresholds. Active uses
+    // 600 s, inactive uses 300 s. The old session's last event is at 03:50:01
+    // (~10 min before `now`); adding 700 s on top lifts elapsed time to ~17 min,
+    // pruning both. The done session is well past its 300 s window.
+    _ = monitor.refresh(now: now.addingTimeInterval(700))
     let after = monitor.snapshots()
     expect(after.isEmpty, true, "stale reducers pruned → empty hook snapshots")
 }

@@ -109,7 +109,7 @@ public final class ClaudeHookStatusMonitor {
     }
 
     private func pruneStaleReducers(now: Date) {
-        let activeStaleThreshold = now.addingTimeInterval(-60)
+        let activeStaleThreshold = now.addingTimeInterval(-600)
         let inactiveStaleThreshold = now.addingTimeInterval(-300)
         reducers = reducers.filter { _, reducer in
             let t = reducer.snapshot.lastEventAt
