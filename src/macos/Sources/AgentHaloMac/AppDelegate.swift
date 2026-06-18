@@ -9,7 +9,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settings: HaloSettings
     private let monitor = CodexSessionMonitor()
     private let claudeHookMonitor = ClaudeHookStatusMonitor()
-    private let claudeMonitor = ClaudeSessionMonitor()
     private var selectedPreview = PreviewPayload.live
     private var aggregate: AggregateSnapshot
     private var statusItem: NSStatusItem!
@@ -63,7 +62,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func tick() {
         _ = monitor.refresh()
         _ = claudeHookMonitor.refresh()
-        _ = claudeMonitor.refresh()
         acknowledgeCompletedIfCodexIsForeground()
         aggregate = SessionAggregator.aggregate(
             snapshots: allSnapshots(),
@@ -261,14 +259,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func claudeSnapshots() -> [SessionSnapshot] {
-        // Hook and transcript are mutually exclusive sources — never merge them.
-        // Merging causes priority inversion (e.g. transcript .thinking (pri 3)
-        // outranks hook .done (pri 4), hiding the Stop completion).
-        let hookSnapshots = claudeHookMonitor.snapshots()
-        if !hookSnapshots.isEmpty {
-            return hookSnapshots
-        }
-        return claudeMonitor.snapshots()
+        ClaudeStatusSourceMerger.merge(
+            hookSnapshots: claudeHookMonitor.snapshots(),
+            transcriptSnapshots: []
+        )
     }
 
     private func acknowledgeCompletedSessions(_ sessions: [SessionSnapshot]) {

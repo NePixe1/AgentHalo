@@ -752,11 +752,10 @@ func testClaudeHookMonitorPrunesStaleReducers() throws {
     expect(before.count >= 1, true, "at least one snapshot before pruning")
 
     // Advance time > 5 minutes. The old active session (>60 s stale) and the done
-    // session (>300 s stale) should both be pruned, leaving an empty reducer map
-    // which triggers the default-idle fallback.
+    // session (>300 s stale) should both be pruned, leaving no Claude hook state.
     _ = monitor.refresh(now: now.addingTimeInterval(400))
     let after = monitor.snapshots()
-    expect(after.isEmpty, true, "stale reducers pruned → empty snapshots, falls through to transcript")
+    expect(after.isEmpty, true, "stale reducers pruned → empty hook snapshots")
 }
 
 func testClaudeMonitorHandlesDiscoveryPendingLinesAndTruncation() throws {
@@ -879,7 +878,30 @@ func testClaudeStatusMergerPrefersHookDoneOverTranscriptThinking() {
     expect(merged.map(\.state), [.done], "recent hook completion should suppress transcript reactivation")
 }
 
-func testClaudeStatusMergerUsesTranscriptCompletionWhenHookStopWasMissed() {
+func testClaudeStatusMergerIgnoresTranscriptWhenNoHookSnapshotExists() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:10Z")!
+    let transcriptThinking = SessionSnapshot(
+        threadId: "transcript-only",
+        projectName: "AgentHalo",
+        workingDirectory: "/Users/wjs/work/pyproj/AgentHalo",
+        state: .thinking,
+        action: "Thinking",
+        lastEventAt: now,
+        completedAt: nil,
+        active: true,
+        agent: .claudeCode
+    )
+
+    let merged = ClaudeStatusSourceMerger.merge(
+        hookSnapshots: [],
+        transcriptSnapshots: [transcriptThinking],
+        now: now
+    )
+
+    expect(merged.isEmpty, true, "transcript-only Claude sessions should not drive the halo")
+}
+
+func testClaudeStatusMergerKeepsHookWhenTranscriptCompletionIsNewer() {
     let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:10Z")!
     let hookWorking = SessionSnapshot(
         threadId: "same-thread",
@@ -910,7 +932,7 @@ func testClaudeStatusMergerUsesTranscriptCompletionWhenHookStopWasMissed() {
         now: now
     )
 
-    expect(merged.map(\.state), [.done], "newer transcript completion should recover from a missed hook Stop")
+    expect(merged.map(\.state), [.working], "hook state should remain authoritative over transcript completion")
 }
 
 func testClaudeStatusMergerSurvivesDuplicateThreadIds() {
@@ -1123,7 +1145,8 @@ do {
     fatalError("\(error)")
 }
 testClaudeStatusMergerPrefersHookDoneOverTranscriptThinking()
-testClaudeStatusMergerUsesTranscriptCompletionWhenHookStopWasMissed()
+testClaudeStatusMergerIgnoresTranscriptWhenNoHookSnapshotExists()
+testClaudeStatusMergerKeepsHookWhenTranscriptCompletionIsNewer()
 testClaudeStatusMergerSurvivesDuplicateThreadIds()
 testClaudeHookStopShowsDoneThenReadyWhileWaitingForInput()
 testStartupExecutablePathUsesAppBundleRoot()

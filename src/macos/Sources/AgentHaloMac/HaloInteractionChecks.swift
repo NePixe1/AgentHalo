@@ -57,9 +57,12 @@ private func testRightClickInvokesContextMenuCallback() {
 @MainActor
 private func testSingleClickInvokesPrimaryAction() {
     var activations = 0
-    let delegate = AppDelegate(codexActivator: {
-        activations += 1
-    })
+    let delegate = AppDelegate(
+        settingsStore: SettingsStore(settingsURL: temporarySettingsURL()),
+        codexActivator: {
+            activations += 1
+        }
+    )
 
     delegate.handleHaloPrimaryClick()
 
