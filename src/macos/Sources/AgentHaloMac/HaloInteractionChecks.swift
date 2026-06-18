@@ -76,8 +76,8 @@ private func testHaloContextMenuContainsCurrentControls() {
     let sizeLabels = sizeItem.view?.subviews.compactMap { $0 as? NSTextField }
         .filter { $0.stringValue == "圆环大小" } ?? []
     expect(sizeLabels.count == 1, "halo size menu item should contain one title label")
-    expect(sizeLabels[0].frame.minX >= 35, "halo size row label should align with regular menu text")
-    expect(sizeLabels[0].frame.minX <= 39, "halo size row label should not drift past regular menu text")
+    expect(sizeLabels[0].frame.minX >= 19, "halo size row label should align with regular menu text")
+    expect(sizeLabels[0].frame.minX <= 23, "halo size row label should not drift past regular menu text")
     expect(titles.contains("预览状态"), "halo context menu should include preview submenu")
     expect(!titles.contains("切换到 Codex"), "halo context menu should not include Codex activation")
     expect(!titles.contains("退出 Agent Halo"), "halo context menu should not include old quit title")

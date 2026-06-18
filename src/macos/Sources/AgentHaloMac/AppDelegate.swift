@@ -3,7 +3,7 @@ import AgentHaloCore
 
 private let haloSizeMenuWidth: CGFloat = 252
 private let haloSizeMenuHeight: CGFloat = 44
-private let haloSizeMenuTextInset: CGFloat = 37
+private let haloSizeMenuTextInset: CGFloat = 21
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
