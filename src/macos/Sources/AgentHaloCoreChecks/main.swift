@@ -145,6 +145,7 @@ func testSettingsPersistFormalFieldsAndNormalizePaused() {
         hasPosition: true,
         left: 110,
         top: 220,
+        haloSize: 144,
         alwaysOnTop: false,
         paused: true,
         installedAt: installedAt,
@@ -158,10 +159,74 @@ func testSettingsPersistFormalFieldsAndNormalizePaused() {
     expect(loaded.hasPosition, true, "hasPosition should persist")
     expect(loaded.left, 110, "left should persist")
     expect(loaded.top, 220, "top should persist")
+    expect(loaded.haloSize, 144, "haloSize should persist")
     expect(loaded.alwaysOnTop, false, "alwaysOnTop should persist")
     expect(loaded.paused, false, "paused should normalize false on load")
     expect(loaded.acknowledged, ["thread": installedAt], "acknowledged should persist")
     expect(loaded.acknowledgedErrorAt, acknowledgedErrorAt, "acknowledgedErrorAt should persist")
+}
+
+func testSettingsUsesDefaultHaloSizeForLegacyFilesAndClampsInvalidSizes() {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-size-\(UUID().uuidString)", isDirectory: true)
+    let legacyURL = root.appendingPathComponent("legacy.json")
+    let smallURL = root.appendingPathComponent("small.json")
+    let largeURL = root.appendingPathComponent("large.json")
+    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    try! """
+    {
+      "acknowledged" : {},
+      "alwaysOnTop" : true,
+      "alwaysOnTopBehaviorVersion" : 1,
+      "hasPosition" : false,
+      "installedAt" : "2026-06-13T12:47:19Z",
+      "left" : 0,
+      "paused" : false,
+      "top" : 0
+    }
+    """.data(using: .utf8)!.write(to: legacyURL)
+    try! """
+    {
+      "acknowledged" : {},
+      "alwaysOnTop" : true,
+      "alwaysOnTopBehaviorVersion" : 1,
+      "haloSize" : 24,
+      "hasPosition" : false,
+      "installedAt" : "2026-06-13T12:47:19Z",
+      "left" : 0,
+      "paused" : false,
+      "top" : 0
+    }
+    """.data(using: .utf8)!.write(to: smallURL)
+    try! """
+    {
+      "acknowledged" : {},
+      "alwaysOnTop" : true,
+      "alwaysOnTopBehaviorVersion" : 1,
+      "haloSize" : 300,
+      "hasPosition" : false,
+      "installedAt" : "2026-06-13T12:47:19Z",
+      "left" : 0,
+      "paused" : false,
+      "top" : 0
+    }
+    """.data(using: .utf8)!.write(to: largeURL)
+
+    expect(
+        SettingsStore(settingsURL: legacyURL).load().haloSize,
+        HaloSettings.defaultHaloSize,
+        "legacy settings should use default halo size"
+    )
+    expect(
+        SettingsStore(settingsURL: smallURL).load().haloSize,
+        HaloSettings.minimumHaloSize,
+        "undersized halo setting should clamp to minimum"
+    )
+    expect(
+        SettingsStore(settingsURL: largeURL).load().haloSize,
+        HaloSettings.maximumHaloSize,
+        "oversized halo setting should clamp to maximum"
+    )
 }
 
 func testSettingsMigratesLegacyAlwaysOnTopOffToDefaultOn() {
@@ -539,6 +604,9 @@ testReducesPlanningWorkingAttentionErrorAndCompleteEvents()
 testAggregatePrioritizesActionableSessions()
 testAcknowledgingCompletedSessionsStoresLatestVisibleCompletionOnly()
 testSettingsPersistFormalFieldsAndNormalizePaused()
+testSettingsUsesDefaultHaloSizeForLegacyFilesAndClampsInvalidSizes()
+testSettingsMigratesLegacyAlwaysOnTopOffToDefaultOn()
+testSettingsPreservesExplicitAlwaysOnTopOffAfterMigrationVersion()
 testAcknowledgedErrorVisibilityUsesLatestErrorTime()
 testWorkingVisibilityLiveCallOutputAndInitialTail()
 testToolFailedDoesNotBecomeFatalError()

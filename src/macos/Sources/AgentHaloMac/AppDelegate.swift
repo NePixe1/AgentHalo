@@ -1,7 +1,9 @@
 import AppKit
 import AgentHaloCore
 
-private let haloSize: CGFloat = 112
+private let haloSizeMenuWidth: CGFloat = 252
+private let haloSizeMenuHeight: CGFloat = 44
+private let haloSizeMenuTextInset: CGFloat = 37
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -20,10 +22,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var timer: Timer?
     private var detailsPanel = DetailsPanel()
     private var hoverHideTimer: Timer?
+    private var settingsSaveTimer: Timer?
     private let rateLimitReader = RateLimitReader()
     private let failureReader = CodexFailureReader()
     private let instanceLock = InstanceLock()
     private let codexActivator: () -> Void
+    private var currentHaloSize: CGFloat {
+        CGFloat(settings.haloSize)
+    }
 
     init(codexActivator: @escaping () -> Void = CodexAppDetector.activateCodex) {
         self.codexActivator = codexActivator
@@ -44,6 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        settingsSaveTimer?.invalidate()
         saveWindowPosition()
         settingsStore.save(settings)
     }
@@ -74,6 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func createHaloPanel() {
         let origin = initialWindowOrigin()
+        let haloSize = currentHaloSize
         haloView = HaloView(frame: NSRect(x: 0, y: 0, width: haloSize, height: haloSize))
         haloView.onDoubleClick = { [weak self] in
             self?.bringCodexForward()
@@ -117,6 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func defaultWindowOrigin(topOffset: CGFloat) -> CGPoint {
         let frame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let haloSize = currentHaloSize
         return CGPoint(x: frame.maxX - haloSize - 28, y: frame.maxY - haloSize - topOffset)
     }
 
@@ -132,6 +141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         addCheckItem("始终置顶", checked: settings.alwaysOnTop, action: #selector(toggleAlwaysOnTop), to: menu)
         addCheckItem("开机自动启动", checked: StartupManager.isEnabled(), action: #selector(toggleStartup), to: menu)
         addCheckItem("暂停状态监听", checked: settings.paused, action: #selector(togglePause), to: menu)
+        addHaloSizeItem(to: menu)
         addMenuItem("脱离卡死（移到主屏右上角）", #selector(escapeOffscreen), enabled: true, to: menu)
         let preview = NSMenuItem(title: "预览状态", action: nil, keyEquivalent: "")
         let submenu = NSMenu()
@@ -177,6 +187,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsStore.save(settings)
     }
 
+    @objc private func haloSizeSliderChanged(_ sender: NSSlider) {
+        let value = Int(CGFloat(sender.doubleValue).rounded())
+        if let valueLabel = sender.superview?.subviews.first(where: { $0.identifier?.rawValue == "halo-size-value" }) as? NSTextField {
+            valueLabel.stringValue = "\(value)"
+        }
+        applyHaloSize(CGFloat(sender.doubleValue))
+    }
+
     @objc private func bringCodexForward() {
         codexActivator()
     }
@@ -207,6 +225,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settings.left = panel.frame.origin.x
         settings.top = panel.frame.origin.y
         settings.hasPosition = true
+    }
+
+    private func applyHaloSize(_ size: CGFloat) {
+        let clampedSize = CGFloat(HaloSettings.clampedHaloSize(Double(size)))
+        settings.haloSize = Double(clampedSize)
+        guard let panel, let haloView else {
+            scheduleSettingsSave()
+            return
+        }
+
+        let oldFrame = panel.frame
+        let frame = Self.haloFrameByKeepingOrigin(oldFrame: oldFrame, requestedSize: clampedSize)
+        panel.setFrame(frame, display: true)
+        haloView.resizeForHaloSize(clampedSize)
+        settings.left = frame.origin.x
+        settings.top = frame.origin.y
+        settings.hasPosition = true
+        scheduleSettingsSave()
+        positionDetailsPanel()
+    }
+
+    private func scheduleSettingsSave() {
+        settingsSaveTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.18, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.settingsStore.save(self.settings)
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        settingsSaveTimer = timer
     }
 
     private func acknowledgeCompletedIfCodexIsForeground() {
@@ -272,6 +321,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item)
     }
 
+    private func addHaloSizeItem(to menu: NSMenu) {
+        let item = NSMenuItem(title: "圆环大小", action: nil, keyEquivalent: "")
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: haloSizeMenuWidth, height: haloSizeMenuHeight))
+        let label = NSTextField(labelWithString: "圆环大小")
+        label.font = .systemFont(ofSize: 12, weight: .medium)
+        label.textColor = .labelColor
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        let slider = NSSlider(
+            value: settings.haloSize,
+            minValue: HaloSettings.minimumHaloSize,
+            maxValue: HaloSettings.maximumHaloSize,
+            target: self,
+            action: #selector(haloSizeSliderChanged(_:))
+        )
+        slider.isContinuous = true
+        slider.translatesAutoresizingMaskIntoConstraints = false
+
+        let valueLabel = NSTextField(labelWithString: "\(Int(settings.haloSize.rounded()))")
+        valueLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        valueLabel.textColor = .secondaryLabelColor
+        valueLabel.alignment = .right
+        valueLabel.identifier = NSUserInterfaceItemIdentifier("halo-size-value")
+        valueLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        container.addSubview(label)
+        container.addSubview(slider)
+        container.addSubview(valueLabel)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: haloSizeMenuTextInset),
+            label.centerYAnchor.constraint(equalTo: slider.centerYAnchor),
+            label.widthAnchor.constraint(equalToConstant: 58),
+            slider.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 10),
+            slider.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            valueLabel.leadingAnchor.constraint(equalTo: slider.trailingAnchor, constant: 8),
+            valueLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            valueLabel.centerYAnchor.constraint(equalTo: slider.centerYAnchor),
+            valueLabel.widthAnchor.constraint(equalToConstant: 32)
+        ])
+        item.view = container
+        menu.addItem(item)
+    }
+
     private func addPreviewItem(_ title: String, state: HaloState?, presentation: ErrorPresentation?, to menu: NSMenu) {
         let item = NSMenuItem(title: title, action: #selector(previewState(_:)), keyEquivalent: "")
         item.target = self
@@ -299,6 +391,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     static func haloWindowLevel(alwaysOnTop: Bool) -> NSWindow.Level {
         alwaysOnTop ? .screenSaver : .normal
+    }
+
+    static func haloFrameByKeepingOrigin(oldFrame: NSRect, requestedSize: CGFloat) -> NSRect {
+        let size = CGFloat(HaloSettings.clampedHaloSize(Double(requestedSize)))
+        return NSRect(x: oldFrame.origin.x, y: oldFrame.origin.y, width: size, height: size)
     }
 
     private struct PreviewPayload {

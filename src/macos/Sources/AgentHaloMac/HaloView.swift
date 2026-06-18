@@ -1,6 +1,5 @@
 import AppKit
 import AgentHaloCore
-import CoreVideo
 import QuartzCore
 
 @MainActor
@@ -26,7 +25,7 @@ final class HaloView: NSView {
     var onMouseExited: (() -> Void)?
     private var dragStart: NSPoint?
     private var windowStart: NSPoint?
-    nonisolated(unsafe) private var displayLink: CVDisplayLink?
+    nonisolated(unsafe) private var animationTimer: Timer?
     private var lastFrameTimestamp = CACurrentMediaTime()
     private var visualState: HaloState = .idle
     private var errorPresentation: ErrorPresentation = .flashing
@@ -60,7 +59,7 @@ final class HaloView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
-        startDisplayLink()
+        startAnimationDriver()
     }
 
     required init?(coder: NSCoder) {
@@ -70,36 +69,46 @@ final class HaloView: NSView {
     override var isOpaque: Bool { false }
 
     deinit {
-        if let displayLink {
-            CVDisplayLinkStop(displayLink)
-        }
+        animationTimer?.invalidate()
     }
 
-    private func startDisplayLink() {
-        var link: CVDisplayLink?
-        guard CVDisplayLinkCreateWithActiveCGDisplays(&link) == kCVReturnSuccess, let link else {
-            return
+    private func startAnimationDriver() {
+        lastFrameTimestamp = CACurrentMediaTime()
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.animationTimerDidFire()
+            }
         }
-        let context = Unmanaged.passUnretained(self).toOpaque()
-        CVDisplayLinkSetOutputCallback(link, { _, _, _, _, _, context in
-            guard let context else {
-                return kCVReturnSuccess
-            }
-            let view = Unmanaged<HaloView>.fromOpaque(context).takeUnretainedValue()
-            DispatchQueue.main.async {
-                view.displayLinkDidFire()
-            }
-            return kCVReturnSuccess
-        }, context)
-        CVDisplayLinkStart(link)
-        displayLink = link
+        RunLoop.main.add(timer, forMode: .common)
+        animationTimer = timer
     }
 
-    private func displayLinkDidFire() {
+    private func animationTimerDidFire() {
         let now = CACurrentMediaTime()
         let delta = HaloMath.clamp(now - lastFrameTimestamp, 0.001, 0.08)
         lastFrameTimestamp = now
         stepAnimation(delta: delta)
+    }
+
+    func resizeForHaloSize(_ size: CGFloat) {
+        let resizedBounds = NSRect(x: 0, y: 0, width: size, height: size)
+        frame = resizedBounds
+        bounds = resizedBounds
+        layer?.frame = resizedBounds
+        updateTrackingAreas()
+        needsDisplay = true
+    }
+
+    var usesCommonRunLoopAnimationDriverForChecks: Bool {
+        animationTimer != nil
+    }
+
+    func advanceAnimationForChecks(delta: Double) {
+        stepAnimation(delta: delta)
+    }
+
+    func animationSnapshotForChecks() -> (time: Double, gapA: Double, gapB: Double) {
+        (animationTime, gapA, gapB)
     }
 
     private func stepAnimation(delta: Double) {
