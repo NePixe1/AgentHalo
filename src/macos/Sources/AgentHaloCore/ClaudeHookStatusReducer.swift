@@ -81,11 +81,13 @@ public struct ClaudeHookStatusReducer: Sendable {
         case "Notification":
             switch Self.string(root["notificationType"]) {
             case "permission_prompt":
-                // Block on user approval. No auto-fade — only the next PreToolUse / Stop clears this.
+                // Block on user approval. Render as `.attention` (NEEDS YOU) so the
+                // ring is visually distinct from normal tool execution. No auto-fade
+                // — only the next PreToolUse / Stop / UserPromptSubmit clears this.
                 isPermissionPrompt = true
                 workingVisibleUntil = nil
                 snapshot.active = true
-                snapshot.state = .working
+                snapshot.state = .attention
                 snapshot.action = "Awaiting permission"
                 snapshot.completedAt = nil
             case "idle_prompt":

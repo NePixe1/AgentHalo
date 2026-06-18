@@ -679,14 +679,14 @@ func testClaudeHookReducerPermissionPromptHoldsUntilResolved() {
     reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"perm","cwd":"/tmp","source":"claude-hook"}"#, now: now)
     reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:01Z","event":"Notification","sessionId":"perm","cwd":"/tmp","notificationType":"permission_prompt","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
 
-    expect(reducer.snapshot.state, .working, "permission_prompt should show working")
+    expect(reducer.snapshot.state, .attention, "permission_prompt should show attention")
     expect(reducer.snapshot.action, "Awaiting permission", "permission_prompt action")
     expect(reducer.snapshot.active, true, "permission_prompt keeps the turn active")
 
     // No fade-out: even minutes later, the state must still reflect the pending prompt
     // until a real PreToolUse / Stop arrives.
     reducer.applyWorkingVisibility(now: now.addingTimeInterval(120))
-    expect(reducer.snapshot.state, .working, "permission_prompt should not fade automatically")
+    expect(reducer.snapshot.state, .attention, "permission_prompt should not fade automatically")
     expect(reducer.snapshot.action, "Awaiting permission", "permission_prompt action persists")
 }
 
