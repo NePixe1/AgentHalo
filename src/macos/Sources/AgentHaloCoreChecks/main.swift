@@ -690,16 +690,40 @@ func testClaudeHookReducerPermissionPromptHoldsUntilResolved() {
     expect(reducer.snapshot.action, "Awaiting permission", "permission_prompt action persists")
 }
 
-func testClaudeHookReducerIdlePromptShowsAwaitingReply() {
+func testClaudeHookReducerIdlePromptReturnsToReady() {
     let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
     var reducer = ClaudeHookStatusReducer(threadId: "idle", now: now)
 
     reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"idle","cwd":"/tmp","source":"claude-hook"}"#, now: now)
     reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:01Z","event":"Notification","sessionId":"idle","cwd":"/tmp","notificationType":"idle_prompt","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
 
-    expect(reducer.snapshot.state, .thinking, "idle_prompt should keep thinking")
-    expect(reducer.snapshot.action, "Awaiting reply", "idle_prompt action")
-    expect(reducer.snapshot.active, true, "idle_prompt keeps the turn active")
+    expect(reducer.snapshot.state, .idle, "idle_prompt should return to idle")
+    expect(reducer.snapshot.action, "Ready", "idle_prompt action")
+    expect(reducer.snapshot.active, false, "idle_prompt should not keep the turn active")
+}
+
+func testClaudeHookIdlePromptDoesNotDriveThinkingAggregate() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-18T08:24:00Z")!
+    var reducer = ClaudeHookStatusReducer(threadId: "idle-aggregate", now: now)
+    let settings = HaloSettings(
+        paused: false,
+        focusedAgent: .claudeCode,
+        installedAt: now.addingTimeInterval(-60)
+    )
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T08:24:00Z","event":"SessionStart","sessionId":"idle-aggregate","cwd":"/Users/wjs/work/pyproj/AgentHalo","source":"claude-hook"}"#, now: now)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T08:24:05Z","event":"PostCompact","sessionId":"idle-aggregate","cwd":"/Users/wjs/work/pyproj/AgentHalo","source":"claude-hook"}"#, now: now.addingTimeInterval(5))
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-18T08:25:05Z","event":"Notification","sessionId":"idle-aggregate","cwd":"/Users/wjs/work/pyproj/AgentHalo","notificationType":"idle_prompt","source":"claude-hook"}"#, now: now.addingTimeInterval(65))
+
+    let aggregate = SessionAggregator.aggregate(
+        snapshots: [reducer.snapshot],
+        settings: settings,
+        focusedAgent: .claudeCode,
+        now: now.addingTimeInterval(66)
+    )
+    expect(aggregate.state, .idle, "idle_prompt should not surface as Thinking")
+    expect(aggregate.label, "READY", "idle_prompt aggregate label")
+    expect(aggregate.detail, "Claude Code is standing by", "idle_prompt aggregate detail")
 }
 
 func testClaudeHookReducerStopFailureMapsToError() {
@@ -1162,7 +1186,8 @@ testClaudeReducerIgnoresLocalCommandUserRecords()
 testClaudeHookReducerMapsLifecycleEvents()
 testClaudeHookReducerPostToolUseFailureSurfacesThenSettles()
 testClaudeHookReducerPermissionPromptHoldsUntilResolved()
-testClaudeHookReducerIdlePromptShowsAwaitingReply()
+testClaudeHookReducerIdlePromptReturnsToReady()
+testClaudeHookIdlePromptDoesNotDriveThinkingAggregate()
 testClaudeHookReducerStopFailureMapsToError()
 testClaudeHookReducerStuckPreToolUseRecoversAfterSafetyTimeout()
 testClaudeHookReducerPreCompactShowsExecutingThenRestoresToThinking()

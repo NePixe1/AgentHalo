@@ -89,10 +89,11 @@ public struct ClaudeHookStatusReducer: Sendable {
                 snapshot.action = "Awaiting permission"
                 snapshot.completedAt = nil
             case "idle_prompt":
+                isPermissionPrompt = false
                 workingVisibleUntil = nil
-                snapshot.active = true
-                snapshot.state = .thinking
-                snapshot.action = "Awaiting reply"
+                snapshot.active = false
+                snapshot.state = .idle
+                snapshot.action = "Ready"
                 snapshot.completedAt = nil
             default:
                 break
