@@ -107,6 +107,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         haloView.onMouseEntered = { [weak self] in self?.showDetails() }
         haloView.onMouseExited = { [weak self] in self?.scheduleHideDetails() }
+        haloView.onDragStarted = { [weak self] in self?.hideDetailsImmediately() }
         haloView.onClick = { [weak self] in self?.handleHaloPrimaryClick() }
         haloView.onRightClick = { [weak self] event in
             self?.showHaloContextMenu(for: event)
@@ -240,8 +241,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showHaloContextMenu(for event: NSEvent) {
-        hoverHideTimer?.invalidate()
-        detailsPanel.orderOut(nil)
+        hideDetailsImmediately()
 
         NSMenu.popUpContextMenu(makeHaloContextMenu(), with: event, for: haloView)
     }
@@ -363,6 +363,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.detailsPanel.orderOut(nil)
             }
         }
+    }
+
+    private func hideDetailsImmediately() {
+        hoverHideTimer?.invalidate()
+        detailsPanel.orderOut(nil)
     }
 
     private func positionDetailsPanel() {

@@ -18,6 +18,7 @@ func runHaloInteractionChecks() {
     testRightClickInvokesContextMenuCallback()
     testSingleClickInvokesPrimaryAction()
     testHaloContextMenuContainsCurrentControls()
+    testDraggingHaloSuppressesHoverDetails()
     testHaloSizeResizeKeepsWindowOrigin()
     testHaloViewResizeKeepsAnimationMoving()
     testPreviewSubmenuMarksLiveStateInitially()
@@ -103,6 +104,36 @@ private func testHaloContextMenuContainsCurrentControls() {
 }
 
 @MainActor
+private func testDraggingHaloSuppressesHoverDetails() {
+    let view = HaloView(frame: NSRect(x: 0, y: 0, width: 112, height: 112))
+    let window = NSWindow(
+        contentRect: NSRect(x: 200, y: 300, width: 112, height: 112),
+        styleMask: [.borderless],
+        backing: .buffered,
+        defer: false
+    )
+    window.contentView = view
+
+    var hoverShowCount = 0
+    var dragStartCount = 0
+    view.onMouseEntered = {
+        hoverShowCount += 1
+    }
+    view.onDragStarted = {
+        dragStartCount += 1
+    }
+
+    view.mouseEntered(with: interactionEvent(type: .leftMouseDown))
+    view.mouseDown(with: interactionEvent(type: .leftMouseDown))
+    view.mouseDragged(with: interactionEvent(type: .leftMouseDragged))
+    view.mouseEntered(with: interactionEvent(type: .leftMouseDown))
+    view.mouseUp(with: interactionEvent(type: .leftMouseUp))
+
+    expect(hoverShowCount == 1, "dragging halo should suppress hover details")
+    expect(dragStartCount == 1, "dragging halo should request immediate details hide")
+}
+
+@MainActor
 private func testHaloSizeResizeKeepsWindowOrigin() {
     let oldFrame = NSRect(x: 520, y: 640, width: 112, height: 112)
 
@@ -110,6 +141,20 @@ private func testHaloSizeResizeKeepsWindowOrigin() {
 
     expect(resizedFrame.origin == oldFrame.origin, "halo size slider should not move the halo window origin")
     expect(resizedFrame.size == NSSize(width: 168, height: 168), "halo size slider should resize the halo window")
+}
+
+private func interactionEvent(type: NSEvent.EventType) -> NSEvent {
+    NSEvent.mouseEvent(
+        with: type,
+        location: NSPoint(x: 24, y: 30),
+        modifierFlags: [],
+        timestamp: 0,
+        windowNumber: 0,
+        context: nil,
+        eventNumber: 0,
+        clickCount: 1,
+        pressure: 0
+    )!
 }
 
 @MainActor

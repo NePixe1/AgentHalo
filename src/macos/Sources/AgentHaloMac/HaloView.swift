@@ -24,8 +24,10 @@ final class HaloView: NSView {
     var onRightClick: ((NSEvent) -> Void)?
     var onMouseEntered: (() -> Void)?
     var onMouseExited: (() -> Void)?
+    var onDragStarted: (() -> Void)?
     private var dragStart: NSPoint?
     private var windowStart: NSPoint?
+    private var isDraggingWindow = false
     nonisolated(unsafe) private var animationTimer: Timer?
     private var lastFrameTimestamp = CACurrentMediaTime()
     private var visualState: HaloState = .idle
@@ -247,6 +249,9 @@ final class HaloView: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) {
+        guard !isDraggingWindow else {
+            return
+        }
         onMouseEntered?()
     }
 
@@ -264,6 +269,7 @@ final class HaloView: NSView {
         }
         dragStart = NSEvent.mouseLocation
         windowStart = window?.frame.origin
+        isDraggingWindow = false
     }
 
     override func rightMouseDown(with event: NSEvent) {
@@ -277,6 +283,10 @@ final class HaloView: NSView {
     override func mouseDragged(with event: NSEvent) {
         guard let window, let dragStart, let windowStart else {
             return
+        }
+        if !isDraggingWindow {
+            isDraggingWindow = true
+            onDragStarted?()
         }
         let current = NSEvent.mouseLocation
         let next = CGPoint(
@@ -292,5 +302,6 @@ final class HaloView: NSView {
         }
         dragStart = nil
         windowStart = nil
+        isDraggingWindow = false
     }
 }
