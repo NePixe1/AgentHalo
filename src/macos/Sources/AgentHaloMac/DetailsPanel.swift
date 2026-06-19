@@ -9,8 +9,12 @@ final class DetailsPanel: NSPanel {
     private let detailField = NSTextField(labelWithString: "Codex 正在待命")
     private let primaryQuota = QuotaRowView(title: "5 小时额度")
     private let secondaryQuota = QuotaRowView(title: "周额度")
+    private let agentSwitch = NSSegmentedControl(labels: AgentKind.allCases.map(\.segmentedTitle), trackingMode: .selectOne, target: nil, action: nil)
+    private let contextPill = NSView()
+    private let quotaGroup = NSStackView()
     var onMouseEntered: (() -> Void)?
     var onMouseExited: (() -> Void)?
+    var onAgentSelected: ((AgentKind) -> Void)?
 
     init() {
         super.init(
@@ -40,7 +44,7 @@ final class DetailsPanel: NSPanel {
         stack.edgeInsets = NSEdgeInsets(top: 14, left: 17, bottom: 16, right: 17)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        stack.addArrangedSubview(Self.makeTopRow(contextValue: contextValue))
+        stack.addArrangedSubview(makeTopRow())
         stack.setCustomSpacing(7, after: stack.arrangedSubviews[0])
 
         titleField.font = .systemFont(ofSize: 24, weight: .bold)
@@ -52,9 +56,12 @@ final class DetailsPanel: NSPanel {
         stack.setCustomSpacing(2, after: titleField)
         stack.addArrangedSubview(detailField)
         stack.setCustomSpacing(13, after: detailField)
-        stack.addArrangedSubview(primaryQuota)
-        stack.setCustomSpacing(10, after: primaryQuota)
-        stack.addArrangedSubview(secondaryQuota)
+        quotaGroup.orientation = .vertical
+        quotaGroup.spacing = 10
+        quotaGroup.translatesAutoresizingMaskIntoConstraints = false
+        quotaGroup.addArrangedSubview(primaryQuota)
+        quotaGroup.addArrangedSubview(secondaryQuota)
+        stack.addArrangedSubview(quotaGroup)
 
         let rootView = TrackingDetailsContentView()
         rootView.owner = self
@@ -78,6 +85,24 @@ final class DetailsPanel: NSPanel {
         let rgb = HaloVisualModel.stateColor(aggregate.state)
         titleField.textColor = NSColor(calibratedRed: rgb.red / 255, green: rgb.green / 255, blue: rgb.blue / 255, alpha: 1)
         detailField.stringValue = Self.localizedDetail(for: aggregate)
+
+        if let index = AgentKind.allCases.firstIndex(of: aggregate.focusedAgent) {
+            agentSwitch.selectedSegment = index
+        }
+
+        let showsCodexQuota = aggregate.focusedAgent == .codex
+        contextPill.isHidden = !showsCodexQuota || quota?.contextUsedPercent == nil
+        quotaGroup.isHidden = !showsCodexQuota
+        primaryQuota.isHidden = !showsCodexQuota
+        secondaryQuota.isHidden = !showsCodexQuota
+
+        guard showsCodexQuota else {
+            contextValue.stringValue = ""
+            primaryQuota.updateUnavailable()
+            secondaryQuota.updateUnavailable()
+            return
+        }
+
         if let quota {
             contextValue.stringValue = quota.contextUsedPercent.map {
                 "上下文 \(Int($0.rounded()))%"
@@ -119,11 +144,11 @@ final class DetailsPanel: NSPanel {
         case .done: return "任务已完成"
         case .attention: return "等待你的授权或输入"
         case .error: return aggregate.detail.isEmpty ? "任务已中断" : aggregate.detail
-        case .idle: return "Codex 正在待命"
+        case .idle: return aggregate.focusedAgent.localizedStandbyDetail
         }
     }
 
-    private static func makeTopRow(contextValue: NSTextField) -> NSView {
+    private func makeTopRow() -> NSView {
         let row = NSView()
         row.translatesAutoresizingMaskIntoConstraints = false
 
@@ -132,13 +157,17 @@ final class DetailsPanel: NSPanel {
         brand.textColor = NSColor(calibratedRed: 0.38, green: 0.46, blue: 0.51, alpha: 1)
         brand.translatesAutoresizingMaskIntoConstraints = false
 
-        let pill = NSView()
-        pill.wantsLayer = true
-        pill.layer?.cornerRadius = 9
-        pill.layer?.backgroundColor = NSColor(calibratedRed: 0.88, green: 0.95, blue: 0.99, alpha: 0.80).cgColor
-        pill.layer?.borderWidth = 1
-        pill.layer?.borderColor = NSColor(calibratedRed: 0.62, green: 0.78, blue: 0.88, alpha: 0.42).cgColor
-        pill.translatesAutoresizingMaskIntoConstraints = false
+        agentSwitch.target = self
+        agentSwitch.action = #selector(agentSwitchChanged(_:))
+        agentSwitch.segmentStyle = .rounded
+        agentSwitch.translatesAutoresizingMaskIntoConstraints = false
+
+        contextPill.wantsLayer = true
+        contextPill.layer?.cornerRadius = 9
+        contextPill.layer?.backgroundColor = NSColor(calibratedRed: 0.88, green: 0.95, blue: 0.99, alpha: 0.80).cgColor
+        contextPill.layer?.borderWidth = 1
+        contextPill.layer?.borderColor = NSColor(calibratedRed: 0.62, green: 0.78, blue: 0.88, alpha: 0.42).cgColor
+        contextPill.translatesAutoresizingMaskIntoConstraints = false
 
         contextValue.font = .systemFont(ofSize: 11, weight: .regular)
         contextValue.textColor = NSColor(calibratedRed: 0.22, green: 0.49, blue: 0.57, alpha: 1)
@@ -146,21 +175,64 @@ final class DetailsPanel: NSPanel {
         contextValue.translatesAutoresizingMaskIntoConstraints = false
 
         row.addSubview(brand)
-        row.addSubview(pill)
-        pill.addSubview(contextValue)
+        row.addSubview(agentSwitch)
+        row.addSubview(contextPill)
+        contextPill.addSubview(contextValue)
         NSLayoutConstraint.activate([
-            row.heightAnchor.constraint(equalToConstant: 22),
+            row.heightAnchor.constraint(equalToConstant: 24),
             brand.leadingAnchor.constraint(equalTo: row.leadingAnchor),
             brand.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            pill.trailingAnchor.constraint(equalTo: row.trailingAnchor),
-            pill.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            pill.leadingAnchor.constraint(greaterThanOrEqualTo: brand.trailingAnchor, constant: 10),
-            contextValue.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 9),
-            contextValue.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -9),
-            contextValue.topAnchor.constraint(equalTo: pill.topAnchor, constant: 3),
-            contextValue.bottomAnchor.constraint(equalTo: pill.bottomAnchor, constant: -3)
+            agentSwitch.leadingAnchor.constraint(greaterThanOrEqualTo: brand.trailingAnchor, constant: 10),
+            agentSwitch.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            contextPill.leadingAnchor.constraint(equalTo: agentSwitch.trailingAnchor, constant: 8),
+            contextPill.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+            contextPill.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            contextValue.leadingAnchor.constraint(equalTo: contextPill.leadingAnchor, constant: 9),
+            contextValue.trailingAnchor.constraint(equalTo: contextPill.trailingAnchor, constant: -9),
+            contextValue.topAnchor.constraint(equalTo: contextPill.topAnchor, constant: 3),
+            contextValue.bottomAnchor.constraint(equalTo: contextPill.bottomAnchor, constant: -3)
         ])
         return row
+    }
+
+    @objc private func agentSwitchChanged(_ sender: NSSegmentedControl) {
+        guard sender.selectedSegment >= 0,
+              sender.selectedSegment < AgentKind.allCases.count else {
+            return
+        }
+        onAgentSelected?(AgentKind.allCases[sender.selectedSegment])
+    }
+
+    var focusedAgentForTesting: AgentKind {
+        let index = agentSwitch.selectedSegment
+        guard index >= 0, index < AgentKind.allCases.count else {
+            return .codex
+        }
+        return AgentKind.allCases[index]
+    }
+
+    var detailTextForTesting: String {
+        detailField.stringValue
+    }
+
+    var contextPillHiddenForTesting: Bool {
+        contextPill.isHidden
+    }
+
+    var primaryQuotaHiddenForTesting: Bool {
+        primaryQuota.isHidden || quotaGroup.isHidden
+    }
+
+    var secondaryQuotaHiddenForTesting: Bool {
+        secondaryQuota.isHidden || quotaGroup.isHidden
+    }
+
+    func selectAgentForTesting(_ agent: AgentKind) {
+        guard let index = AgentKind.allCases.firstIndex(of: agent) else {
+            return
+        }
+        agentSwitch.selectedSegment = index
+        agentSwitchChanged(agentSwitch)
     }
 }
 

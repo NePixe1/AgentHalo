@@ -59,6 +59,26 @@
             "target": "AgentHaloDiagnostics",
             "configuration": "release",
             "preLaunchTask": "swift: Build Release AgentHaloDiagnostics (src/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AgentHalo}/src/macos",
+            "name": "Debug ClaudeCodeStatusHook (src/macos)",
+            "target": "ClaudeCodeStatusHook",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug ClaudeCodeStatusHook (src/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AgentHalo}/src/macos",
+            "name": "Release ClaudeCodeStatusHook (src/macos)",
+            "target": "ClaudeCodeStatusHook",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release ClaudeCodeStatusHook (src/macos)"
         }
     ]
 }

@@ -7,15 +7,12 @@ private let haloSizeMenuTextInset: CGFloat = 21
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let settingsStore = SettingsStore()
+    private let settingsStore: SettingsStore
     private var settings: HaloSettings
     private let monitor = CodexSessionMonitor()
-    private var aggregate = AggregateSnapshot(
-        state: .idle,
-        label: "READY",
-        detail: "Codex is standing by",
-        sessions: []
-    )
+    private let claudeHookMonitor = ClaudeHookStatusMonitor()
+    private var selectedPreview = PreviewPayload.live
+    private var aggregate: AggregateSnapshot
     private var statusItem: NSStatusItem!
     private var panel: HaloPanel!
     private var haloView: HaloView!
@@ -31,9 +28,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         CGFloat(settings.haloSize)
     }
 
-    init(codexActivator: @escaping () -> Void = CodexAppDetector.activateCodex) {
+    init(
+        settingsStore: SettingsStore = SettingsStore(),
+        codexActivator: @escaping () -> Void = CodexAppDetector.activateCodex
+    ) {
+        self.settingsStore = settingsStore
         self.codexActivator = codexActivator
         self.settings = settingsStore.load()
+        self.aggregate = SessionAggregator.aggregate(
+            snapshots: [],
+            settings: self.settings,
+            focusedAgent: self.settings.focusedAgent
+        )
         super.init()
     }
 
@@ -42,6 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.terminate(nil)
             return
         }
+        ClaudeHookConfigurator.configure()
         NSApp.setActivationPolicy(.accessory)
         createStatusItem()
         createHaloPanel()
@@ -61,16 +68,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func tick() {
         _ = monitor.refresh()
+        _ = claudeHookMonitor.refresh()
         acknowledgeCompletedIfCodexIsForeground()
         aggregate = SessionAggregator.aggregate(
-            snapshots: monitor.snapshots(),
+            snapshots: allSnapshots(),
             settings: settings,
             recentFailure: failureReader.readRecent(),
-            codexRunning: CodexAppDetector.isCodexRunning()
+            codexRunning: CodexAppDetector.isCodexRunning(),
+            focusedAgent: settings.focusedAgent
         )
-        haloView.aggregate = aggregate
-        haloView.needsDisplay = true
-        updateStatusMenu()
+        haloView?.aggregate = aggregate
+        haloView?.needsDisplay = true
+        if statusItem != nil {
+            updateStatusMenu()
+        }
     }
 
     private func createStatusItem() {
@@ -142,6 +153,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         addCheckItem("开机自动启动", checked: StartupManager.isEnabled(), action: #selector(toggleStartup), to: menu)
         addCheckItem("暂停状态监听", checked: settings.paused, action: #selector(togglePause), to: menu)
         addHaloSizeItem(to: menu)
+        let focus = NSMenuItem(title: "监控对象", action: nil, keyEquivalent: "")
+        let focusMenu = NSMenu()
+        addFocusedAgentItem(.codex, to: focusMenu)
+        addFocusedAgentItem(.claudeCode, to: focusMenu)
+        focus.submenu = focusMenu
+        menu.addItem(focus)
         addMenuItem("脱离卡死（移到主屏右上角）", #selector(escapeOffscreen), enabled: true, to: menu)
         let preview = NSMenuItem(title: "预览状态", action: nil, keyEquivalent: "")
         let submenu = NSMenu()
@@ -196,11 +213,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func bringCodexForward() {
+        guard settings.focusedAgent == .codex else {
+            return
+        }
         codexActivator()
     }
 
     func handleHaloPrimaryClick() {
         bringCodexForward()
+    }
+
+    func setFocusedAgent(_ agent: AgentKind) {
+        guard settings.focusedAgent != agent else {
+            tick()
+            refreshVisibleDetailsPanel()
+            return
+        }
+        settings.focusedAgent = agent
+        settingsStore.save(settings)
+        tick()
+        refreshVisibleDetailsPanel()
     }
 
     @objc private func quit() {
@@ -259,8 +291,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func acknowledgeCompletedIfCodexIsForeground() {
+        guard settings.focusedAgent == .codex else {
+            return
+        }
         let updated = settings.acknowledgingCompletedSessions(
-            CodexAppDetector.isCodexForeground() ? monitor.snapshots() : []
+            CodexAppDetector.isCodexForeground() ? codexSnapshots() : []
         )
         if updated.acknowledged != settings.acknowledged {
             settings = updated
@@ -268,17 +303,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func codexSnapshots() -> [SessionSnapshot] {
+        monitor.snapshots()
+    }
+
+    private func claudeSnapshots() -> [SessionSnapshot] {
+        ClaudeStatusSourceMerger.merge(
+            hookSnapshots: claudeHookMonitor.snapshots(),
+            transcriptSnapshots: []
+        )
+    }
+
+    private func acknowledgeCompletedSessions(_ sessions: [SessionSnapshot]) {
+        let updated = settings.acknowledgingCompletedSessions(sessions)
+        if updated.acknowledged != settings.acknowledged {
+            settings = updated
+            settingsStore.save(settings)
+            aggregate = SessionAggregator.aggregate(
+                snapshots: allSnapshots(),
+                settings: settings,
+                recentFailure: failureReader.readRecent(),
+                codexRunning: CodexAppDetector.isCodexRunning(),
+                focusedAgent: settings.focusedAgent
+            )
+        }
+    }
+
     private func showDetails() {
         hoverHideTimer?.invalidate()
-        detailsPanel.update(aggregate: displayAggregate(), quota: rateLimitReader.read())
+        if settings.focusedAgent == .claudeCode {
+            acknowledgeCompletedSessions(claudeSnapshots())
+        }
+        let quota = settings.focusedAgent == .codex ? rateLimitReader.read() : nil
+        detailsPanel.update(aggregate: displayAggregate(), quota: quota)
         detailsPanel.onMouseEntered = { [weak self] in
             self?.hoverHideTimer?.invalidate()
         }
         detailsPanel.onMouseExited = { [weak self] in
             self?.scheduleHideDetails()
         }
+        detailsPanel.onAgentSelected = { [weak self] agent in
+            self?.setFocusedAgent(agent)
+        }
         positionDetailsPanel()
         detailsPanel.orderFrontRegardless()
+    }
+
+    private func refreshVisibleDetailsPanel() {
+        guard detailsPanel.isVisible else {
+            return
+        }
+        showDetails()
     }
 
     private func scheduleHideDetails() {
@@ -305,6 +380,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func displayAggregate() -> AggregateSnapshot {
         aggregate
+    }
+
+    private func allSnapshots() -> [SessionSnapshot] {
+        monitor.snapshots() + claudeSnapshots()
     }
 
     private func addMenuItem(_ title: String, _ action: Selector, enabled: Bool, to menu: NSMenu) {
@@ -365,20 +444,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func addPreviewItem(_ title: String, state: HaloState?, presentation: ErrorPresentation?, to menu: NSMenu) {
+        let payload = PreviewPayload(state: state, presentation: presentation)
         let item = NSMenuItem(title: title, action: #selector(previewState(_:)), keyEquivalent: "")
         item.target = self
-        item.representedObject = PreviewPayload(state: state, presentation: presentation)
+        item.representedObject = payload
+        item.state = payload == selectedPreview ? .on : .off
         menu.addItem(item)
+    }
+
+    private func addFocusedAgentItem(_ agent: AgentKind, to menu: NSMenu) {
+        let item = NSMenuItem(title: agent.menuTitle, action: #selector(selectFocusedAgent(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = agent.rawValue
+        item.state = settings.focusedAgent == agent ? .on : .off
+        menu.addItem(item)
+    }
+
+    @objc private func selectFocusedAgent(_ sender: NSMenuItem) {
+        guard let rawValue = sender.representedObject as? String,
+              let agent = AgentKind(rawValue: rawValue) else {
+            return
+        }
+        setFocusedAgent(agent)
     }
 
     @objc private func previewState(_ sender: NSMenuItem) {
         guard let payload = sender.representedObject as? PreviewPayload else {
             return
         }
+        selectedPreview = payload
+        updatePreviewCheckmarks(in: sender.menu)
         if let state = payload.state {
-            haloView.showPreview(state: state, presentation: payload.presentation ?? .flashing)
+            haloView?.showPreview(state: state, presentation: payload.presentation ?? .flashing)
         } else {
-            haloView.useLiveState()
+            haloView?.useLiveState()
+        }
+    }
+
+    private func updatePreviewCheckmarks(in menu: NSMenu?) {
+        for item in menu?.items ?? [] {
+            guard let payload = item.representedObject as? PreviewPayload else {
+                continue
+            }
+            item.state = payload == selectedPreview ? .on : .off
         }
     }
 
@@ -398,7 +506,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return NSRect(x: oldFrame.origin.x, y: oldFrame.origin.y, width: size, height: size)
     }
 
-    private struct PreviewPayload {
+    private struct PreviewPayload: Equatable {
+        static let live = PreviewPayload(state: nil, presentation: nil)
+
         let state: HaloState?
         let presentation: ErrorPresentation?
     }
