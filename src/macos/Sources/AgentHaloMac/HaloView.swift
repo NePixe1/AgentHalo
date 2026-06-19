@@ -4,6 +4,10 @@ import QuartzCore
 
 @MainActor
 final class HaloView: NSView {
+    private static let dragActivationDistance = 3.0
+    private static let normalAnimationInterval = 1.0 / 60.0
+    private static let draggingAnimationInterval = 1.0 / 15.0
+
     var aggregate = AggregateSnapshot(
         state: .idle,
         label: "READY",
@@ -26,8 +30,10 @@ final class HaloView: NSView {
     var onMouseExited: (() -> Void)?
     var onDragStarted: (() -> Void)?
     private var dragStart: NSPoint?
+    private var dragStartInWindow: NSPoint?
     private var windowStart: NSPoint?
     private var isDraggingWindow = false
+    private var pendingClickActivation = false
     nonisolated(unsafe) private var animationTimer: Timer?
     private var lastFrameTimestamp = CACurrentMediaTime()
     private var visualState: HaloState = .idle
@@ -62,7 +68,7 @@ final class HaloView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
-        startAnimationDriver()
+        startAnimationDriver(interval: Self.normalAnimationInterval)
     }
 
     required init?(coder: NSCoder) {
@@ -75,15 +81,23 @@ final class HaloView: NSView {
         animationTimer?.invalidate()
     }
 
-    private func startAnimationDriver() {
+    private func startAnimationDriver(interval: TimeInterval) {
+        animationTimer?.invalidate()
         lastFrameTimestamp = CACurrentMediaTime()
-        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.animationTimerDidFire()
             }
         }
         RunLoop.main.add(timer, forMode: .common)
         animationTimer = timer
+    }
+
+    private func setAnimationFrameInterval(_ interval: TimeInterval) {
+        guard abs((animationTimer?.timeInterval ?? 0) - interval) > 0.001 else {
+            return
+        }
+        startAnimationDriver(interval: interval)
     }
 
     private func animationTimerDidFire() {
@@ -261,13 +275,13 @@ final class HaloView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         if event.clickCount == 2 {
+            pendingClickActivation = false
             onDoubleClick?()
             return
         }
-        if event.clickCount == 1 {
-            onClick?()
-        }
+        pendingClickActivation = event.clickCount == 1
         dragStart = NSEvent.mouseLocation
+        dragStartInWindow = event.locationInWindow
         windowStart = window?.frame.origin
         isDraggingWindow = false
     }
@@ -284,8 +298,15 @@ final class HaloView: NSView {
         guard let window, let dragStart, let windowStart else {
             return
         }
+        if !isDraggingWindow,
+           let dragStartInWindow,
+           Self.distance(from: dragStartInWindow, to: event.locationInWindow) < Self.dragActivationDistance {
+            return
+        }
         if !isDraggingWindow {
             isDraggingWindow = true
+            pendingClickActivation = false
+            setAnimationFrameInterval(Self.draggingAnimationInterval)
             onDragStarted?()
         }
         let current = NSEvent.mouseLocation
@@ -297,11 +318,26 @@ final class HaloView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        if let frame = window?.frame {
+        let completedDrag = isDraggingWindow
+        if completedDrag, let frame = window?.frame {
             onMoved?(frame)
         }
+        if pendingClickActivation && !completedDrag {
+            onClick?()
+        }
+        if completedDrag {
+            setAnimationFrameInterval(Self.normalAnimationInterval)
+        }
         dragStart = nil
+        dragStartInWindow = nil
         windowStart = nil
         isDraggingWindow = false
+        pendingClickActivation = false
+    }
+
+    private static func distance(from start: NSPoint, to end: NSPoint) -> CGFloat {
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        return sqrt(dx * dx + dy * dy)
     }
 }

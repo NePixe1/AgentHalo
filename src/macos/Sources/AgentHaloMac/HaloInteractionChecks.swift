@@ -18,7 +18,9 @@ func runHaloInteractionChecks() {
     testRightClickInvokesContextMenuCallback()
     testSingleClickInvokesPrimaryAction()
     testHaloContextMenuContainsCurrentControls()
+    testHaloClickWaitsForMouseUpAndDragCancelsClick()
     testDraggingHaloSuppressesHoverDetails()
+    testDraggingHaloReducesAnimationFrameRate()
     testHaloSizeResizeKeepsWindowOrigin()
     testHaloViewResizeKeepsAnimationMoving()
     testPreviewSubmenuMarksLiveStateInitially()
@@ -104,6 +106,33 @@ private func testHaloContextMenuContainsCurrentControls() {
 }
 
 @MainActor
+private func testHaloClickWaitsForMouseUpAndDragCancelsClick() {
+    let view = HaloView(frame: NSRect(x: 0, y: 0, width: 112, height: 112))
+    let window = NSWindow(
+        contentRect: NSRect(x: 200, y: 300, width: 112, height: 112),
+        styleMask: [.borderless],
+        backing: .buffered,
+        defer: false
+    )
+    window.contentView = view
+
+    var clickCount = 0
+    view.onClick = {
+        clickCount += 1
+    }
+
+    view.mouseDown(with: interactionEvent(type: .leftMouseDown))
+    expect(clickCount == 0, "halo click should not activate on mouse down")
+    view.mouseUp(with: interactionEvent(type: .leftMouseUp))
+    expect(clickCount == 1, "halo click should activate on mouse up when no drag occurred")
+
+    view.mouseDown(with: interactionEvent(type: .leftMouseDown))
+    view.mouseDragged(with: interactionEvent(type: .leftMouseDragged, location: NSPoint(x: 34, y: 30)))
+    view.mouseUp(with: interactionEvent(type: .leftMouseUp))
+    expect(clickCount == 1, "dragging halo should cancel click activation")
+}
+
+@MainActor
 private func testDraggingHaloSuppressesHoverDetails() {
     let view = HaloView(frame: NSRect(x: 0, y: 0, width: 112, height: 112))
     let window = NSWindow(
@@ -125,12 +154,33 @@ private func testDraggingHaloSuppressesHoverDetails() {
 
     view.mouseEntered(with: interactionEvent(type: .leftMouseDown))
     view.mouseDown(with: interactionEvent(type: .leftMouseDown))
-    view.mouseDragged(with: interactionEvent(type: .leftMouseDragged))
+    view.mouseDragged(with: interactionEvent(type: .leftMouseDragged, location: NSPoint(x: 34, y: 30)))
     view.mouseEntered(with: interactionEvent(type: .leftMouseDown))
     view.mouseUp(with: interactionEvent(type: .leftMouseUp))
 
     expect(hoverShowCount == 1, "dragging halo should suppress hover details")
     expect(dragStartCount == 1, "dragging halo should request immediate details hide")
+}
+
+@MainActor
+private func testDraggingHaloReducesAnimationFrameRate() {
+    let view = HaloView(frame: NSRect(x: 0, y: 0, width: 112, height: 112))
+    let window = NSWindow(
+        contentRect: NSRect(x: 200, y: 300, width: 112, height: 112),
+        styleMask: [.borderless],
+        backing: .buffered,
+        defer: false
+    )
+    window.contentView = view
+
+    expectApproximately(animationFrameInterval(of: view), 1.0 / 60.0, "halo should animate at full frame rate normally")
+
+    view.mouseDown(with: interactionEvent(type: .leftMouseDown))
+    view.mouseDragged(with: interactionEvent(type: .leftMouseDragged, location: NSPoint(x: 34, y: 30)))
+    expectApproximately(animationFrameInterval(of: view), 1.0 / 15.0, "dragging halo should reduce animation frame rate")
+
+    view.mouseUp(with: interactionEvent(type: .leftMouseUp))
+    expectApproximately(animationFrameInterval(of: view), 1.0 / 60.0, "halo should restore full frame rate after dragging")
 }
 
 @MainActor
@@ -143,10 +193,30 @@ private func testHaloSizeResizeKeepsWindowOrigin() {
     expect(resizedFrame.size == NSSize(width: 168, height: 168), "halo size slider should resize the halo window")
 }
 
-private func interactionEvent(type: NSEvent.EventType) -> NSEvent {
+private func expectApproximately(_ actual: TimeInterval, _ expected: TimeInterval, _ message: String) {
+    if abs(actual - expected) > 0.001 {
+        fatalError("\(message): expected \(expected), got \(actual)")
+    }
+}
+
+private func animationFrameInterval(of view: HaloView) -> TimeInterval {
+    guard let timerValue = Mirror(reflecting: view).children.first(where: { $0.label == "animationTimer" })?.value else {
+        fatalError("halo view should expose animation timer for checks")
+    }
+    let optionalMirror = Mirror(reflecting: timerValue)
+    guard let timer = optionalMirror.children.first?.value as? Timer else {
+        fatalError("halo view should have an animation timer")
+    }
+    return timer.timeInterval
+}
+
+private func interactionEvent(
+    type: NSEvent.EventType,
+    location: NSPoint = NSPoint(x: 24, y: 30)
+) -> NSEvent {
     NSEvent.mouseEvent(
         with: type,
-        location: NSPoint(x: 24, y: 30),
+        location: location,
         modifierFlags: [],
         timestamp: 0,
         windowNumber: 0,
