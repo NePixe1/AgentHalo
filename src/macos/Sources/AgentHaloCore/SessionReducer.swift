@@ -153,7 +153,7 @@ public struct SessionReducer: Sendable {
         if type == "function_call" || type == "custom_tool_call" {
             let name = payload.string("name")
             snapshot.active = true
-            if name == "request_user_input" {
+            if name == "request_user_input" || Self.requiresApproval(name: name, payload: payload) {
                 snapshot.state = .attention
                 snapshot.action = "Needs you"
             } else {
@@ -257,6 +257,21 @@ public struct SessionReducer: Sendable {
             return array.contains(where: containsProposedPlan)
         }
         return false
+    }
+
+    private static func requiresApproval(name: String, payload: [String: Any]) -> Bool {
+        guard name == "exec_command" || name == "shell_command" else {
+            return false
+        }
+        if let dictionary = payload["arguments"] as? [String: Any] {
+            return dictionary.string("sandbox_permissions") == "require_escalated"
+        }
+        let text = payload.string("arguments")
+        guard let data = text.data(using: .utf8),
+              let dictionary = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return false
+        }
+        return dictionary.string("sandbox_permissions") == "require_escalated"
     }
 
     private static func threadId(from filePath: String) -> String {

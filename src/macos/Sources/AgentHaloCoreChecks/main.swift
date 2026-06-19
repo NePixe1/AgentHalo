@@ -516,6 +516,18 @@ func testSessionReducerMapsCustomToolRequestUserInputToAttention() {
     expect(reducer.snapshot.active, "custom_tool_call request_user_input should keep session active")
 }
 
+func testSessionReducerMapsEscalatedExecCommandToAttention() {
+    var reducer = SessionReducer(filePath: "/tmp/escalated-exec-command.jsonl")
+    let arguments = #"{"cmd":"swift build","sandbox_permissions":"require_escalated","justification":"Allow build?"}"#
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-19T01:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-19T01:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"\#(arguments.replacingOccurrences(of: "\"", with: "\\\""))"}}"#)
+
+    expect(reducer.snapshot.state, .attention, "escalated exec_command state")
+    expect(reducer.snapshot.action, "Needs you", "escalated exec_command action")
+    expect(reducer.snapshot.active, "escalated exec_command should keep session active")
+}
+
 func testAggregatorInjectsUnacknowledgedCodexFailureWhenIdle() {
     let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
     let failure = CodexFailure(detail: "认证已失效", eventAt: now)
@@ -1388,6 +1400,7 @@ do {
 testCodexRealtimeActivityReaderDetectsAnswerStreaming()
 testCodexRealtimeActivityReaderClearsAnswerStreamingWhenDone()
 testSessionReducerMapsCustomToolRequestUserInputToAttention()
+testSessionReducerMapsEscalatedExecCommandToAttention()
 testCodexRealtimeActivityReaderDetectsRequestUserInput()
 testAggregatorInjectsUnacknowledgedCodexFailureWhenIdle()
 testAggregatorFiltersByFocusedAgent()
