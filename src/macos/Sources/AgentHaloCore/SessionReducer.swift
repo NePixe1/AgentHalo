@@ -150,7 +150,7 @@ public struct SessionReducer: Sendable {
     }
 
     private mutating func reduceResponse(_ type: String, payload: [String: Any], now: Date) {
-        if type == "function_call" {
+        if type == "function_call" || type == "custom_tool_call" {
             let name = payload.string("name")
             snapshot.active = true
             if name == "request_user_input" {

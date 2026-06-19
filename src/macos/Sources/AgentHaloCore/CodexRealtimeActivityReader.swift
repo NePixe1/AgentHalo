@@ -32,10 +32,12 @@ public struct CodexRealtimeActivityReader: Sendable {
     }
 
     public func findActive(in newestFirst: [String]) -> CodexRealtimeActivity? {
+        var completedItemIds = Set<String>()
         for body in newestFirst {
-            guard let eventType = Self.eventType(from: body) else {
+            guard let event = Self.parseEvent(from: body) else {
                 continue
             }
+            let eventType = event.type
             if eventType == "response.output_text.delta" {
                 return CodexRealtimeActivity(
                     state: .working,
@@ -48,11 +50,42 @@ public struct CodexRealtimeActivityReader: Sendable {
                 || eventType == "response.content_part.done" {
                 return nil
             }
+            if eventType == "response.output_item.done" {
+                if !event.itemId.isEmpty {
+                    completedItemIds.insert(event.itemId)
+                }
+                continue
+            }
+            if eventType == "response.output_item.added",
+               !completedItemIds.contains(event.itemId) {
+                if event.name.caseInsensitiveCompare("request_user_input") == .orderedSame {
+                    return CodexRealtimeActivity(state: .attention, action: "Needs you")
+                }
+                if event.itemType == "function_call"
+                    || event.itemType == "custom_tool_call"
+                    || event.itemType == "tool_search_call"
+                    || event.itemType == "message" {
+                    return CodexRealtimeActivity(
+                        state: .working,
+                        action: event.itemType == "message"
+                            ? "Writing answer"
+                            : GeneratedHaloSpec.friendlyAction(event.name.isEmpty ? event.itemType : event.name),
+                        answerStreaming: event.itemType == "message"
+                    )
+                }
+            }
         }
         return nil
     }
 
-    private static func eventType(from body: String) -> String? {
+    private struct RealtimeEvent {
+        var type: String
+        var itemId: String
+        var itemType: String
+        var name: String
+    }
+
+    private static func parseEvent(from body: String) -> RealtimeEvent? {
         let prefix = "SSE event: "
         let jsonText: String
         if let range = body.range(of: prefix) {
@@ -64,7 +97,14 @@ public struct CodexRealtimeActivityReader: Sendable {
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
-        return root["type"] as? String
+        let eventType = (root["type"] as? String) ?? ""
+        let item = root["item"] as? [String: Any]
+        return RealtimeEvent(
+            type: eventType,
+            itemId: (item?["id"] as? String) ?? "",
+            itemType: ((item?["type"] as? String) ?? "").lowercased(),
+            name: (item?["name"] as? String) ?? ""
+        )
     }
 
     private func runSQLite(query: String) -> String {

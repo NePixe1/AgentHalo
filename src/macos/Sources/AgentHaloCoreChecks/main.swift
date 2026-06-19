@@ -485,6 +485,16 @@ func testCodexRealtimeActivityReaderDetectsAnswerStreaming() {
     expect(activity?.answerStreaming, true, "answer text delta should mark streaming")
 }
 
+func testCodexRealtimeActivityReaderDetectsRequestUserInput() {
+    let reader = CodexRealtimeActivityReader()
+    let request = #"SSE event: {"type":"response.output_item.added","item":{"id":"approval-1","type":"custom_tool_call","name":"request_user_input"}}"#
+    let activity = reader.findActive(in: [request])
+
+    expect(activity?.state, .attention, "request_user_input state")
+    expect(activity?.action, "Needs you", "request_user_input action")
+    expect(activity?.answerStreaming, false, "request_user_input should not mark answer streaming")
+}
+
 func testCodexRealtimeActivityReaderClearsAnswerStreamingWhenDone() {
     let reader = CodexRealtimeActivityReader()
     let delta = #"SSE event: {"type":"response.output_text.delta","delta":"hello"}"#
@@ -493,6 +503,17 @@ func testCodexRealtimeActivityReaderClearsAnswerStreamingWhenDone() {
 
     expect(reader.findActive(in: [textDone, delta]) == nil, "text done should clear answer streaming")
     expect(reader.findActive(in: [completed, delta]) == nil, "response completed should clear answer streaming")
+}
+
+func testSessionReducerMapsCustomToolRequestUserInputToAttention() {
+    var reducer = SessionReducer(filePath: "/tmp/custom-tool-request-user-input.jsonl")
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-19T01:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-19T01:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","name":"request_user_input"}}"#)
+
+    expect(reducer.snapshot.state, .attention, "custom_tool_call request_user_input state")
+    expect(reducer.snapshot.action, "Needs you", "custom_tool_call request_user_input action")
+    expect(reducer.snapshot.active, "custom_tool_call request_user_input should keep session active")
 }
 
 func testAggregatorInjectsUnacknowledgedCodexFailureWhenIdle() {
@@ -1366,6 +1387,8 @@ do {
 }
 testCodexRealtimeActivityReaderDetectsAnswerStreaming()
 testCodexRealtimeActivityReaderClearsAnswerStreamingWhenDone()
+testSessionReducerMapsCustomToolRequestUserInputToAttention()
+testCodexRealtimeActivityReaderDetectsRequestUserInput()
 testAggregatorInjectsUnacknowledgedCodexFailureWhenIdle()
 testAggregatorFiltersByFocusedAgent()
 testAggregatorIdleDetailUsesFocusedAgent()

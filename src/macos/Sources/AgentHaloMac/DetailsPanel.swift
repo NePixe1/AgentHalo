@@ -26,7 +26,7 @@ final class DetailsPanel: NSPanel {
         isOpaque = false
         backgroundColor = .clear
         hasShadow = true
-        sharingType = .none
+        sharingType = .readOnly
         level = .floating
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 

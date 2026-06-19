@@ -32,7 +32,8 @@ func runHaloInteractionChecks() {
     testNonOverlayFrontmostAppDoesNotSuspendHalo()
     testSystemOverlaySuspensionKeepsHaloVisible()
     testHaloWindowAllowsScreenCaptureSharing()
-    testDetailsPanelOptOutsOfScreenCaptureSharing()
+    testDetailsPanelAllowsScreenCaptureSharing()
+    testDetailsPanelVisibilityAfterCaptureFollowsMouseLocation()
     testFocusSubmenuMarksCodexInitially()
     testFocusSubmenuSwitchesToClaudeCode()
     testSingleClickDoesNotActivateCodexWhenClaudeCodeFocused()
@@ -325,6 +326,10 @@ private func testSystemOverlayApplicationDetection() {
         "Dock-owned Mission Control should suspend the halo"
     )
     expect(
+        AppDelegate.isSystemOverlayApplication(bundleIdentifier: nil, localizedName: "Snipaste"),
+        "Snipaste capture overlay should suspend the halo without hiding visible details"
+    )
+    expect(
         !AppDelegate.isSystemOverlayApplication(bundleIdentifier: "com.todesktop.230313mzl4w4u92", localizedName: "Codex"),
         "regular app activation should not suspend the halo"
     )
@@ -354,10 +359,41 @@ private func testHaloWindowAllowsScreenCaptureSharing() {
 }
 
 @MainActor
-private func testDetailsPanelOptOutsOfScreenCaptureSharing() {
+private func testDetailsPanelAllowsScreenCaptureSharing() {
     let panel = DetailsPanel()
 
-    expect(panel.sharingType == .none, "details panel should not be shared with screen capture")
+    expect(panel.sharingType == .readOnly, "details panel should be included in screen capture")
+}
+
+@MainActor
+private func testDetailsPanelVisibilityAfterCaptureFollowsMouseLocation() {
+    let haloFrame = NSRect(x: 100, y: 100, width: 96, height: 96)
+    let detailsFrame = NSRect(x: 0, y: 80, width: 90, height: 120)
+
+    expect(
+        AppDelegate.shouldKeepDetailsVisibleAfterSystemOverlay(
+            mouseLocation: NSPoint(x: 120, y: 120),
+            haloFrame: haloFrame,
+            detailsFrame: detailsFrame
+        ),
+        "details should stay visible when the pointer returns over the halo"
+    )
+    expect(
+        AppDelegate.shouldKeepDetailsVisibleAfterSystemOverlay(
+            mouseLocation: NSPoint(x: 40, y: 120),
+            haloFrame: haloFrame,
+            detailsFrame: detailsFrame
+        ),
+        "details should stay visible when the pointer returns over the details panel"
+    )
+    expect(
+        !AppDelegate.shouldKeepDetailsVisibleAfterSystemOverlay(
+            mouseLocation: NSPoint(x: 260, y: 260),
+            haloFrame: haloFrame,
+            detailsFrame: detailsFrame
+        ),
+        "details should hide after capture when the pointer is outside both hover surfaces"
+    )
 }
 
 @MainActor

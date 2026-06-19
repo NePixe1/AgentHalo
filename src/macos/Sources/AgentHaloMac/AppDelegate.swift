@@ -177,7 +177,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         systemOverlaySuspended = suspended
         haloView?.setSystemOverlaySuspended(suspended)
         if suspended {
-            hideDetailsImmediately()
+            hoverHideTimer?.invalidate()
+            if detailsPanel.isVisible {
+                detailsPanel.orderFrontRegardless()
+            }
             if Self.haloWindowVisibilityDuringSystemOverlay == .visible {
                 panel?.orderFrontRegardless()
             }
@@ -185,6 +188,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             haloView?.aggregate = aggregate
             haloView?.needsDisplay = true
             panel?.orderFrontRegardless()
+            reconcileDetailsVisibilityAfterSystemOverlay()
         }
     }
 
@@ -422,9 +426,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func scheduleHideDetails() {
         hoverHideTimer?.invalidate()
+        guard !systemOverlaySuspended else {
+            return
+        }
         hoverHideTimer = Timer.scheduledTimer(withTimeInterval: 0.22, repeats: false) { [weak self] _ in
             Task { @MainActor in
-                self?.detailsPanel.orderOut(nil)
+                guard let self, !self.systemOverlaySuspended else {
+                    return
+                }
+                self.detailsPanel.orderOut(nil)
             }
         }
     }
@@ -432,6 +442,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func hideDetailsImmediately() {
         hoverHideTimer?.invalidate()
         detailsPanel.orderOut(nil)
+    }
+
+    private func reconcileDetailsVisibilityAfterSystemOverlay() {
+        guard detailsPanel.isVisible, let haloFrame = panel?.frame else {
+            return
+        }
+        guard !Self.shouldKeepDetailsVisibleAfterSystemOverlay(
+            mouseLocation: NSEvent.mouseLocation,
+            haloFrame: haloFrame,
+            detailsFrame: detailsPanel.frame
+        ) else {
+            return
+        }
+        scheduleHideDetails()
     }
 
     private func positionDetailsPanel() {
@@ -602,14 +626,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let systemOverlayBundleIdentifiers: Set<String> = [
             "com.apple.screenshot.launcher",
             "com.apple.screencaptureui",
-            "com.apple.dock"
+            "com.apple.dock",
+            "com.snipaste.Snipaste"
         ]
         if let bundleIdentifier, systemOverlayBundleIdentifiers.contains(bundleIdentifier) {
             return true
         }
 
         let normalizedName = localizedName?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return normalizedName == "screenshot"
+        return normalizedName == "screenshot" || normalizedName == "snipaste"
     }
 
     static func shouldSuspendForSystemOverlay(
@@ -620,6 +645,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             bundleIdentifier: frontmostBundleIdentifier,
             localizedName: frontmostLocalizedName
         )
+    }
+
+    static func shouldKeepDetailsVisibleAfterSystemOverlay(
+        mouseLocation: NSPoint,
+        haloFrame: NSRect,
+        detailsFrame: NSRect
+    ) -> Bool {
+        haloFrame.contains(mouseLocation) || detailsFrame.contains(mouseLocation)
     }
 
     static func haloFrameByKeepingOrigin(oldFrame: NSRect, requestedSize: CGFloat) -> NSRect {
