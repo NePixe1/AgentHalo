@@ -595,6 +595,7 @@ public sealed class CodexSessionMonitor : IDisposable
         private DateTime nextRealtimePollUtc;
         private HaloState realtimeState;
         private string realtimeAction;
+        private bool realtimeAnswerStreaming;
         private bool hasRealtimeActivity;
         private int pollInProgress;
 
@@ -650,16 +651,19 @@ public sealed class CodexSessionMonitor : IDisposable
                         nextRealtimePollUtc = DateTime.UtcNow.AddMilliseconds(300);
                         HaloState activeState;
                         string activeAction;
+                        bool answerStreaming;
                         bool active = realtimeActivity.TryReadActive(out activeState,
-                            out activeAction);
+                            out activeAction, out answerStreaming);
                         if (active != hasRealtimeActivity ||
                             activeState != realtimeState ||
+                            answerStreaming != realtimeAnswerStreaming ||
                             !String.Equals(activeAction, realtimeAction,
                                 StringComparison.Ordinal))
                         {
                             hasRealtimeActivity = active;
                             realtimeState = activeState;
                             realtimeAction = activeAction ?? String.Empty;
+                            realtimeAnswerStreaming = answerStreaming;
                             changed = true;
                         }
                     }
@@ -779,6 +783,7 @@ public sealed class CodexSessionMonitor : IDisposable
                     result.Label = StateLabel(realtimeState);
                     result.Detail = (current == null ? "Codex" : current.ProjectName) +
                         " · " + realtimeAction;
+                    result.AnswerStreaming = realtimeAnswerStreaming;
                     return result;
                 }
                 if (sessions.Count == 0)
@@ -868,8 +873,16 @@ public sealed class CodexRealtimeActivityReader
 
         public bool TryReadActive(out HaloState state, out string action)
         {
+            bool answerStreaming;
+            return TryReadActive(out state, out action, out answerStreaming);
+        }
+
+        public bool TryReadActive(out HaloState state, out string action,
+            out bool answerStreaming)
+        {
             state = HaloState.Working;
             action = String.Empty;
+            answerStreaming = false;
             if (unavailable || !File.Exists(database))
             {
                 return false;
@@ -890,7 +903,7 @@ public sealed class CodexRealtimeActivityReader
                 string query = "select feedback_log_body from logs where ts >= " +
                     cutoff.ToString(CultureInfo.InvariantCulture) +
                     " and target='codex_api::sse::responses' and " +
-                    "feedback_log_body like 'SSE event: {\"type\":\"response.output_item.%' " +
+                    "feedback_log_body like 'SSE event: {\"type\":\"response.%' " +
                     "order by id desc limit 96;";
                 if (sqlite3_prepare_v2(connection, query, -1, out statement,
                     IntPtr.Zero) != 0 || statement == IntPtr.Zero)
@@ -907,7 +920,7 @@ public sealed class CodexRealtimeActivityReader
                         rows.Add(value);
                     }
                 }
-                return FindActive(rows, out state, out action);
+                return FindActive(rows, out state, out action, out answerStreaming);
             }
             catch (DllNotFoundException)
             {
@@ -937,8 +950,16 @@ public sealed class CodexRealtimeActivityReader
         public bool FindActive(IEnumerable<string> newestFirst, out HaloState state,
             out string action)
         {
+            bool answerStreaming;
+            return FindActive(newestFirst, out state, out action, out answerStreaming);
+        }
+
+        public bool FindActive(IEnumerable<string> newestFirst, out HaloState state,
+            out string action, out bool answerStreaming)
+        {
             state = HaloState.Working;
             action = String.Empty;
+            answerStreaming = false;
             HashSet<string> completed = new HashSet<string>(
                 StringComparer.OrdinalIgnoreCase);
             foreach (string body in newestFirst)
@@ -951,6 +972,19 @@ public sealed class CodexRealtimeActivityReader
                     out itemType, out name))
                 {
                     continue;
+                }
+                if (eventType == "response.output_text.delta")
+                {
+                    state = HaloState.Working;
+                    action = "Writing answer";
+                    answerStreaming = true;
+                    return true;
+                }
+                if (eventType == "response.completed" ||
+                    eventType == "response.output_text.done" ||
+                    eventType == "response.content_part.done")
+                {
+                    return false;
                 }
                 if (eventType == "response.output_item.done")
                 {
@@ -1003,6 +1037,13 @@ public sealed class CodexRealtimeActivityReader
                 }
                 eventType = ReadString(root, "type");
                 Dictionary<string, object> item = ReadDictionary(root, "item");
+                if (eventType == "response.output_text.delta" ||
+                    eventType == "response.output_text.done" ||
+                    eventType == "response.content_part.done" ||
+                    eventType == "response.completed")
+                {
+                    return true;
+                }
                 if (item == null)
                 {
                     return false;

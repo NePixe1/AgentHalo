@@ -84,6 +84,7 @@ public sealed class HaloVisual : FrameworkElement
         private double smallGapInertiaVelocity;
         private double energy;
         private bool steadyDone;
+        private bool answerStreaming;
         private ErrorPresentation errorPresentation;
 
         public HaloVisual()
@@ -188,12 +189,27 @@ public sealed class HaloVisual : FrameworkElement
             }
         }
 
+        public void SetAnswerStreaming(bool value)
+        {
+            if (answerStreaming != value)
+            {
+                double now = clock.Elapsed.TotalSeconds;
+                CaptureTransitionStart(now);
+                answerStreaming = value;
+                previousState = VisualState();
+                stateChangedUtc = DateTime.UtcNow;
+                transitionStartSeconds = now;
+                transitionDuration = value ? 0.92 : 1.12;
+                InvalidateVisual();
+            }
+        }
+
         private void CaptureTransitionStart(double now)
         {
             double localTime = Math.Max(0,
                 (DateTime.UtcNow - stateChangedUtc).TotalSeconds);
             transitionFromVisual = hasRenderedFrame ? renderedVisual :
-                TargetVisual(state, localTime);
+                TargetVisual(VisualState(), localTime);
             transitionFromColor = transitionFromVisual.Color;
         }
 
@@ -380,9 +396,10 @@ public sealed class HaloVisual : FrameworkElement
             double scale = Math.Min(width, height) / 112.0;
             dc.PushTransform(new ScaleTransform(scale, scale, center.X, center.Y));
 
+            HaloState visualState = VisualState();
             MediaColor color = AnimatedColor(t);
             double displayEnergy = useTestTime
-                ? Lerp(TargetEnergy(previousState), TargetEnergy(state), transition)
+                ? Lerp(TargetEnergy(previousState), TargetEnergy(visualState), transition)
                 : energy;
             double displayOuterPhase = outerPhase;
             double displayInnerPhase = innerPhase;
@@ -402,16 +419,20 @@ public sealed class HaloVisual : FrameworkElement
             double displayEnergy, double gapA, double gapB, double t, double sinceState,
             double transition)
         {
+            HaloState visualState = VisualState();
             double localStateTime = useTestTime && transitionStartSeconds < 0
                 ? sinceState : Math.Max(0, sinceState - transitionDuration);
-            VisualSnapshot target = TargetVisual(state, localStateTime);
+            VisualSnapshot target = TargetVisual(visualState, localStateTime);
             target.Color = color;
             VisualSnapshot visual = TransitionVisual(transitionFromVisual, target,
                 transition);
             double breath = visual.Breath;
+            double streamingFlash = answerStreaming
+                ? CompletionDoubleFlash(PositiveModulo(localStateTime, 1.8)) : 0;
             double completionFlash = state == HaloState.Done
                 && !steadyDone && transition >= 0.999
                     ? CompletionDoubleFlash(localStateTime) : 0;
+            completionFlash = Math.Max(completionFlash, streamingFlash);
             double intensity = Clamp(visual.Intensity + displayEnergy * 0.18 +
                 completionFlash * 0.5, 0, 1.32);
             double radius = 35.8 + completionFlash * 0.45;
@@ -602,7 +623,7 @@ public sealed class HaloVisual : FrameworkElement
             double targetOrbitVelocity = TargetGapVelocityA(state) *
                 GapVelocityEnvelopeA(state, now);
             outerVelocity = Damp(outerVelocity, targetOrbitVelocity, delta, 2.1);
-            energy = Damp(energy, TargetEnergy(state), delta, 4.2);
+            energy = Damp(energy, TargetEnergy(VisualState()), delta, 4.2);
             outerPhase += outerVelocity * delta;
 
             if (gapRepelling)
@@ -1061,7 +1082,7 @@ public sealed class HaloVisual : FrameworkElement
         {
             double progress = TransitionProgress(time);
             double colorProgress = SmootherStep(Clamp((progress - 0.18) / 0.56, 0, 1));
-            return MixColor(transitionFromColor, StateColor(state), colorProgress);
+            return MixColor(transitionFromColor, StateColor(VisualState()), colorProgress);
         }
 
         private static double TransitionScalar(double from, double to, double progress)
@@ -1095,6 +1116,11 @@ public sealed class HaloVisual : FrameworkElement
             }
             return SmootherStep(Clamp((time - transitionStartSeconds) /
                 transitionDuration, 0, 1));
+        }
+
+        private HaloState VisualState()
+        {
+            return answerStreaming ? HaloState.Done : state;
         }
 
         private static double TransitionDuration(HaloState from, HaloState to)

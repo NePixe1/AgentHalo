@@ -330,6 +330,7 @@ public sealed class HaloWindow : Window
             visual.SetErrorPresentation(demoErrorPresentation ?? errorPresentation);
             visual.SetState(showGreenStandby ? HaloState.Done : aggregate.State,
                 showGreenStandby ? "待命" : aggregate.Label, count);
+            visual.SetAnswerStreaming(!showGreenStandby && aggregate.AnswerStreaming);
             tray.Text = ("Agent Halo · " + aggregate.Label).Substring(0,
                 Math.Min(63, ("Agent Halo · " + aggregate.Label).Length));
             AggregateSnapshot displayAggregate = aggregate;
@@ -340,7 +341,8 @@ public sealed class HaloWindow : Window
                     State = HaloState.Done,
                     Label = "STANDBY",
                     Detail = "Codex 正在待命",
-                    Sessions = aggregate.Sessions
+                    Sessions = aggregate.Sessions,
+                    AnswerStreaming = false
                 };
             }
             details.UpdateContent(displayAggregate, monitor.GetAllRecent());
