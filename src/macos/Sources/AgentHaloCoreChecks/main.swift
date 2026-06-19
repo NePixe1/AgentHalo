@@ -475,6 +475,26 @@ func testRateLimitReaderFindsContextUsageAndResetTimes() throws {
     expectAlmost(snapshot?.contextUsedPercent ?? 0, 78.405, tolerance: 0.01, "context usage")
 }
 
+func testCodexRealtimeActivityReaderDetectsAnswerStreaming() {
+    let reader = CodexRealtimeActivityReader()
+    let delta = #"SSE event: {"type":"response.output_text.delta","delta":"hello"}"#
+    let activity = reader.findActive(in: [delta])
+
+    expect(activity?.state, .working, "answer text delta state")
+    expect(activity?.action, "Writing answer", "answer text delta action")
+    expect(activity?.answerStreaming, true, "answer text delta should mark streaming")
+}
+
+func testCodexRealtimeActivityReaderClearsAnswerStreamingWhenDone() {
+    let reader = CodexRealtimeActivityReader()
+    let delta = #"SSE event: {"type":"response.output_text.delta","delta":"hello"}"#
+    let textDone = #"SSE event: {"type":"response.output_text.done"}"#
+    let completed = #"SSE event: {"type":"response.completed","response":{"id":"resp-test"}}"#
+
+    expect(reader.findActive(in: [textDone, delta]) == nil, "text done should clear answer streaming")
+    expect(reader.findActive(in: [completed, delta]) == nil, "response completed should clear answer streaming")
+}
+
 func testAggregatorInjectsUnacknowledgedCodexFailureWhenIdle() {
     let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
     let failure = CodexFailure(detail: "认证已失效", eventAt: now)
@@ -1344,6 +1364,8 @@ do {
 } catch {
     fatalError("\(error)")
 }
+testCodexRealtimeActivityReaderDetectsAnswerStreaming()
+testCodexRealtimeActivityReaderClearsAnswerStreamingWhenDone()
 testAggregatorInjectsUnacknowledgedCodexFailureWhenIdle()
 testAggregatorFiltersByFocusedAgent()
 testAggregatorIdleDetailUsesFocusedAgent()

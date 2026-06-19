@@ -37,6 +37,8 @@ func runHaloInteractionChecks() {
     testFocusSubmenuSwitchesToClaudeCode()
     testSingleClickDoesNotActivateCodexWhenClaudeCodeFocused()
     testDetailsPanelShowsCodexQuotaAndIdleCopy()
+    testDetailsPanelShowsExpiredQuotaAsWaitingForRefresh()
+    testDetailsPanelShowsAnswerStreamingCopy()
     testDetailsPanelHidesQuotaForClaudeCode()
     testDetailsPanelSwitchCallbackSelectsClaudeCode()
 }
@@ -448,6 +450,49 @@ private func testDetailsPanelShowsCodexQuotaAndIdleCopy() {
     expect(panel.contextPillHiddenForTesting == false, "Codex context pill should be visible")
     expect(panel.primaryQuotaHiddenForTesting == false, "Codex primary quota should be visible")
     expect(panel.secondaryQuotaHiddenForTesting == false, "Codex secondary quota should be visible")
+}
+
+@MainActor
+private func testDetailsPanelShowsExpiredQuotaAsWaitingForRefresh() {
+    let panel = DetailsPanel()
+    let aggregate = AggregateSnapshot(
+        state: .idle,
+        label: "READY",
+        detail: AgentKind.codex.standbyDetail,
+        sessions: [],
+        focusedAgent: .codex
+    )
+
+    panel.update(
+        aggregate: aggregate,
+        quota: RateLimitSnapshot(
+            primaryUsedPercent: 30,
+            secondaryUsedPercent: 60,
+            primaryResetAt: Date().addingTimeInterval(-5),
+            secondaryResetAt: Date().addingTimeInterval(300),
+            contextUsedPercent: 42
+        )
+    )
+
+    expect(panel.primaryQuotaValueForTesting == "等待 Codex 刷新", "expired primary quota should wait for Codex refresh")
+    expect(panel.secondaryQuotaValueForTesting == "剩余 40%", "valid secondary quota should keep remaining percent")
+}
+
+@MainActor
+private func testDetailsPanelShowsAnswerStreamingCopy() {
+    let panel = DetailsPanel()
+    let aggregate = AggregateSnapshot(
+        state: .working,
+        label: "WORKING",
+        detail: "AgentHalo - Writing answer",
+        sessions: [],
+        focusedAgent: .codex,
+        answerStreaming: true
+    )
+
+    panel.update(aggregate: aggregate, quota: nil)
+
+    expect(panel.detailTextForTesting == "正在输出答案", "answer streaming should use localized copy")
 }
 
 @MainActor

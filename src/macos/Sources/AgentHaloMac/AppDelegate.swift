@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var systemOverlaySuspended = false
     private let rateLimitReader = RateLimitReader()
     private let failureReader = CodexFailureReader()
+    private let realtimeActivityReader = CodexRealtimeActivityReader()
     private let instanceLock = InstanceLock()
     private let codexActivator: () -> Void
     private var currentHaloSize: CGFloat {
@@ -82,6 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             codexRunning: CodexAppDetector.isCodexRunning(),
             focusedAgent: settings.focusedAgent
         )
+        applyRealtimeCodexActivity()
         haloView?.aggregate = aggregate
         if !systemOverlaySuspended {
             haloView?.needsDisplay = true
@@ -384,6 +386,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 codexRunning: CodexAppDetector.isCodexRunning(),
                 focusedAgent: settings.focusedAgent
             )
+            applyRealtimeCodexActivity()
         }
     }
 
@@ -446,6 +449,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func displayAggregate() -> AggregateSnapshot {
         aggregate
+    }
+
+    private func applyRealtimeCodexActivity() {
+        guard settings.focusedAgent == .codex,
+              let activity = realtimeActivityReader.readActive() else {
+            return
+        }
+        let projectName = aggregate.sessions.first?.projectName ?? "Codex"
+        aggregate = AggregateSnapshot(
+            state: activity.state,
+            label: SessionAggregator.label(for: activity.state),
+            detail: "\(projectName) - \(activity.action)",
+            sessions: aggregate.sessions,
+            focusedAgent: .codex,
+            answerStreaming: activity.answerStreaming
+        )
     }
 
     private func allSnapshots() -> [SessionSnapshot] {

@@ -5,6 +5,7 @@ struct HaloRenderInput {
     var state: HaloState
     var errorPresentation: ErrorPresentation
     var steadyDone: Bool
+    var answerStreaming: Bool
     var transitionFrom: HaloVisualSnapshot
     var time: Double
     var sinceState: Double
@@ -16,8 +17,9 @@ struct HaloRenderInput {
 enum HaloRenderer {
     static func drawPureRing(context: CGContext, bounds: CGRect, input: HaloRenderInput) {
         let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        let visualState: HaloState = input.answerStreaming ? .done : input.state
         let target = HaloVisualModel.targetVisual(
-            state: input.state,
+            state: visualState,
             time: input.sinceState,
             errorPresentation: input.errorPresentation,
             steadyDone: input.steadyDone
@@ -32,12 +34,18 @@ enum HaloRenderer {
             to: target.color,
             progress: input.transition
         )
-        let completionFlash = input.state == .done && !input.steadyDone && input.transition >= 0.999
+        let streamingFlash = input.answerStreaming
+            ? HaloVisualModel.completionDoubleFlash(
+                sinceState: HaloMath.positiveModulo(input.sinceState, 1.8)
+            )
+            : 0
+        let doneFlash = input.state == .done && !input.steadyDone && input.transition >= 0.999
             ? HaloVisualModel.completionDoubleFlash(sinceState: input.sinceState)
             : 0
+        let completionFlash = max(doneFlash, streamingFlash)
         visual.powered = HaloMath.clamp(visual.powered + completionFlash * 0.82, 0, 1)
         let scale = min(bounds.width, bounds.height) / 112.0
-        let intensity = HaloMath.clamp(visual.intensity + HaloMath.stateBreath(input.state, time: input.time) * 0.18 + completionFlash * 0.5, 0, 1.32)
+        let intensity = HaloMath.clamp(visual.intensity + HaloMath.stateBreath(visualState, time: input.time) * 0.18 + completionFlash * 0.5, 0, 1.32)
         let radius = scale * (35.8 + completionFlash * 0.45)
         let bodyWidth = scale * (visual.bodyWidth + completionFlash * 0.65)
         let material = HaloVisualModel.materialSnapshot(color: color, visual: visual, intensity: intensity)

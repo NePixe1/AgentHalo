@@ -136,6 +136,9 @@ final class DetailsPanel: NSPanel {
 
     static func localizedDetail(for aggregate: AggregateSnapshot) -> String {
         let action = aggregate.sessions.first?.action ?? aggregate.detail
+        if aggregate.answerStreaming || action.localizedCaseInsensitiveContains("Writing answer") {
+            return "正在输出答案"
+        }
         if action.localizedCaseInsensitiveContains("command") { return "正在执行命令" }
         if action.localizedCaseInsensitiveContains("Editing") { return "正在编辑文件" }
         if action.localizedCaseInsensitiveContains("Search") { return "正在搜索信息" }
@@ -228,6 +231,14 @@ final class DetailsPanel: NSPanel {
         secondaryQuota.isHidden || quotaGroup.isHidden
     }
 
+    var primaryQuotaValueForTesting: String {
+        primaryQuota.valueForTesting
+    }
+
+    var secondaryQuotaValueForTesting: String {
+        secondaryQuota.valueForTesting
+    }
+
     func selectAgentForTesting(_ agent: AgentKind) {
         guard let index = AgentKind.allCases.firstIndex(of: agent) else {
             return
@@ -280,6 +291,13 @@ private final class QuotaRowView: NSView {
     }
 
     func update(usedPercent: Double, resetAt: Date?) {
+        if let resetAt, resetAt <= Date() {
+            valueField.stringValue = "等待 Codex 刷新"
+            resetField.stringValue = ""
+            resetField.isHidden = true
+            meter.value = 0
+            return
+        }
         let remaining = min(100, max(0, 100 - usedPercent))
         valueField.stringValue = "剩余 \(Int(remaining.rounded()))%"
         meter.value = remaining
@@ -293,6 +311,10 @@ private final class QuotaRowView: NSView {
         resetField.stringValue = ""
         resetField.isHidden = true
         meter.value = 0
+    }
+
+    var valueForTesting: String {
+        valueField.stringValue
     }
 
     private func setup() {

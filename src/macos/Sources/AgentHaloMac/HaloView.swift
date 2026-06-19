@@ -19,7 +19,11 @@ final class HaloView: NSView {
             guard !previewMode else {
                 return
             }
-            applyVisualState(aggregate.state, presentation: .flashing)
+            applyVisualState(
+                aggregate.state,
+                presentation: .flashing,
+                answerStreaming: aggregate.answerStreaming
+            )
         }
     }
     var onDoubleClick: (() -> Void)?
@@ -40,6 +44,7 @@ final class HaloView: NSView {
     private var visualState: HaloState = .idle
     private var errorPresentation: ErrorPresentation = .flashing
     private var steadyDone = false
+    private var answerStreaming = false
     private var transitionFromVisual = HaloVisualModel.targetVisual(
         state: .idle,
         time: 0,
@@ -164,8 +169,9 @@ final class HaloView: NSView {
     private func stepAnimation(delta: Double) {
         animationTime += max(0.001, min(delta, 0.08))
         sinceState += max(0.001, min(delta, 0.08))
-        let targetVelocity = HaloMath.targetGapVelocity(visualState) *
-            HaloMath.gapVelocityEnvelope(visualState, time: animationTime)
+        let currentRenderState = renderState(state: visualState, answerStreaming: answerStreaming)
+        let targetVelocity = HaloMath.targetGapVelocity(currentRenderState) *
+            HaloMath.gapVelocityEnvelope(currentRenderState, time: animationTime)
         outerVelocity = HaloMath.damp(
             current: outerVelocity,
             target: targetVelocity,
@@ -194,12 +200,12 @@ final class HaloView: NSView {
             }
         } else {
             smallGapDriftElapsed += delta
-            smallGapInertiaVelocity *= exp(-HaloMath.smallGapInertiaDamping(visualState) * delta)
+            smallGapInertiaVelocity *= exp(-HaloMath.smallGapInertiaDamping(currentRenderState) * delta)
             smallGapInertiaOffset += smallGapInertiaVelocity * delta
             gapB = smallGapAnchor +
                 smallGapInertiaOffset +
                 HaloMath.smallGapDriftOffset(
-                    state: visualState,
+                    state: currentRenderState,
                     time: smallGapDriftElapsed,
                     cycle: gapRepulsionCount
                 )
@@ -228,27 +234,38 @@ final class HaloView: NSView {
 
     func showPreview(state: HaloState, presentation: ErrorPresentation) {
         previewMode = true
-        applyVisualState(state, presentation: presentation)
+        applyVisualState(state, presentation: presentation, answerStreaming: false)
     }
 
     func useLiveState() {
         previewMode = false
-        applyVisualState(aggregate.state, presentation: .flashing)
+        applyVisualState(
+            aggregate.state,
+            presentation: .flashing,
+            answerStreaming: aggregate.answerStreaming
+        )
     }
 
-    private func applyVisualState(_ state: HaloState, presentation: ErrorPresentation) {
+    private func applyVisualState(_ state: HaloState, presentation: ErrorPresentation, answerStreaming nextAnswerStreaming: Bool) {
         let nextSteadyDone = state == .done && aggregate.sessions.isEmpty
         let nextPresentation: ErrorPresentation = state == .error ? presentation : .flashing
-        if visualState != state || steadyDone != nextSteadyDone || errorPresentation != nextPresentation {
+        if visualState != state
+            || steadyDone != nextSteadyDone
+            || errorPresentation != nextPresentation
+            || answerStreaming != nextAnswerStreaming {
             transitionFromVisual = HaloVisualModel.targetVisual(
-                state: visualState,
+                state: renderState(state: visualState, answerStreaming: answerStreaming),
                 time: sinceState,
                 errorPresentation: errorPresentation,
                 steadyDone: steadyDone
             )
             sinceState = 0
             transitionProgress = 0
-            if visualState == state && state == .error && errorPresentation != nextPresentation {
+            if nextAnswerStreaming {
+                transitionDuration = 0.92
+            } else if answerStreaming {
+                transitionDuration = 1.12
+            } else if visualState == state && state == .error && errorPresentation != nextPresentation {
                 transitionDuration = nextPresentation == .flashing ? 0.82 : 1.24
             } else if state == .done && nextSteadyDone {
                 transitionDuration = 1.45
@@ -259,6 +276,7 @@ final class HaloView: NSView {
         visualState = state
         errorPresentation = nextPresentation
         steadyDone = nextSteadyDone
+        answerStreaming = nextAnswerStreaming
         needsDisplay = true
     }
 
@@ -275,6 +293,7 @@ final class HaloView: NSView {
                 state: visualState,
                 errorPresentation: errorPresentation,
                 steadyDone: steadyDone,
+                answerStreaming: answerStreaming,
                 transitionFrom: transitionFromVisual,
                 time: animationTime,
                 sinceState: sinceState,
@@ -283,6 +302,10 @@ final class HaloView: NSView {
                 gapB: gapB
             )
         )
+    }
+
+    private func renderState(state: HaloState, answerStreaming: Bool) -> HaloState {
+        answerStreaming ? .done : state
     }
 
     override func updateTrackingAreas() {
