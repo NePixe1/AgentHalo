@@ -23,9 +23,17 @@ func runHaloInteractionChecks() {
     testDraggingHaloReducesAnimationFrameRate()
     testHaloSizeResizeKeepsWindowOrigin()
     testHaloViewResizeKeepsAnimationMoving()
+    testHaloViewSystemOverlaySuspensionStopsAnimation()
     testPreviewSubmenuMarksLiveStateInitially()
     testPreviewSubmenuMovesCheckmarkAfterSelection()
     testAlwaysOnTopUsesOverlayWindowLevel()
+    testHaloCollectionBehaviorDoesNotStayStationaryInMissionControl()
+    testSystemOverlayApplicationDetection()
+    testSnipasteSuspendsHalo()
+    testNonOverlayFrontmostAppDoesNotSuspendHalo()
+    testSystemOverlaySuspensionKeepsHaloVisible()
+    testHaloWindowAllowsScreenCaptureSharing()
+    testDetailsPanelOptOutsOfScreenCaptureSharing()
     testFocusSubmenuMarksCodexInitially()
     testFocusSubmenuSwitchesToClaudeCode()
     testSingleClickDoesNotActivateCodexWhenClaudeCodeFocused()
@@ -243,6 +251,24 @@ private func testHaloViewResizeKeepsAnimationMoving() {
 }
 
 @MainActor
+private func testHaloViewSystemOverlaySuspensionStopsAnimation() {
+    let view = HaloView(frame: NSRect(x: 0, y: 0, width: 112, height: 112))
+    expect(view.hasAnimationDriverForChecks, "halo view should animate before system overlay suspension")
+
+    view.setSystemOverlaySuspended(true)
+
+    expect(!view.hasAnimationDriverForChecks, "system overlay suspension should stop halo animation")
+    let before = view.animationSnapshotForChecks()
+    view.advanceAnimationForChecks(delta: 0.5)
+    let after = view.animationSnapshotForChecks()
+    expect(after.time == before.time, "suspended halo should not advance animation state")
+
+    view.setSystemOverlaySuspended(false)
+
+    expect(view.hasAnimationDriverForChecks, "halo view should restore animation after system overlay suspension")
+}
+
+@MainActor
 private func testPreviewSubmenuMarksLiveStateInitially() {
     let delegate = AppDelegate()
     let submenu = previewSubmenu(in: delegate.makeHaloContextMenu())
@@ -275,6 +301,80 @@ private func testAlwaysOnTopUsesOverlayWindowLevel() {
         AppDelegate.haloWindowLevel(alwaysOnTop: false) == .normal,
         "non-topmost halo should use the normal window level"
     )
+}
+
+@MainActor
+private func testHaloCollectionBehaviorDoesNotStayStationaryInMissionControl() {
+    let behavior = AppDelegate.haloCollectionBehavior
+
+    expect(behavior.contains(.canJoinAllSpaces), "halo should stay available across Spaces")
+    expect(behavior.contains(.fullScreenAuxiliary), "halo should stay available beside full-screen apps")
+    expect(behavior.contains(.transient), "halo should hide during Mission Control instead of floating over it")
+    expect(!behavior.contains(.stationary), "halo should not remain stationary over Mission Control")
+}
+
+@MainActor
+private func testSystemOverlayApplicationDetection() {
+    expect(
+        AppDelegate.isSystemOverlayApplication(bundleIdentifier: "com.apple.screenshot.launcher", localizedName: "Screenshot"),
+        "Screenshot app should suspend the halo"
+    )
+    expect(
+        AppDelegate.isSystemOverlayApplication(bundleIdentifier: "com.apple.dock", localizedName: "Dock"),
+        "Dock-owned Mission Control should suspend the halo"
+    )
+    expect(
+        AppDelegate.isSystemOverlayApplication(bundleIdentifier: "com.nicothin.snipaste", localizedName: "Snipaste"),
+        "Snipaste should suspend the halo"
+    )
+    expect(
+        AppDelegate.isSystemOverlayApplication(bundleIdentifier: nil, localizedName: "Snipaste 2"),
+        "Snipaste 2 detected by name should suspend the halo"
+    )
+    expect(
+        !AppDelegate.isSystemOverlayApplication(bundleIdentifier: "com.todesktop.230313mzl4w4u92", localizedName: "Codex"),
+        "regular app activation should not suspend the halo"
+    )
+}
+
+@MainActor
+private func testSnipasteSuspendsHalo() {
+    let shouldSuspend = AppDelegate.shouldSuspendForSystemOverlay(
+        frontmostBundleIdentifier: "com.nicothin.snipaste",
+        frontmostLocalizedName: "Snipaste"
+    )
+
+    expect(shouldSuspend, "frontmost Snipaste should suspend halo")
+}
+
+@MainActor
+private func testNonOverlayFrontmostAppDoesNotSuspendHalo() {
+    let shouldSuspend = AppDelegate.shouldSuspendForSystemOverlay(
+        frontmostBundleIdentifier: "com.todesktop.230313mzl4w4u92",
+        frontmostLocalizedName: "Codex"
+    )
+
+    expect(!shouldSuspend, "regular frontmost app should not suspend halo")
+}
+
+@MainActor
+private func testSystemOverlaySuspensionKeepsHaloVisible() {
+    expect(
+        AppDelegate.haloWindowVisibilityDuringSystemOverlay == .visible,
+        "system overlay suspension should freeze the halo without hiding it"
+    )
+}
+
+@MainActor
+private func testHaloWindowAllowsScreenCaptureSharing() {
+    expect(AppDelegate.haloWindowSharingType == .readOnly, "halo window should be included in screen capture")
+}
+
+@MainActor
+private func testDetailsPanelOptOutsOfScreenCaptureSharing() {
+    let panel = DetailsPanel()
+
+    expect(panel.sharingType == .none, "details panel should not be shared with screen capture")
 }
 
 @MainActor

@@ -35,6 +35,7 @@ final class HaloView: NSView {
     private var isDraggingWindow = false
     private var pendingClickActivation = false
     nonisolated(unsafe) private var animationTimer: Timer?
+    private var systemOverlaySuspended = false
     private var lastFrameTimestamp = CACurrentMediaTime()
     private var visualState: HaloState = .idle
     private var errorPresentation: ErrorPresentation = .flashing
@@ -94,6 +95,9 @@ final class HaloView: NSView {
     }
 
     private func setAnimationFrameInterval(_ interval: TimeInterval) {
+        guard !systemOverlaySuspended else {
+            return
+        }
         guard abs((animationTimer?.timeInterval ?? 0) - interval) > 0.001 else {
             return
         }
@@ -101,10 +105,32 @@ final class HaloView: NSView {
     }
 
     private func animationTimerDidFire() {
+        guard !systemOverlaySuspended else {
+            return
+        }
         let now = CACurrentMediaTime()
         let delta = HaloMath.clamp(now - lastFrameTimestamp, 0.001, 0.08)
         lastFrameTimestamp = now
         stepAnimation(delta: delta)
+    }
+
+    func setSystemOverlaySuspended(_ suspended: Bool) {
+        guard systemOverlaySuspended != suspended else {
+            return
+        }
+        systemOverlaySuspended = suspended
+        if suspended {
+            animationTimer?.invalidate()
+            animationTimer = nil
+            dragStart = nil
+            dragStartInWindow = nil
+            windowStart = nil
+            isDraggingWindow = false
+            pendingClickActivation = false
+        } else {
+            startAnimationDriver(interval: Self.normalAnimationInterval)
+        }
+        needsDisplay = true
     }
 
     func resizeForHaloSize(_ size: CGFloat) {
@@ -120,7 +146,14 @@ final class HaloView: NSView {
         animationTimer != nil
     }
 
+    var hasAnimationDriverForChecks: Bool {
+        animationTimer != nil
+    }
+
     func advanceAnimationForChecks(delta: Double) {
+        guard !systemOverlaySuspended else {
+            return
+        }
         stepAnimation(delta: delta)
     }
 
@@ -263,17 +296,23 @@ final class HaloView: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) {
-        guard !isDraggingWindow else {
+        guard !systemOverlaySuspended, !isDraggingWindow else {
             return
         }
         onMouseEntered?()
     }
 
     override func mouseExited(with event: NSEvent) {
+        guard !systemOverlaySuspended else {
+            return
+        }
         onMouseExited?()
     }
 
     override func mouseDown(with event: NSEvent) {
+        guard !systemOverlaySuspended else {
+            return
+        }
         if event.clickCount == 2 {
             pendingClickActivation = false
             onDoubleClick?()
@@ -287,6 +326,9 @@ final class HaloView: NSView {
     }
 
     override func rightMouseDown(with event: NSEvent) {
+        guard !systemOverlaySuspended else {
+            return
+        }
         if let onRightClick {
             onRightClick(event)
         } else {
@@ -295,6 +337,9 @@ final class HaloView: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        guard !systemOverlaySuspended else {
+            return
+        }
         guard let window, let dragStart, let windowStart else {
             return
         }
@@ -318,6 +363,9 @@ final class HaloView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        guard !systemOverlaySuspended else {
+            return
+        }
         let completedDrag = isDraggingWindow
         if completedDrag, let frame = window?.frame {
             onMoved?(frame)

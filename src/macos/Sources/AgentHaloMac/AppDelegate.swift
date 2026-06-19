@@ -20,6 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var detailsPanel = DetailsPanel()
     private var hoverHideTimer: Timer?
     private var settingsSaveTimer: Timer?
+    private var systemOverlaySuspended = false
     private let rateLimitReader = RateLimitReader()
     private let failureReader = CodexFailureReader()
     private let instanceLock = InstanceLock()
@@ -52,11 +53,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         createStatusItem()
         createHaloPanel()
+        registerSystemOverlayObservers()
+        updateSystemOverlaySuspension(for: NSWorkspace.shared.frontmostApplication)
         tick()
         timer = Timer.scheduledTimer(timeInterval: 0.22, target: self, selector: #selector(timerDidFire), userInfo: nil, repeats: true)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
         settingsSaveTimer?.invalidate()
         saveWindowPosition()
         settingsStore.save(settings)
@@ -67,6 +71,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func tick() {
+        updateSystemOverlaySuspension(for: NSWorkspace.shared.frontmostApplication)
         _ = monitor.refresh()
         _ = claudeHookMonitor.refresh()
         acknowledgeCompletedIfCodexIsForeground()
@@ -78,7 +83,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             focusedAgent: settings.focusedAgent
         )
         haloView?.aggregate = aggregate
-        haloView?.needsDisplay = true
+        if !systemOverlaySuspended {
+            haloView?.needsDisplay = true
+        }
         if statusItem != nil {
             updateStatusMenu()
         }
@@ -123,9 +130,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = false
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        panel.sharingType = Self.haloWindowSharingType
+        panel.collectionBehavior = Self.haloCollectionBehavior
         applyWindowLevels()
         panel.orderFrontRegardless()
+    }
+
+    private func registerSystemOverlayObservers() {
+        let center = NSWorkspace.shared.notificationCenter
+        center.addObserver(
+            self,
+            selector: #selector(workspaceApplicationDidActivate(_:)),
+            name: NSWorkspace.didActivateApplicationNotification,
+            object: nil
+        )
+        center.addObserver(
+            self,
+            selector: #selector(workspaceActiveSpaceDidChange(_:)),
+            name: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil
+        )
+    }
+
+    @objc private func workspaceApplicationDidActivate(_ notification: Notification) {
+        let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+        updateSystemOverlaySuspension(for: app)
+    }
+
+    @objc private func workspaceActiveSpaceDidChange(_ notification: Notification) {
+        updateSystemOverlaySuspension(for: NSWorkspace.shared.frontmostApplication)
+    }
+
+    private func updateSystemOverlaySuspension(for app: NSRunningApplication?) {
+        setSystemOverlaySuspended(Self.shouldSuspendForSystemOverlay(
+            frontmostBundleIdentifier: app?.bundleIdentifier,
+            frontmostLocalizedName: app?.localizedName
+        ))
+    }
+
+    private func setSystemOverlaySuspended(_ suspended: Bool) {
+        guard systemOverlaySuspended != suspended else {
+            return
+        }
+        systemOverlaySuspended = suspended
+        haloView?.setSystemOverlaySuspended(suspended)
+        if suspended {
+            hideDetailsImmediately()
+            if Self.haloWindowVisibilityDuringSystemOverlay == .visible {
+                panel?.orderFrontRegardless()
+            }
+        } else {
+            haloView?.aggregate = aggregate
+            haloView?.needsDisplay = true
+            panel?.orderFrontRegardless()
+        }
     }
 
     private func initialWindowOrigin() -> CGPoint {
@@ -330,6 +388,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showDetails() {
+        guard !systemOverlaySuspended else {
+            return
+        }
         hoverHideTimer?.invalidate()
         if settings.focusedAgent == .claudeCode {
             acknowledgeCompletedSessions(claudeSnapshots())
@@ -499,11 +560,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let level = Self.haloWindowLevel(alwaysOnTop: settings.alwaysOnTop)
         panel?.level = level
         detailsPanel.level = level
-        panel?.orderFrontRegardless()
+        if !systemOverlaySuspended {
+            panel?.orderFrontRegardless()
+        }
     }
 
     static func haloWindowLevel(alwaysOnTop: Bool) -> NSWindow.Level {
         alwaysOnTop ? .screenSaver : .normal
+    }
+
+    static let haloCollectionBehavior: NSWindow.CollectionBehavior = [
+        .canJoinAllSpaces,
+        .fullScreenAuxiliary,
+        .transient
+    ]
+
+    static let haloWindowSharingType: NSWindow.SharingType = .readOnly
+
+    static let haloWindowVisibilityDuringSystemOverlay = SystemOverlayHaloVisibility.visible
+
+    static func isSystemOverlayApplication(bundleIdentifier: String?, localizedName: String?) -> Bool {
+        let systemOverlayBundleIdentifiers: Set<String> = [
+            "com.apple.screenshot.launcher",
+            "com.apple.screencaptureui",
+            "com.apple.dock",
+            // Third-party screenshot tools
+            "com.nicothin.snipaste",
+            "com.nicothin.snipaste2",
+            "com.snipaste2.mac-setapp",
+            "cc.isnowfox.snipaste2"
+        ]
+        if let bundleIdentifier, systemOverlayBundleIdentifiers.contains(bundleIdentifier) {
+            return true
+        }
+
+        let normalizedName = localizedName?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalizedName == "screenshot" || normalizedName == "snipaste" || normalizedName == "snipaste 2"
+    }
+
+    static func shouldSuspendForSystemOverlay(
+        frontmostBundleIdentifier: String?,
+        frontmostLocalizedName: String?
+    ) -> Bool {
+        isSystemOverlayApplication(
+            bundleIdentifier: frontmostBundleIdentifier,
+            localizedName: frontmostLocalizedName
+        )
     }
 
     static func haloFrameByKeepingOrigin(oldFrame: NSRect, requestedSize: CGFloat) -> NSRect {
@@ -516,5 +618,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let state: HaloState?
         let presentation: ErrorPresentation?
+    }
+
+    enum SystemOverlayHaloVisibility {
+        case visible
     }
 }
