@@ -579,55 +579,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     static let haloWindowVisibilityDuringSystemOverlay = SystemOverlayHaloVisibility.visible
 
-    private static let systemOverlayBundleIdentifiers: Set<String> = [
-        // Apple system
-        "com.apple.screenshot.launcher",
-        "com.apple.screencaptureui",
-        "com.apple.dock",
-        // Snipaste
-        "com.nicothin.snipaste",
-        "com.nicothin.snipaste2",
-        "com.snipaste2.mac-setapp",
-        "cc.isnowfox.snipaste2",
-        // iShot
-        "com.better365.iShot",
-        "com.better365.iShotPro",
-        // CleanShot X
-        "pl.maketheweb.cleanshotx",
-        // Shottr
-        "cc.ffitch.shottr",
-        // Xnip
-        "com.xnipapp.xnip",
-        // Snagit
-        "com.TechSmith.Snagit",
-        // Monosnap
-        "com.monosnap.monosnap",
-        // Skitch
-        "com.skitch.skitch",
-        // PixPin
-        "com.pixpin.app",
-        // 腾讯截图 (Jietu)
-        "com.tencent.Jietu"
-    ]
-
-    /// Name-based keywords that indicate a screenshot overlay application.
-    /// Matched as substrings of the lowercased localizedName.
-    private static let screenshotNameKeywords = [
-        "screenshot", "snipaste", "cleanshot", "ishot",
-        "shottr", "xnip", "snagit", "monosnap", "skitch",
-        "pixpin", "截图"
-    ]
-
     static func isSystemOverlayApplication(bundleIdentifier: String?, localizedName: String?) -> Bool {
+        let systemOverlayBundleIdentifiers: Set<String> = [
+            "com.apple.screenshot.launcher",
+            "com.apple.screencaptureui",
+            "com.apple.dock"
+        ]
         if let bundleIdentifier, systemOverlayBundleIdentifiers.contains(bundleIdentifier) {
             return true
         }
 
-        guard let normalizedName = localizedName?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-              !normalizedName.isEmpty else {
-            return false
-        }
-        return screenshotNameKeywords.contains { normalizedName.contains($0) }
+        let normalizedName = localizedName?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalizedName == "screenshot"
     }
 
     static func shouldSuspendForSystemOverlay(
