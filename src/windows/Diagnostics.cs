@@ -119,6 +119,27 @@ public static class Diagnostics
                 Assert(!realtime.FindActive(new[] { realtimeMessageDone, realtimeMessageAdded },
                     out realtimeState, out realtimeAction),
                     "live final answer done clears realtime working");
+                bool answerStreaming;
+                string realtimeTextDelta =
+                    "SSE event: {\"type\":\"response.output_text.delta\"," +
+                    "\"delta\":\"hello\"}";
+                string realtimeTextDone =
+                    "SSE event: {\"type\":\"response.output_text.done\"}";
+                string realtimeCompleted =
+                    "SSE event: {\"type\":\"response.completed\",\"response\":{" +
+                    "\"id\":\"resp-test\"}}";
+                Assert(realtime.FindActive(new[] { realtimeTextDelta },
+                    out realtimeState, out realtimeAction, out answerStreaming) &&
+                    realtimeState == HaloState.Working &&
+                    realtimeAction == "Writing answer" &&
+                    answerStreaming,
+                    "live text delta -> answer streaming");
+                Assert(!realtime.FindActive(new[] { realtimeCompleted, realtimeTextDelta },
+                    out realtimeState, out realtimeAction, out answerStreaming),
+                    "live response completed clears answer streaming");
+                Assert(!realtime.FindActive(new[] { realtimeTextDone, realtimeTextDelta },
+                    out realtimeState, out realtimeAction, out answerStreaming),
+                    "live text done clears answer streaming");
                 string realtimeInputAdded =
                     "SSE event: {\"type\":\"response.output_item.added\",\"item\":{" +
                     "\"id\":\"input-test\",\"type\":\"function_call\"," +
@@ -406,6 +427,12 @@ public static class Diagnostics
                     "14:58 刷新", "same-day quota reset formatting");
                 Assert(String.IsNullOrEmpty(DetailsWindow.FormatResetTime(
                     DateTime.MinValue)), "missing reset time stays hidden");
+                Assert(DetailsWindow.IsQuotaExpired(
+                    DateTime.UtcNow.AddSeconds(-1), DateTime.UtcNow),
+                    "expired quota snapshot is stale");
+                Assert(!DetailsWindow.IsQuotaExpired(
+                    DateTime.UtcNow.AddMinutes(5), DateTime.UtcNow),
+                    "future quota reset remains valid");
                 File.Delete(temp);
                 File.WriteAllText(outputPath,
                     "PASS\nLifecycle, usage metrics, panel formatting, and animation checks passed.\n",

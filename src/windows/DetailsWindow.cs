@@ -185,6 +185,11 @@ public sealed class DetailsWindow : Window
                 return session.Active;
             });
             string action = active == null ? String.Empty : active.Action;
+            if (aggregate.AnswerStreaming ||
+                action.IndexOf("Writing answer", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "正在输出答案";
+            }
             if (action.IndexOf("command", StringComparison.OrdinalIgnoreCase) >= 0)
             {
                 return "正在执行命令";
@@ -263,6 +268,14 @@ public sealed class DetailsWindow : Window
                 bar.Value = 0;
                 return;
             }
+            if (IsQuotaExpired(resetUtc, DateTime.UtcNow))
+            {
+                value.Text = "等待 Codex 刷新";
+                reset.Text = String.Empty;
+                reset.Visibility = Visibility.Collapsed;
+                bar.Value = 0;
+                return;
+            }
             double remaining = Math.Max(0, Math.Min(100, 100 - usedPercent));
             value.Text = String.Format(CultureInfo.InvariantCulture,
                 "剩余 {0:0}%", remaining);
@@ -270,6 +283,11 @@ public sealed class DetailsWindow : Window
             reset.Visibility = String.IsNullOrEmpty(reset.Text)
                 ? Visibility.Collapsed : Visibility.Visible;
             bar.Value = remaining;
+        }
+
+        public static bool IsQuotaExpired(DateTime resetUtc, DateTime nowUtc)
+        {
+            return resetUtc != DateTime.MinValue && nowUtc >= resetUtc.ToUniversalTime();
         }
 
         public static string FormatResetTime(DateTime resetUtc)
