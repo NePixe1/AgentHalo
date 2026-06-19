@@ -294,8 +294,8 @@ private func testPreviewSubmenuMovesCheckmarkAfterSelection() {
 @MainActor
 private func testAlwaysOnTopUsesOverlayWindowLevel() {
     expect(
-        AppDelegate.haloWindowLevel(alwaysOnTop: true) == .screenSaver,
-        "always-on-top halo should use an overlay window level"
+        AppDelegate.haloWindowLevel(alwaysOnTop: true) == .floating,
+        "always-on-top halo should use floating window level to stay above normal windows but below screenshot overlays"
     )
     expect(
         AppDelegate.haloWindowLevel(alwaysOnTop: false) == .normal,
@@ -315,6 +315,7 @@ private func testHaloCollectionBehaviorDoesNotStayStationaryInMissionControl() {
 
 @MainActor
 private func testSystemOverlayApplicationDetection() {
+    // Apple system tools
     expect(
         AppDelegate.isSystemOverlayApplication(bundleIdentifier: "com.apple.screenshot.launcher", localizedName: "Screenshot"),
         "Screenshot app should suspend the halo"
@@ -323,17 +324,51 @@ private func testSystemOverlayApplicationDetection() {
         AppDelegate.isSystemOverlayApplication(bundleIdentifier: "com.apple.dock", localizedName: "Dock"),
         "Dock-owned Mission Control should suspend the halo"
     )
+
+    // Third-party tools (by bundle ID)
     expect(
         AppDelegate.isSystemOverlayApplication(bundleIdentifier: "com.nicothin.snipaste", localizedName: "Snipaste"),
         "Snipaste should suspend the halo"
     )
     expect(
+        AppDelegate.isSystemOverlayApplication(bundleIdentifier: "com.better365.iShot", localizedName: "iShot"),
+        "iShot should suspend the halo"
+    )
+    expect(
+        AppDelegate.isSystemOverlayApplication(bundleIdentifier: "pl.maketheweb.cleanshotx", localizedName: "CleanShot X"),
+        "CleanShot X should suspend the halo"
+    )
+    expect(
+        AppDelegate.isSystemOverlayApplication(bundleIdentifier: "cc.ffitch.shottr", localizedName: "Shottr"),
+        "Shottr should suspend the halo"
+    )
+    expect(
+        AppDelegate.isSystemOverlayApplication(bundleIdentifier: "com.xnipapp.xnip", localizedName: "Xnip"),
+        "Xnip should suspend the halo"
+    )
+    expect(
+        AppDelegate.isSystemOverlayApplication(bundleIdentifier: "com.pixpin.app", localizedName: "PixPin"),
+        "PixPin should suspend the halo"
+    )
+
+    // Name-based keyword matching (unknown bundle ID)
+    expect(
         AppDelegate.isSystemOverlayApplication(bundleIdentifier: nil, localizedName: "Snipaste 2"),
         "Snipaste 2 detected by name should suspend the halo"
     )
     expect(
+        AppDelegate.isSystemOverlayApplication(bundleIdentifier: "com.example.unknown", localizedName: "My 截图 Tool"),
+        "app with 截图 in name should suspend the halo"
+    )
+
+    // Regular apps should NOT suspend
+    expect(
         !AppDelegate.isSystemOverlayApplication(bundleIdentifier: "com.todesktop.230313mzl4w4u92", localizedName: "Codex"),
         "regular app activation should not suspend the halo"
+    )
+    expect(
+        !AppDelegate.isSystemOverlayApplication(bundleIdentifier: "com.apple.finder", localizedName: "Finder"),
+        "Finder should not suspend the halo"
     )
 }
 
