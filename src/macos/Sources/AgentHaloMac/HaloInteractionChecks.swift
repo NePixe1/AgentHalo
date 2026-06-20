@@ -20,7 +20,7 @@ func runHaloInteractionChecks() {
     testHaloContextMenuContainsCurrentControls()
     testHaloClickWaitsForMouseUpAndDragCancelsClick()
     testDraggingHaloSuppressesHoverDetails()
-    testDraggingHaloReducesAnimationFrameRate()
+    testDraggingHaloPausesAnimationDuringDrag()
     testHaloSizeResizeKeepsWindowOrigin()
     testHaloViewResizeKeepsAnimationMoving()
     testHaloViewSystemOverlaySuspensionStopsAnimation()
@@ -173,7 +173,7 @@ private func testDraggingHaloSuppressesHoverDetails() {
 }
 
 @MainActor
-private func testDraggingHaloReducesAnimationFrameRate() {
+private func testDraggingHaloPausesAnimationDuringDrag() {
     let view = HaloView(frame: NSRect(x: 0, y: 0, width: 112, height: 112))
     let window = NSWindow(
         contentRect: NSRect(x: 200, y: 300, width: 112, height: 112),
@@ -183,14 +183,14 @@ private func testDraggingHaloReducesAnimationFrameRate() {
     )
     window.contentView = view
 
-    expectApproximately(animationFrameInterval(of: view), 1.0 / 60.0, "halo should animate at full frame rate normally")
+    expect(view.hasAnimationDriverForChecks, "halo should animate normally before drag")
 
     view.mouseDown(with: interactionEvent(type: .leftMouseDown))
     view.mouseDragged(with: interactionEvent(type: .leftMouseDragged, location: NSPoint(x: 34, y: 30)))
-    expectApproximately(animationFrameInterval(of: view), 1.0 / 15.0, "dragging halo should reduce animation frame rate")
+    expect(!view.hasAnimationDriverForChecks, "dragging halo should pause animation entirely")
 
     view.mouseUp(with: interactionEvent(type: .leftMouseUp))
-    expectApproximately(animationFrameInterval(of: view), 1.0 / 60.0, "halo should restore full frame rate after dragging")
+    expect(view.hasAnimationDriverForChecks, "halo should restore animation after dragging")
 }
 
 @MainActor
@@ -201,23 +201,6 @@ private func testHaloSizeResizeKeepsWindowOrigin() {
 
     expect(resizedFrame.origin == oldFrame.origin, "halo size slider should not move the halo window origin")
     expect(resizedFrame.size == NSSize(width: 168, height: 168), "halo size slider should resize the halo window")
-}
-
-private func expectApproximately(_ actual: TimeInterval, _ expected: TimeInterval, _ message: String) {
-    if abs(actual - expected) > 0.001 {
-        fatalError("\(message): expected \(expected), got \(actual)")
-    }
-}
-
-private func animationFrameInterval(of view: HaloView) -> TimeInterval {
-    guard let timerValue = Mirror(reflecting: view).children.first(where: { $0.label == "animationTimer" })?.value else {
-        fatalError("halo view should expose animation timer for checks")
-    }
-    let optionalMirror = Mirror(reflecting: timerValue)
-    guard let timer = optionalMirror.children.first?.value as? Timer else {
-        fatalError("halo view should have an animation timer")
-    }
-    return timer.timeInterval
 }
 
 private func interactionEvent(

@@ -72,6 +72,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func tick() {
+        if haloView?.isDragging == true {
+            return
+        }
         updateSystemOverlaySuspension(for: NSWorkspace.shared.frontmostApplication)
         _ = monitor.refresh()
         _ = claudeHookMonitor.refresh()

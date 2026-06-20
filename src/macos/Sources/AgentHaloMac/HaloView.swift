@@ -6,7 +6,6 @@ import QuartzCore
 final class HaloView: NSView {
     private static let dragActivationDistance = 3.0
     private static let normalAnimationInterval = 1.0 / 60.0
-    private static let draggingAnimationInterval = 1.0 / 15.0
 
     var aggregate = AggregateSnapshot(
         state: .idle,
@@ -37,6 +36,7 @@ final class HaloView: NSView {
     private var dragStartInWindow: NSPoint?
     private var windowStart: NSPoint?
     private var isDraggingWindow = false
+    var isDragging: Bool { isDraggingWindow }
     private var pendingClickActivation = false
     nonisolated(unsafe) private var animationTimer: Timer?
     private var systemOverlaySuspended = false
@@ -374,7 +374,8 @@ final class HaloView: NSView {
         if !isDraggingWindow {
             isDraggingWindow = true
             pendingClickActivation = false
-            setAnimationFrameInterval(Self.draggingAnimationInterval)
+            animationTimer?.invalidate()
+            animationTimer = nil
             onDragStarted?()
         }
         let current = NSEvent.mouseLocation
@@ -397,7 +398,7 @@ final class HaloView: NSView {
             onClick?()
         }
         if completedDrag {
-            setAnimationFrameInterval(Self.normalAnimationInterval)
+            startAnimationDriver(interval: Self.normalAnimationInterval)
         }
         dragStart = nil
         dragStartInWindow = nil
