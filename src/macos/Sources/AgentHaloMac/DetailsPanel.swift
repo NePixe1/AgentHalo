@@ -9,7 +9,7 @@ final class DetailsPanel: NSPanel {
     private let detailField = NSTextField(labelWithString: "Codex 正在待命")
     private let primaryQuota = QuotaRowView(title: "5 小时额度")
     private let secondaryQuota = QuotaRowView(title: "周额度")
-    private let agentSwitch = NSSegmentedControl(labels: AgentKind.allCases.map(\.segmentedTitle), trackingMode: .selectOne, target: nil, action: nil)
+    private let agentToggle = AgentToggleView()
     private let contextPill = NSView()
     private let quotaGroup = NSStackView()
     var onMouseEntered: (() -> Void)?
@@ -42,23 +42,29 @@ final class DetailsPanel: NSPanel {
 
         stack.orientation = .vertical
         stack.spacing = 0
+        stack.alignment = .leading
         stack.edgeInsets = NSEdgeInsets(top: 14, left: 17, bottom: 16, right: 17)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        stack.addArrangedSubview(makeTopRow())
-        stack.setCustomSpacing(7, after: stack.arrangedSubviews[0])
+        let topRow = makeTopRow()
+        stack.addArrangedSubview(topRow)
+        stack.setCustomSpacing(7, after: topRow)
 
         titleField.font = .systemFont(ofSize: 24, weight: .bold)
         titleField.lineBreakMode = .byTruncatingTail
+        titleField.alignment = .left
         detailField.font = .systemFont(ofSize: 13)
         detailField.textColor = NSColor(calibratedRed: 0.38, green: 0.45, blue: 0.50, alpha: 1)
         detailField.lineBreakMode = .byTruncatingTail
+        detailField.alignment = .left
         stack.addArrangedSubview(titleField)
         stack.setCustomSpacing(2, after: titleField)
         stack.addArrangedSubview(detailField)
         stack.setCustomSpacing(13, after: detailField)
+
         quotaGroup.orientation = .vertical
         quotaGroup.spacing = 10
+        quotaGroup.alignment = .leading
         quotaGroup.translatesAutoresizingMaskIntoConstraints = false
         quotaGroup.addArrangedSubview(primaryQuota)
         quotaGroup.addArrangedSubview(secondaryQuota)
@@ -77,7 +83,14 @@ final class DetailsPanel: NSPanel {
             stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             stack.topAnchor.constraint(equalTo: container.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+
+            topRow.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
+            titleField.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
+            detailField.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
+            quotaGroup.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
+            primaryQuota.trailingAnchor.constraint(equalTo: quotaGroup.trailingAnchor),
+            secondaryQuota.trailingAnchor.constraint(equalTo: quotaGroup.trailingAnchor)
         ])
     }
 
@@ -87,9 +100,7 @@ final class DetailsPanel: NSPanel {
         titleField.textColor = NSColor(calibratedRed: rgb.red / 255, green: rgb.green / 255, blue: rgb.blue / 255, alpha: 1)
         detailField.stringValue = Self.localizedDetail(for: aggregate)
 
-        if let index = AgentKind.allCases.firstIndex(of: aggregate.focusedAgent) {
-            agentSwitch.selectedSegment = index
-        }
+        agentToggle.setAgent(aggregate.focusedAgent)
 
         let showsCodexQuota = aggregate.focusedAgent == .codex
         contextPill.isHidden = !showsCodexQuota || quota?.contextUsedPercent == nil
@@ -156,15 +167,9 @@ final class DetailsPanel: NSPanel {
         let row = NSView()
         row.translatesAutoresizingMaskIntoConstraints = false
 
-        let brand = NSTextField(labelWithString: "Agent Halo")
-        brand.font = .systemFont(ofSize: 11.5, weight: .semibold)
-        brand.textColor = NSColor(calibratedRed: 0.38, green: 0.46, blue: 0.51, alpha: 1)
-        brand.translatesAutoresizingMaskIntoConstraints = false
-
-        agentSwitch.target = self
-        agentSwitch.action = #selector(agentSwitchChanged(_:))
-        agentSwitch.segmentStyle = .rounded
-        agentSwitch.translatesAutoresizingMaskIntoConstraints = false
+        agentToggle.onAgentSelected = { [weak self] agent in
+            self?.onAgentSelected?(agent)
+        }
 
         contextPill.wantsLayer = true
         contextPill.layer?.cornerRadius = 9
@@ -178,19 +183,18 @@ final class DetailsPanel: NSPanel {
         contextValue.lineBreakMode = .byTruncatingTail
         contextValue.translatesAutoresizingMaskIntoConstraints = false
 
-        row.addSubview(brand)
-        row.addSubview(agentSwitch)
+        row.addSubview(agentToggle)
         row.addSubview(contextPill)
         contextPill.addSubview(contextValue)
         NSLayoutConstraint.activate([
             row.heightAnchor.constraint(equalToConstant: 24),
-            brand.leadingAnchor.constraint(equalTo: row.leadingAnchor),
-            brand.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            agentSwitch.leadingAnchor.constraint(greaterThanOrEqualTo: brand.trailingAnchor, constant: 10),
-            agentSwitch.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            contextPill.leadingAnchor.constraint(equalTo: agentSwitch.trailingAnchor, constant: 8),
+            agentToggle.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            agentToggle.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            agentToggle.widthAnchor.constraint(equalToConstant: 110),
+            agentToggle.heightAnchor.constraint(equalToConstant: 24),
             contextPill.trailingAnchor.constraint(equalTo: row.trailingAnchor),
             contextPill.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            contextPill.leadingAnchor.constraint(greaterThanOrEqualTo: agentToggle.trailingAnchor, constant: 10),
             contextValue.leadingAnchor.constraint(equalTo: contextPill.leadingAnchor, constant: 9),
             contextValue.trailingAnchor.constraint(equalTo: contextPill.trailingAnchor, constant: -9),
             contextValue.topAnchor.constraint(equalTo: contextPill.topAnchor, constant: 3),
@@ -199,20 +203,8 @@ final class DetailsPanel: NSPanel {
         return row
     }
 
-    @objc private func agentSwitchChanged(_ sender: NSSegmentedControl) {
-        guard sender.selectedSegment >= 0,
-              sender.selectedSegment < AgentKind.allCases.count else {
-            return
-        }
-        onAgentSelected?(AgentKind.allCases[sender.selectedSegment])
-    }
-
     var focusedAgentForTesting: AgentKind {
-        let index = agentSwitch.selectedSegment
-        guard index >= 0, index < AgentKind.allCases.count else {
-            return .codex
-        }
-        return AgentKind.allCases[index]
+        agentToggle.selectedAgent
     }
 
     var detailTextForTesting: String {
@@ -240,11 +232,8 @@ final class DetailsPanel: NSPanel {
     }
 
     func selectAgentForTesting(_ agent: AgentKind) {
-        guard let index = AgentKind.allCases.firstIndex(of: agent) else {
-            return
-        }
-        agentSwitch.selectedSegment = index
-        agentSwitchChanged(agentSwitch)
+        agentToggle.setAgent(agent)
+        onAgentSelected?(agent)
     }
 }
 
@@ -376,5 +365,128 @@ private final class RoundedMeterView: NSView {
             xRadius: radius,
             yRadius: radius
         ).fill()
+    }
+}
+
+@MainActor
+final class AgentToggleView: NSView {
+    var onAgentSelected: ((AgentKind) -> Void)?
+    
+    private(set) var selectedAgent: AgentKind = .codex {
+        didSet {
+            updateSelectedState(animated: true)
+        }
+    }
+    
+    private let bgView = NSView()
+    private let activeBg = NSView()
+    private let codexLabel = NSTextField(labelWithString: "Codex")
+    private let ccLabel = NSTextField(labelWithString: "CC")
+    private var activeBgConstraints: [NSLayoutConstraint] = []
+    
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setup()
+    }
+    
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setup()
+    }
+    
+    private func setup() {
+        translatesAutoresizingMaskIntoConstraints = false
+        
+        bgView.wantsLayer = true
+        bgView.layer?.cornerRadius = 12
+        bgView.layer?.borderWidth = 1
+        bgView.layer?.borderColor = NSColor(calibratedRed: 0.88, green: 0.88, blue: 0.88, alpha: 0.7).cgColor
+        bgView.layer?.backgroundColor = NSColor(calibratedRed: 0.96, green: 0.96, blue: 0.96, alpha: 0.7).cgColor
+        bgView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(bgView)
+        
+        activeBg.wantsLayer = true
+        activeBg.layer?.cornerRadius = 10
+        activeBg.layer?.borderWidth = 1
+        activeBg.layer?.borderColor = NSColor(calibratedRed: 0.78, green: 0.88, blue: 0.78, alpha: 0.7).cgColor
+        activeBg.layer?.backgroundColor = NSColor(calibratedRed: 0.88, green: 0.94, blue: 0.88, alpha: 1.0).cgColor
+        activeBg.translatesAutoresizingMaskIntoConstraints = false
+        bgView.addSubview(activeBg)
+        
+        codexLabel.font = .systemFont(ofSize: 11.5, weight: .bold)
+        codexLabel.alignment = .center
+        codexLabel.textColor = NSColor(calibratedRed: 0.0, green: 0.60, blue: 0.15, alpha: 1.0)
+        codexLabel.translatesAutoresizingMaskIntoConstraints = false
+        bgView.addSubview(codexLabel)
+        
+        ccLabel.font = .systemFont(ofSize: 11.5, weight: .bold)
+        ccLabel.alignment = .center
+        ccLabel.textColor = NSColor(calibratedRed: 0.38, green: 0.45, blue: 0.50, alpha: 1.0)
+        ccLabel.translatesAutoresizingMaskIntoConstraints = false
+        bgView.addSubview(ccLabel)
+        
+        NSLayoutConstraint.activate([
+            bgView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            bgView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            bgView.topAnchor.constraint(equalTo: topAnchor),
+            bgView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            
+            codexLabel.leadingAnchor.constraint(equalTo: bgView.leadingAnchor, constant: 4),
+            codexLabel.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
+            codexLabel.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: 0.5, constant: -4),
+            
+            ccLabel.trailingAnchor.constraint(equalTo: bgView.trailingAnchor, constant: -4),
+            ccLabel.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
+            ccLabel.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: 0.5, constant: -4),
+        ])
+        
+        updateSelectedState(animated: false)
+    }
+    
+    func setAgent(_ agent: AgentKind) {
+        guard selectedAgent != agent else { return }
+        selectedAgent = agent
+    }
+    
+    private func updateSelectedState(animated: Bool) {
+        NSLayoutConstraint.deactivate(activeBgConstraints)
+        
+        let targetLabel = selectedAgent == .codex ? codexLabel : ccLabel
+        
+        activeBgConstraints = [
+            activeBg.leadingAnchor.constraint(equalTo: targetLabel.leadingAnchor, constant: -2),
+            activeBg.trailingAnchor.constraint(equalTo: targetLabel.trailingAnchor, constant: 2),
+            activeBg.topAnchor.constraint(equalTo: bgView.topAnchor, constant: 2),
+            activeBg.bottomAnchor.constraint(equalTo: bgView.bottomAnchor, constant: -2)
+        ]
+        
+        if animated {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.2
+                context.allowsImplicitAnimation = true
+                NSLayoutConstraint.activate(activeBgConstraints)
+                self.layoutSubtreeIfNeeded()
+            }
+        } else {
+            NSLayoutConstraint.activate(activeBgConstraints)
+        }
+        
+        codexLabel.textColor = selectedAgent == .codex 
+            ? NSColor(calibratedRed: 0.0, green: 0.60, blue: 0.15, alpha: 1.0)
+            : NSColor(calibratedRed: 0.38, green: 0.45, blue: 0.50, alpha: 1.0)
+            
+        ccLabel.textColor = selectedAgent == .claudeCode 
+            ? NSColor(calibratedRed: 0.0, green: 0.60, blue: 0.15, alpha: 1.0)
+            : NSColor(calibratedRed: 0.38, green: 0.45, blue: 0.50, alpha: 1.0)
+    }
+    
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let isLeft = point.x < bounds.width / 2
+        let newAgent: AgentKind = isLeft ? .codex : .claudeCode
+        if newAgent != selectedAgent {
+            selectedAgent = newAgent
+            onAgentSelected?(newAgent)
+        }
     }
 }
