@@ -388,6 +388,37 @@ func testClaudeHookConfiguratorWritesUserSettingsNotLegacyClaudeJson() throws {
     expect(legacyCommand, "/old/claude-code-status-hook PreToolUse", "legacy ~/.claude.json should not be rewritten")
 }
 
+func testClaudeStatusLineConfiguratorPreservesAndChainsExistingCommand() throws {
+    let home = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-statusline-config-\(UUID().uuidString)", isDirectory: true)
+    let claude = home.appendingPathComponent(".claude", isDirectory: true)
+    try FileManager.default.createDirectory(at: claude, withIntermediateDirectories: true)
+    let settingsURL = claude.appendingPathComponent("settings.json")
+    let originalCommand = "~/.claude/ccline/ccline"
+    let settings: [String: Any] = [
+        "statusLine": ["type": "command", "command": originalCommand, "padding": 0],
+        "theme": "dark"
+    ]
+    try JSONSerialization.data(withJSONObject: settings).write(to: settingsURL)
+    let bundledProxy = home.appendingPathComponent("bundled-statusline-proxy")
+    try Data("proxy".utf8).write(to: bundledProxy)
+
+    ClaudeStatusLineConfigurator.configure(homeDirectory: home, bundledProxyBinary: bundledProxy)
+    ClaudeStatusLineConfigurator.configure(homeDirectory: home, bundledProxyBinary: bundledProxy)
+
+    let configuredData = try Data(contentsOf: settingsURL)
+    let configured = try JSONSerialization.jsonObject(with: configuredData) as! [String: Any]
+    let statusLine = configured["statusLine"] as! [String: Any]
+    let installedProxy = home.appendingPathComponent(".agent-halo/claude-code-statusline-proxy")
+    let storedCommand = home.appendingPathComponent(".agent-halo/claude-code-statusline-original-command")
+
+    expect(statusLine["command"] as? String, installedProxy.path, "Claude statusline should use AgentHalo proxy")
+    expect(statusLine["padding"] as? Int, 0, "Claude statusline padding should be preserved")
+    expect(configured["theme"] as? String, "dark", "unrelated Claude settings should be preserved")
+    expect(try String(contentsOf: storedCommand, encoding: .utf8), originalCommand, "existing ccline command should be preserved exactly")
+    expect(FileManager.default.isExecutableFile(atPath: installedProxy.path), "installed statusline proxy should be executable")
+}
+
 extension FileHandle {
     func withClose(_ body: (FileHandle) throws -> Void) rethrows {
         defer { try? close() }
@@ -473,6 +504,61 @@ func testRateLimitReaderFindsContextUsageAndResetTimes() throws {
     expect(snapshot?.primaryResetAt, Date(timeIntervalSince1970: 1_781_765_880), "primary reset time")
     expect(snapshot?.secondaryResetAt, Date(timeIntervalSince1970: 1_781_938_560), "secondary reset time")
     expectAlmost(snapshot?.contextUsedPercent ?? 0, 78.405, tolerance: 0.01, "context usage")
+}
+
+func testClaudeStatusLineUsageParserReadsAuthoritativeContextPercent() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
+    let data = Data(#"{"session_id":"cc-session","context_window":{"used_percentage":52.75,"remaining_percentage":47.25,"context_window_size":200000}}"#.utf8)
+
+    let snapshot = ClaudeStatusLineUsageParser.parse(data: data, updatedAt: now)
+
+    expect(snapshot?.sessionId, "cc-session", "Claude context session id")
+    expect(snapshot?.usedPercent, 52.75, "Claude authoritative context percent")
+    expect(snapshot?.contextWindowSize, 200_000, "Claude context window size")
+    expect(snapshot?.updatedAt, now, "Claude context capture time")
+}
+
+func testClaudeContextUsageReaderRejectsStaleAndMismatchedSessions() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-claude-context-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let snapshotURL = root.appendingPathComponent("claude-code-context.json")
+    let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
+    let reader = ClaudeContextUsageReader(snapshotURL: snapshotURL)
+
+    let fresh = ClaudeContextUsageSnapshot(
+        sessionId: "cc-session",
+        usedPercent: 52.75,
+        contextWindowSize: 200_000,
+        updatedAt: now.addingTimeInterval(-30)
+    )
+    try JSONEncoder().encode(fresh).write(to: snapshotURL)
+
+    expect(reader.read(sessionIds: ["cc-session"], now: now)?.usedPercent, 52.75, "matching fresh Claude context")
+    expect(reader.read(sessionIds: ["other-session"], now: now) == nil, "mismatched Claude session should be rejected")
+    expect(reader.read(sessionIds: [], now: now)?.usedPercent, 52.75, "fresh Claude context should survive hook snapshot pruning")
+    expect(reader.read(sessionIds: ["cc-session"], now: now.addingTimeInterval(301)) == nil, "stale Claude context should be rejected")
+}
+
+func testClaudeStatusLineProxyRuntimeCapturesUsageAndForwardsInput() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-statusline-runtime-\(UUID().uuidString)", isDirectory: true)
+    let snapshotURL = root.appendingPathComponent("claude-code-context.json")
+    let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
+    let input = Data(#"{"session_id":"cc-session","context_window":{"used_percentage":61.5,"context_window_size":200000}}"#.utf8)
+
+    let captured = try ClaudeStatusLineProxyRuntime.capture(
+        input: input,
+        snapshotURL: snapshotURL,
+        updatedAt: now
+    )
+    let forwarded = try ClaudeStatusLineProxyRuntime.runOriginalCommand(command: "cat", input: input)
+
+    expect(captured?.usedPercent, 61.5, "statusline proxy should capture Claude context")
+    expect(forwarded.standardOutput, input, "statusline proxy should forward input unchanged")
+    expect(forwarded.terminationStatus, 0, "statusline proxy should preserve successful command status")
+    let stored = try JSONDecoder().decode(ClaudeContextUsageSnapshot.self, from: Data(contentsOf: snapshotURL))
+    expect(stored, captured, "statusline proxy should persist the captured context atomically")
 }
 
 func testCodexRealtimeActivityReaderDetectsAnswerStreaming() {
@@ -1381,6 +1467,11 @@ do {
     fatalError("\(error)")
 }
 do {
+    try testClaudeStatusLineConfiguratorPreservesAndChainsExistingCommand()
+} catch {
+    fatalError("\(error)")
+}
+do {
     try testMonitorHandlesPendingLinesAndTruncation()
 } catch {
     fatalError("\(error)")
@@ -1394,6 +1485,17 @@ do {
 }
 do {
     try testRateLimitReaderFindsContextUsageAndResetTimes()
+} catch {
+    fatalError("\(error)")
+}
+testClaudeStatusLineUsageParserReadsAuthoritativeContextPercent()
+do {
+    try testClaudeContextUsageReaderRejectsStaleAndMismatchedSessions()
+} catch {
+    fatalError("\(error)")
+}
+do {
+    try testClaudeStatusLineProxyRuntimeCapturesUsageAndForwardsInput()
 } catch {
     fatalError("\(error)")
 }

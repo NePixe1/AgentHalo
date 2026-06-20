@@ -13,6 +13,7 @@ let package = Package(
         .executable(name: "AgentHaloCoreChecks", targets: ["AgentHaloCoreChecks"]),
         .executable(name: "AgentHaloDiagnostics", targets: ["AgentHaloDiagnostics"]),
         .executable(name: "ClaudeCodeStatusHook", targets: ["ClaudeCodeStatusHook"]),
+        .executable(name: "ClaudeCodeStatusLineProxy", targets: ["ClaudeCodeStatusLineProxy"]),
     ],
     targets: [
         .target(name: "AgentHaloCore"),
@@ -31,6 +32,10 @@ let package = Package(
         .executableTarget(
             name: "ClaudeCodeStatusHook",
             dependencies: []
+        ),
+        .executableTarget(
+            name: "ClaudeCodeStatusLineProxy",
+            dependencies: ["AgentHaloCore"]
         ),
     ]
 )

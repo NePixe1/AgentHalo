@@ -22,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsSaveTimer: Timer?
     private var systemOverlaySuspended = false
     private let rateLimitReader = RateLimitReader()
+    private let claudeContextUsageReader = ClaudeContextUsageReader()
     private let failureReader = CodexFailureReader()
     private let realtimeActivityReader = CodexRealtimeActivityReader()
     private let instanceLock = InstanceLock()
@@ -51,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         ClaudeHookConfigurator.configure()
+        ClaudeStatusLineConfigurator.configure()
         NSApp.setActivationPolicy(.accessory)
         createStatusItem()
         createHaloPanel()
@@ -402,11 +404,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         hoverHideTimer?.invalidate()
+        let rawClaudeSnapshots = settings.focusedAgent == .claudeCode ? claudeSnapshots() : []
         if settings.focusedAgent == .claudeCode {
-            acknowledgeCompletedSessions(claudeSnapshots())
+            acknowledgeCompletedSessions(rawClaudeSnapshots)
         }
+        let displayedAggregate = displayAggregate()
         let quota = settings.focusedAgent == .codex ? rateLimitReader.read() : nil
-        detailsPanel.update(aggregate: displayAggregate(), quota: quota)
+        let contextUsedPercent = Self.contextUsedPercentForDetails(
+            focusedAgent: settings.focusedAgent,
+            quota: quota,
+            displayedAggregate: displayedAggregate,
+            rawClaudeSnapshots: rawClaudeSnapshots,
+            claudeContextUsageReader: claudeContextUsageReader
+        )
+        detailsPanel.update(
+            aggregate: displayedAggregate,
+            quota: quota,
+            contextUsedPercent: contextUsedPercent
+        )
         detailsPanel.onMouseEntered = { [weak self] in
             self?.hoverHideTimer?.invalidate()
         }
@@ -418,6 +433,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         positionDetailsPanel()
         detailsPanel.orderFrontRegardless()
+    }
+
+    static func contextUsedPercentForDetails(
+        focusedAgent: AgentKind,
+        quota: RateLimitSnapshot?,
+        displayedAggregate: AggregateSnapshot,
+        rawClaudeSnapshots: [SessionSnapshot],
+        claudeContextUsageReader: ClaudeContextUsageReader,
+        now: Date = Date()
+    ) -> Double? {
+        switch focusedAgent {
+        case .codex:
+            return quota?.contextUsedPercent
+        case .claudeCode:
+            let sessionIds = rawClaudeSnapshots.isEmpty
+                ? displayedAggregate.sessions.map(\.threadId)
+                : rawClaudeSnapshots.map(\.threadId)
+            let comparableSessionIds = sessionIds.filter { $0 != "claude-code" }
+            return claudeContextUsageReader.read(
+                sessionIds: comparableSessionIds,
+                now: now
+            )?.usedPercent
+        }
     }
 
     private func refreshVisibleDetailsPanel() {

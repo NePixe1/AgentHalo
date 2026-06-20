@@ -79,6 +79,26 @@
             "target": "ClaudeCodeStatusHook",
             "configuration": "release",
             "preLaunchTask": "swift: Build Release ClaudeCodeStatusHook (src/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AgentHalo}/src/macos",
+            "name": "Debug ClaudeCodeStatusLineProxy (src/macos)",
+            "target": "ClaudeCodeStatusLineProxy",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug ClaudeCodeStatusLineProxy (src/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AgentHalo}/src/macos",
+            "name": "Release ClaudeCodeStatusLineProxy (src/macos)",
+            "target": "ClaudeCodeStatusLineProxy",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release ClaudeCodeStatusLineProxy (src/macos)"
         }
     ]
 }

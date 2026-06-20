@@ -40,7 +40,9 @@ func runHaloInteractionChecks() {
     testDetailsPanelShowsCodexQuotaAndIdleCopy()
     testDetailsPanelShowsExpiredQuotaAsWaitingForRefresh()
     testDetailsPanelShowsAnswerStreamingCopy()
-    testDetailsPanelHidesQuotaForClaudeCode()
+    testDetailsPanelShowsContextAndHidesQuotaForClaudeCode()
+    testClaudeContextUsesRawSessionAfterCompletionAcknowledgement()
+    testClaudeContextSurvivesHookSnapshotPruning()
     testDetailsPanelSwitchCallbackSelectsClaudeCode()
 }
 
@@ -461,7 +463,8 @@ private func testDetailsPanelShowsCodexQuotaAndIdleCopy() {
 
     panel.update(
         aggregate: aggregate,
-        quota: RateLimitSnapshot(primaryUsedPercent: 30, secondaryUsedPercent: 60, contextUsedPercent: 42)
+        quota: RateLimitSnapshot(primaryUsedPercent: 30, secondaryUsedPercent: 60, contextUsedPercent: 42),
+        contextUsedPercent: 42
     )
 
     expect(panel.focusedAgentForTesting == .codex, "details panel should select Codex")
@@ -490,7 +493,8 @@ private func testDetailsPanelShowsExpiredQuotaAsWaitingForRefresh() {
             primaryResetAt: Date().addingTimeInterval(-5),
             secondaryResetAt: Date().addingTimeInterval(300),
             contextUsedPercent: 42
-        )
+        ),
+        contextUsedPercent: 42
     )
 
     expect(panel.primaryQuotaValueForTesting == "等待 Codex 刷新", "expired primary quota should wait for Codex refresh")
@@ -509,13 +513,13 @@ private func testDetailsPanelShowsAnswerStreamingCopy() {
         answerStreaming: true
     )
 
-    panel.update(aggregate: aggregate, quota: nil)
+    panel.update(aggregate: aggregate, quota: nil, contextUsedPercent: nil)
 
     expect(panel.detailTextForTesting == "正在输出答案", "answer streaming should use localized copy")
 }
 
 @MainActor
-private func testDetailsPanelHidesQuotaForClaudeCode() {
+private func testDetailsPanelShowsContextAndHidesQuotaForClaudeCode() {
     let panel = DetailsPanel()
     let aggregate = AggregateSnapshot(
         state: .idle,
@@ -525,13 +529,104 @@ private func testDetailsPanelHidesQuotaForClaudeCode() {
         focusedAgent: .claudeCode
     )
 
-    panel.update(aggregate: aggregate, quota: nil)
+    panel.update(aggregate: aggregate, quota: nil, contextUsedPercent: 58.4)
 
     expect(panel.focusedAgentForTesting == .claudeCode, "details panel should select Claude Code")
     expect(panel.detailTextForTesting == "Claude Code 正在待命", "Claude Code idle copy should be localized")
-    expect(panel.contextPillHiddenForTesting == true, "Claude Code context pill should be hidden")
+    expect(panel.contextPillHiddenForTesting == false, "Claude Code context pill should be visible")
+    expect(panel.contextValueForTesting == "上下文 58%", "Claude Code context percent should be shown")
     expect(panel.primaryQuotaHiddenForTesting == true, "Claude Code primary quota should be hidden")
     expect(panel.secondaryQuotaHiddenForTesting == true, "Claude Code secondary quota should be hidden")
+}
+
+@MainActor
+private func testClaudeContextUsesRawSessionAfterCompletionAcknowledgement() {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-claude-context-ui-\(UUID().uuidString)", isDirectory: true)
+    let snapshotURL = root.appendingPathComponent("claude-code-context.json")
+    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let now = Date()
+    let context = ClaudeContextUsageSnapshot(
+        sessionId: "cc-done",
+        usedPercent: 30,
+        contextWindowSize: 200_000,
+        updatedAt: now
+    )
+    try! JSONEncoder().encode(context).write(to: snapshotURL)
+    let rawClaudeSession = SessionSnapshot(
+        threadId: "cc-done",
+        projectName: "AgentHalo",
+        workingDirectory: "/tmp/AgentHalo",
+        state: .done,
+        action: "Complete",
+        lastEventAt: now,
+        completedAt: now,
+        active: false,
+        agent: .claudeCode
+    )
+    let acknowledgedAggregate = AggregateSnapshot(
+        state: .idle,
+        label: "READY",
+        detail: AgentKind.claudeCode.standbyDetail,
+        sessions: [],
+        focusedAgent: .claudeCode
+    )
+
+    let percent = AppDelegate.contextUsedPercentForDetails(
+        focusedAgent: .claudeCode,
+        quota: nil,
+        displayedAggregate: acknowledgedAggregate,
+        rawClaudeSnapshots: [rawClaudeSession],
+        claudeContextUsageReader: ClaudeContextUsageReader(snapshotURL: snapshotURL),
+        now: now
+    )
+
+    expect(percent == 30, "acknowledged Claude completion should retain matching context usage")
+}
+
+@MainActor
+private func testClaudeContextSurvivesHookSnapshotPruning() {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-claude-context-pruned-\(UUID().uuidString)", isDirectory: true)
+    let snapshotURL = root.appendingPathComponent("claude-code-context.json")
+    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let now = Date()
+    let context = ClaudeContextUsageSnapshot(
+        sessionId: "cc-recent",
+        usedPercent: 30,
+        contextWindowSize: 200_000,
+        updatedAt: now.addingTimeInterval(-60)
+    )
+    try! JSONEncoder().encode(context).write(to: snapshotURL)
+    let placeholderSession = SessionSnapshot(
+        threadId: "claude-code",
+        projectName: "Claude Code",
+        workingDirectory: "",
+        state: .idle,
+        action: "Ready",
+        lastEventAt: now,
+        completedAt: nil,
+        active: false,
+        agent: .claudeCode
+    )
+    let readyAggregate = AggregateSnapshot(
+        state: .idle,
+        label: "READY",
+        detail: AgentKind.claudeCode.standbyDetail,
+        sessions: [placeholderSession],
+        focusedAgent: .claudeCode
+    )
+
+    let percent = AppDelegate.contextUsedPercentForDetails(
+        focusedAgent: .claudeCode,
+        quota: nil,
+        displayedAggregate: readyAggregate,
+        rawClaudeSnapshots: [],
+        claudeContextUsageReader: ClaudeContextUsageReader(snapshotURL: snapshotURL),
+        now: now
+    )
+
+    expect(percent == 30, "fresh Claude context should remain visible after hook snapshots prune")
 }
 
 @MainActor
@@ -547,7 +642,8 @@ private func testDetailsPanelSwitchCallbackSelectsClaudeCode() {
             sessions: [],
             focusedAgent: .codex
         ),
-        quota: nil
+        quota: nil,
+        contextUsedPercent: nil
     )
 
     panel.selectAgentForTesting(.claudeCode)

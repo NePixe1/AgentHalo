@@ -94,7 +94,11 @@ final class DetailsPanel: NSPanel {
         ])
     }
 
-    func update(aggregate: AggregateSnapshot, quota: RateLimitSnapshot?) {
+    func update(
+        aggregate: AggregateSnapshot,
+        quota: RateLimitSnapshot?,
+        contextUsedPercent: Double?
+    ) {
         titleField.stringValue = aggregate.label
         let rgb = HaloVisualModel.stateColor(aggregate.state)
         titleField.textColor = NSColor(calibratedRed: rgb.red / 255, green: rgb.green / 255, blue: rgb.blue / 255, alpha: 1)
@@ -103,22 +107,21 @@ final class DetailsPanel: NSPanel {
         agentToggle.setAgent(aggregate.focusedAgent)
 
         let showsCodexQuota = aggregate.focusedAgent == .codex
-        contextPill.isHidden = !showsCodexQuota || quota?.contextUsedPercent == nil
+        contextPill.isHidden = contextUsedPercent == nil
+        contextValue.stringValue = contextUsedPercent.map {
+            "上下文 \(Int($0.rounded()))%"
+        } ?? "上下文 --"
         quotaGroup.isHidden = !showsCodexQuota
         primaryQuota.isHidden = !showsCodexQuota
         secondaryQuota.isHidden = !showsCodexQuota
 
         guard showsCodexQuota else {
-            contextValue.stringValue = ""
             primaryQuota.updateUnavailable()
             secondaryQuota.updateUnavailable()
             return
         }
 
         if let quota {
-            contextValue.stringValue = quota.contextUsedPercent.map {
-                "上下文 \(Int($0.rounded()))%"
-            } ?? "上下文 --"
             primaryQuota.update(
                 usedPercent: quota.primaryUsedPercent,
                 resetAt: quota.primaryResetAt
@@ -213,6 +216,10 @@ final class DetailsPanel: NSPanel {
 
     var contextPillHiddenForTesting: Bool {
         contextPill.isHidden
+    }
+
+    var contextValueForTesting: String {
+        contextValue.stringValue
     }
 
     var primaryQuotaHiddenForTesting: Bool {
@@ -371,32 +378,32 @@ private final class RoundedMeterView: NSView {
 @MainActor
 final class AgentToggleView: NSView {
     var onAgentSelected: ((AgentKind) -> Void)?
-    
+
     private(set) var selectedAgent: AgentKind = .codex {
         didSet {
             updateSelectedState(animated: true)
         }
     }
-    
+
     private let bgView = NSView()
     private let activeBg = NSView()
     private let codexLabel = NSTextField(labelWithString: "Codex")
     private let ccLabel = NSTextField(labelWithString: "CC")
     private var activeBgConstraints: [NSLayoutConstraint] = []
-    
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         setup()
     }
-    
+
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         setup()
     }
-    
+
     private func setup() {
         translatesAutoresizingMaskIntoConstraints = false
-        
+
         bgView.wantsLayer = true
         bgView.layer?.cornerRadius = 12
         bgView.layer?.borderWidth = 1
@@ -404,7 +411,7 @@ final class AgentToggleView: NSView {
         bgView.layer?.backgroundColor = NSColor(calibratedRed: 0.96, green: 0.96, blue: 0.96, alpha: 0.7).cgColor
         bgView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(bgView)
-        
+
         activeBg.wantsLayer = true
         activeBg.layer?.cornerRadius = 10
         activeBg.layer?.borderWidth = 1
@@ -412,54 +419,54 @@ final class AgentToggleView: NSView {
         activeBg.layer?.backgroundColor = NSColor(calibratedRed: 0.88, green: 0.94, blue: 0.88, alpha: 1.0).cgColor
         activeBg.translatesAutoresizingMaskIntoConstraints = false
         bgView.addSubview(activeBg)
-        
+
         codexLabel.font = .systemFont(ofSize: 11.5, weight: .bold)
         codexLabel.alignment = .center
         codexLabel.textColor = NSColor(calibratedRed: 0.0, green: 0.60, blue: 0.15, alpha: 1.0)
         codexLabel.translatesAutoresizingMaskIntoConstraints = false
         bgView.addSubview(codexLabel)
-        
+
         ccLabel.font = .systemFont(ofSize: 11.5, weight: .bold)
         ccLabel.alignment = .center
         ccLabel.textColor = NSColor(calibratedRed: 0.38, green: 0.45, blue: 0.50, alpha: 1.0)
         ccLabel.translatesAutoresizingMaskIntoConstraints = false
         bgView.addSubview(ccLabel)
-        
+
         NSLayoutConstraint.activate([
             bgView.leadingAnchor.constraint(equalTo: leadingAnchor),
             bgView.trailingAnchor.constraint(equalTo: trailingAnchor),
             bgView.topAnchor.constraint(equalTo: topAnchor),
             bgView.bottomAnchor.constraint(equalTo: bottomAnchor),
-            
+
             codexLabel.leadingAnchor.constraint(equalTo: bgView.leadingAnchor, constant: 4),
             codexLabel.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
             codexLabel.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: 0.5, constant: -4),
-            
+
             ccLabel.trailingAnchor.constraint(equalTo: bgView.trailingAnchor, constant: -4),
             ccLabel.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
             ccLabel.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: 0.5, constant: -4),
         ])
-        
+
         updateSelectedState(animated: false)
     }
-    
+
     func setAgent(_ agent: AgentKind) {
         guard selectedAgent != agent else { return }
         selectedAgent = agent
     }
-    
+
     private func updateSelectedState(animated: Bool) {
         NSLayoutConstraint.deactivate(activeBgConstraints)
-        
+
         let targetLabel = selectedAgent == .codex ? codexLabel : ccLabel
-        
+
         activeBgConstraints = [
             activeBg.leadingAnchor.constraint(equalTo: targetLabel.leadingAnchor, constant: -2),
             activeBg.trailingAnchor.constraint(equalTo: targetLabel.trailingAnchor, constant: 2),
             activeBg.topAnchor.constraint(equalTo: bgView.topAnchor, constant: 2),
             activeBg.bottomAnchor.constraint(equalTo: bgView.bottomAnchor, constant: -2)
         ]
-        
+
         if animated {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.2
@@ -470,16 +477,16 @@ final class AgentToggleView: NSView {
         } else {
             NSLayoutConstraint.activate(activeBgConstraints)
         }
-        
-        codexLabel.textColor = selectedAgent == .codex 
+
+        codexLabel.textColor = selectedAgent == .codex
             ? NSColor(calibratedRed: 0.0, green: 0.60, blue: 0.15, alpha: 1.0)
             : NSColor(calibratedRed: 0.38, green: 0.45, blue: 0.50, alpha: 1.0)
-            
-        ccLabel.textColor = selectedAgent == .claudeCode 
+
+        ccLabel.textColor = selectedAgent == .claudeCode
             ? NSColor(calibratedRed: 0.0, green: 0.60, blue: 0.15, alpha: 1.0)
             : NSColor(calibratedRed: 0.38, green: 0.45, blue: 0.50, alpha: 1.0)
     }
-    
+
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         let isLeft = point.x < bounds.width / 2

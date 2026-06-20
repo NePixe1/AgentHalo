@@ -14,11 +14,13 @@ swift run AgentHaloDiagnostics --self-test "$output_root/diagnostics-self-test.t
 swift build -c release --product AgentHaloDiagnostics
 swift build -c release --product AgentHaloMac
 swift build -c release --product ClaudeCodeStatusHook
+swift build -c release --product ClaudeCodeStatusLineProxy
 
 rm -rf "$app_dir"
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
 cp "$binary" "$app_dir/Contents/MacOS/AgentHaloMac"
 cp "$mac_root/.build/release/ClaudeCodeStatusHook" "$app_dir/Contents/Resources/claude-code-status-hook"
+cp "$mac_root/.build/release/ClaudeCodeStatusLineProxy" "$app_dir/Contents/Resources/claude-code-statusline-proxy"
 
 cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
