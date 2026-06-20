@@ -518,7 +518,7 @@ func testClaudeStatusLineUsageParserReadsAuthoritativeContextPercent() {
     expect(snapshot?.updatedAt, now, "Claude context capture time")
 }
 
-func testClaudeContextUsageReaderRejectsStaleAndMismatchedSessions() throws {
+func testClaudeContextUsageReaderKeepsLastKnownUsageForMatchingSession() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-claude-context-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -537,7 +537,11 @@ func testClaudeContextUsageReaderRejectsStaleAndMismatchedSessions() throws {
     expect(reader.read(sessionIds: ["cc-session"], now: now)?.usedPercent, 52.75, "matching fresh Claude context")
     expect(reader.read(sessionIds: ["other-session"], now: now) == nil, "mismatched Claude session should be rejected")
     expect(reader.read(sessionIds: [], now: now)?.usedPercent, 52.75, "fresh Claude context should survive hook snapshot pruning")
-    expect(reader.read(sessionIds: ["cc-session"], now: now.addingTimeInterval(301)) == nil, "stale Claude context should be rejected")
+    expect(
+        reader.read(sessionIds: ["cc-session"], now: now.addingTimeInterval(301))?.usedPercent,
+        52.75,
+        "matching Claude context should remain visible after five minutes"
+    )
 }
 
 func testClaudeStatusLineProxyRuntimeCapturesUsageAndForwardsInput() throws {
@@ -1490,7 +1494,7 @@ do {
 }
 testClaudeStatusLineUsageParserReadsAuthoritativeContextPercent()
 do {
-    try testClaudeContextUsageReaderRejectsStaleAndMismatchedSessions()
+    try testClaudeContextUsageReaderKeepsLastKnownUsageForMatchingSession()
 } catch {
     fatalError("\(error)")
 }

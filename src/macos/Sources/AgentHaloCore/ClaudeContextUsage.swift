@@ -49,16 +49,13 @@ public enum ClaudeStatusLineUsageParser {
 
 public struct ClaudeContextUsageReader: Sendable {
     public var snapshotURL: URL
-    public var maxAge: TimeInterval
 
     public init(
         snapshotURL: URL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".agent-halo", isDirectory: true)
-            .appendingPathComponent("claude-code-context.json"),
-        maxAge: TimeInterval = 300
+            .appendingPathComponent("claude-code-context.json")
     ) {
         self.snapshotURL = snapshotURL
-        self.maxAge = maxAge
     }
 
     public func read(sessionIds: [String], now: Date = Date()) -> ClaudeContextUsageSnapshot? {
@@ -71,7 +68,7 @@ public struct ClaudeContextUsageReader: Sendable {
         }
 
         let age = now.timeIntervalSince(snapshot.updatedAt)
-        guard age >= -30, age <= maxAge else {
+        guard age >= -30 else {
             return nil
         }
         return snapshot
