@@ -29,6 +29,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var systemOverlaySuspended = false
     private let rateLimitReader = RateLimitReader()
     private let claudeContextUsageReader = ClaudeContextUsageReader()
+    private let contextReaderQueue = DispatchQueue(
+        label: "com.agenthalo.context-reader",
+        qos: .userInteractive
+    )
     private let failureReader = CodexFailureReader()
     private let realtimeActivityReader = CodexRealtimeActivityReader()
     private let instanceLock = InstanceLock()
@@ -436,9 +440,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ? displayedAggregate.sessions.map(\.threadId)
             : rawClaudeSnapshots.map(\.threadId)
         let claudeUsage = settings.focusedAgent == .claudeCode
-            ? claudeContextUsageReader.read(
-                sessionIds: claudeSessionIds.filter { $0 != "claude-code" }
-            )
+            ? contextReaderQueue.sync {
+                claudeContextUsageReader.read(
+                    sessionIds: claudeSessionIds.filter { $0 != "claude-code" }
+                )
+            }
             : nil
         let presentation = Self.detailsPresentationForDetails(
             focusedAgent: settings.focusedAgent,
@@ -473,6 +479,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         displayedAggregate: AggregateSnapshot,
         rawClaudeSnapshots: [SessionSnapshot],
         claudeContextUsageReader: ClaudeContextUsageReader,
+        contextReaderQueue: DispatchQueue,
         now: Date = Date()
     ) -> Double? {
         switch focusedAgent {
@@ -483,10 +490,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 ? displayedAggregate.sessions.map(\.threadId)
                 : rawClaudeSnapshots.map(\.threadId)
             let comparableSessionIds = sessionIds.filter { $0 != "claude-code" }
-            return claudeContextUsageReader.read(
-                sessionIds: comparableSessionIds,
-                now: now
-            )?.usedPercent
+            return contextReaderQueue.sync {
+                claudeContextUsageReader.read(
+                    sessionIds: comparableSessionIds,
+                    now: now
+                )?.usedPercent
+            }
         }
     }
 

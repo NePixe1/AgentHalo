@@ -30,12 +30,28 @@ public struct ClaudeContextUsageSnapshot: Codable, Equatable, Sendable {
 
 public enum ClaudeStatusLineUsageParser {
     public static func parse(data: Data, updatedAt: Date = Date()) -> ClaudeContextUsageSnapshot? {
-        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let sessionId = root["session_id"] as? String,
-              !sessionId.isEmpty,
-              let context = root["context_window"] as? [String: Any],
-              let usedPercent = number(context["used_percentage"]),
-              (0...100).contains(usedPercent) else {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            AgentHaloLogger.log("ClaudeStatusLineUsageParser: invalid JSON format")
+            return nil
+        }
+
+        guard let sessionId = root["session_id"] as? String, !sessionId.isEmpty else {
+            AgentHaloLogger.log("ClaudeStatusLineUsageParser: missing or empty session_id")
+            return nil
+        }
+
+        guard let context = root["context_window"] as? [String: Any] else {
+            AgentHaloLogger.log("ClaudeStatusLineUsageParser: missing context_window object")
+            return nil
+        }
+
+        guard let usedPercent = number(context["used_percentage"]) else {
+            AgentHaloLogger.log("ClaudeStatusLineUsageParser: invalid used_percentage value: \(context["used_percentage"] ?? "nil")")
+            return nil
+        }
+
+        guard (0...100).contains(usedPercent) else {
+            AgentHaloLogger.log("ClaudeStatusLineUsageParser: used_percentage out of range: \(usedPercent)")
             return nil
         }
 
@@ -74,6 +90,27 @@ public enum ClaudeStatusLineUsageParser {
 public struct ClaudeContextUsageReader: Sendable {
     public var snapshotURL: URL
 
+    private struct CachedSnapshot: Sendable {
+        var snapshotURL: URL
+        var snapshot: ClaudeContextUsageSnapshot
+        var fileModificationDate: Date
+    }
+
+    private final class Cache: @unchecked Sendable {
+        private let queue = DispatchQueue(label: "com.agenthalo.context-cache")
+        private var cachedSnapshot: CachedSnapshot?
+
+        func get() -> CachedSnapshot? {
+            queue.sync { cachedSnapshot }
+        }
+
+        func set(_ snapshot: CachedSnapshot?) {
+            queue.sync { cachedSnapshot = snapshot }
+        }
+    }
+
+    private static let cache = Cache()
+
     public init(
         snapshotURL: URL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".agent-halo", isDirectory: true)
@@ -83,18 +120,45 @@ public struct ClaudeContextUsageReader: Sendable {
     }
 
     public func read(sessionIds: [String], now: Date = Date()) -> ClaudeContextUsageSnapshot? {
-        guard let data = try? Data(contentsOf: snapshotURL),
-              let snapshot = try? JSONDecoder().decode(ClaudeContextUsageSnapshot.self, from: data) else {
+        let normalizedSnapshotURL = snapshotURL.standardizedFileURL
+        let attributes = try? FileManager.default.attributesOfItem(atPath: snapshotURL.path)
+        guard let modDate = attributes?[.modificationDate] as? Date else {
             return nil
         }
+
+        if let cachedValue = Self.cache.get(),
+           cachedValue.snapshotURL == normalizedSnapshotURL,
+           cachedValue.fileModificationDate == modDate,
+           (sessionIds.isEmpty || sessionIds.contains(cachedValue.snapshot.sessionId)) {
+            let age = now.timeIntervalSince(cachedValue.snapshot.updatedAt)
+            guard age >= -ClaudeContextUsageConstants.clockSkewTolerance else {
+                return nil
+            }
+            return cachedValue.snapshot
+        }
+
+        guard let data = try? Data(contentsOf: snapshotURL),
+              let snapshot = try? JSONDecoder().decode(ClaudeContextUsageSnapshot.self, from: data) else {
+            Self.cache.set(nil)
+            return nil
+        }
+
         if !sessionIds.isEmpty, !sessionIds.contains(snapshot.sessionId) {
+            Self.cache.set(nil)
             return nil
         }
 
         let age = now.timeIntervalSince(snapshot.updatedAt)
-        guard age >= -30 else {
+        guard age >= -ClaudeContextUsageConstants.clockSkewTolerance else {
+            Self.cache.set(nil)
             return nil
         }
+
+        Self.cache.set(CachedSnapshot(
+            snapshotURL: normalizedSnapshotURL,
+            snapshot: snapshot,
+            fileModificationDate: modDate
+        ))
         return snapshot
     }
 }

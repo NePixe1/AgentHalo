@@ -190,7 +190,7 @@ public struct SessionReducer: Sendable {
                 if inFlightTools > 0 {
                     snapshot.state = .working
                 } else if liveTracking {
-                    extendWorkingVisibility(seconds: 1.8, now: now)
+                    extendWorkingVisibility(seconds: ClaudeContextUsageConstants.workingVisibilityExtension, now: now)
                     snapshot.state = .working
                     snapshot.action = "Reviewing result"
                 } else {

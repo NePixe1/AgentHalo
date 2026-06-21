@@ -119,6 +119,16 @@ final class DetailsPanel: NSPanel {
         sessionDetails: SessionDetailsSnapshot? = nil,
         showsQuota: Bool? = nil
     ) {
+        #if DEBUG
+        let startTime = CFAbsoluteTimeGetCurrent()
+        defer {
+            let duration = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
+            if duration > 16.67 {
+                NSLog("[Performance] DetailsPanel.update took %.2fms (>1 frame)", duration)
+            }
+        }
+        #endif
+
         titleField.stringValue = aggregate.label
         let rgb = HaloVisualModel.stateColor(aggregate.state)
         titleField.textColor = NSColor(calibratedRed: rgb.red / 255, green: rgb.green / 255, blue: rgb.blue / 255, alpha: 1)

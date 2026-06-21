@@ -138,6 +138,9 @@ func testAcknowledgingCompletedSessionsStoresLatestVisibleCompletionOnly() {
 func testSettingsPersistFormalFieldsAndNormalizePaused() {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-settings-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     let url = root.appendingPathComponent("settings.json")
     let store = SettingsStore(settingsURL: url)
     let installedAt = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
@@ -170,6 +173,9 @@ func testSettingsPersistFormalFieldsAndNormalizePaused() {
 func testSettingsUsesDefaultHaloSizeForLegacyFilesAndClampsInvalidSizes() {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-size-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     let legacyURL = root.appendingPathComponent("legacy.json")
     let smallURL = root.appendingPathComponent("small.json")
     let largeURL = root.appendingPathComponent("large.json")
@@ -233,6 +239,9 @@ func testSettingsUsesDefaultHaloSizeForLegacyFilesAndClampsInvalidSizes() {
 func testSettingsMigratesLegacyAlwaysOnTopOffToDefaultOn() {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-legacy-topmost-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     let url = root.appendingPathComponent("settings.json")
     try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     try! """
@@ -260,6 +269,9 @@ func testSettingsMigratesLegacyAlwaysOnTopOffToDefaultOn() {
 func testSettingsPreservesExplicitAlwaysOnTopOffAfterMigrationVersion() {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-current-topmost-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     let url = root.appendingPathComponent("settings.json")
     let store = SettingsStore(settingsURL: url)
     let settings = HaloSettings(alwaysOnTop: false)
@@ -278,6 +290,9 @@ func testSettingsPreservesExplicitAlwaysOnTopOffAfterMigrationVersion() {
 func testSettingsDefaultsFocusedAgentToCodexWhenMissing() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-focus-legacy-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     let url = root.appendingPathComponent("settings.json")
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     try """
@@ -301,6 +316,9 @@ func testSettingsDefaultsFocusedAgentToCodexWhenMissing() throws {
 func testSettingsPersistsFocusedAgent() {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-focus-persist-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     let url = root.appendingPathComponent("settings.json")
     let store = SettingsStore(settingsURL: url)
     let settings = HaloSettings(focusedAgent: .claudeCode)
@@ -374,6 +392,9 @@ func testToolFailedDoesNotBecomeFatalError() {
 func testClaudeHookConfiguratorWritesUserSettingsNotLegacyClaudeJson() throws {
     let home = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-hook-config-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: home)
+    }
     let claudeDir = home.appendingPathComponent(".claude", isDirectory: true)
     let settingsURL = claudeDir.appendingPathComponent("settings.json")
     let legacyURL = home.appendingPathComponent(".claude.json")
@@ -411,6 +432,9 @@ func testClaudeHookConfiguratorWritesUserSettingsNotLegacyClaudeJson() throws {
 func testClaudeStatusLineConfiguratorPreservesAndChainsExistingCommand() throws {
     let home = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-statusline-config-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: home)
+    }
     let claude = home.appendingPathComponent(".claude", isDirectory: true)
     try FileManager.default.createDirectory(at: claude, withIntermediateDirectories: true)
     let settingsURL = claude.appendingPathComponent("settings.json")
@@ -449,6 +473,9 @@ extension FileHandle {
 func testMonitorHandlesPendingLinesAndTruncation() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-monitor-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     let sessions = root.appendingPathComponent("sessions", isDirectory: true)
     try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
     let file = sessions.appendingPathComponent("session-\(UUID().uuidString).jsonl")
@@ -501,6 +528,9 @@ func testFailureClassification() {
 func testRateLimitReaderFindsNewestTailRateLimit() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-rate-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     let sessions = root.appendingPathComponent("sessions", isDirectory: true)
     try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
     let file = sessions.appendingPathComponent("a.jsonl")
@@ -514,6 +544,9 @@ func testRateLimitReaderFindsNewestTailRateLimit() throws {
 func testRateLimitReaderFindsContextUsageAndResetTimes() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-usage-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     let sessions = root.appendingPathComponent("sessions", isDirectory: true)
     try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
     let file = sessions.appendingPathComponent("usage.jsonl")
@@ -544,6 +577,9 @@ func testClaudeStatusLineUsageParserReadsAuthoritativeContextPercent() {
 func testClaudeContextUsageReaderKeepsLastKnownUsageForMatchingSession() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-claude-context-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     let snapshotURL = root.appendingPathComponent("claude-code-context.json")
     let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
@@ -567,9 +603,38 @@ func testClaudeContextUsageReaderKeepsLastKnownUsageForMatchingSession() throws 
     )
 }
 
+func testClaudeContextUsageReaderDoesNotShareSnapshotsAcrossFiles() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-claude-context-cache-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let firstURL = root.appendingPathComponent("first.json")
+    let secondURL = root.appendingPathComponent("second.json")
+    let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
+    let first = ClaudeContextUsageSnapshot(sessionId: "shared-session", usedPercent: 10, updatedAt: now)
+    let second = ClaudeContextUsageSnapshot(sessionId: "shared-session", usedPercent: 90, updatedAt: now)
+
+    try JSONEncoder().encode(first).write(to: firstURL)
+    try JSONEncoder().encode(second).write(to: secondURL)
+    let sharedModificationDate = ISO8601DateFormatter().date(from: "2026-06-21T07:59:00Z")!
+    try FileManager.default.setAttributes([.modificationDate: sharedModificationDate], ofItemAtPath: firstURL.path)
+    try FileManager.default.setAttributes([.modificationDate: sharedModificationDate], ofItemAtPath: secondURL.path)
+
+    let firstRead = ClaudeContextUsageReader(snapshotURL: firstURL).read(sessionIds: ["shared-session"], now: now)
+    let secondRead = ClaudeContextUsageReader(snapshotURL: secondURL).read(sessionIds: ["shared-session"], now: now)
+
+    expect(firstRead?.usedPercent, 10, "first Claude context reader should read its own snapshot")
+    expect(secondRead?.usedPercent, 90, "second Claude context reader should not reuse another file's snapshot")
+}
+
 func testClaudeStatusLineProxyRuntimeCapturesUsageAndForwardsInput() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-statusline-runtime-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     let snapshotURL = root.appendingPathComponent("claude-code-context.json")
     let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
     let input = Data(#"{"session_id":"cc-session","context_window":{"used_percentage":61.5,"context_window_size":200000}}"#.utf8)
@@ -1024,6 +1089,9 @@ func testClaudeHookReducerPreCompactShowsExecutingThenRestoresToThinking() {
 func testClaudeHookMonitorPrunesStaleReducers() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-claude-hook-prune-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     let statusFile = root.appendingPathComponent("claude-code-status.jsonl")
     let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
@@ -1055,6 +1123,9 @@ func testClaudeHookMonitorPrunesStaleReducers() throws {
 func testClaudeMonitorHandlesDiscoveryPendingLinesAndTruncation() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-claude-monitor-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     let projects = root.appendingPathComponent("projects", isDirectory: true)
     let project = projects.appendingPathComponent("-Users-wjs-work-pyproj-AgentHalo", isDirectory: true)
     try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
@@ -1083,6 +1154,9 @@ func testClaudeMonitorHandlesDiscoveryPendingLinesAndTruncation() throws {
 func testClaudeHookMonitorHandlesPendingLinesAndTruncation() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-claude-hook-monitor-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     let statusFile = root.appendingPathComponent("claude-code-status.jsonl")
     let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
@@ -1109,6 +1183,9 @@ func testClaudeHookMonitorHandlesPendingLinesAndTruncation() throws {
 func testClaudeMonitorIgnoresSubagentTranscripts() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-claude-subagents-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     let projects = root.appendingPathComponent("projects", isDirectory: true)
     let project = projects.appendingPathComponent("-Users-wjs-work-pyproj-AgentHalo", isDirectory: true)
     let subagents = project
@@ -1407,6 +1484,9 @@ func testPlanModeFlagResetsAfterFatalTurn() {
 func testDiagnosticsCreatesParentDirectoryForOutput() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-diagnostics-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     let output = root.appendingPathComponent("self-test.txt")
     try DiagnosticsOutput.write("PASS\n", to: output.path(percentEncoded: false))
     expect(FileManager.default.fileExists(atPath: output.path(percentEncoded: false)), "diagnostics output should create parent directory")
@@ -1519,6 +1599,11 @@ do {
 testClaudeStatusLineUsageParserReadsAuthoritativeContextPercent()
 do {
     try testClaudeContextUsageReaderKeepsLastKnownUsageForMatchingSession()
+} catch {
+    fatalError("\(error)")
+}
+do {
+    try testClaudeContextUsageReaderDoesNotShareSnapshotsAcrossFiles()
 } catch {
     fatalError("\(error)")
 }

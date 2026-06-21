@@ -798,12 +798,14 @@ private func testClaudeContextUsesRawSessionAfterCompletionAcknowledgement() {
         focusedAgent: .claudeCode
     )
 
+    let testQueue = DispatchQueue(label: "com.agenthalo.test-context-reader")
     let percent = AppDelegate.contextUsedPercentForDetails(
         focusedAgent: .claudeCode,
         quota: nil,
         displayedAggregate: acknowledgedAggregate,
         rawClaudeSnapshots: [rawClaudeSession],
         claudeContextUsageReader: ClaudeContextUsageReader(snapshotURL: snapshotURL),
+        contextReaderQueue: testQueue,
         now: now
     )
 
@@ -816,6 +818,7 @@ private func testClaudeContextSurvivesHookSnapshotPruning() {
         .appendingPathComponent("agent-halo-claude-context-pruned-\(UUID().uuidString)", isDirectory: true)
     let snapshotURL = root.appendingPathComponent("claude-code-context.json")
     try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let testQueue = DispatchQueue(label: "com.agenthalo.test-context-reader")
     let now = Date()
     let context = ClaudeContextUsageSnapshot(
         sessionId: "cc-recent",
@@ -849,6 +852,7 @@ private func testClaudeContextSurvivesHookSnapshotPruning() {
         displayedAggregate: readyAggregate,
         rawClaudeSnapshots: [],
         claudeContextUsageReader: ClaudeContextUsageReader(snapshotURL: snapshotURL),
+        contextReaderQueue: testQueue,
         now: now
     )
 

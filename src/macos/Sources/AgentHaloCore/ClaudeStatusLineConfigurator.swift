@@ -35,45 +35,54 @@ public enum ClaudeStatusLineConfigurator {
             return
         }
 
-        var settings: [String: Any]
-        if let data = try? Data(contentsOf: settingsURL),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            settings = json
-        } else {
-            settings = [:]
-        }
+        let coordinator = NSFileCoordinator()
+        var coordinatorError: NSError?
 
-        var statusLine = (settings["statusLine"] as? [String: Any]) ?? [:]
-        let currentCommand = statusLine["command"] as? String ?? ""
-        let alreadyUsesProxy = currentCommand.contains("claude-code-statusline-proxy")
+        coordinator.coordinate(writingItemAt: settingsURL, options: [], error: &coordinatorError) { url in
+            var settings: [String: Any]
+            if let data = try? Data(contentsOf: url),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                settings = json
+            } else {
+                settings = [:]
+            }
 
-        if !currentCommand.isEmpty, !alreadyUsesProxy {
-            do {
-                try Data(currentCommand.utf8).write(to: originalCommandURL, options: [.atomic])
-            } catch {
-                AgentHaloLogger.log("ClaudeStatusLineConfigurator: failed to preserve original command: \(error)")
+            var statusLine = (settings["statusLine"] as? [String: Any]) ?? [:]
+            let currentCommand = statusLine["command"] as? String ?? ""
+            let alreadyUsesProxy = currentCommand.contains("claude-code-statusline-proxy")
+
+            if !currentCommand.isEmpty, !alreadyUsesProxy {
+                do {
+                    try Data(currentCommand.utf8).write(to: originalCommandURL, options: [.atomic])
+                } catch {
+                    AgentHaloLogger.log("ClaudeStatusLineConfigurator: failed to preserve original command: \(error)")
+                    return
+                }
+            }
+
+            guard currentCommand != installedProxy.path else {
                 return
+            }
+
+            statusLine["type"] = "command"
+            statusLine["command"] = installedProxy.path
+            settings["statusLine"] = statusLine
+
+            do {
+                try fileManager.createDirectory(
+                    at: url.deletingLastPathComponent(),
+                    withIntermediateDirectories: true,
+                    attributes: [.posixPermissions: 0o700]
+                )
+                let data = try JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys])
+                try data.write(to: url, options: [.atomic])
+            } catch {
+                AgentHaloLogger.log("ClaudeStatusLineConfigurator: failed to update settings: \(error)")
             }
         }
 
-        guard currentCommand != installedProxy.path else {
-            return
-        }
-
-        statusLine["type"] = "command"
-        statusLine["command"] = installedProxy.path
-        settings["statusLine"] = statusLine
-
-        do {
-            try fileManager.createDirectory(
-                at: settingsURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-            let data = try JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: settingsURL, options: [.atomic])
-        } catch {
-            AgentHaloLogger.log("ClaudeStatusLineConfigurator: failed to update settings: \(error)")
+        if let error = coordinatorError {
+            AgentHaloLogger.log("ClaudeStatusLineConfigurator: file coordination failed: \(error)")
         }
     }
 
