@@ -280,6 +280,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func recoverHaloIfOffscreen() {
+        guard let panel else {
+            return
+        }
         let visibleFrames = NSScreen.screens.map(\.visibleFrame)
         guard !Self.isHaloFrameVisible(panel.frame, in: visibleFrames) else {
             return
