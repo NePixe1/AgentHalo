@@ -23,6 +23,7 @@ func runHaloInteractionChecks() {
     testDraggingHaloSuppressesHoverDetails()
     testDraggingHaloPausesAnimationDuringDrag()
     testHaloSizeResizeKeepsWindowOrigin()
+    testHaloFrameVisibilityAcrossScreens()
     testHaloViewResizeKeepsAnimationMoving()
     testHaloViewSystemOverlaySuspensionStopsAnimation()
     testPreviewSubmenuMarksLiveStateInitially()
@@ -45,6 +46,26 @@ func runHaloInteractionChecks() {
     testClaudeContextUsesRawSessionAfterCompletionAcknowledgement()
     testClaudeContextSurvivesHookSnapshotPruning()
     testDetailsPanelSwitchCallbackSelectsClaudeCode()
+}
+
+@MainActor
+private func testHaloFrameVisibilityAcrossScreens() {
+    let screens = [
+        NSRect(x: 0, y: 0, width: 1440, height: 900),
+        NSRect(x: 1440, y: 0, width: 1920, height: 1080)
+    ]
+    expect(
+        AppDelegate.isHaloFrameVisible(NSRect(x: 1200, y: 700, width: 112, height: 112), in: screens),
+        "halo wholly inside a screen should remain visible"
+    )
+    expect(
+        AppDelegate.isHaloFrameVisible(NSRect(x: 3320, y: 900, width: 112, height: 112), in: screens),
+        "halo partially intersecting a screen should remain visible"
+    )
+    expect(
+        !AppDelegate.isHaloFrameVisible(NSRect(x: 3500, y: 1200, width: 112, height: 112), in: screens),
+        "halo outside every screen should be recovered"
+    )
 }
 
 @MainActor

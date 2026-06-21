@@ -32,7 +32,7 @@ private func testHaloFrameVisibilityAcrossScreens() {
         "halo wholly inside a screen should remain visible"
     )
     expect(
-        AppDelegate.isHaloFrameVisible(NSRect(x: 3380, y: 900, width: 112, height: 112), in: screens),
+        AppDelegate.isHaloFrameVisible(NSRect(x: 3320, y: 900, width: 112, height: 112), in: screens),
         "halo partially intersecting a screen should remain visible"
     )
     expect(

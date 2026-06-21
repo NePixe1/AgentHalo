@@ -56,6 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         createStatusItem()
         createHaloPanel()
+        recoverHaloIfOffscreen()
         registerSystemOverlayObservers()
         updateSystemOverlaySuspension(for: NSWorkspace.shared.frontmostApplication)
         tick()
@@ -67,6 +68,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsSaveTimer?.invalidate()
         saveWindowPosition()
         settingsStore.save(settings)
+    }
+
+    func applicationDidChangeScreenParameters(_ notification: Notification) {
+        recoverHaloIfOffscreen()
     }
 
     @objc private func timerDidFire() {
@@ -272,6 +277,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settings.top = origin.y
         settings.hasPosition = true
         settingsStore.save(settings)
+    }
+
+    private func recoverHaloIfOffscreen() {
+        let visibleFrames = NSScreen.screens.map(\.visibleFrame)
+        guard !Self.isHaloFrameVisible(panel.frame, in: visibleFrames) else {
+            return
+        }
+        escapeOffscreen()
     }
 
     @objc private func haloSizeSliderChanged(_ sender: NSSlider) {
@@ -699,6 +712,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static func haloFrameByKeepingOrigin(oldFrame: NSRect, requestedSize: CGFloat) -> NSRect {
         let size = CGFloat(HaloSettings.clampedHaloSize(Double(requestedSize)))
         return NSRect(x: oldFrame.origin.x, y: oldFrame.origin.y, width: size, height: size)
+    }
+
+    static func isHaloFrameVisible(_ frame: NSRect, in visibleFrames: [NSRect]) -> Bool {
+        visibleFrames.contains { $0.intersects(frame) }
     }
 
     private struct PreviewPayload: Equatable {
