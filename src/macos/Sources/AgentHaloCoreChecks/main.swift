@@ -342,6 +342,26 @@ func testWorkingVisibilityLiveCallOutputAndInitialTail() {
     expect(initial.snapshot.state, .thinking, "initial tail output should not fake working")
 }
 
+func testSessionReducerCapturesCodexSessionDetailsAndRateLimitAvailability() {
+    var reducer = SessionReducer(filePath: "/tmp/codex-session-details.jsonl")
+    reducer.consume(jsonLine: #"{"type":"session_meta","payload":{"id":"codex-details","cwd":"/Users/wjs/work/pyproj/AgentHalo"}}"#)
+    reducer.consume(jsonLine: #"{"type":"turn_context","payload":{"model":"gpt-5.5"}}"#)
+    reducer.consume(jsonLine: #"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":38000,"output_tokens":1200},"last_token_usage":{"input_tokens":20000},"model_context_window":100000}}}"#)
+
+    expect(reducer.snapshot.projectName, "AgentHalo", "Codex detail project")
+    expect(reducer.snapshot.modelName, "gpt-5.5", "Codex detail model")
+    expect(reducer.snapshot.inputTokens, 38_000, "Codex detail input tokens")
+    expect(reducer.snapshot.outputTokens, 1_200, "Codex detail output tokens")
+    expect(reducer.snapshot.hasRateLimits, false, "third-party Codex should have no rate limits")
+    expect(reducer.snapshot.contextUsedPercent, 20, "Codex context should come from the current session")
+
+    reducer.consume(jsonLine: #"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":40000,"output_tokens":1500}},"rate_limits":{"primary":{},"secondary":{}}}}"#)
+
+    expect(reducer.snapshot.inputTokens, 40_000, "Codex detail input tokens should refresh")
+    expect(reducer.snapshot.outputTokens, 1_500, "Codex detail output tokens should refresh")
+    expect(reducer.snapshot.hasRateLimits, true, "subscription Codex should report rate limits")
+}
+
 func testToolFailedDoesNotBecomeFatalError() {
     let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
     var reducer = SessionReducer(filePath: "/tmp/tool-failed.jsonl", now: now, liveTracking: true)
@@ -508,13 +528,16 @@ func testRateLimitReaderFindsContextUsageAndResetTimes() throws {
 
 func testClaudeStatusLineUsageParserReadsAuthoritativeContextPercent() {
     let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
-    let data = Data(#"{"session_id":"cc-session","context_window":{"used_percentage":52.75,"remaining_percentage":47.25,"context_window_size":200000}}"#.utf8)
+    let data = Data(#"{"session_id":"cc-session","model":{"id":"claude-sonnet-4","display_name":"Sonnet 4"},"context_window":{"used_percentage":52.75,"remaining_percentage":47.25,"context_window_size":200000,"total_input_tokens":38000,"total_output_tokens":1200}}"#.utf8)
 
     let snapshot = ClaudeStatusLineUsageParser.parse(data: data, updatedAt: now)
 
     expect(snapshot?.sessionId, "cc-session", "Claude context session id")
     expect(snapshot?.usedPercent, 52.75, "Claude authoritative context percent")
     expect(snapshot?.contextWindowSize, 200_000, "Claude context window size")
+    expect(snapshot?.modelName, "claude-sonnet-4", "Claude detail model")
+    expect(snapshot?.inputTokens, 38_000, "Claude detail input tokens")
+    expect(snapshot?.outputTokens, 1_200, "Claude detail output tokens")
     expect(snapshot?.updatedAt, now, "Claude context capture time")
 }
 
@@ -1464,6 +1487,7 @@ do {
 testSettingsPersistsFocusedAgent()
 testAcknowledgedErrorVisibilityUsesLatestErrorTime()
 testWorkingVisibilityLiveCallOutputAndInitialTail()
+testSessionReducerCapturesCodexSessionDetailsAndRateLimitAvailability()
 testToolFailedDoesNotBecomeFatalError()
 do {
     try testClaudeHookConfiguratorWritesUserSettingsNotLegacyClaudeJson()

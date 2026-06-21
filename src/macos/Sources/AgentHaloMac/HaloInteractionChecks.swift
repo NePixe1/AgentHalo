@@ -40,9 +40,11 @@ func runHaloInteractionChecks() {
     testFocusSubmenuSwitchesToClaudeCode()
     testSingleClickDoesNotActivateCodexWhenClaudeCodeFocused()
     testDetailsPanelShowsCodexQuotaAndIdleCopy()
+    testDetailsPanelShowsSessionMetadataForCodexAndClaudeCode()
     testDetailsPanelShowsExpiredQuotaAsWaitingForRefresh()
     testDetailsPanelShowsAnswerStreamingCopy()
     testDetailsPanelShowsContextAndHidesQuotaForClaudeCode()
+    testDetailsPresentationUsesFocusedSessionAndRejectsStaleQuota()
     testClaudeContextUsesRawSessionAfterCompletionAcknowledgement()
     testClaudeContextSurvivesHookSnapshotPruning()
     testDetailsPanelSwitchCallbackSelectsClaudeCode()
@@ -538,6 +540,57 @@ private func testDetailsPanelShowsCodexQuotaAndIdleCopy() {
 }
 
 @MainActor
+private func testDetailsPanelShowsSessionMetadataForCodexAndClaudeCode() {
+    let panel = DetailsPanel()
+    let codex = AggregateSnapshot(
+        state: .working,
+        label: "EXECUTING",
+        detail: "AgentHalo - Running command",
+        sessions: [],
+        focusedAgent: .codex
+    )
+    let details = SessionDetailsSnapshot(
+        projectName: "AgentHalo",
+        modelName: "gpt-5.5",
+        inputTokens: 38_000,
+        outputTokens: 1_200
+    )
+
+    panel.update(
+        aggregate: codex,
+        quota: nil,
+        contextUsedPercent: 42,
+        sessionDetails: details,
+        showsQuota: false
+    )
+
+    expect(panel.primaryQuotaHiddenForTesting, "third-party Codex quota should be hidden")
+    expect(!panel.metadataGroupHiddenForTesting, "third-party Codex metadata should be visible")
+    expect(panel.projectValueForTesting, "AgentHalo", "details project value")
+    expect(panel.modelValueForTesting, "gpt-5.5", "details model value")
+    expect(panel.tokenValueForTesting, "输入 38k · 输出 1.2k", "details token value")
+
+    let claude = AggregateSnapshot(
+        state: .working,
+        label: "EXECUTING",
+        detail: "AgentHalo - Running command",
+        sessions: [],
+        focusedAgent: .claudeCode
+    )
+    panel.update(
+        aggregate: claude,
+        quota: nil,
+        contextUsedPercent: 58,
+        sessionDetails: details,
+        showsQuota: false
+    )
+
+    expect(panel.focusedAgentForTesting == .claudeCode, "details panel should select Claude Code")
+    expect(!panel.metadataGroupHiddenForTesting, "Claude Code metadata should be visible")
+    expect(panel.tokenValueForTesting, "输入 38k · 输出 1.2k", "Claude Code token value")
+}
+
+@MainActor
 private func testDetailsPanelShowsExpiredQuotaAsWaitingForRefresh() {
     let panel = DetailsPanel()
     let aggregate = AggregateSnapshot(
@@ -600,6 +653,116 @@ private func testDetailsPanelShowsContextAndHidesQuotaForClaudeCode() {
     expect(panel.contextValueForTesting == "上下文 58%", "Claude Code context percent should be shown")
     expect(panel.primaryQuotaHiddenForTesting == true, "Claude Code primary quota should be hidden")
     expect(panel.secondaryQuotaHiddenForTesting == true, "Claude Code secondary quota should be hidden")
+}
+
+@MainActor
+private func testDetailsPresentationUsesFocusedSessionAndRejectsStaleQuota() {
+    let now = Date()
+    let thirdPartySession = SessionSnapshot(
+        threadId: "codex-third-party",
+        projectName: "AgentHalo",
+        workingDirectory: "/tmp/AgentHalo",
+        state: .working,
+        action: "Running command",
+        lastEventAt: now,
+        completedAt: nil,
+        active: true,
+        modelName: "gpt-5.5",
+        inputTokens: 38_000,
+        outputTokens: 1_200,
+        hasRateLimits: false,
+        contextUsedPercent: 20
+    )
+    let staleQuota = RateLimitSnapshot(
+        primaryUsedPercent: 20,
+        secondaryUsedPercent: 80,
+        contextUsedPercent: 42
+    )
+    let codexAggregate = AggregateSnapshot(
+        state: .working,
+        label: "EXECUTING",
+        detail: "AgentHalo - Running command",
+        sessions: [thirdPartySession],
+        focusedAgent: .codex
+    )
+
+    let thirdParty = AppDelegate.detailsPresentationForDetails(
+        focusedAgent: .codex,
+        displayedAggregate: codexAggregate,
+        rawClaudeSnapshots: [],
+        quota: staleQuota,
+        claudeUsage: nil
+    )
+    expect(!thirdParty.showsQuota, "stale global quota must not override current third-party Codex session")
+    expect(thirdParty.sessionDetails.modelName, "gpt-5.5", "Codex details should use focused session model")
+    expect(thirdParty.contextUsedPercent, 20, "Codex context should use the focused session rather than stale quota")
+
+    var subscriptionSession = thirdPartySession
+    subscriptionSession.hasRateLimits = true
+    let subscriptionAggregate = AggregateSnapshot(
+        state: .working,
+        label: "EXECUTING",
+        detail: "AgentHalo - Running command",
+        sessions: [subscriptionSession],
+        focusedAgent: .codex
+    )
+    let subscription = AppDelegate.detailsPresentationForDetails(
+        focusedAgent: .codex,
+        displayedAggregate: subscriptionAggregate,
+        rawClaudeSnapshots: [],
+        quota: staleQuota,
+        claudeUsage: nil
+    )
+    expect(subscription.showsQuota, "Codex session with rate limits should keep quota UI")
+
+    let claudeSession = SessionSnapshot(
+        threadId: "cc-current",
+        projectName: "AgentHalo",
+        workingDirectory: "/tmp/AgentHalo",
+        state: .working,
+        action: "Thinking",
+        lastEventAt: now,
+        completedAt: nil,
+        active: true,
+        agent: .claudeCode
+    )
+    let claudeAggregate = AggregateSnapshot(
+        state: .working,
+        label: "THINKING",
+        detail: "AgentHalo - Thinking",
+        sessions: [claudeSession],
+        focusedAgent: .claudeCode
+    )
+    let matchingUsage = ClaudeContextUsageSnapshot(
+        sessionId: "cc-current",
+        usedPercent: 58,
+        modelName: "claude-sonnet-4",
+        inputTokens: 38_000,
+        outputTokens: 1_200,
+        updatedAt: now
+    )
+    let claude = AppDelegate.detailsPresentationForDetails(
+        focusedAgent: .claudeCode,
+        displayedAggregate: claudeAggregate,
+        rawClaudeSnapshots: [claudeSession],
+        quota: nil,
+        claudeUsage: matchingUsage
+    )
+    expect(!claude.showsQuota, "Claude Code should use metadata UI")
+    expect(claude.contextUsedPercent, 58, "Claude Code should retain context usage")
+    expect(claude.sessionDetails.modelName, "claude-sonnet-4", "Claude details should use matching statusline model")
+
+    var mismatchedUsage = matchingUsage
+    mismatchedUsage.sessionId = "cc-other"
+    let mismatched = AppDelegate.detailsPresentationForDetails(
+        focusedAgent: .claudeCode,
+        displayedAggregate: claudeAggregate,
+        rawClaudeSnapshots: [claudeSession],
+        quota: nil,
+        claudeUsage: mismatchedUsage
+    )
+    expect(mismatched.sessionDetails.modelName == nil, "Claude details must reject another session's model")
+    expect(mismatched.contextUsedPercent == nil, "Claude details must reject another session's context usage")
 }
 
 @MainActor

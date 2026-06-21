@@ -12,6 +12,10 @@ final class DetailsPanel: NSPanel {
     private let agentToggle = AgentToggleView()
     private let contextPill = NSView()
     private let quotaGroup = NSStackView()
+    private let metadataGroup = NSStackView()
+    private let projectRow = MetadataRowView(title: "项目")
+    private let modelRow = MetadataRowView(title: "模型")
+    private let tokenRow = MetadataRowView(title: "Token", showsSeparator: false)
     var onMouseEntered: (() -> Void)?
     var onMouseExited: (() -> Void)?
     var onAgentSelected: ((AgentKind) -> Void)?
@@ -70,6 +74,16 @@ final class DetailsPanel: NSPanel {
         quotaGroup.addArrangedSubview(secondaryQuota)
         stack.addArrangedSubview(quotaGroup)
 
+        metadataGroup.orientation = .vertical
+        metadataGroup.spacing = 0
+        metadataGroup.alignment = .leading
+        metadataGroup.translatesAutoresizingMaskIntoConstraints = false
+        metadataGroup.addArrangedSubview(projectRow)
+        metadataGroup.addArrangedSubview(modelRow)
+        metadataGroup.addArrangedSubview(tokenRow)
+        metadataGroup.isHidden = true
+        stack.addArrangedSubview(metadataGroup)
+
         let rootView = TrackingDetailsContentView()
         rootView.owner = self
         contentView = rootView
@@ -90,14 +104,20 @@ final class DetailsPanel: NSPanel {
             detailField.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
             quotaGroup.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
             primaryQuota.trailingAnchor.constraint(equalTo: quotaGroup.trailingAnchor),
-            secondaryQuota.trailingAnchor.constraint(equalTo: quotaGroup.trailingAnchor)
+            secondaryQuota.trailingAnchor.constraint(equalTo: quotaGroup.trailingAnchor),
+            metadataGroup.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
+            projectRow.trailingAnchor.constraint(equalTo: metadataGroup.trailingAnchor),
+            modelRow.trailingAnchor.constraint(equalTo: metadataGroup.trailingAnchor),
+            tokenRow.trailingAnchor.constraint(equalTo: metadataGroup.trailingAnchor)
         ])
     }
 
     func update(
         aggregate: AggregateSnapshot,
         quota: RateLimitSnapshot?,
-        contextUsedPercent: Double?
+        contextUsedPercent: Double?,
+        sessionDetails: SessionDetailsSnapshot? = nil,
+        showsQuota: Bool? = nil
     ) {
         titleField.stringValue = aggregate.label
         let rgb = HaloVisualModel.stateColor(aggregate.state)
@@ -106,7 +126,7 @@ final class DetailsPanel: NSPanel {
 
         agentToggle.setAgent(aggregate.focusedAgent)
 
-        let showsCodexQuota = aggregate.focusedAgent == .codex
+        let showsCodexQuota = showsQuota ?? (aggregate.focusedAgent == .codex)
         contextPill.isHidden = contextUsedPercent == nil
         contextValue.stringValue = contextUsedPercent.map {
             "上下文 \(Int($0.rounded()))%"
@@ -114,6 +134,10 @@ final class DetailsPanel: NSPanel {
         quotaGroup.isHidden = !showsCodexQuota
         primaryQuota.isHidden = !showsCodexQuota
         secondaryQuota.isHidden = !showsCodexQuota
+        metadataGroup.isHidden = showsCodexQuota
+        projectRow.value = Self.displayValue(sessionDetails?.projectName)
+        modelRow.value = Self.displayValue(sessionDetails?.modelName)
+        tokenRow.value = "输入 \(Self.compactTokenCount(sessionDetails?.inputTokens)) · 输出 \(Self.compactTokenCount(sessionDetails?.outputTokens))"
 
         guard showsCodexQuota else {
             primaryQuota.updateUnavailable()
@@ -146,6 +170,27 @@ final class DetailsPanel: NSPanel {
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.dateFormat = calendar.isDateInToday(date) ? "HH:mm '刷新'" : "M月d日 HH:mm '刷新'"
         return formatter.string(from: date)
+    }
+
+    static func compactTokenCount(_ count: Int64?) -> String {
+        guard let count else {
+            return "--"
+        }
+        guard count >= 1_000 else {
+            return String(count)
+        }
+        let thousands = Double(count) / 1_000
+        if thousands.rounded() == thousands {
+            return "\(Int(thousands))k"
+        }
+        return String(format: "%.1fk", locale: Locale(identifier: "en_US_POSIX"), thousands)
+    }
+
+    private static func displayValue(_ value: String?) -> String {
+        guard let value, !value.isEmpty else {
+            return "--"
+        }
+        return value
     }
 
     static func localizedDetail(for aggregate: AggregateSnapshot) -> String {
@@ -238,9 +283,77 @@ final class DetailsPanel: NSPanel {
         secondaryQuota.valueForTesting
     }
 
+    var metadataGroupHiddenForTesting: Bool {
+        metadataGroup.isHidden
+    }
+
+    var projectValueForTesting: String {
+        projectRow.value
+    }
+
+    var modelValueForTesting: String {
+        modelRow.value
+    }
+
+    var tokenValueForTesting: String {
+        tokenRow.value
+    }
+
     func selectAgentForTesting(_ agent: AgentKind) {
         agentToggle.setAgent(agent)
         onAgentSelected?(agent)
+    }
+}
+
+@MainActor
+private final class MetadataRowView: NSView {
+    private let nameField: NSTextField
+    private let valueField = NSTextField(labelWithString: "--")
+    private let separator = NSView()
+
+    var value: String {
+        get { valueField.stringValue }
+        set { valueField.stringValue = newValue }
+    }
+
+    init(title: String, showsSeparator: Bool = true) {
+        nameField = NSTextField(labelWithString: title)
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        nameField.font = .systemFont(ofSize: 12, weight: .semibold)
+        nameField.textColor = .labelColor
+        valueField.font = .systemFont(ofSize: 12, weight: .semibold)
+        valueField.textColor = .labelColor
+        valueField.alignment = .right
+        valueField.lineBreakMode = .byTruncatingTail
+        valueField.maximumNumberOfLines = 1
+        separator.wantsLayer = true
+        separator.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.55).cgColor
+        separator.isHidden = !showsSeparator
+
+        [nameField, valueField, separator].forEach {
+            $0.translatesAutoresizingMaskIntoConstraints = false
+            addSubview($0)
+        }
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 29),
+            nameField.leadingAnchor.constraint(equalTo: leadingAnchor),
+            nameField.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -1),
+            nameField.widthAnchor.constraint(equalToConstant: 52),
+            valueField.leadingAnchor.constraint(greaterThanOrEqualTo: nameField.trailingAnchor, constant: 10),
+            valueField.trailingAnchor.constraint(equalTo: trailingAnchor),
+            valueField.centerYAnchor.constraint(equalTo: nameField.centerYAnchor),
+            separator.leadingAnchor.constraint(equalTo: leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: trailingAnchor),
+            separator.bottomAnchor.constraint(equalTo: bottomAnchor),
+            separator.heightAnchor.constraint(equalToConstant: 1)
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
     }
 }
 

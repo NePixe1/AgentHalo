@@ -43,6 +43,11 @@ public struct SessionSnapshot: Equatable, Sendable {
     public var completedAt: Date?
     public var active: Bool
     public var agent: AgentKind
+    public var modelName: String?
+    public var inputTokens: Int64?
+    public var outputTokens: Int64?
+    public var hasRateLimits: Bool?
+    public var contextUsedPercent: Double?
 
     public init(
         threadId: String,
@@ -53,7 +58,12 @@ public struct SessionSnapshot: Equatable, Sendable {
         lastEventAt: Date,
         completedAt: Date?,
         active: Bool,
-        agent: AgentKind = .codex
+        agent: AgentKind = .codex,
+        modelName: String? = nil,
+        inputTokens: Int64? = nil,
+        outputTokens: Int64? = nil,
+        hasRateLimits: Bool? = nil,
+        contextUsedPercent: Double? = nil
     ) {
         self.threadId = threadId
         self.projectName = projectName
@@ -64,6 +74,11 @@ public struct SessionSnapshot: Equatable, Sendable {
         self.completedAt = completedAt
         self.active = active
         self.agent = agent
+        self.modelName = modelName
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+        self.hasRateLimits = hasRateLimits
+        self.contextUsedPercent = contextUsedPercent
     }
 }
 
@@ -89,6 +104,25 @@ public struct AggregateSnapshot: Equatable, Sendable {
         self.sessions = sessions
         self.focusedAgent = focusedAgent
         self.answerStreaming = answerStreaming
+    }
+}
+
+public struct SessionDetailsSnapshot: Equatable, Sendable {
+    public var projectName: String?
+    public var modelName: String?
+    public var inputTokens: Int64?
+    public var outputTokens: Int64?
+
+    public init(
+        projectName: String? = nil,
+        modelName: String? = nil,
+        inputTokens: Int64? = nil,
+        outputTokens: Int64? = nil
+    ) {
+        self.projectName = projectName
+        self.modelName = modelName
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
     }
 }
 

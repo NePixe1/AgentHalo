@@ -5,6 +5,12 @@ private let haloSizeMenuWidth: CGFloat = 252
 private let haloSizeMenuHeight: CGFloat = 44
 private let haloSizeMenuTextInset: CGFloat = 21
 
+struct DetailsPresentation: Equatable {
+    var sessionDetails: SessionDetailsSnapshot
+    var showsQuota: Bool
+    var contextUsedPercent: Double?
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let settingsStore: SettingsStore
@@ -426,17 +432,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let displayedAggregate = displayAggregate()
         let quota = settings.focusedAgent == .codex ? rateLimitReader.read() : nil
-        let contextUsedPercent = Self.contextUsedPercentForDetails(
+        let claudeSessionIds = rawClaudeSnapshots.isEmpty
+            ? displayedAggregate.sessions.map(\.threadId)
+            : rawClaudeSnapshots.map(\.threadId)
+        let claudeUsage = settings.focusedAgent == .claudeCode
+            ? claudeContextUsageReader.read(
+                sessionIds: claudeSessionIds.filter { $0 != "claude-code" }
+            )
+            : nil
+        let presentation = Self.detailsPresentationForDetails(
             focusedAgent: settings.focusedAgent,
-            quota: quota,
             displayedAggregate: displayedAggregate,
             rawClaudeSnapshots: rawClaudeSnapshots,
-            claudeContextUsageReader: claudeContextUsageReader
+            quota: quota,
+            claudeUsage: claudeUsage
         )
         detailsPanel.update(
             aggregate: displayedAggregate,
             quota: quota,
-            contextUsedPercent: contextUsedPercent
+            contextUsedPercent: presentation.contextUsedPercent,
+            sessionDetails: presentation.sessionDetails,
+            showsQuota: presentation.showsQuota
         )
         detailsPanel.onMouseEntered = { [weak self] in
             self?.hoverHideTimer?.invalidate()
@@ -471,6 +487,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 sessionIds: comparableSessionIds,
                 now: now
             )?.usedPercent
+        }
+    }
+
+    static func detailsPresentationForDetails(
+        focusedAgent: AgentKind,
+        displayedAggregate: AggregateSnapshot,
+        rawClaudeSnapshots: [SessionSnapshot],
+        quota: RateLimitSnapshot?,
+        claudeUsage: ClaudeContextUsageSnapshot?
+    ) -> DetailsPresentation {
+        switch focusedAgent {
+        case .codex:
+            let session = displayedAggregate.sessions.first
+            let showsQuota = session?.hasRateLimits ?? (quota != nil)
+            return DetailsPresentation(
+                sessionDetails: SessionDetailsSnapshot(
+                    projectName: session?.projectName,
+                    modelName: session?.modelName,
+                    inputTokens: session?.inputTokens,
+                    outputTokens: session?.outputTokens
+                ),
+                showsQuota: showsQuota,
+                contextUsedPercent: session?.contextUsedPercent
+                    ?? (showsQuota ? quota?.contextUsedPercent : nil)
+            )
+        case .claudeCode:
+            let matchingRawSession = claudeUsage.flatMap { usage in
+                rawClaudeSnapshots.first { $0.threadId == usage.sessionId }
+            }
+            let session = matchingRawSession
+                ?? displayedAggregate.sessions.first
+                ?? rawClaudeSnapshots.first
+            let matchingUsage = session.flatMap { session in
+                claudeUsage?.sessionId == session.threadId ? claudeUsage : nil
+            }
+            return DetailsPresentation(
+                sessionDetails: SessionDetailsSnapshot(
+                    projectName: session?.projectName,
+                    modelName: matchingUsage?.modelName,
+                    inputTokens: matchingUsage?.inputTokens,
+                    outputTokens: matchingUsage?.outputTokens
+                ),
+                showsQuota: false,
+                contextUsedPercent: matchingUsage?.usedPercent
+            )
         }
     }
 
