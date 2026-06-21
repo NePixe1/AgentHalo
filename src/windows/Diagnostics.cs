@@ -397,6 +397,21 @@ public static class Diagnostics
                     "removed 150 percent size falls back to 100 percent");
                 Assert(Math.Abs(HaloWindow.DiagnosticSizeForScale(99) - 112) < 0.001,
                     "invalid halo size falls back to 100 percent");
+                List<System.Drawing.Rectangle> displayAreas =
+                    new List<System.Drawing.Rectangle>
+                    {
+                        new System.Drawing.Rectangle(0, 0, 1920, 1040),
+                        new System.Drawing.Rectangle(1920, 0, 2560, 1400)
+                    };
+                Assert(HaloWindow.DiagnosticIsFrameVisible(
+                    new System.Drawing.Rectangle(1800, 900, 112, 112), displayAreas),
+                    "on-screen halo remains visible");
+                Assert(HaloWindow.DiagnosticIsFrameVisible(
+                    new System.Drawing.Rectangle(4440, 1300, 112, 112), displayAreas),
+                    "partially visible halo remains visible");
+                Assert(!HaloWindow.DiagnosticIsFrameVisible(
+                    new System.Drawing.Rectangle(4600, 1500, 112, 112), displayAreas),
+                    "off-screen halo requires recovery");
                 MediaColor workingBlue = HaloVisual.StateColor(HaloState.Working);
                 MediaColor completedGreen = HaloVisual.StateColor(HaloState.Done);
                 Assert(ColorSaturation(workingBlue) >=

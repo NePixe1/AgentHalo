@@ -150,12 +150,12 @@ private void RecoverHaloIfOffscreen()
         .Select(delegate(Forms.Screen screen) { return screen.WorkingArea; });
     if (!DiagnosticIsFrameVisible(frame, areas))
     {
-        EscapeOffscreen();
+        MoveHaloToPrimaryScreen();
     }
 }
 ```
 
-Define `NativeRect` and `GetWindowRect`, call `RecoverHaloIfOffscreen()` immediately after `RestorePosition()`, subscribe to `SystemEvents.DisplaySettingsChanged` in the constructor, dispatch recovery back to the WPF dispatcher in its handler, and unsubscribe in `OnClosing`:
+Define `NativeRect` and `GetWindowRect`, extract the placement-and-save portion of `EscapeOffscreen()` into `MoveHaloToPrimaryScreen()` so automatic recovery does not call `Activate()` or steal focus, call `RecoverHaloIfOffscreen()` immediately after `RestorePosition()`, subscribe to `SystemEvents.DisplaySettingsChanged` in the constructor, dispatch recovery back to the WPF dispatcher in its handler, and unsubscribe in `OnClosing`:
 
 ```csharp
 private void OnDisplaySettingsChanged(object sender, EventArgs e)
