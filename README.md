@@ -69,8 +69,9 @@ OpenAI API key.
 - Right-click for state previews, pause, startup, and exit controls.
 - Use the `光环大小` submenu to select `75% / 100% / 125%`;
   the selected size persists across restarts.
-- If a disconnected display leaves the halo off-screen, right-click its system
-  tray icon and select `脱离卡死` to move it to the primary display.
+- If launch or a display change leaves the halo fully off-screen, Agent Halo
+  automatically returns it to the primary display. Select `脱离卡死` from the
+  context menu to force the same reset manually.
 - Click the halo to bring the Codex window forward.
 
 ## Status language
