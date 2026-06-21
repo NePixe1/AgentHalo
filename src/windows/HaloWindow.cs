@@ -34,6 +34,7 @@ public sealed class HaloWindow : Window
         private static readonly int[] HaloScalePresets = { 75, 100, 125 };
         private readonly HaloSettings settings;
         private readonly CodexSessionMonitor monitor;
+        private readonly ClaudeHookStatusMonitor claudeMonitor;
         private readonly HaloVisual visual;
         private readonly DetailsWindow details;
         private readonly Forms.NotifyIcon tray;
@@ -51,6 +52,8 @@ public sealed class HaloWindow : Window
         private DateTime activeErrorUtc;
         private DateTime errorDimmedUtc;
         private ErrorPresentation errorPresentation = ErrorPresentation.Flashing;
+        private Forms.ToolStripMenuItem codexAgentItem;
+        private Forms.ToolStripMenuItem claudeAgentItem;
 
         public HaloWindow(HaloSettings appSettings)
         {
@@ -81,7 +84,12 @@ public sealed class HaloWindow : Window
             hitSurface.Children.Add(visual);
             Content = hitSurface;
             details = new DetailsWindow();
+            details.AgentSelected += delegate(AgentKind agent)
+            {
+                Dispatcher.BeginInvoke(new Action(delegate { SetFocusedAgent(agent); }));
+            };
             monitor = new CodexSessionMonitor();
+            claudeMonitor = new ClaudeHookStatusMonitor();
             monitor.Changed += delegate { RefreshState(); };
             foregroundTimer = new DispatcherTimer(DispatcherPriority.Background);
             foregroundTimer.Interval = TimeSpan.FromMilliseconds(300);
@@ -170,6 +178,7 @@ public sealed class HaloWindow : Window
 
         private void OnLoaded(object sender, RoutedEventArgs e)
         {
+            ClaudeHookConfigurator.Configure();
             RestorePosition();
             monitor.Start();
             RefreshState();
@@ -184,8 +193,14 @@ public sealed class HaloWindow : Window
 
         private void OnForegroundTick(object sender, EventArgs e)
         {
+            bool claudeChanged = claudeMonitor.Refresh();
+            if (claudeChanged && settings.GetFocusedAgent() == AgentKind.ClaudeCode)
+            {
+                RefreshState();
+            }
             bool codexIsForeground = IsCodexForeground();
-            if (codexIsForeground && !codexWasForeground && !demoState.HasValue &&
+            if (settings.GetFocusedAgent() == AgentKind.Codex &&
+                codexIsForeground && !codexWasForeground && !demoState.HasValue &&
                 aggregate != null && aggregate.State == HaloState.Done)
             {
                 AcknowledgeCompleted();
@@ -257,6 +272,28 @@ public sealed class HaloWindow : Window
 
         private void RefreshState()
         {
+            if (settings.GetFocusedAgent() == AgentKind.ClaudeCode)
+            {
+                claudeMonitor.Refresh();
+                aggregate = GetClaudeAggregate();
+                if (demoState.HasValue)
+                {
+                    aggregate.State = demoState.Value;
+                    aggregate.Label = CodexSessionMonitor.StateLabel(demoState.Value);
+                    aggregate.Detail = "Preview mode";
+                }
+                int claudeCount = aggregate.Sessions == null ? 0 : aggregate.Sessions.Count;
+                visual.SetSteadyDone(false);
+                visual.SetErrorPresentation(demoErrorPresentation ?? ErrorPresentation.Flashing);
+                visual.SetState(aggregate.State, aggregate.Label, claudeCount);
+                visual.SetAnswerStreaming(false);
+                tray.Text = ("Agent Halo · " + aggregate.Label).Substring(0,
+                    Math.Min(63, ("Agent Halo · " + aggregate.Label).Length));
+                details.UpdateContent(aggregate, aggregate.Sessions);
+                UpdateAgentMenuChecks();
+                return;
+            }
+
             aggregate = monitor.GetAggregate(settings);
             bool codexRunning = IsCodexRunning();
             string appFailure;
@@ -272,6 +309,7 @@ public sealed class HaloWindow : Window
                 {
                     ThreadId = "codex-app",
                     ProjectName = "Codex",
+                    Agent = AgentKind.Codex,
                     State = HaloState.Error,
                     Action = appFailure,
                     LastEventUtc = appFailureUtc,
@@ -342,10 +380,12 @@ public sealed class HaloWindow : Window
                     Label = "STANDBY",
                     Detail = "Codex 正在待命",
                     Sessions = aggregate.Sessions,
-                    AnswerStreaming = false
+                    AnswerStreaming = false,
+                    FocusedAgent = AgentKind.Codex
                 };
             }
             details.UpdateContent(displayAggregate, monitor.GetAllRecent());
+            UpdateAgentMenuChecks();
         }
 
         private void OnMouseDown(object sender, MouseButtonEventArgs e)
@@ -397,13 +437,19 @@ public sealed class HaloWindow : Window
             }
             else
             {
-                BringCodexForward();
+                if (settings.GetFocusedAgent() == AgentKind.Codex)
+                {
+                    BringCodexForward();
+                }
             }
         }
 
         private void OnDoubleClick(object sender, MouseButtonEventArgs e)
         {
-            BringCodexForward();
+            if (settings.GetFocusedAgent() == AgentKind.Codex)
+            {
+                BringCodexForward();
+            }
             e.Handled = true;
         }
 
@@ -415,29 +461,51 @@ public sealed class HaloWindow : Window
             }
             else
             {
-                details.Topmost = Topmost;
-                details.UpdateContent(aggregate, monitor.GetAllRecent());
-                PositionDetails();
-                details.Show();
-                details.Activate();
-                Dispatcher.BeginInvoke(DispatcherPriority.Loaded,
-                    new Action(PositionDetails));
+                ShowOrRefreshDetails(true);
             }
         }
 
         private void ShowHoverDetails()
+        {
+            ShowOrRefreshDetails(false);
+        }
+
+        private void ShowOrRefreshDetails(bool activate)
         {
             if (aggregate == null)
             {
                 return;
             }
             details.Topmost = Topmost;
-            details.UpdateContent(aggregate, monitor.GetAllRecent());
+            details.UpdateContent(aggregate, DetailsSessions());
             PositionDetails();
             if (!details.IsVisible)
             {
                 details.Show();
+                details.UpdateLayout();
             }
+            PositionDetails();
+            if (activate)
+            {
+                details.Activate();
+            }
+            QueueDetailsReposition();
+        }
+
+        private void QueueDetailsReposition()
+        {
+            Dispatcher.BeginInvoke(DispatcherPriority.Loaded,
+                new Action(PositionDetails));
+            Dispatcher.BeginInvoke(DispatcherPriority.Render,
+                new Action(PositionDetails));
+        }
+
+        private List<SessionSnapshot> DetailsSessions()
+        {
+            return settings.GetFocusedAgent() == AgentKind.ClaudeCode
+                ? (aggregate == null || aggregate.Sessions == null
+                    ? new List<SessionSnapshot>() : aggregate.Sessions)
+                : monitor.GetAllRecent();
         }
 
         private void PositionDetails()
@@ -449,11 +517,29 @@ public sealed class HaloWindow : Window
             {
                 proposedLeft = Left + Width + gap;
             }
+            double detailHeight = GetDetailsHeightForPosition();
             details.Left = Math.Max(area.Left + 8,
                 Math.Min(proposedLeft, area.Right - details.Width - 8));
             details.Top = Math.Max(area.Top + 8,
-                Math.Min(Top + Height / 2 - details.ActualHeight / 2,
-                    area.Bottom - Math.Max(details.ActualHeight, 230) - 8));
+                Math.Min(Top + Height / 2 - detailHeight / 2,
+                    area.Bottom - Math.Max(detailHeight, 230) - 8));
+        }
+
+        private double GetDetailsHeightForPosition()
+        {
+            if (details.ActualHeight > 0)
+            {
+                return details.ActualHeight;
+            }
+            if (details.DesiredSize.Height > 0)
+            {
+                return details.DesiredSize.Height;
+            }
+            if (!Double.IsNaN(details.Height) && details.Height > 0)
+            {
+                return details.Height;
+            }
+            return 230;
         }
 
         private void SnapToEdges()
@@ -598,6 +684,57 @@ public sealed class HaloWindow : Window
             RefreshState();
         }
 
+        private AggregateSnapshot GetClaudeAggregate()
+        {
+            DateTime now = DateTime.UtcNow;
+            List<SessionSnapshot> sessions = claudeMonitor.Snapshots()
+                .Where(delegate(SessionSnapshot snapshot)
+                {
+                    if (snapshot.State == HaloState.Done)
+                    {
+                        return snapshot.CompletedUtc >= now.AddSeconds(-8);
+                    }
+                    return snapshot.Active ||
+                        (snapshot.State == HaloState.Error &&
+                         snapshot.LastEventUtc >= now.AddHours(-1));
+                })
+                .OrderBy(delegate(SessionSnapshot snapshot)
+                {
+                    return CodexSessionMonitor.StatePriority(snapshot.State);
+                })
+                .ThenByDescending(delegate(SessionSnapshot snapshot)
+                {
+                    return snapshot.LastEventUtc;
+                })
+                .ToList();
+
+            AggregateSnapshot result = new AggregateSnapshot();
+            result.FocusedAgent = AgentKind.ClaudeCode;
+            result.Sessions = sessions;
+            if (settings.Paused)
+            {
+                result.State = HaloState.Idle;
+                result.Label = "PAUSED";
+                result.Detail = "Monitoring paused";
+                return result;
+            }
+            if (sessions.Count == 0)
+            {
+                result.State = HaloState.Idle;
+                result.Label = "READY";
+                result.Detail = "Claude Code is standing by";
+                return result;
+            }
+            SessionSnapshot primary = sessions[0];
+            result.State = primary.State;
+            result.Label = CodexSessionMonitor.StateLabel(primary.State);
+            result.Detail = sessions.Count == 1
+                ? primary.ProjectName + " · " + primary.Action
+                : primary.ProjectName + " +" +
+                    (sessions.Count - 1).ToString(CultureInfo.InvariantCulture);
+            return result;
+        }
+
         private static bool IsCodexRunning()
         {
             try
@@ -664,6 +801,28 @@ public sealed class HaloWindow : Window
             };
             menu.Items.Add(pause);
 
+            Forms.ToolStripMenuItem agentMenu =
+                new Forms.ToolStripMenuItem("监控对象");
+            codexAgentItem = new Forms.ToolStripMenuItem("Codex");
+            claudeAgentItem = new Forms.ToolStripMenuItem("Claude Code");
+            codexAgentItem.Click += delegate
+            {
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    SetFocusedAgent(AgentKind.Codex);
+                }));
+            };
+            claudeAgentItem.Click += delegate
+            {
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    SetFocusedAgent(AgentKind.ClaudeCode);
+                }));
+            };
+            agentMenu.DropDownItems.Add(codexAgentItem);
+            agentMenu.DropDownItems.Add(claudeAgentItem);
+            menu.Items.Add(agentMenu);
+
             menu.Items.Add("脱离卡死（移到主屏右上角）", null, delegate
             {
                 Dispatcher.BeginInvoke(new Action(EscapeOffscreen));
@@ -719,6 +878,33 @@ public sealed class HaloWindow : Window
             });
             Win11MenuRenderer.Apply(menu);
             tray.ContextMenuStrip = menu;
+            UpdateAgentMenuChecks();
+        }
+
+        private void SetFocusedAgent(AgentKind agent)
+        {
+            if (settings.GetFocusedAgent() != agent)
+            {
+                settings.SetFocusedAgent(agent);
+                SettingsStorage.Save(settings);
+            }
+            RefreshState();
+            if (details.IsVisible)
+            {
+                details.UpdateContent(aggregate, DetailsSessions());
+                PositionDetails();
+            }
+        }
+
+        private void UpdateAgentMenuChecks()
+        {
+            if (codexAgentItem == null || claudeAgentItem == null)
+            {
+                return;
+            }
+            AgentKind focused = settings.GetFocusedAgent();
+            codexAgentItem.Checked = focused == AgentKind.Codex;
+            claudeAgentItem.Checked = focused == AgentKind.ClaudeCode;
         }
 
         private void AddPreviewItem(Forms.ToolStripMenuItem parent, string title,

@@ -42,6 +42,10 @@ public static class Program
         public static int Main()
         {
             string[] args = Environment.GetCommandLineArgs();
+            if (args.Length >= 3 && args[1] == "--claude-hook")
+            {
+                return ClaudeHookStatusWriter.WriteFromStandardInput(args[2]);
+            }
             if (args.Length >= 3 && args[1] == "--self-test")
             {
                 return Diagnostics.RunSelfTest(args[2]);
@@ -49,6 +53,10 @@ public static class Program
             if (args.Length >= 3 && args[1] == "--snapshot")
             {
                 return Diagnostics.WriteLiveSnapshot(args[2]);
+            }
+            if (args.Length >= 3 && args[1] == "--claude-snapshot")
+            {
+                return Diagnostics.WriteClaudeSnapshot(args[2]);
             }
 
             Application app = new Application();

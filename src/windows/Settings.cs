@@ -39,13 +39,27 @@ public sealed class HaloSettings
         public Dictionary<string, string> Acknowledged { get; set; }
         public string AcknowledgedErrorAt { get; set; }
         public int HaloScalePercent { get; set; }
+        public string FocusedAgent { get; set; }
 
         public HaloSettings()
         {
             AlwaysOnTop = true;
             HaloScalePercent = 100;
+            FocusedAgent = "codex";
             InstalledAt = DateTime.UtcNow.ToString("o");
             Acknowledged = new Dictionary<string, string>();
+        }
+
+        public AgentKind GetFocusedAgent()
+        {
+            return String.Equals(FocusedAgent, "claudeCode",
+                StringComparison.OrdinalIgnoreCase)
+                ? AgentKind.ClaudeCode : AgentKind.Codex;
+        }
+
+        public void SetFocusedAgent(AgentKind agent)
+        {
+            FocusedAgent = agent == AgentKind.ClaudeCode ? "claudeCode" : "codex";
         }
 
         public DateTime GetInstalledUtc()
@@ -139,6 +153,14 @@ public static class SettingsStorage
                         if (!HaloWindow.IsValidScalePercent(result.HaloScalePercent))
                         {
                             result.HaloScalePercent = 100;
+                            repaired = true;
+                        }
+                        if (!String.Equals(result.FocusedAgent, "codex",
+                                StringComparison.OrdinalIgnoreCase) &&
+                            !String.Equals(result.FocusedAgent, "claudeCode",
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            result.FocusedAgent = "codex";
                             repaired = true;
                         }
                         if (repaired)

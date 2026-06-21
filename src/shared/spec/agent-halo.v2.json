@@ -71,11 +71,11 @@
     "durationByTarget": {"idle": 1.78, "thinking": 1.68, "working": 1.48, "done": 1.72, "attention": 1.02, "error": 0.92}
   },
   "attentionPulse": {
-    "period": 5.8,
+    "period": 3.35,
     "first": {"center": 0.16, "width": 0.095, "strength": 1.0},
-    "second": {"center": 0.38, "width": 0.11, "strength": 0.82},
-    "livingBase": 0.08,
-    "livingAmplitude": 0.05,
+    "second": {"center": 0.37, "width": 0.115, "strength": 0.82},
+    "livingBase": 0.12,
+    "livingAmplitude": 0.065,
     "livingPhase": 0.18
   },
   "errorPresentations": {
