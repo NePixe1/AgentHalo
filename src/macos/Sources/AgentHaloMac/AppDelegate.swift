@@ -693,7 +693,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         haloFrame: NSRect,
         detailsFrame: NSRect
     ) -> Bool {
-        haloFrame.contains(mouseLocation) || detailsFrame.contains(mouseLocation)
+        HaloGeometry.contains(point: mouseLocation, in: haloFrame) || detailsFrame.contains(mouseLocation)
     }
 
     static func haloFrameByKeepingOrigin(oldFrame: NSRect, requestedSize: CGFloat) -> NSRect {

@@ -19,6 +19,7 @@ func runHaloInteractionChecks() {
     testSingleClickInvokesPrimaryAction()
     testHaloContextMenuContainsCurrentControls()
     testHaloClickWaitsForMouseUpAndDragCancelsClick()
+    testHaloHoverUsesFilledCircularSurface()
     testDraggingHaloSuppressesHoverDetails()
     testDraggingHaloPausesAnimationDuringDrag()
     testHaloSizeResizeKeepsWindowOrigin()
@@ -145,6 +146,31 @@ private func testHaloClickWaitsForMouseUpAndDragCancelsClick() {
 }
 
 @MainActor
+private func testHaloHoverUsesFilledCircularSurface() {
+    let view = HaloView(frame: NSRect(x: 0, y: 0, width: 112, height: 112))
+    var enterCount = 0
+    var exitCount = 0
+    view.onMouseEntered = {
+        enterCount += 1
+    }
+    view.onMouseExited = {
+        exitCount += 1
+    }
+
+    view.mouseEntered(with: interactionEvent(type: .mouseMoved, location: NSPoint(x: 2, y: 2)))
+    expect(enterCount == 0, "transparent halo corners should not trigger hover details")
+
+    view.mouseMoved(with: interactionEvent(type: .mouseMoved, location: NSPoint(x: 56, y: 56)))
+    expect(enterCount == 1, "the hollow halo center should trigger hover details")
+
+    view.mouseMoved(with: interactionEvent(type: .mouseMoved, location: NSPoint(x: 72, y: 56)))
+    expect(enterCount == 1, "moving within the circular hover surface should not duplicate entry")
+
+    view.mouseMoved(with: interactionEvent(type: .mouseMoved, location: NSPoint(x: 110, y: 110)))
+    expect(exitCount == 1, "moving into a transparent halo corner should exit hover details")
+}
+
+@MainActor
 private func testDraggingHaloSuppressesHoverDetails() {
     let view = HaloView(frame: NSRect(x: 0, y: 0, width: 112, height: 112))
     let window = NSWindow(
@@ -168,9 +194,10 @@ private func testDraggingHaloSuppressesHoverDetails() {
     view.mouseDown(with: interactionEvent(type: .leftMouseDown))
     view.mouseDragged(with: interactionEvent(type: .leftMouseDragged, location: NSPoint(x: 34, y: 30)))
     view.mouseEntered(with: interactionEvent(type: .leftMouseDown))
+    expect(hoverShowCount == 1, "dragging halo should suppress hover details")
     view.mouseUp(with: interactionEvent(type: .leftMouseUp))
 
-    expect(hoverShowCount == 1, "dragging halo should suppress hover details")
+    expect(hoverShowCount == 2, "releasing halo inside its hover surface should restore details")
     expect(dragStartCount == 1, "dragging halo should request immediate details hide")
 }
 
@@ -240,6 +267,11 @@ private func testHaloViewResizeKeepsAnimationMoving() {
 @MainActor
 private func testHaloViewSystemOverlaySuspensionStopsAnimation() {
     let view = HaloView(frame: NSRect(x: 0, y: 0, width: 112, height: 112))
+    var exitCount = 0
+    view.onMouseExited = {
+        exitCount += 1
+    }
+    view.mouseEntered(with: interactionEvent(type: .mouseMoved, location: NSPoint(x: 56, y: 56)))
     expect(view.hasAnimationDriverForChecks, "halo view should animate before system overlay suspension")
 
     view.setSystemOverlaySuspended(true)
@@ -253,6 +285,8 @@ private func testHaloViewSystemOverlaySuspensionStopsAnimation() {
     view.setSystemOverlaySuspended(false)
 
     expect(view.hasAnimationDriverForChecks, "halo view should restore animation after system overlay suspension")
+    view.mouseMoved(with: interactionEvent(type: .mouseMoved, location: NSPoint(x: 110, y: 110)))
+    expect(exitCount == 1, "hover exit should still fire after system overlay suspension")
 }
 
 @MainActor
@@ -357,11 +391,11 @@ private func testDetailsPanelVisibilityAfterCaptureFollowsMouseLocation() {
 
     expect(
         AppDelegate.shouldKeepDetailsVisibleAfterSystemOverlay(
-            mouseLocation: NSPoint(x: 120, y: 120),
+            mouseLocation: NSPoint(x: 148, y: 148),
             haloFrame: haloFrame,
             detailsFrame: detailsFrame
         ),
-        "details should stay visible when the pointer returns over the halo"
+        "details should stay visible when the pointer returns over the hollow halo center"
     )
     expect(
         AppDelegate.shouldKeepDetailsVisibleAfterSystemOverlay(
@@ -370,6 +404,14 @@ private func testDetailsPanelVisibilityAfterCaptureFollowsMouseLocation() {
             detailsFrame: detailsFrame
         ),
         "details should stay visible when the pointer returns over the details panel"
+    )
+    expect(
+        !AppDelegate.shouldKeepDetailsVisibleAfterSystemOverlay(
+            mouseLocation: NSPoint(x: 102, y: 102),
+            haloFrame: haloFrame,
+            detailsFrame: detailsFrame
+        ),
+        "details should hide when the pointer returns over a transparent halo corner"
     )
     expect(
         !AppDelegate.shouldKeepDetailsVisibleAfterSystemOverlay(
