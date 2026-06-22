@@ -43,6 +43,8 @@ func runHaloInteractionChecks() {
     testDetailsPanelShowsSessionMetadataForCodexAndClaudeCode()
     testDetailsPanelShowsExpiredQuotaAsWaitingForRefresh()
     testDetailsPanelShowsAnswerStreamingCopy()
+    testDetailsPanelRefreshesStatusFromLatestAggregate()
+    testVisibleDetailsPanelStatusRefreshIsWiredToTick()
     testDetailsPanelLocalizesClaudeActivityDetails()
     testDetailsPanelShowsContextAndHidesQuotaForClaudeCode()
     testDetailsPresentationUsesFocusedSessionAndRejectsStaleQuota()
@@ -636,6 +638,50 @@ private func testDetailsPanelShowsAnswerStreamingCopy() {
     panel.update(aggregate: aggregate, quota: nil, contextUsedPercent: nil)
 
     expect(panel.detailTextForTesting == "正在输出答案", "answer streaming should use localized copy")
+}
+
+@MainActor
+private func testDetailsPanelRefreshesStatusFromLatestAggregate() {
+    let panel = DetailsPanel()
+    panel.update(
+        aggregate: AggregateSnapshot(
+            state: .thinking,
+            label: "THINKING",
+            detail: "AgentHalo - Planning",
+            sessions: [],
+            focusedAgent: .claudeCode
+        ),
+        quota: nil,
+        contextUsedPercent: 27
+    )
+
+    panel.updateStatus(aggregate: AggregateSnapshot(
+        state: .working,
+        label: "EXECUTING",
+        detail: "AgentHalo - Running command",
+        sessions: [],
+        focusedAgent: .claudeCode
+    ))
+
+    expect(panel.titleTextForTesting == "EXECUTING", "visible details should use the latest status label")
+    expect(panel.detailTextForTesting == "正在执行命令", "visible details should use the latest activity detail")
+    expect(panel.contextValueForTesting == "上下文 27%", "status refresh should preserve existing metadata")
+}
+
+private func testVisibleDetailsPanelStatusRefreshIsWiredToTick() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let appDelegateURL = sourceDirectory.appendingPathComponent("AppDelegate.swift")
+    guard let source = try? String(contentsOf: appDelegateURL, encoding: .utf8),
+          let tickStart = source.range(of: "    private func tick() {")?.lowerBound,
+          let tickEnd = source.range(of: "    private func createStatusItem()", range: tickStart..<source.endIndex)?.lowerBound else {
+        fatalError("AppDelegate tick source should be readable")
+    }
+
+    let tickSource = source[tickStart..<tickEnd]
+    expect(
+        tickSource.contains("refreshVisibleDetailsStatus()"),
+        "tick should refresh status while the details panel remains visible"
+    )
 }
 
 @MainActor

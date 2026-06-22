@@ -105,6 +105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         applyRealtimeCodexActivity()
         haloView?.aggregate = aggregate
+        refreshVisibleDetailsStatus()
         if !systemOverlaySuspended {
             haloView?.needsDisplay = true
         }
@@ -549,6 +550,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         showDetails()
+    }
+
+    private func refreshVisibleDetailsStatus() {
+        guard detailsPanel.isVisible else {
+            return
+        }
+        detailsPanel.updateStatus(aggregate: displayAggregate())
     }
 
     private func scheduleHideDetails() {

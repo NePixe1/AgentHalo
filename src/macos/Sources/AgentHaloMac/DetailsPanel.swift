@@ -129,12 +129,7 @@ final class DetailsPanel: NSPanel {
         }
         #endif
 
-        titleField.stringValue = aggregate.label
-        let rgb = HaloVisualModel.stateColor(aggregate.state)
-        titleField.textColor = NSColor(calibratedRed: rgb.red / 255, green: rgb.green / 255, blue: rgb.blue / 255, alpha: 1)
-        detailField.stringValue = Self.localizedDetail(for: aggregate)
-
-        agentToggle.setAgent(aggregate.focusedAgent)
+        updateStatus(aggregate: aggregate)
 
         let showsCodexQuota = showsQuota ?? (aggregate.focusedAgent == .codex)
         contextPill.isHidden = contextUsedPercent == nil
@@ -169,6 +164,14 @@ final class DetailsPanel: NSPanel {
             primaryQuota.updateUnavailable()
             secondaryQuota.updateUnavailable()
         }
+    }
+
+    func updateStatus(aggregate: AggregateSnapshot) {
+        titleField.stringValue = aggregate.label
+        let rgb = HaloVisualModel.stateColor(aggregate.state)
+        titleField.textColor = NSColor(calibratedRed: rgb.red / 255, green: rgb.green / 255, blue: rgb.blue / 255, alpha: 1)
+        detailField.stringValue = Self.localizedDetail(for: aggregate)
+        agentToggle.setAgent(aggregate.focusedAgent)
     }
 
     static func formatResetTime(_ date: Date?) -> String {
@@ -266,6 +269,10 @@ final class DetailsPanel: NSPanel {
 
     var focusedAgentForTesting: AgentKind {
         agentToggle.selectedAgent
+    }
+
+    var titleTextForTesting: String {
+        titleField.stringValue
     }
 
     var detailTextForTesting: String {
