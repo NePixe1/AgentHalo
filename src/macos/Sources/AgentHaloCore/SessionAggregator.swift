@@ -39,7 +39,10 @@ public enum SessionAggregator {
         }
 
         let focusedSnapshots = snapshots.filter { $0.agent == focusedAgent }
-        let visible = focusedSnapshots.filter { snapshot in
+        let displayCandidates = focusedSnapshots.filter { snapshot in
+            !isSupersededError(snapshot, among: focusedSnapshots)
+        }
+        let visible = displayCandidates.filter { snapshot in
             if snapshot.state == .done {
                 guard let completedAt = snapshot.completedAt else {
                     return false
@@ -126,5 +129,24 @@ public enum SessionAggregator {
         case .codex:
             return codexCompletedVisibleDuration
         }
+    }
+
+    private static func isSupersededError(
+        _ snapshot: SessionSnapshot,
+        among snapshots: [SessionSnapshot]
+    ) -> Bool {
+        guard snapshot.state == .error else {
+            return false
+        }
+        return snapshots.contains { candidate in
+            candidate.agent == snapshot.agent
+                && candidate.threadId != snapshot.threadId
+                && isMeaningful(candidate)
+                && candidate.lastEventAt > snapshot.lastEventAt
+        }
+    }
+
+    private static func isMeaningful(_ snapshot: SessionSnapshot) -> Bool {
+        snapshot.active || snapshot.state == .done || snapshot.state == .error
     }
 }

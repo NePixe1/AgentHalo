@@ -94,6 +94,115 @@ func testAggregatePrioritizesActionableSessions() {
     expect(aggregate.sessions.map(\.threadId), ["attention", "done"], "aggregate sessions")
 }
 
+func testAggregateRemovesSupersededSessionErrors() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-22T04:00:00Z")!
+    let oldError = SessionSnapshot(
+        threadId: "old-error",
+        projectName: "OldProject",
+        workingDirectory: "/tmp/old",
+        state: .error,
+        action: "Interrupted",
+        lastEventAt: now.addingTimeInterval(-60),
+        completedAt: nil,
+        active: false
+    )
+    let newerWorking = SessionSnapshot(
+        threadId: "new-working",
+        projectName: "NewProject",
+        workingDirectory: "/tmp/new",
+        state: .working,
+        action: "Running command",
+        lastEventAt: now,
+        completedAt: nil,
+        active: true
+    )
+    let settings = HaloSettings(installedAt: now.addingTimeInterval(-600))
+
+    let working = SessionAggregator.aggregate(
+        snapshots: [oldError, newerWorking],
+        settings: settings,
+        now: now
+    )
+    expect(working.state, .working, "newer working session replaces old error")
+    expect(working.sessions.map(\.threadId), ["new-working"], "old error removed from display sessions")
+
+    let newerDone = SessionSnapshot(
+        threadId: "new-done",
+        projectName: "NewProject",
+        workingDirectory: "/tmp/new",
+        state: .done,
+        action: "Complete",
+        lastEventAt: now,
+        completedAt: now,
+        active: false
+    )
+    let done = SessionAggregator.aggregate(
+        snapshots: [oldError, newerDone],
+        settings: settings,
+        now: now
+    )
+    expect(done.sessions.map(\.threadId), ["new-done"], "newer completion replaces old error")
+
+    let acknowledged = settings.acknowledgingCompletedSessions([newerDone])
+    let ready = SessionAggregator.aggregate(
+        snapshots: [oldError, newerDone],
+        settings: acknowledged,
+        now: now
+    )
+    expect(ready.state, .idle, "acknowledged newer completion does not resurrect old error")
+    expect(ready.sessions.isEmpty, "superseded error remains absent after acknowledgement")
+
+    let newerError = SessionSnapshot(
+        threadId: "new-error",
+        projectName: "NewProject",
+        workingDirectory: "/tmp/new",
+        state: .error,
+        action: "Interrupted",
+        lastEventAt: now,
+        completedAt: nil,
+        active: false
+    )
+    let olderWorking = SessionSnapshot(
+        threadId: "old-working",
+        projectName: "OldProject",
+        workingDirectory: "/tmp/old",
+        state: .working,
+        action: "Running command",
+        lastEventAt: now.addingTimeInterval(-60),
+        completedAt: nil,
+        active: true
+    )
+    let latestError = SessionAggregator.aggregate(
+        snapshots: [olderWorking, newerError],
+        settings: settings,
+        now: now
+    )
+    expect(latestError.state, .error, "latest error remains primary")
+    expect(
+        latestError.sessions.map(\.threadId),
+        ["new-error", "old-working"],
+        "active sessions remain available behind the latest error"
+    )
+
+    let metadataOnly = SessionSnapshot(
+        threadId: "metadata-only",
+        projectName: "Codex",
+        workingDirectory: "/tmp/new",
+        state: .idle,
+        action: "Ready",
+        lastEventAt: now,
+        completedAt: nil,
+        active: false
+    )
+    let unchanged = SessionAggregator.aggregate(
+        snapshots: [oldError, metadataOnly],
+        settings: settings,
+        now: now
+    )
+    expect(unchanged.state, .error, "metadata-only session does not suppress error")
+    expect(unchanged.sessions.map(\.threadId), ["old-error"], "metadata-only session stays invisible")
+}
+
 func testAcknowledgingCompletedSessionsStoresLatestVisibleCompletionOnly() {
     let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
     let earlier = now.addingTimeInterval(-120)
@@ -1554,6 +1663,7 @@ func expectAlmost(_ actual: Double, _ expected: Double, tolerance: Double, _ mes
 
 testReducesPlanningWorkingAttentionErrorAndCompleteEvents()
 testAggregatePrioritizesActionableSessions()
+testAggregateRemovesSupersededSessionErrors()
 testAcknowledgingCompletedSessionsStoresLatestVisibleCompletionOnly()
 testSettingsPersistFormalFieldsAndNormalizePaused()
 testSettingsUsesDefaultHaloSizeForLegacyFilesAndClampsInvalidSizes()
