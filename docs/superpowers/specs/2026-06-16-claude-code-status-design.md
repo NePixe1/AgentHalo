@@ -18,33 +18,42 @@ The system is structured as follows:
 3. **ClaudeHookStatusMonitor** ([ClaudeHookStatusMonitor.swift](file:///Users/wjs/work/pyproj/AgentHalo/src/macos/Sources/AgentHaloCore/ClaudeHookStatusMonitor.swift)): Reads the Hook status JSONL file incrementally and uses `ClaudeHookStatusReducer` to produce state snapshots.
 4. **ClaudeStatusSourceMerger** ([ClaudeStatusSourceMerger.swift](file:///Users/wjs/work/pyproj/AgentHalo/src/macos/Sources/AgentHaloCore/ClaudeStatusSourceMerger.swift)): Merges and deduplicates snapshots. It enforces source precedence, treating Hook status snapshots as the sole authority and filtering out raw transcript snapshots to prevent ghost sessions.
 
+### Context Usage Monitoring
+
+In addition to lifecycle status, Agent Halo captures Claude Code's **context window usage** via a Status Line Proxy architecture:
+
+1. **ClaudeStatusLineConfigurator** ([ClaudeStatusLineConfigurator.swift](file:///Users/wjs/work/pyproj/AgentHalo/src/macos/Sources/AgentHaloCore/ClaudeStatusLineConfigurator.swift)): Automatically deploys the `claude-code-statusline-proxy` binary to `~/.agent-halo/` and configures `~/.claude/settings.json` to use it as the `statusLine.command`. The user's original status line command (if any) is preserved to `~/.agent-halo/claude-code-statusline-original-command` for chaining.
+2. **claude-code-statusline-proxy** ([ClaudeCodeStatusLineProxy/main.swift](file:///Users/wjs/work/pyproj/AgentHalo/src/macos/Sources/ClaudeCodeStatusLineProxy/main.swift)): A proxy executable that intercepts Claude Code's status line JSON input (containing `session_id` and `context_window.used_percentage`), writes a snapshot to `~/.agent-halo/claude-code-context.json`, and then chains to the original command if one was configured.
+3. **ClaudeContextUsageReader** ([ClaudeContextUsage.swift](file:///Users/wjs/work/pyproj/AgentHalo/src/macos/Sources/AgentHaloCore/ClaudeContextUsage.swift)): Reads the context snapshot file, validates the session ID against active Claude sessions, and enforces a 5-minute staleness threshold (`maxAge: 300s`).
+4. **DetailsPanel integration**: When `focusedAgent == .claudeCode`, `AppDelegate.contextUsedPercentForDetails` retrieves the context usage snapshot for the currently displayed session(s) and passes it to `DetailsPanel.update(contextUsedPercent:)` to render the context pill.
+
 ```
 +---------------------+        +-------------------------+
 |     Claude Code     | ---->  | ~/.claude/settings.json |
 +---------------------+        +-------------------------+
-           | (native hooks)
-           v
-+-----------------------------+
-|  claude-code-status-hook    |
-+-----------------------------+
-           | (writes to status log)
-           v
-+------------------------------------------+
-| ~/.agent-halo/claude-code-status.jsonl   |
-+------------------------------------------+
-           | (incremental file read)
-           v
-+-----------------------------+
-|   ClaudeHookStatusMonitor   |
-+-----------------------------+
-           | (produces snapshots)
-           v
-+-----------------------------+
-|  ClaudeStatusSourceMerger   |
-+-----------------------------+
+           | (native hooks)          | (statusLine.command)
+           v                         v
++-----------------------------+   +------------------------------+
+|  claude-code-status-hook    |   | claude-code-statusline-proxy |
++-----------------------------+   +------------------------------+
+           | (writes to status log)  | (intercepts status line JSON)
+           v                         v
++------------------------------------------+  +---------------------------------------+
+| ~/.agent-halo/claude-code-status.jsonl   |  | ~/.agent-halo/claude-code-context.json |
++------------------------------------------+  +---------------------------------------+
+           | (incremental file read)            | (read on demand)
+           v                                    v
++-----------------------------+   +---------------------------+
+|   ClaudeHookStatusMonitor   |   | ClaudeContextUsageReader  |
++-----------------------------+   +---------------------------+
+           | (produces snapshots)    | (validates & reads)
+           v                         v
++-----------------------------+   +---------------------------+
+|  ClaudeStatusSourceMerger   |   | AppDelegate.contextUsed…  |
++-----------------------------+   +---------------------------+
            | (merges hook status, discards transcripts)
-           v
-   [SessionSnapshot]
+           v                         v
+   [SessionSnapshot]        [contextUsedPercent for DetailsPanel]
 ```
 
 ## Hook Configuration
@@ -55,6 +64,17 @@ The system is structured as follows:
 3. Declares lifecycle hooks for the following events:
    - `SessionStart`, `UserPromptSubmit`, `PreToolUse` (matcher: `.*`), `PostToolUse` (matcher: `.*`), `PostToolUseFailure` (matcher: `.*`), `Notification`, `Stop`, `StopFailure`, `SessionEnd`, `PreCompact` (matcher: `""`), `PostCompact` (matcher: `""`).
 4. Merges our binary executable command cleanly and saves the JSON settings file.
+
+## Status Line Proxy Configuration
+
+`ClaudeStatusLineConfigurator` runs automatically on application startup:
+1. Stages the compiled `claude-code-statusline-proxy` binary into `~/.agent-halo/claude-code-statusline-proxy` with `0o755` permissions.
+2. Reads the user-level settings file `~/.claude/settings.json`.
+3. Preserves any existing `statusLine.command` to `~/.agent-halo/claude-code-statusline-original-command` (unless it already points to our proxy).
+4. Sets `statusLine.type = "command"` and `statusLine.command` to the proxy binary path.
+5. Saves the updated settings file atomically.
+
+The proxy is idempotent: if the settings already point to our proxy, no changes are made. If the user later configures a different status line command, it will be chained automatically on the next app restart.
 
 ## Claude Hook Event Mapping
 
@@ -94,3 +114,9 @@ Ensure tests exist under `AgentHaloCoreChecks` (and related integration tests):
 - Hook reducer maps prompt submits, tool execution (with normalized name mapping like bash -> shell_command), notification alerts (permission holds), compaction, and errors.
 - Hook reducer auto-fade timeout and stuck-tool 180s safety recovery.
 - `ClaudeStatusSourceMerger` deduplication and source precedence rules.
+- Status line configurator idempotency and proxy staging logic.
+- Status line configurator preserves and chains original commands.
+- `ClaudeStatusLineUsageParser` correctly parses Claude Code status line JSON format.
+- `ClaudeContextUsageReader` validates session IDs and enforces staleness thresholds.
+- `AppDelegate.contextUsedPercentForDetails` selects the correct data source based on focused agent.
+- DetailsPanel renders context pill for both Codex (via quota) and Claude Code (via status line proxy).

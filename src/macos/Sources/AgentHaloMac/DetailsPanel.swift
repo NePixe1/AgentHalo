@@ -9,9 +9,13 @@ final class DetailsPanel: NSPanel {
     private let detailField = NSTextField(labelWithString: "Codex 正在待命")
     private let primaryQuota = QuotaRowView(title: "5 小时额度")
     private let secondaryQuota = QuotaRowView(title: "周额度")
-    private let agentSwitch = NSSegmentedControl(labels: AgentKind.allCases.map(\.segmentedTitle), trackingMode: .selectOne, target: nil, action: nil)
+    private let agentToggle = AgentToggleView()
     private let contextPill = NSView()
     private let quotaGroup = NSStackView()
+    private let metadataGroup = NSStackView()
+    private let projectRow = MetadataRowView(title: "项目")
+    private let modelRow = MetadataRowView(title: "模型")
+    private let tokenRow = MetadataRowView(title: "Token", showsSeparator: false)
     var onMouseEntered: (() -> Void)?
     var onMouseExited: (() -> Void)?
     var onAgentSelected: ((AgentKind) -> Void)?
@@ -26,7 +30,7 @@ final class DetailsPanel: NSPanel {
         isOpaque = false
         backgroundColor = .clear
         hasShadow = true
-        sharingType = .none
+        sharingType = .readOnly
         level = .floating
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
@@ -42,27 +46,43 @@ final class DetailsPanel: NSPanel {
 
         stack.orientation = .vertical
         stack.spacing = 0
+        stack.alignment = .leading
         stack.edgeInsets = NSEdgeInsets(top: 14, left: 17, bottom: 16, right: 17)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        stack.addArrangedSubview(makeTopRow())
-        stack.setCustomSpacing(7, after: stack.arrangedSubviews[0])
+        let topRow = makeTopRow()
+        stack.addArrangedSubview(topRow)
+        stack.setCustomSpacing(7, after: topRow)
 
         titleField.font = .systemFont(ofSize: 24, weight: .bold)
         titleField.lineBreakMode = .byTruncatingTail
+        titleField.alignment = .left
         detailField.font = .systemFont(ofSize: 13)
         detailField.textColor = NSColor(calibratedRed: 0.38, green: 0.45, blue: 0.50, alpha: 1)
         detailField.lineBreakMode = .byTruncatingTail
+        detailField.alignment = .left
         stack.addArrangedSubview(titleField)
         stack.setCustomSpacing(2, after: titleField)
         stack.addArrangedSubview(detailField)
         stack.setCustomSpacing(13, after: detailField)
+
         quotaGroup.orientation = .vertical
         quotaGroup.spacing = 10
+        quotaGroup.alignment = .leading
         quotaGroup.translatesAutoresizingMaskIntoConstraints = false
         quotaGroup.addArrangedSubview(primaryQuota)
         quotaGroup.addArrangedSubview(secondaryQuota)
         stack.addArrangedSubview(quotaGroup)
+
+        metadataGroup.orientation = .vertical
+        metadataGroup.spacing = 0
+        metadataGroup.alignment = .leading
+        metadataGroup.translatesAutoresizingMaskIntoConstraints = false
+        metadataGroup.addArrangedSubview(projectRow)
+        metadataGroup.addArrangedSubview(modelRow)
+        metadataGroup.addArrangedSubview(tokenRow)
+        metadataGroup.isHidden = true
+        stack.addArrangedSubview(metadataGroup)
 
         let rootView = TrackingDetailsContentView()
         rootView.owner = self
@@ -77,37 +97,65 @@ final class DetailsPanel: NSPanel {
             stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             stack.topAnchor.constraint(equalTo: container.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+
+            topRow.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
+            titleField.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
+            detailField.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
+            quotaGroup.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
+            primaryQuota.trailingAnchor.constraint(equalTo: quotaGroup.trailingAnchor),
+            secondaryQuota.trailingAnchor.constraint(equalTo: quotaGroup.trailingAnchor),
+            metadataGroup.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
+            projectRow.trailingAnchor.constraint(equalTo: metadataGroup.trailingAnchor),
+            modelRow.trailingAnchor.constraint(equalTo: metadataGroup.trailingAnchor),
+            tokenRow.trailingAnchor.constraint(equalTo: metadataGroup.trailingAnchor)
         ])
     }
 
-    func update(aggregate: AggregateSnapshot, quota: RateLimitSnapshot?) {
+    func update(
+        aggregate: AggregateSnapshot,
+        quota: RateLimitSnapshot?,
+        contextUsedPercent: Double?,
+        sessionDetails: SessionDetailsSnapshot? = nil,
+        showsQuota: Bool? = nil
+    ) {
+        #if DEBUG
+        let startTime = CFAbsoluteTimeGetCurrent()
+        defer {
+            let duration = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
+            if duration > 16.67 {
+                NSLog("[Performance] DetailsPanel.update took %.2fms (>1 frame)", duration)
+            }
+        }
+        #endif
+
         titleField.stringValue = aggregate.label
         let rgb = HaloVisualModel.stateColor(aggregate.state)
         titleField.textColor = NSColor(calibratedRed: rgb.red / 255, green: rgb.green / 255, blue: rgb.blue / 255, alpha: 1)
         detailField.stringValue = Self.localizedDetail(for: aggregate)
 
-        if let index = AgentKind.allCases.firstIndex(of: aggregate.focusedAgent) {
-            agentSwitch.selectedSegment = index
-        }
+        agentToggle.setAgent(aggregate.focusedAgent)
 
-        let showsCodexQuota = aggregate.focusedAgent == .codex
-        contextPill.isHidden = !showsCodexQuota || quota?.contextUsedPercent == nil
+        let showsCodexQuota = showsQuota ?? (aggregate.focusedAgent == .codex)
+        contextPill.isHidden = contextUsedPercent == nil
+        contextValue.stringValue = contextUsedPercent.map {
+            "上下文 \(Int($0.rounded()))%"
+        } ?? "上下文 --"
         quotaGroup.isHidden = !showsCodexQuota
         primaryQuota.isHidden = !showsCodexQuota
         secondaryQuota.isHidden = !showsCodexQuota
+        metadataGroup.isHidden = showsCodexQuota
+        projectRow.value = Self.displayValue(sessionDetails?.projectName)
+        modelRow.value = Self.displayValue(sessionDetails?.modelName)
+        tokenRow.value = "输入 \(Self.compactTokenCount(sessionDetails?.inputTokens)) · 输出 \(Self.compactTokenCount(sessionDetails?.outputTokens))"
 
         guard showsCodexQuota else {
-            contextValue.stringValue = ""
             primaryQuota.updateUnavailable()
             secondaryQuota.updateUnavailable()
             return
         }
 
         if let quota {
-            contextValue.stringValue = quota.contextUsedPercent.map {
-                "上下文 \(Int($0.rounded()))%"
-            } ?? "上下文 --"
             primaryQuota.update(
                 usedPercent: quota.primaryUsedPercent,
                 resetAt: quota.primaryResetAt
@@ -134,6 +182,27 @@ final class DetailsPanel: NSPanel {
         return formatter.string(from: date)
     }
 
+    static func compactTokenCount(_ count: Int64?) -> String {
+        guard let count else {
+            return "--"
+        }
+        guard count >= 1_000 else {
+            return String(count)
+        }
+        let thousands = Double(count) / 1_000
+        if thousands.rounded() == thousands {
+            return "\(Int(thousands))k"
+        }
+        return String(format: "%.1fk", locale: Locale(identifier: "en_US_POSIX"), thousands)
+    }
+
+    private static func displayValue(_ value: String?) -> String {
+        guard let value, !value.isEmpty else {
+            return "--"
+        }
+        return value
+    }
+
     static func localizedDetail(for aggregate: AggregateSnapshot) -> String {
         let action = aggregate.sessions.first?.action ?? aggregate.detail
         if aggregate.answerStreaming || action.localizedCaseInsensitiveContains("Writing answer") {
@@ -142,6 +211,9 @@ final class DetailsPanel: NSPanel {
         if action.localizedCaseInsensitiveContains("command") { return "正在执行命令" }
         if action.localizedCaseInsensitiveContains("Editing") { return "正在编辑文件" }
         if action.localizedCaseInsensitiveContains("Search") { return "正在搜索信息" }
+        if action.localizedCaseInsensitiveContains("Compressing context") { return "正在压缩上下文" }
+        if action.localizedCaseInsensitiveContains("Awaiting permission") { return "等待你的授权" }
+        if action.localizedCaseInsensitiveContains("Reviewing result") { return "正在分析结果" }
         switch aggregate.state {
         case .thinking: return "正在思考与规划"
         case .working: return "正在执行任务"
@@ -156,15 +228,9 @@ final class DetailsPanel: NSPanel {
         let row = NSView()
         row.translatesAutoresizingMaskIntoConstraints = false
 
-        let brand = NSTextField(labelWithString: "Agent Halo")
-        brand.font = .systemFont(ofSize: 11.5, weight: .semibold)
-        brand.textColor = NSColor(calibratedRed: 0.38, green: 0.46, blue: 0.51, alpha: 1)
-        brand.translatesAutoresizingMaskIntoConstraints = false
-
-        agentSwitch.target = self
-        agentSwitch.action = #selector(agentSwitchChanged(_:))
-        agentSwitch.segmentStyle = .rounded
-        agentSwitch.translatesAutoresizingMaskIntoConstraints = false
+        agentToggle.onAgentSelected = { [weak self] agent in
+            self?.onAgentSelected?(agent)
+        }
 
         contextPill.wantsLayer = true
         contextPill.layer?.cornerRadius = 9
@@ -178,19 +244,18 @@ final class DetailsPanel: NSPanel {
         contextValue.lineBreakMode = .byTruncatingTail
         contextValue.translatesAutoresizingMaskIntoConstraints = false
 
-        row.addSubview(brand)
-        row.addSubview(agentSwitch)
+        row.addSubview(agentToggle)
         row.addSubview(contextPill)
         contextPill.addSubview(contextValue)
         NSLayoutConstraint.activate([
             row.heightAnchor.constraint(equalToConstant: 24),
-            brand.leadingAnchor.constraint(equalTo: row.leadingAnchor),
-            brand.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            agentSwitch.leadingAnchor.constraint(greaterThanOrEqualTo: brand.trailingAnchor, constant: 10),
-            agentSwitch.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            contextPill.leadingAnchor.constraint(equalTo: agentSwitch.trailingAnchor, constant: 8),
+            agentToggle.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            agentToggle.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            agentToggle.widthAnchor.constraint(equalToConstant: 110),
+            agentToggle.heightAnchor.constraint(equalToConstant: 24),
             contextPill.trailingAnchor.constraint(equalTo: row.trailingAnchor),
             contextPill.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            contextPill.leadingAnchor.constraint(greaterThanOrEqualTo: agentToggle.trailingAnchor, constant: 10),
             contextValue.leadingAnchor.constraint(equalTo: contextPill.leadingAnchor, constant: 9),
             contextValue.trailingAnchor.constraint(equalTo: contextPill.trailingAnchor, constant: -9),
             contextValue.topAnchor.constraint(equalTo: contextPill.topAnchor, constant: 3),
@@ -199,20 +264,8 @@ final class DetailsPanel: NSPanel {
         return row
     }
 
-    @objc private func agentSwitchChanged(_ sender: NSSegmentedControl) {
-        guard sender.selectedSegment >= 0,
-              sender.selectedSegment < AgentKind.allCases.count else {
-            return
-        }
-        onAgentSelected?(AgentKind.allCases[sender.selectedSegment])
-    }
-
     var focusedAgentForTesting: AgentKind {
-        let index = agentSwitch.selectedSegment
-        guard index >= 0, index < AgentKind.allCases.count else {
-            return .codex
-        }
-        return AgentKind.allCases[index]
+        agentToggle.selectedAgent
     }
 
     var detailTextForTesting: String {
@@ -221,6 +274,10 @@ final class DetailsPanel: NSPanel {
 
     var contextPillHiddenForTesting: Bool {
         contextPill.isHidden
+    }
+
+    var contextValueForTesting: String {
+        contextValue.stringValue
     }
 
     var primaryQuotaHiddenForTesting: Bool {
@@ -239,12 +296,77 @@ final class DetailsPanel: NSPanel {
         secondaryQuota.valueForTesting
     }
 
+    var metadataGroupHiddenForTesting: Bool {
+        metadataGroup.isHidden
+    }
+
+    var projectValueForTesting: String {
+        projectRow.value
+    }
+
+    var modelValueForTesting: String {
+        modelRow.value
+    }
+
+    var tokenValueForTesting: String {
+        tokenRow.value
+    }
+
     func selectAgentForTesting(_ agent: AgentKind) {
-        guard let index = AgentKind.allCases.firstIndex(of: agent) else {
-            return
+        agentToggle.setAgent(agent)
+        onAgentSelected?(agent)
+    }
+}
+
+@MainActor
+private final class MetadataRowView: NSView {
+    private let nameField: NSTextField
+    private let valueField = NSTextField(labelWithString: "--")
+    private let separator = NSView()
+
+    var value: String {
+        get { valueField.stringValue }
+        set { valueField.stringValue = newValue }
+    }
+
+    init(title: String, showsSeparator: Bool = true) {
+        nameField = NSTextField(labelWithString: title)
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        nameField.font = .systemFont(ofSize: 12, weight: .semibold)
+        nameField.textColor = .labelColor
+        valueField.font = .systemFont(ofSize: 12, weight: .semibold)
+        valueField.textColor = .labelColor
+        valueField.alignment = .right
+        valueField.lineBreakMode = .byTruncatingTail
+        valueField.maximumNumberOfLines = 1
+        separator.wantsLayer = true
+        separator.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.55).cgColor
+        separator.isHidden = !showsSeparator
+
+        [nameField, valueField, separator].forEach {
+            $0.translatesAutoresizingMaskIntoConstraints = false
+            addSubview($0)
         }
-        agentSwitch.selectedSegment = index
-        agentSwitchChanged(agentSwitch)
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 29),
+            nameField.leadingAnchor.constraint(equalTo: leadingAnchor),
+            nameField.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -1),
+            nameField.widthAnchor.constraint(equalToConstant: 52),
+            valueField.leadingAnchor.constraint(greaterThanOrEqualTo: nameField.trailingAnchor, constant: 10),
+            valueField.trailingAnchor.constraint(equalTo: trailingAnchor),
+            valueField.centerYAnchor.constraint(equalTo: nameField.centerYAnchor),
+            separator.leadingAnchor.constraint(equalTo: leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: trailingAnchor),
+            separator.bottomAnchor.constraint(equalTo: bottomAnchor),
+            separator.heightAnchor.constraint(equalToConstant: 1)
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
     }
 }
 
@@ -376,5 +498,167 @@ private final class RoundedMeterView: NSView {
             xRadius: radius,
             yRadius: radius
         ).fill()
+    }
+}
+
+@MainActor
+final class AgentToggleView: NSView {
+    var onAgentSelected: ((AgentKind) -> Void)?
+
+    private(set) var selectedAgent: AgentKind = .codex {
+        didSet {
+            updateSelectedState(animated: true)
+        }
+    }
+
+    private let bgView = AgentToggleContentView()
+    private let activeBg = NSView()
+    private let codexIcon = NSImageView()
+    private let claudeIcon = NSImageView()
+    private var activeBgConstraints: [NSLayoutConstraint] = []
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setup()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setup()
+    }
+
+    private func setup() {
+        translatesAutoresizingMaskIntoConstraints = false
+
+        bgView.wantsLayer = true
+        bgView.layer?.cornerRadius = 12
+        bgView.layer?.borderWidth = 1
+        bgView.layer?.borderColor = NSColor(calibratedRed: 0.88, green: 0.88, blue: 0.88, alpha: 0.7).cgColor
+        bgView.layer?.backgroundColor = NSColor(calibratedRed: 0.96, green: 0.96, blue: 0.96, alpha: 0.7).cgColor
+        bgView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(bgView)
+
+        activeBg.wantsLayer = true
+        activeBg.layer?.cornerRadius = 10
+        activeBg.layer?.borderWidth = 1
+        activeBg.layer?.borderColor = NSColor(calibratedRed: 0.72, green: 0.92, blue: 0.97, alpha: 0.85).cgColor
+        activeBg.layer?.backgroundColor = NSColor(calibratedRed: 0.88, green: 0.97, blue: 1.0, alpha: 1.0).cgColor
+        activeBg.layer?.shadowColor = NSColor(calibratedRed: 0.26, green: 0.70, blue: 0.80, alpha: 1).cgColor
+        activeBg.layer?.shadowOpacity = 0.12
+        activeBg.layer?.shadowRadius = 5
+        activeBg.layer?.shadowOffset = .zero
+        activeBg.translatesAutoresizingMaskIntoConstraints = false
+        bgView.addSubview(activeBg)
+
+        configureIcon(codexIcon, assetName: "codex", accessibilityLabel: "Codex")
+        configureIcon(claudeIcon, assetName: "claude-code", accessibilityLabel: "Claude Code")
+        bgView.addSubview(codexIcon)
+        bgView.addSubview(claudeIcon)
+
+        NSLayoutConstraint.activate([
+            bgView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            bgView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            bgView.topAnchor.constraint(equalTo: topAnchor),
+            bgView.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            codexIcon.leadingAnchor.constraint(equalTo: bgView.leadingAnchor, constant: 4),
+            codexIcon.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
+            codexIcon.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: 0.5, constant: -4),
+            codexIcon.heightAnchor.constraint(equalToConstant: 18),
+
+            claudeIcon.trailingAnchor.constraint(equalTo: bgView.trailingAnchor, constant: -4),
+            claudeIcon.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
+            claudeIcon.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: 0.5, constant: -4),
+            claudeIcon.heightAnchor.constraint(equalToConstant: 18),
+        ])
+
+        updateSelectedState(animated: false)
+    }
+
+    func setAgent(_ agent: AgentKind) {
+        guard selectedAgent != agent else { return }
+        selectedAgent = agent
+    }
+
+    private func updateSelectedState(animated: Bool) {
+        NSLayoutConstraint.deactivate(activeBgConstraints)
+
+        let targetIcon = selectedAgent == .codex ? codexIcon : claudeIcon
+
+        activeBgConstraints = [
+            activeBg.leadingAnchor.constraint(equalTo: targetIcon.leadingAnchor, constant: -2),
+            activeBg.trailingAnchor.constraint(equalTo: targetIcon.trailingAnchor, constant: 2),
+            activeBg.topAnchor.constraint(equalTo: bgView.topAnchor, constant: 2),
+            activeBg.bottomAnchor.constraint(equalTo: bgView.bottomAnchor, constant: -2)
+        ]
+
+        if animated {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.2
+                context.allowsImplicitAnimation = true
+                NSLayoutConstraint.activate(activeBgConstraints)
+                self.layoutSubtreeIfNeeded()
+            }
+        } else {
+            NSLayoutConstraint.activate(activeBgConstraints)
+        }
+
+        codexIcon.alphaValue = selectedAgent == .codex ? 1 : 0.58
+        claudeIcon.alphaValue = selectedAgent == .claudeCode ? 1 : 0.58
+    }
+
+    private func configureIcon(_ imageView: NSImageView, assetName: String, accessibilityLabel: String) {
+        imageView.image = AgentIconAssets.image(named: assetName)
+        imageView.imageScaling = .scaleProportionallyDown
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        imageView.setAccessibilityLabel(accessibilityLabel)
+        imageView.setAccessibilityRole(.image)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let isLeft = point.x < bounds.width / 2
+        let newAgent: AgentKind = isLeft ? .codex : .claudeCode
+        if newAgent != selectedAgent {
+            selectedAgent = newAgent
+            onAgentSelected?(newAgent)
+        }
+    }
+}
+
+@MainActor
+private final class AgentToggleContentView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+}
+
+private enum AgentIconAssets {
+    static func image(named name: String) -> NSImage? {
+        guard let url = url(named: name),
+              let data = try? Data(contentsOf: url) else {
+            return nil
+        }
+        return NSImage(data: data)
+    }
+
+    private static func url(named name: String) -> URL? {
+        if let bundled = Bundle.main.url(
+            forResource: name,
+            withExtension: "svg",
+            subdirectory: "agent-switch"
+        ) {
+            return bundled
+        }
+
+        let srcRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceAsset = srcRoot
+            .appendingPathComponent("shared/assets/agent-switch", isDirectory: true)
+            .appendingPathComponent("\(name).svg")
+        return FileManager.default.fileExists(atPath: sourceAsset.path) ? sourceAsset : nil
     }
 }

@@ -4,7 +4,7 @@
 
 编码 Agent 的本地常驻状态光环。
 
-当前版本支持 Codex，并在 macOS 上支持 Claude Code（CC）转录日志状态识别。
+当前版本支持 Codex，并在 macOS 上通过生命周期 hooks 和 status line proxy 支持 Claude Code（CC）。
 
 版本：`0.13.0`
 
@@ -60,11 +60,12 @@ swift run AgentHaloDiagnostics --transition-strip /tmp/agent-halo-transitions
 - 拖动光环：调整位置，靠近屏幕边缘时会自动吸附。
 - 鼠标悬停：查看当前状态、5 小时额度和周额度。
 - 悬停详情面板提供 `Codex / CC` 切换。Agent Halo 会同时监听两个工具，但光环颜色、状态文案和额度行只跟随当前选中的监控对象。
-- Codex 额度和上下文占用只在 `Codex` 视图显示。切到 `CC` 时，详情面板只显示 Claude Code 会话状态，不混入 Codex 余额信息。
+- 上下文 pill 显示当前监控对象的上下文占用：Codex 显示配额上下文占用，Claude Code 显示通过 status line proxy 捕获的上下文窗口使用率。
+- Codex 额度行只在 `Codex` 视图显示。切到 `CC` 时，详情面板只显示 Claude Code 会话状态，不混入 Codex 余额信息。
 - 任务完成后绿色会缓慢呼吸；再次打开 Codex 后自动确认并变为不发光的稳定绿色。
 - 右键单击：打开状态预览、暂停监听、开机启动和退出菜单。
 - 右键”光环大小”：选择 `75% / 100% / 125%`，重启后保持设置。
-- 光环因拔掉副屏而消失时，从系统托盘右键选择”脱离卡死”，可移回主屏右上角。
+- 启动或显示器变化后，如果光环完全离开所有屏幕，会自动移回主屏右上角；也可从右键菜单选择“脱离卡死”手动重置。
 - 单击光环：将 Codex 窗口切到前台。
 
 ## 状态含义
@@ -86,9 +87,12 @@ swift run AgentHaloDiagnostics --transition-strip /tmp/agent-halo-transitions
 ## 隐私
 
 Agent Halo 只在本机读取 `%USERPROFILE%\.codex\sessions` 中的生命周期事件、
-额度信息，以及 macOS 上 `~/.claude/projects` 中的 Claude Code 转录日志。
-它还会只读查询 `logs_2.sqlite` 中结构化的 Codex 连接和服务故障记录。
-程序不会上传数据、调用网络服务，也不会读取或保存 API Key。
+额度信息，并在 macOS 上自动配置 `~/.claude/settings.json` 中的 Claude Code
+生命周期 hooks 和 status line proxy。它会将 hook 事件写入
+`~/.agent-halo/claude-code-status.jsonl`，上下文快照写入
+`~/.agent-halo/claude-code-context.json`。它还会只读查询 `logs_2.sqlite`
+中结构化的 Codex 连接和服务故障记录。程序不会上传数据、调用网络服务，
+也不会读取或保存 API Key。
 
 ## Windows 安全提示
 

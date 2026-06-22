@@ -149,6 +149,7 @@ public sealed class HaloWindow : Window
             SourceInitialized += OnSourceInitialized;
             Loaded += OnLoaded;
             Closing += OnClosing;
+            SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
 
             tray = new Forms.NotifyIcon();
             tray.Text = "Agent Halo";
@@ -176,10 +177,21 @@ public sealed class HaloWindow : Window
             return SizeForScale(IsValidScalePercent(percent) ? percent : 100);
         }
 
+        public static bool DiagnosticIsFrameVisible(
+            System.Drawing.Rectangle frame,
+            IEnumerable<System.Drawing.Rectangle> workingAreas)
+        {
+            return workingAreas.Any(delegate(System.Drawing.Rectangle area)
+            {
+                return area.IntersectsWith(frame);
+            });
+        }
+
         private void OnLoaded(object sender, RoutedEventArgs e)
         {
             ClaudeHookConfigurator.Configure();
             RestorePosition();
+            RecoverHaloIfOffscreen();
             monitor.Start();
             RefreshState();
             codexWasForeground = IsCodexForeground();
@@ -188,6 +200,14 @@ public sealed class HaloWindow : Window
             {
                 visual.ResetPerformanceMetrics();
                 performanceTimer.Start();
+            }
+        }
+
+        private void OnDisplaySettingsChanged(object sender, EventArgs e)
+        {
+            if (!Dispatcher.HasShutdownStarted)
+            {
+                Dispatcher.BeginInvoke(new Action(RecoverHaloIfOffscreen));
             }
         }
 
@@ -625,12 +645,35 @@ public sealed class HaloWindow : Window
 
         private void EscapeOffscreen()
         {
+            MoveHaloToPrimaryScreen();
+            Topmost = settings.AlwaysOnTop;
+            Activate();
+        }
+
+        private void MoveHaloToPrimaryScreen()
+        {
             Rect area = GetPrimaryWorkAreaDip();
             Left = area.Right - Width - 28;
             Top = area.Top + 28;
             SavePosition();
-            Topmost = settings.AlwaysOnTop;
-            Activate();
+        }
+
+        private void RecoverHaloIfOffscreen()
+        {
+            IntPtr handle = new WindowInteropHelper(this).Handle;
+            NativeRect nativeFrame;
+            if (handle == IntPtr.Zero || !GetWindowRect(handle, out nativeFrame))
+            {
+                return;
+            }
+            System.Drawing.Rectangle frame = System.Drawing.Rectangle.FromLTRB(
+                nativeFrame.Left, nativeFrame.Top, nativeFrame.Right, nativeFrame.Bottom);
+            IEnumerable<System.Drawing.Rectangle> areas = Forms.Screen.AllScreens
+                .Select(delegate(Forms.Screen screen) { return screen.WorkingArea; });
+            if (!DiagnosticIsFrameVisible(frame, areas))
+            {
+                MoveHaloToPrimaryScreen();
+            }
         }
 
         private void SavePosition()
@@ -961,6 +1004,7 @@ public sealed class HaloWindow : Window
 
         private void OnClosing(object sender, System.ComponentModel.CancelEventArgs e)
         {
+            SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
             foregroundTimer.Stop();
             hoverHideTimer.Stop();
             if (performanceTimer != null)
@@ -1019,8 +1063,19 @@ public sealed class HaloWindow : Window
         private static extern uint GetWindowThreadProcessId(IntPtr hWnd,
             out uint processId);
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeRect
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
+        }
+
+        [DllImport("user32.dll")]
+        private static extern bool GetWindowRect(IntPtr hWnd, out NativeRect rect);
+
         [DllImport("user32.dll")]
         private static extern bool DestroyIcon(IntPtr handle);
     }
 }
-

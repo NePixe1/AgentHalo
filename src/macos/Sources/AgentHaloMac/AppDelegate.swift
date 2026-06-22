@@ -5,6 +5,12 @@ private let haloSizeMenuWidth: CGFloat = 252
 private let haloSizeMenuHeight: CGFloat = 44
 private let haloSizeMenuTextInset: CGFloat = 21
 
+struct DetailsPresentation: Equatable {
+    var sessionDetails: SessionDetailsSnapshot
+    var showsQuota: Bool
+    var contextUsedPercent: Double?
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let settingsStore: SettingsStore
@@ -22,6 +28,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsSaveTimer: Timer?
     private var systemOverlaySuspended = false
     private let rateLimitReader = RateLimitReader()
+    private let claudeContextUsageReader = ClaudeContextUsageReader()
+    private let contextReaderQueue = DispatchQueue(
+        label: "com.agenthalo.context-reader",
+        qos: .userInteractive
+    )
     private let failureReader = CodexFailureReader()
     private let realtimeActivityReader = CodexRealtimeActivityReader()
     private let instanceLock = InstanceLock()
@@ -51,9 +62,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         ClaudeHookConfigurator.configure()
+        ClaudeStatusLineConfigurator.configure()
         NSApp.setActivationPolicy(.accessory)
         createStatusItem()
         createHaloPanel()
+        recoverHaloIfOffscreen()
         registerSystemOverlayObservers()
         updateSystemOverlaySuspension(for: NSWorkspace.shared.frontmostApplication)
         tick()
@@ -67,11 +80,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsStore.save(settings)
     }
 
+    func applicationDidChangeScreenParameters(_ notification: Notification) {
+        recoverHaloIfOffscreen()
+    }
+
     @objc private func timerDidFire() {
         tick()
     }
 
     private func tick() {
+        if haloView?.isDragging == true {
+            return
+        }
         updateSystemOverlaySuspension(for: NSWorkspace.shared.frontmostApplication)
         _ = monitor.refresh()
         _ = claudeHookMonitor.refresh()
@@ -177,7 +197,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         systemOverlaySuspended = suspended
         haloView?.setSystemOverlaySuspended(suspended)
         if suspended {
-            hideDetailsImmediately()
+            hoverHideTimer?.invalidate()
+            if detailsPanel.isVisible {
+                detailsPanel.orderFrontRegardless()
+            }
             if Self.haloWindowVisibilityDuringSystemOverlay == .visible {
                 panel?.orderFrontRegardless()
             }
@@ -185,6 +208,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             haloView?.aggregate = aggregate
             haloView?.needsDisplay = true
             panel?.orderFrontRegardless()
+            reconcileDetailsVisibilityAfterSystemOverlay()
         }
     }
 
@@ -263,6 +287,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settings.top = origin.y
         settings.hasPosition = true
         settingsStore.save(settings)
+    }
+
+    private func recoverHaloIfOffscreen() {
+        guard let panel else {
+            return
+        }
+        let visibleFrames = NSScreen.screens.map(\.visibleFrame)
+        guard !Self.isHaloFrameVisible(panel.frame, in: visibleFrames) else {
+            return
+        }
+        escapeOffscreen()
     }
 
     @objc private func haloSizeSliderChanged(_ sender: NSSlider) {
@@ -395,11 +430,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         hoverHideTimer?.invalidate()
+        let rawClaudeSnapshots = settings.focusedAgent == .claudeCode ? claudeSnapshots() : []
         if settings.focusedAgent == .claudeCode {
-            acknowledgeCompletedSessions(claudeSnapshots())
+            acknowledgeCompletedSessions(rawClaudeSnapshots)
         }
+        let displayedAggregate = displayAggregate()
         let quota = settings.focusedAgent == .codex ? rateLimitReader.read() : nil
-        detailsPanel.update(aggregate: displayAggregate(), quota: quota)
+        let claudeSessionIds = rawClaudeSnapshots.isEmpty
+            ? displayedAggregate.sessions.map(\.threadId)
+            : rawClaudeSnapshots.map(\.threadId)
+        let claudeUsage = settings.focusedAgent == .claudeCode
+            ? contextReaderQueue.sync {
+                claudeContextUsageReader.read(
+                    sessionIds: claudeSessionIds.filter { $0 != "claude-code" }
+                )
+            }
+            : nil
+        let presentation = Self.detailsPresentationForDetails(
+            focusedAgent: settings.focusedAgent,
+            displayedAggregate: displayedAggregate,
+            rawClaudeSnapshots: rawClaudeSnapshots,
+            quota: quota,
+            claudeUsage: claudeUsage
+        )
+        detailsPanel.update(
+            aggregate: displayedAggregate,
+            quota: quota,
+            contextUsedPercent: presentation.contextUsedPercent,
+            sessionDetails: presentation.sessionDetails,
+            showsQuota: presentation.showsQuota
+        )
         detailsPanel.onMouseEntered = { [weak self] in
             self?.hoverHideTimer?.invalidate()
         }
@@ -413,6 +473,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         detailsPanel.orderFrontRegardless()
     }
 
+    static func contextUsedPercentForDetails(
+        focusedAgent: AgentKind,
+        quota: RateLimitSnapshot?,
+        displayedAggregate: AggregateSnapshot,
+        rawClaudeSnapshots: [SessionSnapshot],
+        claudeContextUsageReader: ClaudeContextUsageReader,
+        contextReaderQueue: DispatchQueue,
+        now: Date = Date()
+    ) -> Double? {
+        switch focusedAgent {
+        case .codex:
+            return quota?.contextUsedPercent
+        case .claudeCode:
+            let sessionIds = rawClaudeSnapshots.isEmpty
+                ? displayedAggregate.sessions.map(\.threadId)
+                : rawClaudeSnapshots.map(\.threadId)
+            let comparableSessionIds = sessionIds.filter { $0 != "claude-code" }
+            return contextReaderQueue.sync {
+                claudeContextUsageReader.read(
+                    sessionIds: comparableSessionIds,
+                    now: now
+                )?.usedPercent
+            }
+        }
+    }
+
+    static func detailsPresentationForDetails(
+        focusedAgent: AgentKind,
+        displayedAggregate: AggregateSnapshot,
+        rawClaudeSnapshots: [SessionSnapshot],
+        quota: RateLimitSnapshot?,
+        claudeUsage: ClaudeContextUsageSnapshot?
+    ) -> DetailsPresentation {
+        switch focusedAgent {
+        case .codex:
+            let session = displayedAggregate.sessions.first
+            let showsQuota = session?.hasRateLimits ?? (quota != nil)
+            return DetailsPresentation(
+                sessionDetails: SessionDetailsSnapshot(
+                    projectName: session?.projectName,
+                    modelName: session?.modelName,
+                    inputTokens: session?.inputTokens,
+                    outputTokens: session?.outputTokens
+                ),
+                showsQuota: showsQuota,
+                contextUsedPercent: session?.contextUsedPercent
+                    ?? (showsQuota ? quota?.contextUsedPercent : nil)
+            )
+        case .claudeCode:
+            let matchingRawSession = claudeUsage.flatMap { usage in
+                rawClaudeSnapshots.first { $0.threadId == usage.sessionId }
+            }
+            let session = matchingRawSession
+                ?? displayedAggregate.sessions.first
+                ?? rawClaudeSnapshots.first
+            let matchingUsage = session.flatMap { session in
+                claudeUsage?.sessionId == session.threadId ? claudeUsage : nil
+            }
+            return DetailsPresentation(
+                sessionDetails: SessionDetailsSnapshot(
+                    projectName: session?.projectName,
+                    modelName: matchingUsage?.modelName,
+                    inputTokens: matchingUsage?.inputTokens,
+                    outputTokens: matchingUsage?.outputTokens
+                ),
+                showsQuota: false,
+                contextUsedPercent: matchingUsage?.usedPercent
+            )
+        }
+    }
+
     private func refreshVisibleDetailsPanel() {
         guard detailsPanel.isVisible else {
             return
@@ -422,9 +553,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func scheduleHideDetails() {
         hoverHideTimer?.invalidate()
+        guard !systemOverlaySuspended else {
+            return
+        }
         hoverHideTimer = Timer.scheduledTimer(withTimeInterval: 0.22, repeats: false) { [weak self] _ in
             Task { @MainActor in
-                self?.detailsPanel.orderOut(nil)
+                guard let self, !self.systemOverlaySuspended else {
+                    return
+                }
+                self.detailsPanel.orderOut(nil)
             }
         }
     }
@@ -432,6 +569,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func hideDetailsImmediately() {
         hoverHideTimer?.invalidate()
         detailsPanel.orderOut(nil)
+    }
+
+    private func reconcileDetailsVisibilityAfterSystemOverlay() {
+        guard detailsPanel.isVisible, let haloFrame = panel?.frame else {
+            return
+        }
+        guard !Self.shouldKeepDetailsVisibleAfterSystemOverlay(
+            mouseLocation: NSEvent.mouseLocation,
+            haloFrame: haloFrame,
+            detailsFrame: detailsPanel.frame
+        ) else {
+            return
+        }
+        scheduleHideDetails()
     }
 
     private func positionDetailsPanel() {
@@ -602,14 +753,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let systemOverlayBundleIdentifiers: Set<String> = [
             "com.apple.screenshot.launcher",
             "com.apple.screencaptureui",
-            "com.apple.dock"
+            "com.apple.dock",
+            "com.snipaste.Snipaste"
         ]
         if let bundleIdentifier, systemOverlayBundleIdentifiers.contains(bundleIdentifier) {
             return true
         }
 
         let normalizedName = localizedName?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return normalizedName == "screenshot"
+        return normalizedName == "screenshot" || normalizedName == "snipaste"
     }
 
     static func shouldSuspendForSystemOverlay(
@@ -622,9 +774,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
+    static func shouldKeepDetailsVisibleAfterSystemOverlay(
+        mouseLocation: NSPoint,
+        haloFrame: NSRect,
+        detailsFrame: NSRect
+    ) -> Bool {
+        HaloGeometry.contains(point: mouseLocation, in: haloFrame) || detailsFrame.contains(mouseLocation)
+    }
+
     static func haloFrameByKeepingOrigin(oldFrame: NSRect, requestedSize: CGFloat) -> NSRect {
         let size = CGFloat(HaloSettings.clampedHaloSize(Double(requestedSize)))
         return NSRect(x: oldFrame.origin.x, y: oldFrame.origin.y, width: size, height: size)
+    }
+
+    static func isHaloFrameVisible(_ frame: NSRect, in visibleFrames: [NSRect]) -> Bool {
+        visibleFrames.contains { $0.intersects(frame) }
     }
 
     private struct PreviewPayload: Equatable {

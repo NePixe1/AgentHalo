@@ -44,14 +44,14 @@ enum HaloRenderer {
             : 0
         let completionFlash = max(doneFlash, streamingFlash)
         visual.powered = HaloMath.clamp(visual.powered + completionFlash * 0.82, 0, 1)
-        let scale = min(bounds.width, bounds.height) / 112.0
+        let scale = HaloGeometry.scale(in: bounds)
         let intensity = HaloMath.clamp(visual.intensity + HaloMath.stateBreath(visualState, time: input.time) * 0.18 + completionFlash * 0.5, 0, 1.32)
-        let radius = scale * (35.8 + completionFlash * 0.45)
+        let radius = scale * (HaloGeometry.ringRadius + completionFlash * 0.45)
         let bodyWidth = scale * (visual.bodyWidth + completionFlash * 0.65)
         let material = HaloVisualModel.materialSnapshot(color: color, visual: visual, intensity: intensity)
 
         context.setLineCap(.round)
-        drawRingLayer(context: context, center: center, radius: radius, gapA: input.gapA, gapB: input.gapB, width: scale * 19.5, color: nsColor(material.emissionColor, alpha: material.glowAlphas[0]))
+        drawRingLayer(context: context, center: center, radius: radius, gapA: input.gapA, gapB: input.gapB, width: scale * HaloGeometry.widestGlowWidth, color: nsColor(material.emissionColor, alpha: material.glowAlphas[0]))
         drawRingLayer(context: context, center: center, radius: radius, gapA: input.gapA, gapB: input.gapB, width: scale * 14.5, color: nsColor(material.emissionColor, alpha: material.glowAlphas[1]))
         drawRingLayer(context: context, center: center, radius: radius, gapA: input.gapA, gapB: input.gapB, width: scale * 11.2, color: nsColor(material.emissionColor, alpha: material.glowAlphas[2]))
         drawRingLayer(context: context, center: center, radius: radius, gapA: input.gapA, gapB: input.gapB, width: scale * 9.8, color: nsColor(material.glowColor, alpha: material.glowAlphas[3]))

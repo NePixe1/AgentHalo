@@ -4,7 +4,7 @@
 
 A local, always-on-top status halo for coding agents.
 
-The current release supports Codex and macOS Claude Code transcript detection.
+The current release supports Codex and macOS Claude Code via lifecycle hooks and status line proxy.
 
 Version: `0.13.0`
 
@@ -62,14 +62,16 @@ OpenAI API key.
 - Drag the halo to reposition it; it gently snaps to display edges.
 - Hover to inspect the current state plus five-hour and weekly usage limits.
 - Hover details include a `Codex / CC` switch. Agent Halo keeps watching both tools, while the halo color, status text, and quota rows follow the selected focused agent.
-- Codex quota and context rows are Codex-only. When `CC` is focused, the hover panel shows Claude Code session state without Codex balance information.
+- The context pill displays context usage for the focused agent: Codex shows quota-based context usage, while Claude Code shows context window usage captured via status line proxy.
+- Codex quota rows are Codex-only. When `CC` is focused, the hover panel shows Claude Code session state without Codex balance information.
 - Completed green breathes until Codex returns to the foreground, then settles
   into a non-glowing standby green.
 - Right-click for state previews, pause, startup, and exit controls.
 - Use the `光环大小` submenu to select `75% / 100% / 125%`;
   the selected size persists across restarts.
-- If a disconnected display leaves the halo off-screen, right-click its system
-  tray icon and select `脱离卡死` to move it to the primary display.
+- If launch or a display change leaves the halo fully off-screen, Agent Halo
+  automatically returns it to the primary display. Select `脱离卡死` from the
+  context menu to force the same reset manually.
 - Click the halo to bring the Codex window forward.
 
 ## Status language
@@ -107,10 +109,12 @@ still produce a readable execution state.
 ## Privacy
 
 Agent Halo locally reads lifecycle and usage events from
-`%USERPROFILE%\.codex\sessions` and, on macOS, Claude Code transcripts under
-`~/.claude/projects`. It also performs read-only structured queries against
-`logs_2.sqlite` for Codex connection and service failures. It does not upload data,
-call a network service, or read/store API keys.
+`%USERPROFILE%\.codex\sessions` and, on macOS, automatically configures Claude Code
+lifecycle hooks and status line proxy in `~/.claude/settings.json`. It writes hook
+events to `~/.agent-halo/claude-code-status.jsonl` and context snapshots to
+`~/.agent-halo/claude-code-context.json`. It also performs read-only structured queries
+against `logs_2.sqlite` for Codex connection and service failures. It does not upload
+data, call a network service, or read/store API keys.
 
 ## Windows security notice
 

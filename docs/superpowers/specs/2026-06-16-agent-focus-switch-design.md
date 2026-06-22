@@ -162,6 +162,31 @@ Three behaviors stay tied to `.codex` focus and become no-ops under `.claudeCode
    - For Codex: `acknowledgeCompletedIfCodexIsForeground()` runs on every tick when Codex is foregrounded.
    - For Claude Code: `acknowledgeCompletedSessions(claudeSnapshots())` is called when the details hover panel is shown (`showDetails()`).
 
+### Context Usage Data Source
+
+`AppDelegate.contextUsedPercentForDetails` provides a unified entry point for retrieving context usage data:
+
+```swift
+static func contextUsedPercentForDetails(
+    focusedAgent: AgentKind,
+    quota: RateLimitSnapshot?,
+    displayedAggregate: AggregateSnapshot,
+    rawClaudeSnapshots: [SessionSnapshot],
+    claudeContextUsageReader: ClaudeContextUsageReader,
+    now: Date = Date()
+) -> Double?
+```
+
+**Behavior:**
+- When `focusedAgent == .codex`: Returns `quota?.contextUsedPercent` (Codex rate limit snapshot).
+- When `focusedAgent == .claudeCode`: 
+  - Extracts session IDs from `rawClaudeSnapshots` (if available) or falls back to `displayedAggregate.sessions`.
+  - Filters out synthetic session IDs (e.g., `"claude-code"`).
+  - Calls `claudeContextUsageReader.read(sessionIds:now:)` to retrieve the most recent context snapshot from the status line proxy.
+  - Returns `nil` if no valid snapshot exists or the data is stale (>5 minutes old).
+
+This ensures the context pill always reflects the appropriate data source for the focused agent.
+
 ### Focus Switch Handler
 
 `AppDelegate` exposes a central helper to switch the focused agent cleanly:
@@ -188,11 +213,22 @@ The top row of the hover panel (`DetailsPanel.swift`) contains:
 - Segmented switch: `agentSwitch` (`NSSegmentedControl`) mapped to `AgentKind.allCases.map(\.segmentedTitle)` (e.g. `"Codex"`, `"CC"`).
 - Context pill: `contextPill` representing the current context usage percentage.
 
+### Context Pill Behavior
+
+The context pill is now **agent-aware** and displays context usage for the currently focused agent:
+
+- **When `Codex` is focused**: `contextPill` shows Codex quota context usage (from `RateLimitSnapshot.contextUsedPercent`). Hidden if quota data is unavailable.
+- **When `CC` is focused**: `contextPill` shows Claude Code context usage (from `ClaudeContextUsageReader`). Hidden if status line proxy data is unavailable or stale.
+
+The context pill visibility is now **decoupled from quota visibility**: it displays whenever valid context data exists for the focused agent, regardless of whether Codex quota rows are shown.
+
+### Quota Group Behavior
+
 When `Codex` is selected:
-- `showsCodexQuota` is true. `contextPill` and the `quotaGroup` (containing `primaryQuota` and `secondaryQuota` views) are shown.
+- `showsCodexQuota` is true. The `quotaGroup` (containing `primaryQuota` and `secondaryQuota` views) is shown.
 
 When `CC` is selected:
-- `showsCodexQuota` is false. `contextPill` and the entire `quotaGroup` are hidden. The height of the details panel collapses automatically using stack view spacing and auto-layout.
+- `showsCodexQuota` is false. The entire `quotaGroup` is hidden. The height of the details panel collapses automatically using stack view spacing and auto-layout.
 
 Switching segments on the control fires `onAgentSelected`, which triggers `AppDelegate.setFocusedAgent(_:)`.
 
@@ -212,6 +248,10 @@ Ensure coverage for focus switches:
 - `HaloSettings` persists the selected focused agent.
 - `SessionAggregator.aggregate` filters snapshots by `focusedAgent`.
 - Codex synthetic failure does not occur when `.claudeCode` is focused.
-- Claude Code focus hides Codex quota rows and the context pill.
+- Claude Code focus hides Codex quota rows but shows context pill when status line data is available.
 - Idle copy properly switches between Codex and Claude Code locales.
 - Switching focus immediately triggers redraw and settings persistence.
+- `AppDelegate.contextUsedPercentForDetails` returns Codex quota data when `.codex` is focused.
+- `AppDelegate.contextUsedPercentForDetails` returns status line proxy data when `.claudeCode` is focused.
+- Context pill visibility is independent of quota group visibility.
+- Context pill shows correct percentage for both agents when data is available.

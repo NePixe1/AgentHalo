@@ -19,9 +19,11 @@ func runHaloInteractionChecks() {
     testSingleClickInvokesPrimaryAction()
     testHaloContextMenuContainsCurrentControls()
     testHaloClickWaitsForMouseUpAndDragCancelsClick()
+    testHaloHoverUsesFilledCircularSurface()
     testDraggingHaloSuppressesHoverDetails()
-    testDraggingHaloReducesAnimationFrameRate()
+    testDraggingHaloPausesAnimationDuringDrag()
     testHaloSizeResizeKeepsWindowOrigin()
+    testHaloFrameVisibilityAcrossScreens()
     testHaloViewResizeKeepsAnimationMoving()
     testHaloViewSystemOverlaySuspensionStopsAnimation()
     testPreviewSubmenuMarksLiveStateInitially()
@@ -32,15 +34,44 @@ func runHaloInteractionChecks() {
     testNonOverlayFrontmostAppDoesNotSuspendHalo()
     testSystemOverlaySuspensionKeepsHaloVisible()
     testHaloWindowAllowsScreenCaptureSharing()
-    testDetailsPanelOptOutsOfScreenCaptureSharing()
+    testDetailsPanelAllowsScreenCaptureSharing()
+    testDetailsPanelVisibilityAfterCaptureFollowsMouseLocation()
     testFocusSubmenuMarksCodexInitially()
     testFocusSubmenuSwitchesToClaudeCode()
     testSingleClickDoesNotActivateCodexWhenClaudeCodeFocused()
     testDetailsPanelShowsCodexQuotaAndIdleCopy()
+    testDetailsPanelShowsSessionMetadataForCodexAndClaudeCode()
     testDetailsPanelShowsExpiredQuotaAsWaitingForRefresh()
     testDetailsPanelShowsAnswerStreamingCopy()
-    testDetailsPanelHidesQuotaForClaudeCode()
+    testDetailsPanelLocalizesClaudeActivityDetails()
+    testDetailsPanelShowsContextAndHidesQuotaForClaudeCode()
+    testDetailsPresentationUsesFocusedSessionAndRejectsStaleQuota()
+    testClaudeContextUsesRawSessionAfterCompletionAcknowledgement()
+    testClaudeContextSurvivesHookSnapshotPruning()
+    testAgentToggleUsesSharedSVGAssets()
+    testAgentToggleUsesCodexAndClaudeIcons()
+    testAgentToggleKeepsWholeControlClickable()
     testDetailsPanelSwitchCallbackSelectsClaudeCode()
+}
+
+@MainActor
+private func testHaloFrameVisibilityAcrossScreens() {
+    let screens = [
+        NSRect(x: 0, y: 0, width: 1440, height: 900),
+        NSRect(x: 1440, y: 0, width: 1920, height: 1080)
+    ]
+    expect(
+        AppDelegate.isHaloFrameVisible(NSRect(x: 1200, y: 700, width: 112, height: 112), in: screens),
+        "halo wholly inside a screen should remain visible"
+    )
+    expect(
+        AppDelegate.isHaloFrameVisible(NSRect(x: 3320, y: 900, width: 112, height: 112), in: screens),
+        "halo partially intersecting a screen should remain visible"
+    )
+    expect(
+        !AppDelegate.isHaloFrameVisible(NSRect(x: 3500, y: 1200, width: 112, height: 112), in: screens),
+        "halo outside every screen should be recovered"
+    )
 }
 
 @MainActor
@@ -142,6 +173,31 @@ private func testHaloClickWaitsForMouseUpAndDragCancelsClick() {
 }
 
 @MainActor
+private func testHaloHoverUsesFilledCircularSurface() {
+    let view = HaloView(frame: NSRect(x: 0, y: 0, width: 112, height: 112))
+    var enterCount = 0
+    var exitCount = 0
+    view.onMouseEntered = {
+        enterCount += 1
+    }
+    view.onMouseExited = {
+        exitCount += 1
+    }
+
+    view.mouseEntered(with: interactionEvent(type: .mouseMoved, location: NSPoint(x: 2, y: 2)))
+    expect(enterCount == 0, "transparent halo corners should not trigger hover details")
+
+    view.mouseMoved(with: interactionEvent(type: .mouseMoved, location: NSPoint(x: 56, y: 56)))
+    expect(enterCount == 1, "the hollow halo center should trigger hover details")
+
+    view.mouseMoved(with: interactionEvent(type: .mouseMoved, location: NSPoint(x: 72, y: 56)))
+    expect(enterCount == 1, "moving within the circular hover surface should not duplicate entry")
+
+    view.mouseMoved(with: interactionEvent(type: .mouseMoved, location: NSPoint(x: 110, y: 110)))
+    expect(exitCount == 1, "moving into a transparent halo corner should exit hover details")
+}
+
+@MainActor
 private func testDraggingHaloSuppressesHoverDetails() {
     let view = HaloView(frame: NSRect(x: 0, y: 0, width: 112, height: 112))
     let window = NSWindow(
@@ -165,14 +221,15 @@ private func testDraggingHaloSuppressesHoverDetails() {
     view.mouseDown(with: interactionEvent(type: .leftMouseDown))
     view.mouseDragged(with: interactionEvent(type: .leftMouseDragged, location: NSPoint(x: 34, y: 30)))
     view.mouseEntered(with: interactionEvent(type: .leftMouseDown))
+    expect(hoverShowCount == 1, "dragging halo should suppress hover details")
     view.mouseUp(with: interactionEvent(type: .leftMouseUp))
 
-    expect(hoverShowCount == 1, "dragging halo should suppress hover details")
+    expect(hoverShowCount == 2, "releasing halo inside its hover surface should restore details")
     expect(dragStartCount == 1, "dragging halo should request immediate details hide")
 }
 
 @MainActor
-private func testDraggingHaloReducesAnimationFrameRate() {
+private func testDraggingHaloPausesAnimationDuringDrag() {
     let view = HaloView(frame: NSRect(x: 0, y: 0, width: 112, height: 112))
     let window = NSWindow(
         contentRect: NSRect(x: 200, y: 300, width: 112, height: 112),
@@ -182,14 +239,14 @@ private func testDraggingHaloReducesAnimationFrameRate() {
     )
     window.contentView = view
 
-    expectApproximately(animationFrameInterval(of: view), 1.0 / 60.0, "halo should animate at full frame rate normally")
+    expect(view.hasAnimationDriverForChecks, "halo should animate normally before drag")
 
     view.mouseDown(with: interactionEvent(type: .leftMouseDown))
     view.mouseDragged(with: interactionEvent(type: .leftMouseDragged, location: NSPoint(x: 34, y: 30)))
-    expectApproximately(animationFrameInterval(of: view), 1.0 / 15.0, "dragging halo should reduce animation frame rate")
+    expect(!view.hasAnimationDriverForChecks, "dragging halo should pause animation entirely")
 
     view.mouseUp(with: interactionEvent(type: .leftMouseUp))
-    expectApproximately(animationFrameInterval(of: view), 1.0 / 60.0, "halo should restore full frame rate after dragging")
+    expect(view.hasAnimationDriverForChecks, "halo should restore animation after dragging")
 }
 
 @MainActor
@@ -200,23 +257,6 @@ private func testHaloSizeResizeKeepsWindowOrigin() {
 
     expect(resizedFrame.origin == oldFrame.origin, "halo size slider should not move the halo window origin")
     expect(resizedFrame.size == NSSize(width: 168, height: 168), "halo size slider should resize the halo window")
-}
-
-private func expectApproximately(_ actual: TimeInterval, _ expected: TimeInterval, _ message: String) {
-    if abs(actual - expected) > 0.001 {
-        fatalError("\(message): expected \(expected), got \(actual)")
-    }
-}
-
-private func animationFrameInterval(of view: HaloView) -> TimeInterval {
-    guard let timerValue = Mirror(reflecting: view).children.first(where: { $0.label == "animationTimer" })?.value else {
-        fatalError("halo view should expose animation timer for checks")
-    }
-    let optionalMirror = Mirror(reflecting: timerValue)
-    guard let timer = optionalMirror.children.first?.value as? Timer else {
-        fatalError("halo view should have an animation timer")
-    }
-    return timer.timeInterval
 }
 
 private func interactionEvent(
@@ -254,6 +294,11 @@ private func testHaloViewResizeKeepsAnimationMoving() {
 @MainActor
 private func testHaloViewSystemOverlaySuspensionStopsAnimation() {
     let view = HaloView(frame: NSRect(x: 0, y: 0, width: 112, height: 112))
+    var exitCount = 0
+    view.onMouseExited = {
+        exitCount += 1
+    }
+    view.mouseEntered(with: interactionEvent(type: .mouseMoved, location: NSPoint(x: 56, y: 56)))
     expect(view.hasAnimationDriverForChecks, "halo view should animate before system overlay suspension")
 
     view.setSystemOverlaySuspended(true)
@@ -267,6 +312,8 @@ private func testHaloViewSystemOverlaySuspensionStopsAnimation() {
     view.setSystemOverlaySuspended(false)
 
     expect(view.hasAnimationDriverForChecks, "halo view should restore animation after system overlay suspension")
+    view.mouseMoved(with: interactionEvent(type: .mouseMoved, location: NSPoint(x: 110, y: 110)))
+    expect(exitCount == 1, "hover exit should still fire after system overlay suspension")
 }
 
 @MainActor
@@ -325,6 +372,10 @@ private func testSystemOverlayApplicationDetection() {
         "Dock-owned Mission Control should suspend the halo"
     )
     expect(
+        AppDelegate.isSystemOverlayApplication(bundleIdentifier: nil, localizedName: "Snipaste"),
+        "Snipaste capture overlay should suspend the halo without hiding visible details"
+    )
+    expect(
         !AppDelegate.isSystemOverlayApplication(bundleIdentifier: "com.todesktop.230313mzl4w4u92", localizedName: "Codex"),
         "regular app activation should not suspend the halo"
     )
@@ -354,10 +405,49 @@ private func testHaloWindowAllowsScreenCaptureSharing() {
 }
 
 @MainActor
-private func testDetailsPanelOptOutsOfScreenCaptureSharing() {
+private func testDetailsPanelAllowsScreenCaptureSharing() {
     let panel = DetailsPanel()
 
-    expect(panel.sharingType == .none, "details panel should not be shared with screen capture")
+    expect(panel.sharingType == .readOnly, "details panel should be included in screen capture")
+}
+
+@MainActor
+private func testDetailsPanelVisibilityAfterCaptureFollowsMouseLocation() {
+    let haloFrame = NSRect(x: 100, y: 100, width: 96, height: 96)
+    let detailsFrame = NSRect(x: 0, y: 80, width: 90, height: 120)
+
+    expect(
+        AppDelegate.shouldKeepDetailsVisibleAfterSystemOverlay(
+            mouseLocation: NSPoint(x: 148, y: 148),
+            haloFrame: haloFrame,
+            detailsFrame: detailsFrame
+        ),
+        "details should stay visible when the pointer returns over the hollow halo center"
+    )
+    expect(
+        AppDelegate.shouldKeepDetailsVisibleAfterSystemOverlay(
+            mouseLocation: NSPoint(x: 40, y: 120),
+            haloFrame: haloFrame,
+            detailsFrame: detailsFrame
+        ),
+        "details should stay visible when the pointer returns over the details panel"
+    )
+    expect(
+        !AppDelegate.shouldKeepDetailsVisibleAfterSystemOverlay(
+            mouseLocation: NSPoint(x: 102, y: 102),
+            haloFrame: haloFrame,
+            detailsFrame: detailsFrame
+        ),
+        "details should hide when the pointer returns over a transparent halo corner"
+    )
+    expect(
+        !AppDelegate.shouldKeepDetailsVisibleAfterSystemOverlay(
+            mouseLocation: NSPoint(x: 260, y: 260),
+            haloFrame: haloFrame,
+            detailsFrame: detailsFrame
+        ),
+        "details should hide after capture when the pointer is outside both hover surfaces"
+    )
 }
 
 @MainActor
@@ -442,7 +532,8 @@ private func testDetailsPanelShowsCodexQuotaAndIdleCopy() {
 
     panel.update(
         aggregate: aggregate,
-        quota: RateLimitSnapshot(primaryUsedPercent: 30, secondaryUsedPercent: 60, contextUsedPercent: 42)
+        quota: RateLimitSnapshot(primaryUsedPercent: 30, secondaryUsedPercent: 60, contextUsedPercent: 42),
+        contextUsedPercent: 42
     )
 
     expect(panel.focusedAgentForTesting == .codex, "details panel should select Codex")
@@ -450,6 +541,57 @@ private func testDetailsPanelShowsCodexQuotaAndIdleCopy() {
     expect(panel.contextPillHiddenForTesting == false, "Codex context pill should be visible")
     expect(panel.primaryQuotaHiddenForTesting == false, "Codex primary quota should be visible")
     expect(panel.secondaryQuotaHiddenForTesting == false, "Codex secondary quota should be visible")
+}
+
+@MainActor
+private func testDetailsPanelShowsSessionMetadataForCodexAndClaudeCode() {
+    let panel = DetailsPanel()
+    let codex = AggregateSnapshot(
+        state: .working,
+        label: "EXECUTING",
+        detail: "AgentHalo - Running command",
+        sessions: [],
+        focusedAgent: .codex
+    )
+    let details = SessionDetailsSnapshot(
+        projectName: "AgentHalo",
+        modelName: "gpt-5.5",
+        inputTokens: 38_000,
+        outputTokens: 1_200
+    )
+
+    panel.update(
+        aggregate: codex,
+        quota: nil,
+        contextUsedPercent: 42,
+        sessionDetails: details,
+        showsQuota: false
+    )
+
+    expect(panel.primaryQuotaHiddenForTesting, "third-party Codex quota should be hidden")
+    expect(!panel.metadataGroupHiddenForTesting, "third-party Codex metadata should be visible")
+    expect(panel.projectValueForTesting, "AgentHalo", "details project value")
+    expect(panel.modelValueForTesting, "gpt-5.5", "details model value")
+    expect(panel.tokenValueForTesting, "输入 38k · 输出 1.2k", "details token value")
+
+    let claude = AggregateSnapshot(
+        state: .working,
+        label: "EXECUTING",
+        detail: "AgentHalo - Running command",
+        sessions: [],
+        focusedAgent: .claudeCode
+    )
+    panel.update(
+        aggregate: claude,
+        quota: nil,
+        contextUsedPercent: 58,
+        sessionDetails: details,
+        showsQuota: false
+    )
+
+    expect(panel.focusedAgentForTesting == .claudeCode, "details panel should select Claude Code")
+    expect(!panel.metadataGroupHiddenForTesting, "Claude Code metadata should be visible")
+    expect(panel.tokenValueForTesting, "输入 38k · 输出 1.2k", "Claude Code token value")
 }
 
 @MainActor
@@ -471,7 +613,8 @@ private func testDetailsPanelShowsExpiredQuotaAsWaitingForRefresh() {
             primaryResetAt: Date().addingTimeInterval(-5),
             secondaryResetAt: Date().addingTimeInterval(300),
             contextUsedPercent: 42
-        )
+        ),
+        contextUsedPercent: 42
     )
 
     expect(panel.primaryQuotaValueForTesting == "等待 Codex 刷新", "expired primary quota should wait for Codex refresh")
@@ -490,13 +633,50 @@ private func testDetailsPanelShowsAnswerStreamingCopy() {
         answerStreaming: true
     )
 
-    panel.update(aggregate: aggregate, quota: nil)
+    panel.update(aggregate: aggregate, quota: nil, contextUsedPercent: nil)
 
     expect(panel.detailTextForTesting == "正在输出答案", "answer streaming should use localized copy")
 }
 
 @MainActor
-private func testDetailsPanelHidesQuotaForClaudeCode() {
+private func testDetailsPanelLocalizesClaudeActivityDetails() {
+    let cases: [(action: String, expected: String)] = [
+        ("Compressing context", "正在压缩上下文"),
+        ("Awaiting permission", "等待你的授权"),
+        ("Reviewing result", "正在分析结果"),
+    ]
+
+    for item in cases {
+        let aggregate = AggregateSnapshot(
+            state: .working,
+            label: "EXECUTING",
+            detail: "AgentHalo - \(item.action)",
+            sessions: [
+                SessionSnapshot(
+                    threadId: "claude-detail",
+                    projectName: "AgentHalo",
+                    workingDirectory: "/tmp/AgentHalo",
+                    state: .working,
+                    action: item.action,
+                    lastEventAt: Date(),
+                    completedAt: nil,
+                    active: true,
+                    agent: .claudeCode
+                )
+            ],
+            focusedAgent: .claudeCode
+        )
+
+        expect(
+            DetailsPanel.localizedDetail(for: aggregate),
+            item.expected,
+            "details panel should localize \(item.action) precisely"
+        )
+    }
+}
+
+@MainActor
+private func testDetailsPanelShowsContextAndHidesQuotaForClaudeCode() {
     let panel = DetailsPanel()
     let aggregate = AggregateSnapshot(
         state: .idle,
@@ -506,13 +686,278 @@ private func testDetailsPanelHidesQuotaForClaudeCode() {
         focusedAgent: .claudeCode
     )
 
-    panel.update(aggregate: aggregate, quota: nil)
+    panel.update(aggregate: aggregate, quota: nil, contextUsedPercent: 58.4)
 
     expect(panel.focusedAgentForTesting == .claudeCode, "details panel should select Claude Code")
     expect(panel.detailTextForTesting == "Claude Code 正在待命", "Claude Code idle copy should be localized")
-    expect(panel.contextPillHiddenForTesting == true, "Claude Code context pill should be hidden")
+    expect(panel.contextPillHiddenForTesting == false, "Claude Code context pill should be visible")
+    expect(panel.contextValueForTesting == "上下文 58%", "Claude Code context percent should be shown")
     expect(panel.primaryQuotaHiddenForTesting == true, "Claude Code primary quota should be hidden")
     expect(panel.secondaryQuotaHiddenForTesting == true, "Claude Code secondary quota should be hidden")
+}
+
+@MainActor
+private func testDetailsPresentationUsesFocusedSessionAndRejectsStaleQuota() {
+    let now = Date()
+    let thirdPartySession = SessionSnapshot(
+        threadId: "codex-third-party",
+        projectName: "AgentHalo",
+        workingDirectory: "/tmp/AgentHalo",
+        state: .working,
+        action: "Running command",
+        lastEventAt: now,
+        completedAt: nil,
+        active: true,
+        modelName: "gpt-5.5",
+        inputTokens: 38_000,
+        outputTokens: 1_200,
+        hasRateLimits: false,
+        contextUsedPercent: 20
+    )
+    let staleQuota = RateLimitSnapshot(
+        primaryUsedPercent: 20,
+        secondaryUsedPercent: 80,
+        contextUsedPercent: 42
+    )
+    let codexAggregate = AggregateSnapshot(
+        state: .working,
+        label: "EXECUTING",
+        detail: "AgentHalo - Running command",
+        sessions: [thirdPartySession],
+        focusedAgent: .codex
+    )
+
+    let thirdParty = AppDelegate.detailsPresentationForDetails(
+        focusedAgent: .codex,
+        displayedAggregate: codexAggregate,
+        rawClaudeSnapshots: [],
+        quota: staleQuota,
+        claudeUsage: nil
+    )
+    expect(!thirdParty.showsQuota, "stale global quota must not override current third-party Codex session")
+    expect(thirdParty.sessionDetails.modelName, "gpt-5.5", "Codex details should use focused session model")
+    expect(thirdParty.contextUsedPercent, 20, "Codex context should use the focused session rather than stale quota")
+
+    var subscriptionSession = thirdPartySession
+    subscriptionSession.hasRateLimits = true
+    let subscriptionAggregate = AggregateSnapshot(
+        state: .working,
+        label: "EXECUTING",
+        detail: "AgentHalo - Running command",
+        sessions: [subscriptionSession],
+        focusedAgent: .codex
+    )
+    let subscription = AppDelegate.detailsPresentationForDetails(
+        focusedAgent: .codex,
+        displayedAggregate: subscriptionAggregate,
+        rawClaudeSnapshots: [],
+        quota: staleQuota,
+        claudeUsage: nil
+    )
+    expect(subscription.showsQuota, "Codex session with rate limits should keep quota UI")
+
+    let claudeSession = SessionSnapshot(
+        threadId: "cc-current",
+        projectName: "AgentHalo",
+        workingDirectory: "/tmp/AgentHalo",
+        state: .working,
+        action: "Thinking",
+        lastEventAt: now,
+        completedAt: nil,
+        active: true,
+        agent: .claudeCode
+    )
+    let claudeAggregate = AggregateSnapshot(
+        state: .working,
+        label: "THINKING",
+        detail: "AgentHalo - Thinking",
+        sessions: [claudeSession],
+        focusedAgent: .claudeCode
+    )
+    let matchingUsage = ClaudeContextUsageSnapshot(
+        sessionId: "cc-current",
+        usedPercent: 58,
+        modelName: "claude-sonnet-4",
+        inputTokens: 38_000,
+        outputTokens: 1_200,
+        updatedAt: now
+    )
+    let claude = AppDelegate.detailsPresentationForDetails(
+        focusedAgent: .claudeCode,
+        displayedAggregate: claudeAggregate,
+        rawClaudeSnapshots: [claudeSession],
+        quota: nil,
+        claudeUsage: matchingUsage
+    )
+    expect(!claude.showsQuota, "Claude Code should use metadata UI")
+    expect(claude.contextUsedPercent, 58, "Claude Code should retain context usage")
+    expect(claude.sessionDetails.modelName, "claude-sonnet-4", "Claude details should use matching statusline model")
+
+    var mismatchedUsage = matchingUsage
+    mismatchedUsage.sessionId = "cc-other"
+    let mismatched = AppDelegate.detailsPresentationForDetails(
+        focusedAgent: .claudeCode,
+        displayedAggregate: claudeAggregate,
+        rawClaudeSnapshots: [claudeSession],
+        quota: nil,
+        claudeUsage: mismatchedUsage
+    )
+    expect(mismatched.sessionDetails.modelName == nil, "Claude details must reject another session's model")
+    expect(mismatched.contextUsedPercent == nil, "Claude details must reject another session's context usage")
+}
+
+@MainActor
+private func testClaudeContextUsesRawSessionAfterCompletionAcknowledgement() {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-claude-context-ui-\(UUID().uuidString)", isDirectory: true)
+    let snapshotURL = root.appendingPathComponent("claude-code-context.json")
+    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let now = Date()
+    let context = ClaudeContextUsageSnapshot(
+        sessionId: "cc-done",
+        usedPercent: 30,
+        contextWindowSize: 200_000,
+        updatedAt: now
+    )
+    try! JSONEncoder().encode(context).write(to: snapshotURL)
+    let rawClaudeSession = SessionSnapshot(
+        threadId: "cc-done",
+        projectName: "AgentHalo",
+        workingDirectory: "/tmp/AgentHalo",
+        state: .done,
+        action: "Complete",
+        lastEventAt: now,
+        completedAt: now,
+        active: false,
+        agent: .claudeCode
+    )
+    let acknowledgedAggregate = AggregateSnapshot(
+        state: .idle,
+        label: "READY",
+        detail: AgentKind.claudeCode.standbyDetail,
+        sessions: [],
+        focusedAgent: .claudeCode
+    )
+
+    let testQueue = DispatchQueue(label: "com.agenthalo.test-context-reader")
+    let percent = AppDelegate.contextUsedPercentForDetails(
+        focusedAgent: .claudeCode,
+        quota: nil,
+        displayedAggregate: acknowledgedAggregate,
+        rawClaudeSnapshots: [rawClaudeSession],
+        claudeContextUsageReader: ClaudeContextUsageReader(snapshotURL: snapshotURL),
+        contextReaderQueue: testQueue,
+        now: now
+    )
+
+    expect(percent == 30, "acknowledged Claude completion should retain matching context usage")
+}
+
+@MainActor
+private func testClaudeContextSurvivesHookSnapshotPruning() {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-claude-context-pruned-\(UUID().uuidString)", isDirectory: true)
+    let snapshotURL = root.appendingPathComponent("claude-code-context.json")
+    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let testQueue = DispatchQueue(label: "com.agenthalo.test-context-reader")
+    let now = Date()
+    let context = ClaudeContextUsageSnapshot(
+        sessionId: "cc-recent",
+        usedPercent: 30,
+        contextWindowSize: 200_000,
+        updatedAt: now.addingTimeInterval(-60)
+    )
+    try! JSONEncoder().encode(context).write(to: snapshotURL)
+    let placeholderSession = SessionSnapshot(
+        threadId: "claude-code",
+        projectName: "Claude Code",
+        workingDirectory: "",
+        state: .idle,
+        action: "Ready",
+        lastEventAt: now,
+        completedAt: nil,
+        active: false,
+        agent: .claudeCode
+    )
+    let readyAggregate = AggregateSnapshot(
+        state: .idle,
+        label: "READY",
+        detail: AgentKind.claudeCode.standbyDetail,
+        sessions: [placeholderSession],
+        focusedAgent: .claudeCode
+    )
+
+    let percent = AppDelegate.contextUsedPercentForDetails(
+        focusedAgent: .claudeCode,
+        quota: nil,
+        displayedAggregate: readyAggregate,
+        rawClaudeSnapshots: [],
+        claudeContextUsageReader: ClaudeContextUsageReader(snapshotURL: snapshotURL),
+        contextReaderQueue: testQueue,
+        now: now
+    )
+
+    expect(percent == 30, "fresh Claude context should remain visible after hook snapshots prune")
+}
+
+@MainActor
+private func testAgentToggleUsesSharedSVGAssets() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let srcRoot = sourceDirectory
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let assetDirectory = srcRoot.appendingPathComponent("shared/assets/agent-switch", isDirectory: true)
+    let codexURL = assetDirectory.appendingPathComponent("codex.svg")
+    let claudeURL = assetDirectory.appendingPathComponent("claude-code.svg")
+    let detailsSourceURL = sourceDirectory.appendingPathComponent("DetailsPanel.swift")
+    let buildScriptURL = srcRoot
+        .deletingLastPathComponent()
+        .appendingPathComponent("scripts/build-macos.sh")
+
+    expect(FileManager.default.fileExists(atPath: codexURL.path), "Codex SVG should live in shared assets")
+    expect(FileManager.default.fileExists(atPath: claudeURL.path), "Claude SVG should live in shared assets")
+
+    let detailsSource = try? String(contentsOf: detailsSourceURL, encoding: .utf8)
+    expect(detailsSource?.contains("<svg") == false, "DetailsPanel should not embed SVG markup")
+
+    let buildScript = try? String(contentsOf: buildScriptURL, encoding: .utf8)
+    expect(
+        buildScript?.contains("src/shared/assets/agent-switch") == true,
+        "macOS packaging should copy the shared agent icons"
+    )
+}
+
+@MainActor
+private func testAgentToggleUsesCodexAndClaudeIcons() {
+    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 110, height: 24))
+    let descendants = allDescendants(of: toggle)
+    let visibleLabels = descendants
+        .compactMap { $0 as? NSTextField }
+        .map(\.stringValue)
+        .filter { !$0.isEmpty }
+    let icons = descendants.compactMap { $0 as? NSImageView }
+
+    expect(!visibleLabels.contains("Codex"), "agent toggle should replace the Codex text with an icon")
+    expect(!visibleLabels.contains("CC"), "agent toggle should replace the CC text with an icon")
+    expect(icons.count == 2, "agent toggle should render one icon for each agent")
+    expect(icons.allSatisfy { $0.image != nil }, "agent toggle should load both shared SVG images")
+}
+
+@MainActor
+private func testAgentToggleKeepsWholeControlClickable() {
+    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 110, height: 24))
+    toggle.layoutSubtreeIfNeeded()
+
+    expect(
+        toggle.hitTest(NSPoint(x: 82, y: 12)) === toggle,
+        "agent icons should not intercept clicks from the toggle"
+    )
+}
+
+@MainActor
+private func allDescendants(of view: NSView) -> [NSView] {
+    view.subviews.flatMap { [$0] + allDescendants(of: $0) }
 }
 
 @MainActor
@@ -528,7 +973,8 @@ private func testDetailsPanelSwitchCallbackSelectsClaudeCode() {
             sessions: [],
             focusedAgent: .codex
         ),
-        quota: nil
+        quota: nil,
+        contextUsedPercent: nil
     )
 
     panel.selectAgentForTesting(.claudeCode)

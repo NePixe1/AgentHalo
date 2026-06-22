@@ -138,6 +138,9 @@ func testAcknowledgingCompletedSessionsStoresLatestVisibleCompletionOnly() {
 func testSettingsPersistFormalFieldsAndNormalizePaused() {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-settings-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     let url = root.appendingPathComponent("settings.json")
     let store = SettingsStore(settingsURL: url)
     let installedAt = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
@@ -170,6 +173,9 @@ func testSettingsPersistFormalFieldsAndNormalizePaused() {
 func testSettingsUsesDefaultHaloSizeForLegacyFilesAndClampsInvalidSizes() {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-size-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     let legacyURL = root.appendingPathComponent("legacy.json")
     let smallURL = root.appendingPathComponent("small.json")
     let largeURL = root.appendingPathComponent("large.json")
@@ -233,6 +239,9 @@ func testSettingsUsesDefaultHaloSizeForLegacyFilesAndClampsInvalidSizes() {
 func testSettingsMigratesLegacyAlwaysOnTopOffToDefaultOn() {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-legacy-topmost-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     let url = root.appendingPathComponent("settings.json")
     try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     try! """
@@ -260,6 +269,9 @@ func testSettingsMigratesLegacyAlwaysOnTopOffToDefaultOn() {
 func testSettingsPreservesExplicitAlwaysOnTopOffAfterMigrationVersion() {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-current-topmost-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     let url = root.appendingPathComponent("settings.json")
     let store = SettingsStore(settingsURL: url)
     let settings = HaloSettings(alwaysOnTop: false)
@@ -278,6 +290,9 @@ func testSettingsPreservesExplicitAlwaysOnTopOffAfterMigrationVersion() {
 func testSettingsDefaultsFocusedAgentToCodexWhenMissing() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-focus-legacy-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     let url = root.appendingPathComponent("settings.json")
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     try """
@@ -301,6 +316,9 @@ func testSettingsDefaultsFocusedAgentToCodexWhenMissing() throws {
 func testSettingsPersistsFocusedAgent() {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-focus-persist-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     let url = root.appendingPathComponent("settings.json")
     let store = SettingsStore(settingsURL: url)
     let settings = HaloSettings(focusedAgent: .claudeCode)
@@ -342,6 +360,26 @@ func testWorkingVisibilityLiveCallOutputAndInitialTail() {
     expect(initial.snapshot.state, .thinking, "initial tail output should not fake working")
 }
 
+func testSessionReducerCapturesCodexSessionDetailsAndRateLimitAvailability() {
+    var reducer = SessionReducer(filePath: "/tmp/codex-session-details.jsonl")
+    reducer.consume(jsonLine: #"{"type":"session_meta","payload":{"id":"codex-details","cwd":"/Users/wjs/work/pyproj/AgentHalo"}}"#)
+    reducer.consume(jsonLine: #"{"type":"turn_context","payload":{"model":"gpt-5.5"}}"#)
+    reducer.consume(jsonLine: #"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":38000,"output_tokens":1200},"last_token_usage":{"input_tokens":20000},"model_context_window":100000}}}"#)
+
+    expect(reducer.snapshot.projectName, "AgentHalo", "Codex detail project")
+    expect(reducer.snapshot.modelName, "gpt-5.5", "Codex detail model")
+    expect(reducer.snapshot.inputTokens, 38_000, "Codex detail input tokens")
+    expect(reducer.snapshot.outputTokens, 1_200, "Codex detail output tokens")
+    expect(reducer.snapshot.hasRateLimits, false, "third-party Codex should have no rate limits")
+    expect(reducer.snapshot.contextUsedPercent, 20, "Codex context should come from the current session")
+
+    reducer.consume(jsonLine: #"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":40000,"output_tokens":1500}},"rate_limits":{"primary":{},"secondary":{}}}}"#)
+
+    expect(reducer.snapshot.inputTokens, 40_000, "Codex detail input tokens should refresh")
+    expect(reducer.snapshot.outputTokens, 1_500, "Codex detail output tokens should refresh")
+    expect(reducer.snapshot.hasRateLimits, true, "subscription Codex should report rate limits")
+}
+
 func testToolFailedDoesNotBecomeFatalError() {
     let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
     var reducer = SessionReducer(filePath: "/tmp/tool-failed.jsonl", now: now, liveTracking: true)
@@ -354,6 +392,9 @@ func testToolFailedDoesNotBecomeFatalError() {
 func testClaudeHookConfiguratorWritesUserSettingsNotLegacyClaudeJson() throws {
     let home = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-hook-config-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: home)
+    }
     let claudeDir = home.appendingPathComponent(".claude", isDirectory: true)
     let settingsURL = claudeDir.appendingPathComponent("settings.json")
     let legacyURL = home.appendingPathComponent(".claude.json")
@@ -388,6 +429,40 @@ func testClaudeHookConfiguratorWritesUserSettingsNotLegacyClaudeJson() throws {
     expect(legacyCommand, "/old/claude-code-status-hook PreToolUse", "legacy ~/.claude.json should not be rewritten")
 }
 
+func testClaudeStatusLineConfiguratorPreservesAndChainsExistingCommand() throws {
+    let home = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-statusline-config-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: home)
+    }
+    let claude = home.appendingPathComponent(".claude", isDirectory: true)
+    try FileManager.default.createDirectory(at: claude, withIntermediateDirectories: true)
+    let settingsURL = claude.appendingPathComponent("settings.json")
+    let originalCommand = "~/.claude/ccline/ccline"
+    let settings: [String: Any] = [
+        "statusLine": ["type": "command", "command": originalCommand, "padding": 0],
+        "theme": "dark"
+    ]
+    try JSONSerialization.data(withJSONObject: settings).write(to: settingsURL)
+    let bundledProxy = home.appendingPathComponent("bundled-statusline-proxy")
+    try Data("proxy".utf8).write(to: bundledProxy)
+
+    ClaudeStatusLineConfigurator.configure(homeDirectory: home, bundledProxyBinary: bundledProxy)
+    ClaudeStatusLineConfigurator.configure(homeDirectory: home, bundledProxyBinary: bundledProxy)
+
+    let configuredData = try Data(contentsOf: settingsURL)
+    let configured = try JSONSerialization.jsonObject(with: configuredData) as! [String: Any]
+    let statusLine = configured["statusLine"] as! [String: Any]
+    let installedProxy = home.appendingPathComponent(".agent-halo/claude-code-statusline-proxy")
+    let storedCommand = home.appendingPathComponent(".agent-halo/claude-code-statusline-original-command")
+
+    expect(statusLine["command"] as? String, installedProxy.path, "Claude statusline should use AgentHalo proxy")
+    expect(statusLine["padding"] as? Int, 0, "Claude statusline padding should be preserved")
+    expect(configured["theme"] as? String, "dark", "unrelated Claude settings should be preserved")
+    expect(try String(contentsOf: storedCommand, encoding: .utf8), originalCommand, "existing ccline command should be preserved exactly")
+    expect(FileManager.default.isExecutableFile(atPath: installedProxy.path), "installed statusline proxy should be executable")
+}
+
 extension FileHandle {
     func withClose(_ body: (FileHandle) throws -> Void) rethrows {
         defer { try? close() }
@@ -398,6 +473,9 @@ extension FileHandle {
 func testMonitorHandlesPendingLinesAndTruncation() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-monitor-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     let sessions = root.appendingPathComponent("sessions", isDirectory: true)
     try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
     let file = sessions.appendingPathComponent("session-\(UUID().uuidString).jsonl")
@@ -450,6 +528,9 @@ func testFailureClassification() {
 func testRateLimitReaderFindsNewestTailRateLimit() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-rate-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     let sessions = root.appendingPathComponent("sessions", isDirectory: true)
     try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
     let file = sessions.appendingPathComponent("a.jsonl")
@@ -463,6 +544,9 @@ func testRateLimitReaderFindsNewestTailRateLimit() throws {
 func testRateLimitReaderFindsContextUsageAndResetTimes() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-usage-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     let sessions = root.appendingPathComponent("sessions", isDirectory: true)
     try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
     let file = sessions.appendingPathComponent("usage.jsonl")
@@ -475,6 +559,100 @@ func testRateLimitReaderFindsContextUsageAndResetTimes() throws {
     expectAlmost(snapshot?.contextUsedPercent ?? 0, 78.405, tolerance: 0.01, "context usage")
 }
 
+func testClaudeStatusLineUsageParserReadsAuthoritativeContextPercent() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
+    let data = Data(#"{"session_id":"cc-session","model":{"id":"claude-sonnet-4","display_name":"Sonnet 4"},"context_window":{"used_percentage":52.75,"remaining_percentage":47.25,"context_window_size":200000,"total_input_tokens":38000,"total_output_tokens":1200}}"#.utf8)
+
+    let snapshot = ClaudeStatusLineUsageParser.parse(data: data, updatedAt: now)
+
+    expect(snapshot?.sessionId, "cc-session", "Claude context session id")
+    expect(snapshot?.usedPercent, 52.75, "Claude authoritative context percent")
+    expect(snapshot?.contextWindowSize, 200_000, "Claude context window size")
+    expect(snapshot?.modelName, "claude-sonnet-4", "Claude detail model")
+    expect(snapshot?.inputTokens, 38_000, "Claude detail input tokens")
+    expect(snapshot?.outputTokens, 1_200, "Claude detail output tokens")
+    expect(snapshot?.updatedAt, now, "Claude context capture time")
+}
+
+func testClaudeContextUsageReaderKeepsLastKnownUsageForMatchingSession() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-claude-context-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let snapshotURL = root.appendingPathComponent("claude-code-context.json")
+    let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
+    let reader = ClaudeContextUsageReader(snapshotURL: snapshotURL)
+
+    let fresh = ClaudeContextUsageSnapshot(
+        sessionId: "cc-session",
+        usedPercent: 52.75,
+        contextWindowSize: 200_000,
+        updatedAt: now.addingTimeInterval(-30)
+    )
+    try JSONEncoder().encode(fresh).write(to: snapshotURL)
+
+    expect(reader.read(sessionIds: ["cc-session"], now: now)?.usedPercent, 52.75, "matching fresh Claude context")
+    expect(reader.read(sessionIds: ["other-session"], now: now) == nil, "mismatched Claude session should be rejected")
+    expect(reader.read(sessionIds: [], now: now)?.usedPercent, 52.75, "fresh Claude context should survive hook snapshot pruning")
+    expect(
+        reader.read(sessionIds: ["cc-session"], now: now.addingTimeInterval(301))?.usedPercent,
+        52.75,
+        "matching Claude context should remain visible after five minutes"
+    )
+}
+
+func testClaudeContextUsageReaderDoesNotShareSnapshotsAcrossFiles() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-claude-context-cache-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let firstURL = root.appendingPathComponent("first.json")
+    let secondURL = root.appendingPathComponent("second.json")
+    let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
+    let first = ClaudeContextUsageSnapshot(sessionId: "shared-session", usedPercent: 10, updatedAt: now)
+    let second = ClaudeContextUsageSnapshot(sessionId: "shared-session", usedPercent: 90, updatedAt: now)
+
+    try JSONEncoder().encode(first).write(to: firstURL)
+    try JSONEncoder().encode(second).write(to: secondURL)
+    let sharedModificationDate = ISO8601DateFormatter().date(from: "2026-06-21T07:59:00Z")!
+    try FileManager.default.setAttributes([.modificationDate: sharedModificationDate], ofItemAtPath: firstURL.path)
+    try FileManager.default.setAttributes([.modificationDate: sharedModificationDate], ofItemAtPath: secondURL.path)
+
+    let firstRead = ClaudeContextUsageReader(snapshotURL: firstURL).read(sessionIds: ["shared-session"], now: now)
+    let secondRead = ClaudeContextUsageReader(snapshotURL: secondURL).read(sessionIds: ["shared-session"], now: now)
+
+    expect(firstRead?.usedPercent, 10, "first Claude context reader should read its own snapshot")
+    expect(secondRead?.usedPercent, 90, "second Claude context reader should not reuse another file's snapshot")
+}
+
+func testClaudeStatusLineProxyRuntimeCapturesUsageAndForwardsInput() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-statusline-runtime-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
+    let snapshotURL = root.appendingPathComponent("claude-code-context.json")
+    let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
+    let input = Data(#"{"session_id":"cc-session","context_window":{"used_percentage":61.5,"context_window_size":200000}}"#.utf8)
+
+    let captured = try ClaudeStatusLineProxyRuntime.capture(
+        input: input,
+        snapshotURL: snapshotURL,
+        updatedAt: now
+    )
+    let forwarded = try ClaudeStatusLineProxyRuntime.runOriginalCommand(command: "cat", input: input)
+
+    expect(captured?.usedPercent, 61.5, "statusline proxy should capture Claude context")
+    expect(forwarded.standardOutput, input, "statusline proxy should forward input unchanged")
+    expect(forwarded.terminationStatus, 0, "statusline proxy should preserve successful command status")
+    let stored = try JSONDecoder().decode(ClaudeContextUsageSnapshot.self, from: Data(contentsOf: snapshotURL))
+    expect(stored, captured, "statusline proxy should persist the captured context atomically")
+}
+
 func testCodexRealtimeActivityReaderDetectsAnswerStreaming() {
     let reader = CodexRealtimeActivityReader()
     let delta = #"SSE event: {"type":"response.output_text.delta","delta":"hello"}"#
@@ -485,6 +663,16 @@ func testCodexRealtimeActivityReaderDetectsAnswerStreaming() {
     expect(activity?.answerStreaming, true, "answer text delta should mark streaming")
 }
 
+func testCodexRealtimeActivityReaderDetectsRequestUserInput() {
+    let reader = CodexRealtimeActivityReader()
+    let request = #"SSE event: {"type":"response.output_item.added","item":{"id":"approval-1","type":"custom_tool_call","name":"request_user_input"}}"#
+    let activity = reader.findActive(in: [request])
+
+    expect(activity?.state, .attention, "request_user_input state")
+    expect(activity?.action, "Needs you", "request_user_input action")
+    expect(activity?.answerStreaming, false, "request_user_input should not mark answer streaming")
+}
+
 func testCodexRealtimeActivityReaderClearsAnswerStreamingWhenDone() {
     let reader = CodexRealtimeActivityReader()
     let delta = #"SSE event: {"type":"response.output_text.delta","delta":"hello"}"#
@@ -493,6 +681,29 @@ func testCodexRealtimeActivityReaderClearsAnswerStreamingWhenDone() {
 
     expect(reader.findActive(in: [textDone, delta]) == nil, "text done should clear answer streaming")
     expect(reader.findActive(in: [completed, delta]) == nil, "response completed should clear answer streaming")
+}
+
+func testSessionReducerMapsCustomToolRequestUserInputToAttention() {
+    var reducer = SessionReducer(filePath: "/tmp/custom-tool-request-user-input.jsonl")
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-19T01:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-19T01:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","name":"request_user_input"}}"#)
+
+    expect(reducer.snapshot.state, .attention, "custom_tool_call request_user_input state")
+    expect(reducer.snapshot.action, "Needs you", "custom_tool_call request_user_input action")
+    expect(reducer.snapshot.active, "custom_tool_call request_user_input should keep session active")
+}
+
+func testSessionReducerMapsEscalatedExecCommandToAttention() {
+    var reducer = SessionReducer(filePath: "/tmp/escalated-exec-command.jsonl")
+    let arguments = #"{"cmd":"swift build","sandbox_permissions":"require_escalated","justification":"Allow build?"}"#
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-19T01:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-19T01:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"\#(arguments.replacingOccurrences(of: "\"", with: "\\\""))"}}"#)
+
+    expect(reducer.snapshot.state, .attention, "escalated exec_command state")
+    expect(reducer.snapshot.action, "Needs you", "escalated exec_command action")
+    expect(reducer.snapshot.active, "escalated exec_command should keep session active")
 }
 
 func testAggregatorInjectsUnacknowledgedCodexFailureWhenIdle() {
@@ -878,6 +1089,9 @@ func testClaudeHookReducerPreCompactShowsExecutingThenRestoresToThinking() {
 func testClaudeHookMonitorPrunesStaleReducers() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-claude-hook-prune-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     let statusFile = root.appendingPathComponent("claude-code-status.jsonl")
     let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
@@ -909,6 +1123,9 @@ func testClaudeHookMonitorPrunesStaleReducers() throws {
 func testClaudeMonitorHandlesDiscoveryPendingLinesAndTruncation() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-claude-monitor-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     let projects = root.appendingPathComponent("projects", isDirectory: true)
     let project = projects.appendingPathComponent("-Users-wjs-work-pyproj-AgentHalo", isDirectory: true)
     try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
@@ -937,6 +1154,9 @@ func testClaudeMonitorHandlesDiscoveryPendingLinesAndTruncation() throws {
 func testClaudeHookMonitorHandlesPendingLinesAndTruncation() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-claude-hook-monitor-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     let statusFile = root.appendingPathComponent("claude-code-status.jsonl")
     let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
@@ -963,6 +1183,9 @@ func testClaudeHookMonitorHandlesPendingLinesAndTruncation() throws {
 func testClaudeMonitorIgnoresSubagentTranscripts() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-claude-subagents-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     let projects = root.appendingPathComponent("projects", isDirectory: true)
     let project = projects.appendingPathComponent("-Users-wjs-work-pyproj-AgentHalo", isDirectory: true)
     let subagents = project
@@ -1261,6 +1484,9 @@ func testPlanModeFlagResetsAfterFatalTurn() {
 func testDiagnosticsCreatesParentDirectoryForOutput() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-diagnostics-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
     let output = root.appendingPathComponent("self-test.txt")
     try DiagnosticsOutput.write("PASS\n", to: output.path(percentEncoded: false))
     expect(FileManager.default.fileExists(atPath: output.path(percentEncoded: false)), "diagnostics output should create parent directory")
@@ -1341,9 +1567,15 @@ do {
 testSettingsPersistsFocusedAgent()
 testAcknowledgedErrorVisibilityUsesLatestErrorTime()
 testWorkingVisibilityLiveCallOutputAndInitialTail()
+testSessionReducerCapturesCodexSessionDetailsAndRateLimitAvailability()
 testToolFailedDoesNotBecomeFatalError()
 do {
     try testClaudeHookConfiguratorWritesUserSettingsNotLegacyClaudeJson()
+} catch {
+    fatalError("\(error)")
+}
+do {
+    try testClaudeStatusLineConfiguratorPreservesAndChainsExistingCommand()
 } catch {
     fatalError("\(error)")
 }
@@ -1364,8 +1596,27 @@ do {
 } catch {
     fatalError("\(error)")
 }
+testClaudeStatusLineUsageParserReadsAuthoritativeContextPercent()
+do {
+    try testClaudeContextUsageReaderKeepsLastKnownUsageForMatchingSession()
+} catch {
+    fatalError("\(error)")
+}
+do {
+    try testClaudeContextUsageReaderDoesNotShareSnapshotsAcrossFiles()
+} catch {
+    fatalError("\(error)")
+}
+do {
+    try testClaudeStatusLineProxyRuntimeCapturesUsageAndForwardsInput()
+} catch {
+    fatalError("\(error)")
+}
 testCodexRealtimeActivityReaderDetectsAnswerStreaming()
 testCodexRealtimeActivityReaderClearsAnswerStreamingWhenDone()
+testSessionReducerMapsCustomToolRequestUserInputToAttention()
+testSessionReducerMapsEscalatedExecCommandToAttention()
+testCodexRealtimeActivityReaderDetectsRequestUserInput()
 testAggregatorInjectsUnacknowledgedCodexFailureWhenIdle()
 testAggregatorFiltersByFocusedAgent()
 testAggregatorIdleDetailUsesFocusedAgent()

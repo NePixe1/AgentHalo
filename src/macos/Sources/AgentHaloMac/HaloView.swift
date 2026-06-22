@@ -6,7 +6,6 @@ import QuartzCore
 final class HaloView: NSView {
     private static let dragActivationDistance = 3.0
     private static let normalAnimationInterval = 1.0 / 60.0
-    private static let draggingAnimationInterval = 1.0 / 15.0
 
     var aggregate = AggregateSnapshot(
         state: .idle,
@@ -37,9 +36,11 @@ final class HaloView: NSView {
     private var dragStartInWindow: NSPoint?
     private var windowStart: NSPoint?
     private var isDraggingWindow = false
+    var isDragging: Bool { isDraggingWindow }
     private var pendingClickActivation = false
     nonisolated(unsafe) private var animationTimer: Timer?
     private var systemOverlaySuspended = false
+    private var pointerInsideHoverSurface = false
     private var lastFrameTimestamp = CACurrentMediaTime()
     private var visualState: HaloState = .idle
     private var errorPresentation: ErrorPresentation = .flashing
@@ -313,23 +314,24 @@ final class HaloView: NSView {
         trackingAreas.forEach(removeTrackingArea)
         addTrackingArea(NSTrackingArea(
             rect: bounds,
-            options: [.mouseEnteredAndExited, .activeAlways],
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways],
             owner: self
         ))
     }
 
     override func mouseEntered(with event: NSEvent) {
-        guard !systemOverlaySuspended, !isDraggingWindow else {
-            return
-        }
-        onMouseEntered?()
+        updateHoverState(with: event)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        updateHoverState(with: event)
     }
 
     override func mouseExited(with event: NSEvent) {
         guard !systemOverlaySuspended else {
             return
         }
-        onMouseExited?()
+        setPointerInsideHoverSurface(false)
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -374,7 +376,9 @@ final class HaloView: NSView {
         if !isDraggingWindow {
             isDraggingWindow = true
             pendingClickActivation = false
-            setAnimationFrameInterval(Self.draggingAnimationInterval)
+            pointerInsideHoverSurface = false
+            animationTimer?.invalidate()
+            animationTimer = nil
             onDragStarted?()
         }
         let current = NSEvent.mouseLocation
@@ -397,13 +401,34 @@ final class HaloView: NSView {
             onClick?()
         }
         if completedDrag {
-            setAnimationFrameInterval(Self.normalAnimationInterval)
+            startAnimationDriver(interval: Self.normalAnimationInterval)
         }
         dragStart = nil
         dragStartInWindow = nil
         windowStart = nil
         isDraggingWindow = false
         pendingClickActivation = false
+        updateHoverState(with: event)
+    }
+
+    private func updateHoverState(with event: NSEvent) {
+        guard !systemOverlaySuspended, !isDraggingWindow else {
+            return
+        }
+        let point = convert(event.locationInWindow, from: nil)
+        setPointerInsideHoverSurface(HaloGeometry.contains(point: point, in: bounds))
+    }
+
+    private func setPointerInsideHoverSurface(_ isInside: Bool) {
+        guard pointerInsideHoverSurface != isInside else {
+            return
+        }
+        pointerInsideHoverSurface = isInside
+        if isInside {
+            onMouseEntered?()
+        } else {
+            onMouseExited?()
+        }
     }
 
     private static func distance(from start: NSPoint, to end: NSPoint) -> CGFloat {

@@ -35,6 +35,10 @@ public struct SessionReducer: Sendable {
         snapshot.lastEventAt = eventAt
 
         if topType == "turn_context", let payload {
+            let model = payload.string("model")
+            if !model.isEmpty {
+                snapshot.modelName = model
+            }
             updatePlanModeFromTurnContext(payload)
             return
         }
@@ -61,6 +65,9 @@ public struct SessionReducer: Sendable {
 
         let payloadType = payload.string("type")
         if topType == "event_msg" {
+            if payloadType == "token_count" {
+                updateSessionDetails(from: payload)
+            }
             reduceEvent(payloadType.lowercased(), payload: payload, eventAt: eventAt, now: now)
         } else if topType == "response_item" {
             reduceResponse(payloadType.lowercased(), payload: payload, now: now)
@@ -150,10 +157,10 @@ public struct SessionReducer: Sendable {
     }
 
     private mutating func reduceResponse(_ type: String, payload: [String: Any], now: Date) {
-        if type == "function_call" {
+        if type == "function_call" || type == "custom_tool_call" {
             let name = payload.string("name")
             snapshot.active = true
-            if name == "request_user_input" {
+            if name == "request_user_input" || Self.requiresApproval(name: name, payload: payload) {
                 snapshot.state = .attention
                 snapshot.action = "Needs you"
             } else {
@@ -183,7 +190,7 @@ public struct SessionReducer: Sendable {
                 if inFlightTools > 0 {
                     snapshot.state = .working
                 } else if liveTracking {
-                    extendWorkingVisibility(seconds: 1.8, now: now)
+                    extendWorkingVisibility(seconds: ClaudeContextUsageConstants.workingVisibilityExtension, now: now)
                     snapshot.state = .working
                     snapshot.action = "Reviewing result"
                 } else {
@@ -229,6 +236,28 @@ public struct SessionReducer: Sendable {
         }
     }
 
+    private mutating func updateSessionDetails(from payload: [String: Any]) {
+        let info = payload.dictionary("info")
+        let totalUsage = info?.dictionary("total_token_usage")
+        if let inputTokens = Self.int64(totalUsage?["input_tokens"]) {
+            snapshot.inputTokens = inputTokens
+        }
+        if let outputTokens = Self.int64(totalUsage?["output_tokens"]) {
+            snapshot.outputTokens = outputTokens
+        }
+        let lastUsage = info?.dictionary("last_token_usage")
+        if let contextTokens = Self.int64(lastUsage?["input_tokens"]),
+           let contextWindow = Self.int64(info?["model_context_window"]),
+           contextWindow > 0 {
+            snapshot.contextUsedPercent = min(
+                100,
+                max(0, Double(contextTokens) * 100 / Double(contextWindow))
+            )
+        }
+        snapshot.hasRateLimits = payload.dictionary("rate_limits") != nil
+            || info?.dictionary("rate_limits") != nil
+    }
+
     private static func isPlanModePayload(_ payload: [String: Any]) -> Bool {
         let mode = payload.string("collaboration_mode_kind")
         return mode.caseInsensitiveCompare("plan") == .orderedSame
@@ -259,6 +288,21 @@ public struct SessionReducer: Sendable {
         return false
     }
 
+    private static func requiresApproval(name: String, payload: [String: Any]) -> Bool {
+        guard name == "exec_command" || name == "shell_command" else {
+            return false
+        }
+        if let dictionary = payload["arguments"] as? [String: Any] {
+            return dictionary.string("sandbox_permissions") == "require_escalated"
+        }
+        let text = payload.string("arguments")
+        guard let data = text.data(using: .utf8),
+              let dictionary = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return false
+        }
+        return dictionary.string("sandbox_permissions") == "require_escalated"
+    }
+
     private static func threadId(from filePath: String) -> String {
         let name = URL(fileURLWithPath: filePath).deletingPathExtension().lastPathComponent
         if name.count >= 36 {
@@ -282,6 +326,14 @@ public struct SessionReducer: Sendable {
         let plain = ISO8601DateFormatter()
         plain.formatOptions = [.withInternetDateTime]
         return plain.date(from: value)
+    }
+
+    private static func int64(_ value: Any?) -> Int64? {
+        if let int = value as? Int { return Int64(int) }
+        if let int64 = value as? Int64 { return int64 }
+        if let number = value as? NSNumber { return number.int64Value }
+        if let string = value as? String { return Int64(string) }
+        return nil
     }
 
 }
