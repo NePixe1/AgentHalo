@@ -743,11 +743,13 @@ public sealed class CodexSessionMonitor : IDisposable
             lock (sync)
             {
                 DateTime now = DateTime.UtcNow;
-                List<SessionSnapshot> sessions = trackers.Values
+                List<SessionSnapshot> rawSessions = trackers.Values
                 .Select(delegate(SessionTracker tracker)
                 {
                     return CloneSnapshot(tracker.Snapshot);
                 })
+                .ToList();
+                List<SessionSnapshot> sessions = WithoutSupersededErrors(rawSessions)
                 .Where(delegate(SessionSnapshot snapshot)
                 {
                     if (snapshot.State == HaloState.Done)
@@ -806,6 +808,29 @@ public sealed class CodexSessionMonitor : IDisposable
                         (sessions.Count - 1).ToString(CultureInfo.InvariantCulture);
                 return result;
             }
+        }
+
+        internal static List<SessionSnapshot> WithoutSupersededErrors(
+            IEnumerable<SessionSnapshot> snapshots)
+        {
+            List<SessionSnapshot> all = snapshots.ToList();
+            return all.Where(delegate(SessionSnapshot snapshot)
+            {
+                if (snapshot.State != HaloState.Error)
+                {
+                    return true;
+                }
+                return !all.Any(delegate(SessionSnapshot candidate)
+                {
+                    bool meaningful = candidate.Active ||
+                        candidate.State == HaloState.Done ||
+                        candidate.State == HaloState.Error;
+                    return candidate.Agent == snapshot.Agent &&
+                        !String.Equals(candidate.ThreadId, snapshot.ThreadId,
+                            StringComparison.OrdinalIgnoreCase) &&
+                        meaningful && candidate.LastEventUtc > snapshot.LastEventUtc;
+                });
+            }).ToList();
         }
 
         public List<SessionSnapshot> GetAllRecent()

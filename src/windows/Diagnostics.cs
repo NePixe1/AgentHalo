@@ -574,6 +574,110 @@ public static class Diagnostics
                     "Claude context percentage uses input tokens and window");
                 Directory.Delete(claudeMetricsHome, true);
 
+                DateTime supersessionNow = DateTime.UtcNow;
+                SessionSnapshot oldError = new SessionSnapshot
+                {
+                    ThreadId = "old-error",
+                    ProjectName = "OldProject",
+                    State = HaloState.Error,
+                    Action = "Interrupted",
+                    LastEventUtc = supersessionNow.AddMinutes(-1),
+                    Active = false,
+                    Agent = AgentKind.Codex
+                };
+                SessionSnapshot newerWorking = new SessionSnapshot
+                {
+                    ThreadId = "new-working",
+                    ProjectName = "NewProject",
+                    State = HaloState.Working,
+                    Action = "Running command",
+                    LastEventUtc = supersessionNow,
+                    Active = true,
+                    Agent = AgentKind.Codex
+                };
+                List<SessionSnapshot> supersessionInput =
+                    new List<SessionSnapshot> { oldError, newerWorking };
+                List<SessionSnapshot> supersessionDisplay =
+                    CodexSessionMonitor.WithoutSupersededErrors(supersessionInput);
+                Assert(supersessionDisplay.Count == 1 &&
+                    supersessionDisplay[0].ThreadId == "new-working",
+                    "newer Windows session removes old interrupted display state");
+                Assert(supersessionInput.Count == 2,
+                    "Windows supersession filter preserves raw sessions");
+
+                SessionSnapshot newerDone = new SessionSnapshot
+                {
+                    ThreadId = "new-done",
+                    ProjectName = "NewProject",
+                    State = HaloState.Done,
+                    Action = "Complete",
+                    LastEventUtc = supersessionNow,
+                    CompletedUtc = supersessionNow,
+                    Active = false,
+                    Agent = AgentKind.Codex
+                };
+                List<SessionSnapshot> doneDisplay =
+                    CodexSessionMonitor.WithoutSupersededErrors(
+                        new[] { oldError, newerDone });
+                Assert(doneDisplay.Count == 1 &&
+                    doneDisplay[0].ThreadId == "new-done",
+                    "newer Windows completion removes old interrupted display state");
+                List<SessionSnapshot> acknowledgedDoneDisplay = doneDisplay
+                    .Where(delegate(SessionSnapshot snapshot)
+                    {
+                        return snapshot.State != HaloState.Done;
+                    })
+                    .ToList();
+                Assert(acknowledgedDoneDisplay.Count == 0,
+                    "acknowledged Windows completion does not resurrect old error");
+
+                SessionSnapshot olderWorking = new SessionSnapshot
+                {
+                    ThreadId = "old-working",
+                    ProjectName = "OldProject",
+                    State = HaloState.Working,
+                    Action = "Running command",
+                    LastEventUtc = supersessionNow.AddMinutes(-1),
+                    Active = true,
+                    Agent = AgentKind.Codex
+                };
+                SessionSnapshot newerError = new SessionSnapshot
+                {
+                    ThreadId = "new-error",
+                    ProjectName = "NewProject",
+                    State = HaloState.Error,
+                    Action = "Interrupted",
+                    LastEventUtc = supersessionNow,
+                    Active = false,
+                    Agent = AgentKind.Codex
+                };
+                List<SessionSnapshot> latestErrorDisplay =
+                    CodexSessionMonitor.WithoutSupersededErrors(
+                        new[] { olderWorking, newerError });
+                Assert(latestErrorDisplay.Count == 2 &&
+                    latestErrorDisplay.Any(delegate(SessionSnapshot snapshot)
+                    {
+                        return snapshot.ThreadId == "new-error";
+                    }), "latest Windows error remains visible with active sessions");
+
+                SessionSnapshot metadataOnly = new SessionSnapshot
+                {
+                    ThreadId = "metadata-only",
+                    ProjectName = "Codex",
+                    State = HaloState.Idle,
+                    Action = "Ready",
+                    LastEventUtc = supersessionNow,
+                    Active = false,
+                    Agent = AgentKind.Codex
+                };
+                List<SessionSnapshot> metadataDisplay =
+                    CodexSessionMonitor.WithoutSupersededErrors(
+                        new[] { oldError, metadataOnly });
+                Assert(metadataDisplay.Any(delegate(SessionSnapshot snapshot)
+                {
+                    return snapshot.ThreadId == "old-error";
+                }), "metadata-only Windows session does not suppress old error");
+
                 File.Delete(temp);
                 File.WriteAllText(outputPath,
                     "PASS\nLifecycle, usage metrics, panel formatting, and animation checks passed.\n",
