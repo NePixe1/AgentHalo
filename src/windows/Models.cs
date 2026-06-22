@@ -28,6 +28,12 @@ using MediaPoint = System.Windows.Point;
 
 namespace CodexHalo
 {
+public enum AgentKind
+    {
+        Codex,
+        ClaudeCode
+    }
+
 public sealed class SessionSnapshot
     {
         public string ThreadId;
@@ -38,6 +44,7 @@ public sealed class SessionSnapshot
         public DateTime LastEventUtc;
         public DateTime CompletedUtc;
         public bool Active;
+        public AgentKind Agent;
     }
 
 public sealed class AggregateSnapshot
@@ -47,6 +54,7 @@ public sealed class AggregateSnapshot
         public string Detail;
         public List<SessionSnapshot> Sessions;
         public bool AnswerStreaming;
+        public AgentKind FocusedAgent;
     }
 
 public sealed class UsageMetrics
@@ -75,6 +83,44 @@ public sealed class UsageMetrics
                 }
                 return Math.Max(0, Math.Min(100,
                     ContextInputTokens * 100.0 / ContextWindowTokens));
+            }
+        }
+    }
+
+public sealed class ClaudeCodeMetrics
+    {
+        public bool IsCustomApi;
+        public string Model;
+        public long InputTokens;
+        public long OutputTokens;
+        public long ContextTokens;
+        public long ContextWindowTokens;
+
+        public bool HasModel
+        {
+            get { return !String.IsNullOrWhiteSpace(Model); }
+        }
+
+        public bool HasTokenUsage
+        {
+            get { return InputTokens > 0 || OutputTokens > 0; }
+        }
+
+        public bool HasContext
+        {
+            get { return ContextTokens >= 0 && ContextWindowTokens > 0; }
+        }
+
+        public double ContextUsedPercent
+        {
+            get
+            {
+                if (!HasContext)
+                {
+                    return 0;
+                }
+                return Math.Max(0, Math.Min(100,
+                    ContextTokens * 100.0 / ContextWindowTokens));
             }
         }
     }

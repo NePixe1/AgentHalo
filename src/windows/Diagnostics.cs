@@ -190,15 +190,17 @@ public static class Diagnostics
                     "\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}}\n",
                     Encoding.UTF8);
                 tracker.Refresh();
-                Assert(tracker.Snapshot.State == HaloState.Thinking,
-                    "normal final answer keeps existing active flow");
+                Assert(tracker.Snapshot.State == HaloState.Working &&
+                    tracker.Snapshot.Action == "Writing answer",
+                    "normal final answer outputs as working");
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\"," +
                     "\"phase\":\"final_answer\",\"message\":\"done\"}}\n",
                     Encoding.UTF8);
                 tracker.Refresh();
-                Assert(tracker.Snapshot.State == HaloState.Thinking,
-                    "final answer agent message keeps thinking flow");
+                Assert(tracker.Snapshot.State == HaloState.Working &&
+                    tracker.Snapshot.Action == "Writing answer",
+                    "final answer agent message outputs as working");
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
                     Encoding.UTF8);
@@ -220,7 +222,8 @@ public static class Diagnostics
                     Encoding.UTF8);
                 tracker.Refresh();
                 Assert(tracker.Snapshot.State == HaloState.Working,
-                    "plain plan final answer outputs as working");
+                    "plain plan final answer outputs as working, got " +
+                    tracker.Snapshot.State + " / " + tracker.Snapshot.Action);
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
                     Encoding.UTF8);
@@ -239,8 +242,9 @@ public static class Diagnostics
                     "\"content\":[{\"type\":\"output_text\",\"text\":\"<proposed_plan>\"}]}}\n",
                     Encoding.UTF8);
                 tracker.Refresh();
-                Assert(tracker.Snapshot.State == HaloState.Thinking,
-                    "plan final answer keeps existing active flow");
+                Assert(tracker.Snapshot.State == HaloState.Working &&
+                    tracker.Snapshot.Action == "Writing answer",
+                    "plan final answer outputs as working");
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
                     Encoding.UTF8);
@@ -371,11 +375,11 @@ public static class Diagnostics
                     "state transition changes color while the ring is dim");
                 Assert(HaloVisual.DiagnosticTransitionLight(0.9, 0.0, 0.99) < 0.01,
                     "steady green transition finishes without glow");
-                Assert(HaloVisual.DiagnosticAttentionPulse(0.93) > 0.88,
+                Assert(HaloVisual.DiagnosticAttentionPulse(0.54) > 0.88,
                     "attention first pulse is clearly visible");
-                Assert(HaloVisual.DiagnosticAttentionPulse(2.20) > 0.70,
+                Assert(HaloVisual.DiagnosticAttentionPulse(1.24) > 0.70,
                     "attention second pulse is visible and softer");
-                Assert(HaloVisual.DiagnosticAttentionPulse(4.5) < 0.20,
+                Assert(HaloVisual.DiagnosticAttentionPulse(2.55) < 0.24,
                     "attention leaves a quiet living interval");
                 Assert(HaloVisual.DiagnosticPowered(HaloState.Thinking, 0.8) > 0.97,
                     "thinking reaches the full bright tier");
@@ -448,6 +452,128 @@ public static class Diagnostics
                 Assert(!DetailsWindow.IsQuotaExpired(
                     DateTime.UtcNow.AddMinutes(5), DateTime.UtcNow),
                     "future quota reset remains valid");
+
+                ClaudeHookStatusReducer claude =
+                    new ClaudeHookStatusReducer("claude-test");
+                string claudeNow = DateTime.UtcNow.ToString("o",
+                    CultureInfo.InvariantCulture);
+                claude.Consume(ClaudeHookLine("UserPromptSubmit", "claude-test",
+                    "C:\\work\\agenthalo", null, null, claudeNow), DateTime.UtcNow);
+                Assert(claude.Snapshot.State == HaloState.Thinking &&
+                    claude.Snapshot.ProjectName == "agenthalo",
+                    "Claude prompt submit -> thinking");
+                claude.Consume(ClaudeHookLine("PreToolUse", "claude-test",
+                    "C:\\work\\agenthalo", "Bash", null, claudeNow), DateTime.UtcNow);
+                Assert(claude.Snapshot.State == HaloState.Working &&
+                    claude.Snapshot.Action == "Running command",
+                    "Claude bash tool -> working command");
+                DateTime postToolAt = DateTime.UtcNow.AddSeconds(-2);
+                claude.Consume(ClaudeHookLine("PostToolUse", "claude-test",
+                    "C:\\work\\agenthalo", "Bash", null,
+                    postToolAt.ToString("o", CultureInfo.InvariantCulture)),
+                    DateTime.UtcNow);
+                Assert(claude.Snapshot.State == HaloState.Working,
+                    "Claude post tool remains briefly working");
+                claude.ApplyWorkingVisibility(DateTime.UtcNow);
+                Assert(claude.Snapshot.State == HaloState.Thinking,
+                    "Claude post tool fades to thinking");
+                claude.Consume(ClaudeHookLine("Notification", "claude-test",
+                    "C:\\work\\agenthalo", null, "permission_prompt", claudeNow),
+                    DateTime.UtcNow);
+                claude.ApplyWorkingVisibility(DateTime.UtcNow.AddMinutes(10));
+                Assert(claude.Snapshot.State == HaloState.Attention,
+                    "Claude permission prompt holds attention");
+                claude.Consume(ClaudeHookLine("Stop", "claude-test",
+                    "C:\\work\\agenthalo", null, null, claudeNow), DateTime.UtcNow);
+                Assert(claude.Snapshot.State == HaloState.Done &&
+                    !claude.Snapshot.Active, "Claude stop -> done");
+                claude.Consume(ClaudeHookLine("StopFailure", "claude-test",
+                    "C:\\work\\agenthalo", null, null, claudeNow), DateTime.UtcNow);
+                Assert(claude.Snapshot.State == HaloState.Error,
+                    "Claude stop failure -> error");
+                claude.Consume(ClaudeHookLine("PreCompact", "claude-test",
+                    "C:\\work\\agenthalo", null, null, claudeNow), DateTime.UtcNow);
+                Assert(claude.Snapshot.State == HaloState.Working &&
+                    claude.Snapshot.Action == "Compressing context",
+                    "Claude pre compact -> working");
+                claude.Consume(ClaudeHookLine("PostCompact", "claude-test",
+                    "C:\\work\\agenthalo", null, null, claudeNow), DateTime.UtcNow);
+                Assert(claude.Snapshot.State == HaloState.Thinking,
+                    "Claude post compact -> thinking");
+                DateTime staleToolAt = DateTime.UtcNow.AddSeconds(-181);
+                claude.Consume(ClaudeHookLine("PreToolUse", "claude-test",
+                    "C:\\work\\agenthalo", "Read", null,
+                    staleToolAt.ToString("o", CultureInfo.InvariantCulture)),
+                    DateTime.UtcNow);
+                claude.ApplyWorkingVisibility(DateTime.UtcNow);
+                Assert(claude.Snapshot.State == HaloState.Thinking,
+                    "Claude stuck tool safety fades to thinking");
+
+                string claudeStatus = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-claude-" + Guid.NewGuid().ToString("N") + ".jsonl");
+                File.WriteAllText(claudeStatus, ClaudeHookLine("UserPromptSubmit",
+                    "claude-monitor", "C:\\work\\monitor", null, null,
+                    claudeNow) + Environment.NewLine, Encoding.UTF8);
+                ClaudeHookStatusMonitor claudeMonitor =
+                    new ClaudeHookStatusMonitor(claudeStatus);
+                claudeMonitor.Refresh();
+                List<SessionSnapshot> claudeSnapshots = claudeMonitor.Snapshots();
+                Assert(claudeSnapshots.Count == 1 &&
+                    claudeSnapshots[0].State == HaloState.Thinking,
+                    "Claude monitor reads status JSONL");
+                File.Delete(claudeStatus);
+
+                string claudeHome = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-claude-home-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(Path.Combine(claudeHome, ".claude"));
+                string claudeSettings = Path.Combine(claudeHome, ".claude",
+                    "settings.json");
+                File.WriteAllText(claudeSettings,
+                    "{\"hooks\":{\"Notification\":[{\"hooks\":[{\"type\":\"command\"," +
+                    "\"command\":\"user-command\"}]}]}}", Encoding.UTF8);
+                ClaudeHookConfigurator.Configure(claudeHome,
+                    "C:\\Program Files\\Agent Halo\\AgentHalo.exe");
+                string configured = File.ReadAllText(claudeSettings, Encoding.UTF8);
+                Assert(configured.Contains("--claude-hook PreToolUse") &&
+                    configured.Contains("user-command"),
+                    "Claude hook configurator merges settings");
+                ClaudeHookConfigurator.Configure(claudeHome,
+                    "C:\\Program Files\\Agent Halo\\AgentHalo.exe");
+                string configuredAgain = File.ReadAllText(claudeSettings, Encoding.UTF8);
+                Assert(configuredAgain.IndexOf("--claude-hook PreToolUse",
+                    StringComparison.Ordinal) ==
+                    configuredAgain.LastIndexOf("--claude-hook PreToolUse",
+                    StringComparison.Ordinal),
+                    "Claude hook configurator is idempotent");
+                Directory.Delete(claudeHome, true);
+
+                string claudeMetricsHome = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-claude-metrics-" + Guid.NewGuid().ToString("N"));
+                string claudeProjectDir = Path.Combine(claudeMetricsHome,
+                    ".claude", "projects", "agenthalo");
+                Directory.CreateDirectory(claudeProjectDir);
+                Directory.CreateDirectory(Path.Combine(claudeMetricsHome, ".claude"));
+                File.WriteAllText(Path.Combine(claudeMetricsHome, ".claude",
+                    "settings.json"),
+                    "{\"env\":{\"ANTHROPIC_BASE_URL\":\"https://example.invalid\"," +
+                    "\"CLAUDE_MAX_CONTEXT_WINDOW\":\"200000\"}}", Encoding.UTF8);
+                File.WriteAllText(Path.Combine(claudeProjectDir, "session.jsonl"),
+                    "{\"type\":\"assistant\",\"message\":{\"model\":\"deepseek-v4-pro\"," +
+                    "\"usage\":{\"input_tokens\":38000,\"output_tokens\":1200}}}\n",
+                    Encoding.UTF8);
+                ClaudeCodeMetrics claudeMetrics =
+                    ClaudeCodeMetricsReader.Read(claudeMetricsHome);
+                Assert(claudeMetrics.IsCustomApi,
+                    "Claude custom API settings are detected");
+                Assert(claudeMetrics.Model == "deepseek-v4-pro",
+                    "Claude model is read from transcript");
+                Assert(claudeMetrics.InputTokens == 38000 &&
+                    claudeMetrics.OutputTokens == 1200,
+                    "Claude token usage is read from transcript");
+                Assert(Math.Abs(claudeMetrics.ContextUsedPercent - 19.0) < 0.001,
+                    "Claude context percentage uses input tokens and window");
+                Directory.Delete(claudeMetricsHome, true);
+
                 File.Delete(temp);
                 File.WriteAllText(outputPath,
                     "PASS\nLifecycle, usage metrics, panel formatting, and animation checks passed.\n",
@@ -490,6 +616,57 @@ public static class Diagnostics
                 File.WriteAllText(outputPath, "FAIL\n" + ex.ToString(), Encoding.UTF8);
                 return 1;
             }
+        }
+
+        public static int WriteClaudeSnapshot(string outputPath)
+        {
+            try
+            {
+                ClaudeHookStatusMonitor monitor = new ClaudeHookStatusMonitor();
+                monitor.Refresh();
+                List<SessionSnapshot> snapshots = monitor.Snapshots();
+                List<Dictionary<string, object>> rows =
+                    new List<Dictionary<string, object>>();
+                foreach (SessionSnapshot snapshot in snapshots)
+                {
+                    Dictionary<string, object> row =
+                        new Dictionary<string, object>();
+                    row["threadId"] = snapshot.ThreadId;
+                    row["projectName"] = snapshot.ProjectName;
+                    row["workingDirectory"] = snapshot.WorkingDirectory;
+                    row["state"] = CodexSessionMonitor.StateLabel(snapshot.State);
+                    row["action"] = snapshot.Action;
+                    row["lastEventUtc"] = snapshot.LastEventUtc.ToString("o",
+                        CultureInfo.InvariantCulture);
+                    row["completedUtc"] = snapshot.CompletedUtc == DateTime.MinValue
+                        ? null : snapshot.CompletedUtc.ToString("o",
+                            CultureInfo.InvariantCulture);
+                    row["active"] = snapshot.Active;
+                    rows.Add(row);
+                }
+                string json = new JavaScriptSerializer().Serialize(rows);
+                File.WriteAllText(outputPath, json, Encoding.UTF8);
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                File.WriteAllText(outputPath, "FAIL\n" + ex.ToString(), Encoding.UTF8);
+                return 1;
+            }
+        }
+
+        private static string ClaudeHookLine(string eventName, string sessionId,
+            string cwd, string toolName, string notificationType, string timestamp)
+        {
+            Dictionary<string, object> record = new Dictionary<string, object>();
+            record["timestamp"] = timestamp;
+            record["event"] = eventName;
+            record["sessionId"] = sessionId;
+            record["cwd"] = cwd;
+            record["toolName"] = toolName;
+            record["notificationType"] = notificationType;
+            record["source"] = "claude-hook";
+            return new JavaScriptSerializer().Serialize(record);
         }
 
         private static void Assert(bool condition, string name)
@@ -567,7 +744,7 @@ public static class Diagnostics
                 RenderGlowPulseStrip(outputDirectory, HaloState.Working,
                     "glow-working.png", 7.2);
                 RenderGlowPulseStrip(outputDirectory, HaloState.Attention,
-                    "glow-attention-double-pulse.png", 5.8);
+                    "glow-attention-double-pulse.png", 3.35);
                 RenderTransitionStrip(outputDirectory, HaloState.Thinking,
                     HaloState.Working, "transition-thinking-working.png");
                 RenderTransitionStrip(outputDirectory, HaloState.Working,
@@ -678,6 +855,70 @@ public static class Diagnostics
                 encoder.Save(stream);
             }
             panel.Close();
+
+            List<SessionSnapshot> claudeSessions = new List<SessionSnapshot>();
+            claudeSessions.Add(new SessionSnapshot
+            {
+                ThreadId = "preview-claude",
+                ProjectName = "AgentHalo",
+                WorkingDirectory = @"C:\work\AgentHalo",
+                State = HaloState.Working,
+                Action = "Running command",
+                Active = true,
+                LastEventUtc = now,
+                Agent = AgentKind.ClaudeCode
+            });
+            AggregateSnapshot claudeAggregate = new AggregateSnapshot
+            {
+                State = HaloState.Working,
+                Label = "EXECUTING",
+                Detail = "Claude Code · Running command",
+                Sessions = claudeSessions,
+                FocusedAgent = AgentKind.ClaudeCode
+            };
+            DetailsWindow claudePanel = new DetailsWindow();
+            claudePanel.SetPreviewClaudeMetrics(new ClaudeCodeMetrics
+            {
+                IsCustomApi = true,
+                Model = "deepseek-v4-pro",
+                InputTokens = 38000,
+                OutputTokens = 1200,
+                ContextTokens = 38000,
+                ContextWindowTokens = 200000
+            });
+            claudePanel.UpdateContent(claudeAggregate, claudeSessions);
+            FrameworkElement claudeContent = claudePanel.Content as FrameworkElement;
+            claudePanel.Content = null;
+            Grid claudeStage = new Grid();
+            claudeStage.Width = 380;
+            claudeStage.Background = new SolidColorBrush(MediaColor.FromRgb(7, 10, 15));
+            claudeContent.Width = 324;
+            claudeContent.Margin = new Thickness(28);
+            claudeStage.Children.Add(claudeContent);
+            claudeStage.Measure(new System.Windows.Size(380, 1000));
+            double claudeHeight = Math.Ceiling(claudeStage.DesiredSize.Height);
+            if (Math.Abs(height - claudeHeight) > 0.001)
+            {
+                throw new InvalidOperationException(
+                    "Panel preview height mismatch: Codex=" +
+                    height.ToString(CultureInfo.InvariantCulture) +
+                    ", Claude=" +
+                    claudeHeight.ToString(CultureInfo.InvariantCulture));
+            }
+            claudeStage.Height = claudeHeight;
+            claudeStage.Arrange(new Rect(0, 0, 380, claudeHeight));
+            claudeStage.UpdateLayout();
+            RenderTargetBitmap claudeBitmap = new RenderTargetBitmap(760,
+                (int)(claudeHeight * 2), 192, 192, PixelFormats.Pbgra32);
+            claudeBitmap.Render(claudeStage);
+            PngBitmapEncoder claudeEncoder = new PngBitmapEncoder();
+            claudeEncoder.Frames.Add(BitmapFrame.Create(claudeBitmap));
+            using (FileStream stream = File.Create(Path.Combine(outputDirectory,
+                "panel-claude-custom.png")))
+            {
+                claudeEncoder.Save(stream);
+            }
+            claudePanel.Close();
         }
 
         private static void RenderMenuPreview(string outputDirectory)

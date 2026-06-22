@@ -57,6 +57,7 @@ public sealed class SessionTracker
             Snapshot.State = HaloState.Idle;
             Snapshot.Action = "Ready";
             Snapshot.LastEventUtc = File.GetLastWriteTimeUtc(path);
+            Snapshot.Agent = AgentKind.Codex;
             ReadMetadata();
             ReadInitialTail();
             FileInfo initialInfo = new FileInfo(path);
@@ -356,6 +357,10 @@ public sealed class SessionTracker
                     {
                         planProposalSeen = true;
                     }
+                    Snapshot.Active = true;
+                    Snapshot.State = HaloState.Working;
+                    Snapshot.Action = "Writing answer";
+                    return;
                 }
                 ApplyActiveThinkingOrWorking();
             }
@@ -415,7 +420,9 @@ public sealed class SessionTracker
                 {
                     planProposalSeen = true;
                 }
-                ApplyActiveThinkingOrWorking();
+                Snapshot.Active = true;
+                Snapshot.State = HaloState.Working;
+                Snapshot.Action = "Writing answer";
             }
             else if (GeneratedHaloSpec.IsToolCall(lower) || lower.EndsWith("_call"))
             {
@@ -759,6 +766,7 @@ public sealed class CodexSessionMonitor : IDisposable
 
                 AggregateSnapshot result = new AggregateSnapshot();
                 result.Sessions = sessions;
+                result.FocusedAgent = AgentKind.Codex;
                 if (settings.Paused)
                 {
                     result.State = HaloState.Idle;
@@ -830,7 +838,8 @@ public sealed class CodexSessionMonitor : IDisposable
                 Action = snapshot.Action,
                 LastEventUtc = snapshot.LastEventUtc,
                 CompletedUtc = snapshot.CompletedUtc,
-                Active = snapshot.Active
+                Active = snapshot.Active,
+                Agent = snapshot.Agent
             };
         }
 

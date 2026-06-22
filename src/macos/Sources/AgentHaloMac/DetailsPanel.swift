@@ -211,6 +211,9 @@ final class DetailsPanel: NSPanel {
         if action.localizedCaseInsensitiveContains("command") { return "正在执行命令" }
         if action.localizedCaseInsensitiveContains("Editing") { return "正在编辑文件" }
         if action.localizedCaseInsensitiveContains("Search") { return "正在搜索信息" }
+        if action.localizedCaseInsensitiveContains("Compressing context") { return "正在压缩上下文" }
+        if action.localizedCaseInsensitiveContains("Awaiting permission") { return "等待你的授权" }
+        if action.localizedCaseInsensitiveContains("Reviewing result") { return "正在分析结果" }
         switch aggregate.state {
         case .thinking: return "正在思考与规划"
         case .working: return "正在执行任务"
@@ -508,10 +511,10 @@ final class AgentToggleView: NSView {
         }
     }
 
-    private let bgView = NSView()
+    private let bgView = AgentToggleContentView()
     private let activeBg = NSView()
-    private let codexLabel = NSTextField(labelWithString: "Codex")
-    private let ccLabel = NSTextField(labelWithString: "CC")
+    private let codexIcon = NSImageView()
+    private let claudeIcon = NSImageView()
     private var activeBgConstraints: [NSLayoutConstraint] = []
 
     override init(frame frameRect: NSRect) {
@@ -538,22 +541,19 @@ final class AgentToggleView: NSView {
         activeBg.wantsLayer = true
         activeBg.layer?.cornerRadius = 10
         activeBg.layer?.borderWidth = 1
-        activeBg.layer?.borderColor = NSColor(calibratedRed: 0.78, green: 0.88, blue: 0.78, alpha: 0.7).cgColor
-        activeBg.layer?.backgroundColor = NSColor(calibratedRed: 0.88, green: 0.94, blue: 0.88, alpha: 1.0).cgColor
+        activeBg.layer?.borderColor = NSColor(calibratedRed: 0.72, green: 0.92, blue: 0.97, alpha: 0.85).cgColor
+        activeBg.layer?.backgroundColor = NSColor(calibratedRed: 0.88, green: 0.97, blue: 1.0, alpha: 1.0).cgColor
+        activeBg.layer?.shadowColor = NSColor(calibratedRed: 0.26, green: 0.70, blue: 0.80, alpha: 1).cgColor
+        activeBg.layer?.shadowOpacity = 0.12
+        activeBg.layer?.shadowRadius = 5
+        activeBg.layer?.shadowOffset = .zero
         activeBg.translatesAutoresizingMaskIntoConstraints = false
         bgView.addSubview(activeBg)
 
-        codexLabel.font = .systemFont(ofSize: 11.5, weight: .bold)
-        codexLabel.alignment = .center
-        codexLabel.textColor = NSColor(calibratedRed: 0.0, green: 0.60, blue: 0.15, alpha: 1.0)
-        codexLabel.translatesAutoresizingMaskIntoConstraints = false
-        bgView.addSubview(codexLabel)
-
-        ccLabel.font = .systemFont(ofSize: 11.5, weight: .bold)
-        ccLabel.alignment = .center
-        ccLabel.textColor = NSColor(calibratedRed: 0.38, green: 0.45, blue: 0.50, alpha: 1.0)
-        ccLabel.translatesAutoresizingMaskIntoConstraints = false
-        bgView.addSubview(ccLabel)
+        configureIcon(codexIcon, assetName: "codex", accessibilityLabel: "Codex")
+        configureIcon(claudeIcon, assetName: "claude-code", accessibilityLabel: "Claude Code")
+        bgView.addSubview(codexIcon)
+        bgView.addSubview(claudeIcon)
 
         NSLayoutConstraint.activate([
             bgView.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -561,13 +561,15 @@ final class AgentToggleView: NSView {
             bgView.topAnchor.constraint(equalTo: topAnchor),
             bgView.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            codexLabel.leadingAnchor.constraint(equalTo: bgView.leadingAnchor, constant: 4),
-            codexLabel.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
-            codexLabel.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: 0.5, constant: -4),
+            codexIcon.leadingAnchor.constraint(equalTo: bgView.leadingAnchor, constant: 4),
+            codexIcon.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
+            codexIcon.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: 0.5, constant: -4),
+            codexIcon.heightAnchor.constraint(equalToConstant: 18),
 
-            ccLabel.trailingAnchor.constraint(equalTo: bgView.trailingAnchor, constant: -4),
-            ccLabel.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
-            ccLabel.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: 0.5, constant: -4),
+            claudeIcon.trailingAnchor.constraint(equalTo: bgView.trailingAnchor, constant: -4),
+            claudeIcon.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
+            claudeIcon.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: 0.5, constant: -4),
+            claudeIcon.heightAnchor.constraint(equalToConstant: 18),
         ])
 
         updateSelectedState(animated: false)
@@ -581,11 +583,11 @@ final class AgentToggleView: NSView {
     private func updateSelectedState(animated: Bool) {
         NSLayoutConstraint.deactivate(activeBgConstraints)
 
-        let targetLabel = selectedAgent == .codex ? codexLabel : ccLabel
+        let targetIcon = selectedAgent == .codex ? codexIcon : claudeIcon
 
         activeBgConstraints = [
-            activeBg.leadingAnchor.constraint(equalTo: targetLabel.leadingAnchor, constant: -2),
-            activeBg.trailingAnchor.constraint(equalTo: targetLabel.trailingAnchor, constant: 2),
+            activeBg.leadingAnchor.constraint(equalTo: targetIcon.leadingAnchor, constant: -2),
+            activeBg.trailingAnchor.constraint(equalTo: targetIcon.trailingAnchor, constant: 2),
             activeBg.topAnchor.constraint(equalTo: bgView.topAnchor, constant: 2),
             activeBg.bottomAnchor.constraint(equalTo: bgView.bottomAnchor, constant: -2)
         ]
@@ -601,13 +603,16 @@ final class AgentToggleView: NSView {
             NSLayoutConstraint.activate(activeBgConstraints)
         }
 
-        codexLabel.textColor = selectedAgent == .codex
-            ? NSColor(calibratedRed: 0.0, green: 0.60, blue: 0.15, alpha: 1.0)
-            : NSColor(calibratedRed: 0.38, green: 0.45, blue: 0.50, alpha: 1.0)
+        codexIcon.alphaValue = selectedAgent == .codex ? 1 : 0.58
+        claudeIcon.alphaValue = selectedAgent == .claudeCode ? 1 : 0.58
+    }
 
-        ccLabel.textColor = selectedAgent == .claudeCode
-            ? NSColor(calibratedRed: 0.0, green: 0.60, blue: 0.15, alpha: 1.0)
-            : NSColor(calibratedRed: 0.38, green: 0.45, blue: 0.50, alpha: 1.0)
+    private func configureIcon(_ imageView: NSImageView, assetName: String, accessibilityLabel: String) {
+        imageView.image = AgentIconAssets.image(named: assetName)
+        imageView.imageScaling = .scaleProportionallyDown
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        imageView.setAccessibilityLabel(accessibilityLabel)
+        imageView.setAccessibilityRole(.image)
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -618,5 +623,42 @@ final class AgentToggleView: NSView {
             selectedAgent = newAgent
             onAgentSelected?(newAgent)
         }
+    }
+}
+
+@MainActor
+private final class AgentToggleContentView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+}
+
+private enum AgentIconAssets {
+    static func image(named name: String) -> NSImage? {
+        guard let url = url(named: name),
+              let data = try? Data(contentsOf: url) else {
+            return nil
+        }
+        return NSImage(data: data)
+    }
+
+    private static func url(named name: String) -> URL? {
+        if let bundled = Bundle.main.url(
+            forResource: name,
+            withExtension: "svg",
+            subdirectory: "agent-switch"
+        ) {
+            return bundled
+        }
+
+        let srcRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceAsset = srcRoot
+            .appendingPathComponent("shared/assets/agent-switch", isDirectory: true)
+            .appendingPathComponent("\(name).svg")
+        return FileManager.default.fileExists(atPath: sourceAsset.path) ? sourceAsset : nil
     }
 }

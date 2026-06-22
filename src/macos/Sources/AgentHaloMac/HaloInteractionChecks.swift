@@ -43,10 +43,14 @@ func runHaloInteractionChecks() {
     testDetailsPanelShowsSessionMetadataForCodexAndClaudeCode()
     testDetailsPanelShowsExpiredQuotaAsWaitingForRefresh()
     testDetailsPanelShowsAnswerStreamingCopy()
+    testDetailsPanelLocalizesClaudeActivityDetails()
     testDetailsPanelShowsContextAndHidesQuotaForClaudeCode()
     testDetailsPresentationUsesFocusedSessionAndRejectsStaleQuota()
     testClaudeContextUsesRawSessionAfterCompletionAcknowledgement()
     testClaudeContextSurvivesHookSnapshotPruning()
+    testAgentToggleUsesSharedSVGAssets()
+    testAgentToggleUsesCodexAndClaudeIcons()
+    testAgentToggleKeepsWholeControlClickable()
     testDetailsPanelSwitchCallbackSelectsClaudeCode()
 }
 
@@ -635,6 +639,43 @@ private func testDetailsPanelShowsAnswerStreamingCopy() {
 }
 
 @MainActor
+private func testDetailsPanelLocalizesClaudeActivityDetails() {
+    let cases: [(action: String, expected: String)] = [
+        ("Compressing context", "正在压缩上下文"),
+        ("Awaiting permission", "等待你的授权"),
+        ("Reviewing result", "正在分析结果"),
+    ]
+
+    for item in cases {
+        let aggregate = AggregateSnapshot(
+            state: .working,
+            label: "EXECUTING",
+            detail: "AgentHalo - \(item.action)",
+            sessions: [
+                SessionSnapshot(
+                    threadId: "claude-detail",
+                    projectName: "AgentHalo",
+                    workingDirectory: "/tmp/AgentHalo",
+                    state: .working,
+                    action: item.action,
+                    lastEventAt: Date(),
+                    completedAt: nil,
+                    active: true,
+                    agent: .claudeCode
+                )
+            ],
+            focusedAgent: .claudeCode
+        )
+
+        expect(
+            DetailsPanel.localizedDetail(for: aggregate),
+            item.expected,
+            "details panel should localize \(item.action) precisely"
+        )
+    }
+}
+
+@MainActor
 private func testDetailsPanelShowsContextAndHidesQuotaForClaudeCode() {
     let panel = DetailsPanel()
     let aggregate = AggregateSnapshot(
@@ -857,6 +898,66 @@ private func testClaudeContextSurvivesHookSnapshotPruning() {
     )
 
     expect(percent == 30, "fresh Claude context should remain visible after hook snapshots prune")
+}
+
+@MainActor
+private func testAgentToggleUsesSharedSVGAssets() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let srcRoot = sourceDirectory
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let assetDirectory = srcRoot.appendingPathComponent("shared/assets/agent-switch", isDirectory: true)
+    let codexURL = assetDirectory.appendingPathComponent("codex.svg")
+    let claudeURL = assetDirectory.appendingPathComponent("claude-code.svg")
+    let detailsSourceURL = sourceDirectory.appendingPathComponent("DetailsPanel.swift")
+    let buildScriptURL = srcRoot
+        .deletingLastPathComponent()
+        .appendingPathComponent("scripts/build-macos.sh")
+
+    expect(FileManager.default.fileExists(atPath: codexURL.path), "Codex SVG should live in shared assets")
+    expect(FileManager.default.fileExists(atPath: claudeURL.path), "Claude SVG should live in shared assets")
+
+    let detailsSource = try? String(contentsOf: detailsSourceURL, encoding: .utf8)
+    expect(detailsSource?.contains("<svg") == false, "DetailsPanel should not embed SVG markup")
+
+    let buildScript = try? String(contentsOf: buildScriptURL, encoding: .utf8)
+    expect(
+        buildScript?.contains("src/shared/assets/agent-switch") == true,
+        "macOS packaging should copy the shared agent icons"
+    )
+}
+
+@MainActor
+private func testAgentToggleUsesCodexAndClaudeIcons() {
+    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 110, height: 24))
+    let descendants = allDescendants(of: toggle)
+    let visibleLabels = descendants
+        .compactMap { $0 as? NSTextField }
+        .map(\.stringValue)
+        .filter { !$0.isEmpty }
+    let icons = descendants.compactMap { $0 as? NSImageView }
+
+    expect(!visibleLabels.contains("Codex"), "agent toggle should replace the Codex text with an icon")
+    expect(!visibleLabels.contains("CC"), "agent toggle should replace the CC text with an icon")
+    expect(icons.count == 2, "agent toggle should render one icon for each agent")
+    expect(icons.allSatisfy { $0.image != nil }, "agent toggle should load both shared SVG images")
+}
+
+@MainActor
+private func testAgentToggleKeepsWholeControlClickable() {
+    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 110, height: 24))
+    toggle.layoutSubtreeIfNeeded()
+
+    expect(
+        toggle.hitTest(NSPoint(x: 82, y: 12)) === toggle,
+        "agent icons should not intercept clicks from the toggle"
+    )
+}
+
+@MainActor
+private func allDescendants(of view: NSView) -> [NSView] {
+    view.subviews.flatMap { [$0] + allDescendants(of: $0) }
 }
 
 @MainActor
