@@ -13,8 +13,12 @@ enum StatusIcon {
         let path = NSBezierPath()
         path.lineWidth = 2.2
         path.lineCapStyle = .round
-        path.appendArc(withCenter: CGPoint(x: rect.midX, y: rect.midY), radius: 6, startAngle: -50, endAngle: 90)
-        path.appendArc(withCenter: CGPoint(x: rect.midX, y: rect.midY), radius: 6, startAngle: 110, endAngle: 300)
+        // Short arc on the left (140° to 220°)
+        path.appendArc(withCenter: CGPoint(x: rect.midX, y: rect.midY), radius: 6, startAngle: 140, endAngle: 220)
+        path.stroke()
+        path.removeAllPoints()
+        // Long arc on the right (-115° to 115° counterclockwise)
+        path.appendArc(withCenter: CGPoint(x: rect.midX, y: rect.midY), radius: 6, startAngle: -115, endAngle: 115)
         path.stroke()
         return image
     }
