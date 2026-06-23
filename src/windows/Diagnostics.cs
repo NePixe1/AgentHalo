@@ -491,6 +491,8 @@ public static class Diagnostics
                     "C:\\work\\agenthalo", null, null, claudeNow), DateTime.UtcNow);
                 Assert(claude.Snapshot.State == HaloState.Error,
                     "Claude stop failure -> error");
+                claude.Consume(ClaudeHookLine("UserPromptSubmit", "claude-test",
+                    "C:\\work\\agenthalo", null, null, claudeNow), DateTime.UtcNow);
                 claude.Consume(ClaudeHookLine("PreCompact", "claude-test",
                     "C:\\work\\agenthalo", null, null, claudeNow), DateTime.UtcNow);
                 Assert(claude.Snapshot.State == HaloState.Working &&
@@ -499,7 +501,30 @@ public static class Diagnostics
                 claude.Consume(ClaudeHookLine("PostCompact", "claude-test",
                     "C:\\work\\agenthalo", null, null, claudeNow), DateTime.UtcNow);
                 Assert(claude.Snapshot.State == HaloState.Thinking,
-                    "Claude post compact -> thinking");
+                    "Claude active post compact -> thinking");
+
+                ClaudeHookStatusReducer manualCompact =
+                    new ClaudeHookStatusReducer("claude-manual-compact");
+                manualCompact.Consume(ClaudeHookLine("SessionStart",
+                    "claude-manual-compact", "C:\\work\\agenthalo", null, null,
+                    claudeNow), DateTime.UtcNow);
+                manualCompact.Consume(ClaudeHookLine("PreCompact",
+                    "claude-manual-compact", "C:\\work\\agenthalo", null, null,
+                    claudeNow), DateTime.UtcNow);
+                manualCompact.Consume(ClaudeHookLine("SessionStart",
+                    "claude-manual-compact", "C:\\work\\agenthalo", null, null,
+                    claudeNow), DateTime.UtcNow);
+                Assert(manualCompact.Snapshot.State == HaloState.Working &&
+                    manualCompact.Snapshot.Action == "Compressing context",
+                    "Claude manual compact SessionStart preserves working");
+                manualCompact.Consume(ClaudeHookLine("PostCompact",
+                    "claude-manual-compact", "C:\\work\\agenthalo", null, null,
+                    claudeNow), DateTime.UtcNow);
+                Assert(manualCompact.Snapshot.State == HaloState.Done &&
+                    manualCompact.Snapshot.Action == "Context compacted" &&
+                    !manualCompact.Snapshot.Active &&
+                    manualCompact.Snapshot.CompletedUtc != DateTime.MinValue,
+                    "Claude manual post compact -> done");
                 DateTime staleToolAt = DateTime.UtcNow.AddSeconds(-181);
                 claude.Consume(ClaudeHookLine("PreToolUse", "claude-test",
                     "C:\\work\\agenthalo", "Read", null,

@@ -443,6 +443,7 @@ public sealed class ClaudeHookStatusReducer
         private readonly JavaScriptSerializer serializer;
         private DateTime workingVisibleUntilUtc;
         private bool permissionPrompt;
+        private bool? wasActiveBeforeCompaction;
 
         public SessionSnapshot Snapshot { get; private set; }
 
@@ -481,6 +482,16 @@ public sealed class ClaudeHookStatusReducer
             switch (StringValue(root, "event"))
             {
                 case "SessionStart":
+                    if (wasActiveBeforeCompaction.HasValue)
+                    {
+                        permissionPrompt = false;
+                        workingVisibleUntilUtc = DateTime.MinValue;
+                        Snapshot.Active = true;
+                        Snapshot.State = HaloState.Working;
+                        Snapshot.Action = "Compressing context";
+                        Snapshot.CompletedUtc = DateTime.MinValue;
+                        break;
+                    }
                     permissionPrompt = false;
                     workingVisibleUntilUtc = DateTime.MinValue;
                     Snapshot.Active = false;
@@ -489,6 +500,7 @@ public sealed class ClaudeHookStatusReducer
                     Snapshot.CompletedUtc = DateTime.MinValue;
                     break;
                 case "UserPromptSubmit":
+                    wasActiveBeforeCompaction = null;
                     permissionPrompt = false;
                     workingVisibleUntilUtc = DateTime.MinValue;
                     Snapshot.Active = true;
@@ -497,6 +509,7 @@ public sealed class ClaudeHookStatusReducer
                     Snapshot.CompletedUtc = DateTime.MinValue;
                     break;
                 case "PreToolUse":
+                    wasActiveBeforeCompaction = null;
                     permissionPrompt = false;
                     workingVisibleUntilUtc = DateTime.MinValue;
                     Snapshot.Active = true;
@@ -506,6 +519,7 @@ public sealed class ClaudeHookStatusReducer
                     Snapshot.CompletedUtc = DateTime.MinValue;
                     break;
                 case "PostToolUse":
+                    wasActiveBeforeCompaction = null;
                     permissionPrompt = false;
                     Snapshot.Active = true;
                     Snapshot.State = HaloState.Working;
@@ -514,6 +528,7 @@ public sealed class ClaudeHookStatusReducer
                     workingVisibleUntilUtc = eventUtc.AddSeconds(1.8);
                     break;
                 case "PostToolUseFailure":
+                    wasActiveBeforeCompaction = null;
                     permissionPrompt = false;
                     Snapshot.Active = true;
                     Snapshot.State = HaloState.Working;
@@ -525,6 +540,7 @@ public sealed class ClaudeHookStatusReducer
                     ReduceNotification(root);
                     break;
                 case "Stop":
+                    wasActiveBeforeCompaction = null;
                     permissionPrompt = false;
                     workingVisibleUntilUtc = DateTime.MinValue;
                     Snapshot.Active = false;
@@ -533,6 +549,7 @@ public sealed class ClaudeHookStatusReducer
                     Snapshot.CompletedUtc = eventUtc;
                     break;
                 case "StopFailure":
+                    wasActiveBeforeCompaction = null;
                     permissionPrompt = false;
                     workingVisibleUntilUtc = DateTime.MinValue;
                     Snapshot.Active = false;
@@ -541,6 +558,10 @@ public sealed class ClaudeHookStatusReducer
                     Snapshot.CompletedUtc = DateTime.MinValue;
                     break;
                 case "PreCompact":
+                    if (!wasActiveBeforeCompaction.HasValue)
+                    {
+                        wasActiveBeforeCompaction = Snapshot.Active;
+                    }
                     permissionPrompt = false;
                     workingVisibleUntilUtc = DateTime.MinValue;
                     Snapshot.Active = true;
@@ -549,14 +570,34 @@ public sealed class ClaudeHookStatusReducer
                     Snapshot.CompletedUtc = DateTime.MinValue;
                     break;
                 case "PostCompact":
+                    bool? shouldResumeActiveTurn = wasActiveBeforeCompaction;
+                    wasActiveBeforeCompaction = null;
                     permissionPrompt = false;
                     workingVisibleUntilUtc = DateTime.MinValue;
-                    Snapshot.Active = true;
-                    Snapshot.State = HaloState.Thinking;
-                    Snapshot.Action = "Thinking";
-                    Snapshot.CompletedUtc = DateTime.MinValue;
+                    if (shouldResumeActiveTurn == true)
+                    {
+                        Snapshot.Active = true;
+                        Snapshot.State = HaloState.Thinking;
+                        Snapshot.Action = "Thinking";
+                        Snapshot.CompletedUtc = DateTime.MinValue;
+                    }
+                    else if (shouldResumeActiveTurn == false)
+                    {
+                        Snapshot.Active = false;
+                        Snapshot.State = HaloState.Done;
+                        Snapshot.Action = "Context compacted";
+                        Snapshot.CompletedUtc = eventUtc;
+                    }
+                    else
+                    {
+                        Snapshot.Active = false;
+                        Snapshot.State = HaloState.Idle;
+                        Snapshot.Action = "Ready";
+                        Snapshot.CompletedUtc = DateTime.MinValue;
+                    }
                     break;
                 case "SessionEnd":
+                    wasActiveBeforeCompaction = null;
                     permissionPrompt = false;
                     if (Snapshot.Active)
                     {
@@ -585,6 +626,17 @@ public sealed class ClaudeHookStatusReducer
             if (workingVisibleUntilUtc == DateTime.MinValue && !permissionPrompt &&
                 (nowUtc - Snapshot.LastEventUtc).TotalSeconds > 180)
             {
+                if (wasActiveBeforeCompaction.HasValue)
+                {
+                    bool shouldResumeActiveTurn = wasActiveBeforeCompaction.Value;
+                    wasActiveBeforeCompaction = null;
+                    Snapshot.Active = shouldResumeActiveTurn;
+                    Snapshot.State = shouldResumeActiveTurn
+                        ? HaloState.Thinking : HaloState.Idle;
+                    Snapshot.Action = shouldResumeActiveTurn ? "Thinking" : "Ready";
+                    Snapshot.CompletedUtc = DateTime.MinValue;
+                    return;
+                }
                 Snapshot.State = HaloState.Thinking;
                 Snapshot.Action = "Thinking";
             }
@@ -595,6 +647,7 @@ public sealed class ClaudeHookStatusReducer
             switch (StringValue(root, "notificationType"))
             {
                 case "permission_prompt":
+                    wasActiveBeforeCompaction = null;
                     permissionPrompt = true;
                     workingVisibleUntilUtc = DateTime.MinValue;
                     Snapshot.Active = true;
@@ -603,6 +656,7 @@ public sealed class ClaudeHookStatusReducer
                     Snapshot.CompletedUtc = DateTime.MinValue;
                     break;
                 case "idle_prompt":
+                    wasActiveBeforeCompaction = null;
                     permissionPrompt = false;
                     workingVisibleUntilUtc = DateTime.MinValue;
                     Snapshot.Active = false;

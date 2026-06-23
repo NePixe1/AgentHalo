@@ -688,6 +688,7 @@ private func testVisibleDetailsPanelStatusRefreshIsWiredToTick() {
 private func testDetailsPanelLocalizesClaudeActivityDetails() {
     let cases: [(action: String, expected: String)] = [
         ("Compressing context", "正在压缩上下文"),
+        ("Context compacted", "上下文压缩完成"),
         ("Awaiting permission", "等待你的授权"),
         ("Reviewing result", "正在分析结果"),
     ]

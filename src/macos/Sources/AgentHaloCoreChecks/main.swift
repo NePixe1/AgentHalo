@@ -1164,7 +1164,51 @@ func testClaudeHookReducerStuckPreToolUseRecoversAfterSafetyTimeout() {
     expect(reducer.snapshot.action, "Thinking", "safety-net fade action")
 }
 
-func testClaudeHookReducerPreCompactShowsExecutingThenRestoresToThinking() {
+func testClaudeHookReducerManualCompactShowsDoneThenReady() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-17T04:00:00Z")!
+    var reducer = ClaudeHookStatusReducer(threadId: "manual-compact", now: now)
+    let settings = HaloSettings(
+        paused: false,
+        focusedAgent: .claudeCode,
+        installedAt: now.addingTimeInterval(-60)
+    )
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:00Z","event":"SessionStart","sessionId":"manual-compact","cwd":"/tmp","source":"claude-hook"}"#, now: now)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:01Z","event":"PreCompact","sessionId":"manual-compact","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
+    expect(reducer.snapshot.state, .working, "manual PreCompact should show Executing")
+    expect(reducer.snapshot.action, "Compressing context", "manual PreCompact action")
+
+    // Claude Code emits another SessionStart while rebuilding the compacted session.
+    // It must not erase the fact that compaction began while the prompt was idle.
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:02Z","event":"SessionStart","sessionId":"manual-compact","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(2))
+    expect(reducer.snapshot.state, .working, "SessionStart during compaction should keep Executing")
+    expect(reducer.snapshot.action, "Compressing context", "SessionStart should preserve compaction action")
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:03Z","event":"PostCompact","sessionId":"manual-compact","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(3))
+    expect(reducer.snapshot.state, .done, "manual PostCompact should show completion")
+    expect(reducer.snapshot.action, "Context compacted", "manual PostCompact action")
+    expect(reducer.snapshot.active, false, "manual PostCompact should deactivate")
+    expect(reducer.snapshot.completedAt, now.addingTimeInterval(3), "manual PostCompact completion time")
+
+    let fresh = SessionAggregator.aggregate(
+        snapshots: [reducer.snapshot],
+        settings: settings,
+        focusedAgent: .claudeCode,
+        now: now.addingTimeInterval(4)
+    )
+    expect(fresh.state, .done, "manual compact should briefly show green Done")
+
+    let settled = SessionAggregator.aggregate(
+        snapshots: [reducer.snapshot],
+        settings: settings,
+        focusedAgent: .claudeCode,
+        now: now.addingTimeInterval(12)
+    )
+    expect(settled.state, .idle, "manual compact should settle to gray Ready")
+    expect(settled.label, "READY", "manual compact settled label")
+}
+
+func testClaudeHookReducerActiveCompactRestoresThinking() {
     let now = ISO8601DateFormatter().date(from: "2026-06-17T04:00:00Z")!
     var reducer = ClaudeHookStatusReducer(threadId: "compact", now: now)
 
@@ -1178,8 +1222,12 @@ func testClaudeHookReducerPreCompactShowsExecutingThenRestoresToThinking() {
     expect(reducer.snapshot.action, "Compressing context", "PreCompact action")
     expect(reducer.snapshot.active, true, "PreCompact keeps the turn active")
 
-    // PostCompact should restore to thinking.
-    reducer.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:02Z","event":"PostCompact","sessionId":"compact","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(2))
+    // A compaction-time SessionStart must preserve the active resume state.
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:02Z","event":"SessionStart","sessionId":"compact","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(2))
+    expect(reducer.snapshot.state, .working, "SessionStart during active compaction should keep Executing")
+
+    // PostCompact should restore to thinking for an active turn.
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:03Z","event":"PostCompact","sessionId":"compact","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(3))
     expect(reducer.snapshot.state, .thinking, "PostCompact should restore to thinking")
     expect(reducer.snapshot.action, "Thinking", "PostCompact action")
     expect(reducer.snapshot.active, true, "PostCompact keeps the turn active")
@@ -1193,6 +1241,19 @@ func testClaudeHookReducerPreCompactShowsExecutingThenRestoresToThinking() {
     // After >180 s with no PostCompact, safety net recovers.
     reducer2.applyWorkingVisibility(now: now.addingTimeInterval(182))
     expect(reducer2.snapshot.state, .thinking, "stuck PreCompact should force-fade to thinking after >180 s")
+}
+
+func testClaudeHookReducerIdleCompactTimeoutReturnsToReady() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-17T04:00:00Z")!
+    var reducer = ClaudeHookStatusReducer(threadId: "idle-compact-timeout", now: now)
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:00Z","event":"SessionStart","sessionId":"idle-compact-timeout","cwd":"/tmp","source":"claude-hook"}"#, now: now)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-17T04:00:01Z","event":"PreCompact","sessionId":"idle-compact-timeout","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
+    reducer.applyWorkingVisibility(now: now.addingTimeInterval(182))
+
+    expect(reducer.snapshot.state, .idle, "stuck idle PreCompact should recover to Ready")
+    expect(reducer.snapshot.action, "Ready", "stuck idle PreCompact recovery action")
+    expect(reducer.snapshot.active, false, "stuck idle PreCompact should deactivate")
 }
 
 func testClaudeHookMonitorPrunesStaleReducers() throws {
@@ -1743,7 +1804,9 @@ testClaudeHookReducerIdlePromptReturnsToReady()
 testClaudeHookIdlePromptDoesNotDriveThinkingAggregate()
 testClaudeHookReducerStopFailureMapsToError()
 testClaudeHookReducerStuckPreToolUseRecoversAfterSafetyTimeout()
-testClaudeHookReducerPreCompactShowsExecutingThenRestoresToThinking()
+testClaudeHookReducerManualCompactShowsDoneThenReady()
+testClaudeHookReducerActiveCompactRestoresThinking()
+testClaudeHookReducerIdleCompactTimeoutReturnsToReady()
 do {
     try testClaudeHookMonitorPrunesStaleReducers()
 } catch {
@@ -1928,4 +1991,3 @@ func testAggregateFiltersInactiveAndTimedOutSessions() {
     expect(failureAgg.state, .error, "should surface synthetic error when active session is filtered out")
     expect(failureAgg.detail, "额度已用尽", "should show correct failure detail")
 }
-

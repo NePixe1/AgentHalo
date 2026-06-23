@@ -293,6 +293,10 @@ public sealed class DetailsWindow : Window
             {
                 return "正在压缩上下文";
             }
+            if (action.IndexOf("Context compacted", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "上下文压缩完成";
+            }
             if (action.IndexOf("Awaiting permission", StringComparison.OrdinalIgnoreCase) >= 0)
             {
                 return "等待你的授权";
@@ -879,4 +883,3 @@ public sealed class DetailsWindow : Window
         }
     }
 }
-

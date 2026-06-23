@@ -12,6 +12,10 @@ public struct ClaudeHookStatusReducer: Sendable {
     /// must explicitly approve or reject. Distinguished from PreToolUse so the stuck-
     /// tool safety net can recover PreToolUse hangs without breaking permission holds.
     private var isPermissionPrompt = false
+    /// Whether the session was active immediately before PreCompact. Claude Code may
+    /// emit another SessionStart while rebuilding the compacted session, so this must
+    /// survive that event until PostCompact restores the correct user-visible state.
+    private var wasActiveBeforeCompaction: Bool?
 
     public init(threadId: String = "claude-code", now: Date = Date()) {
         self.snapshot = SessionSnapshot(
@@ -39,6 +43,15 @@ public struct ClaudeHookStatusReducer: Sendable {
 
         switch Self.string(root["event"]) {
         case "SessionStart":
+            if wasActiveBeforeCompaction != nil {
+                isPermissionPrompt = false
+                workingVisibleUntil = nil
+                snapshot.active = true
+                snapshot.state = .working
+                snapshot.action = "Compressing context"
+                snapshot.completedAt = nil
+                break
+            }
             // A new session always resets to idle regardless of prior state.
             // Without this, a previous Stop (→ .done) blocks every subsequent
             // SessionStart and the reducer can never return to idle on replay.
@@ -49,6 +62,7 @@ public struct ClaudeHookStatusReducer: Sendable {
             snapshot.action = "Ready"
             snapshot.completedAt = nil
         case "UserPromptSubmit":
+            wasActiveBeforeCompaction = nil
             workingVisibleUntil = nil
             isPermissionPrompt = false
             snapshot.active = true
@@ -56,6 +70,7 @@ public struct ClaudeHookStatusReducer: Sendable {
             snapshot.action = "Thinking"
             snapshot.completedAt = nil
         case "PreToolUse":
+            wasActiveBeforeCompaction = nil
             isPermissionPrompt = false
             // No auto-fade timeout during tool execution — the tool may run for
             // many seconds. If PostToolUse never arrives (crash, stale data),
@@ -66,6 +81,7 @@ public struct ClaudeHookStatusReducer: Sendable {
             snapshot.action = GeneratedHaloSpec.friendlyAction(Self.normalizedToolName(Self.string(root["toolName"])))
             snapshot.completedAt = nil
         case "PostToolUse":
+            wasActiveBeforeCompaction = nil
             snapshot.active = true
             snapshot.state = .working
             snapshot.action = "Reviewing result"
@@ -73,6 +89,7 @@ public struct ClaudeHookStatusReducer: Sendable {
             // Anchored on event time, NOT `now`. A late tick still gets correct fade behavior.
             workingVisibleUntil = eventAt.addingTimeInterval(1.8)
         case "PostToolUseFailure":
+            wasActiveBeforeCompaction = nil
             snapshot.active = true
             snapshot.state = .working
             snapshot.action = "Tool failed"
@@ -81,6 +98,7 @@ public struct ClaudeHookStatusReducer: Sendable {
         case "Notification":
             switch Self.string(root["notificationType"]) {
             case "permission_prompt":
+                wasActiveBeforeCompaction = nil
                 // Block on user approval. Render as `.attention` (NEEDS YOU) so the
                 // ring is visually distinct from normal tool execution. No auto-fade
                 // — only the next PreToolUse / Stop / UserPromptSubmit clears this.
@@ -91,6 +109,7 @@ public struct ClaudeHookStatusReducer: Sendable {
                 snapshot.action = "Awaiting permission"
                 snapshot.completedAt = nil
             case "idle_prompt":
+                wasActiveBeforeCompaction = nil
                 isPermissionPrompt = false
                 workingVisibleUntil = nil
                 snapshot.active = false
@@ -101,6 +120,7 @@ public struct ClaudeHookStatusReducer: Sendable {
                 break
             }
         case "Stop":
+            wasActiveBeforeCompaction = nil
             isPermissionPrompt = false
             workingVisibleUntil = nil
             snapshot.active = false
@@ -108,6 +128,7 @@ public struct ClaudeHookStatusReducer: Sendable {
             snapshot.action = "Complete"
             snapshot.completedAt = eventAt
         case "StopFailure":
+            wasActiveBeforeCompaction = nil
             isPermissionPrompt = false
             workingVisibleUntil = nil
             snapshot.active = false
@@ -115,8 +136,9 @@ public struct ClaudeHookStatusReducer: Sendable {
             snapshot.action = "Claude Code stopped with an error"
             snapshot.completedAt = nil
         case "PreCompact":
-            // Compaction is a transient background operation — show Executing while
-            // CC compresses the context, then let PostCompact restore to Thinking.
+            if wasActiveBeforeCompaction == nil {
+                wasActiveBeforeCompaction = snapshot.active
+            }
             isPermissionPrompt = false
             workingVisibleUntil = nil
             snapshot.active = true
@@ -124,16 +146,29 @@ public struct ClaudeHookStatusReducer: Sendable {
             snapshot.action = "Compressing context"
             snapshot.completedAt = nil
         case "PostCompact":
-            // Context compaction finished — return to Thinking as the default
-            // active state. The next hook event (PreToolUse, UserPromptSubmit, …)
-            // will refine the state further.
+            let shouldResumeActiveTurn = wasActiveBeforeCompaction
+            wasActiveBeforeCompaction = nil
             isPermissionPrompt = false
             workingVisibleUntil = nil
-            snapshot.active = true
-            snapshot.state = .thinking
-            snapshot.action = "Thinking"
-            snapshot.completedAt = nil
+            switch shouldResumeActiveTurn {
+            case true:
+                snapshot.active = true
+                snapshot.state = .thinking
+                snapshot.action = "Thinking"
+                snapshot.completedAt = nil
+            case false:
+                snapshot.active = false
+                snapshot.state = .done
+                snapshot.action = "Context compacted"
+                snapshot.completedAt = eventAt
+            case nil:
+                snapshot.active = false
+                snapshot.state = .idle
+                snapshot.action = "Ready"
+                snapshot.completedAt = nil
+            }
         case "SessionEnd":
+            wasActiveBeforeCompaction = nil
             isPermissionPrompt = false
             if snapshot.active {
                 snapshot.active = false
@@ -167,6 +202,14 @@ public struct ClaudeHookStatusReducer: Sendable {
         // testClaudeHookReducerPermissionPromptHoldsUntilResolved).
         if workingVisibleUntil == nil, !isPermissionPrompt {
             if now.timeIntervalSince(snapshot.lastEventAt) > 180 {
+                if let shouldResumeActiveTurn = wasActiveBeforeCompaction {
+                    wasActiveBeforeCompaction = nil
+                    snapshot.active = shouldResumeActiveTurn
+                    snapshot.state = shouldResumeActiveTurn ? .thinking : .idle
+                    snapshot.action = shouldResumeActiveTurn ? "Thinking" : "Ready"
+                    snapshot.completedAt = nil
+                    return
+                }
                 snapshot.state = .thinking
                 snapshot.action = "Thinking"
             }
