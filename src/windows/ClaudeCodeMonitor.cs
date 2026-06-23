@@ -234,7 +234,10 @@ public static class ClaudeHookConfigurator
             new HookSpec("PreToolUse", ".*"),
             new HookSpec("PostToolUse", ".*"),
             new HookSpec("PostToolUseFailure", ".*"),
+            new HookSpec("PostToolBatch", null),
             new HookSpec("Notification", null),
+            new HookSpec("PermissionRequest", null),
+            new HookSpec("PermissionDenied", null),
             new HookSpec("Stop", null),
             new HookSpec("StopFailure", null),
             new HookSpec("SessionEnd", null),
@@ -258,6 +261,7 @@ public static class ClaudeHookConfigurator
 
         public static void Configure(string home, string executablePath)
         {
+            RemoveLegacyHookHelper(home);
             string claudeDir = Path.Combine(home, ".claude");
             string settingsPath = Path.Combine(claudeDir, "settings.json");
             Dictionary<string, object> config = ReadSettings(settingsPath);
@@ -312,6 +316,21 @@ public static class ClaudeHookConfigurator
                 new UTF8Encoding(false));
         }
 
+        private static void RemoveLegacyHookHelper(string home)
+        {
+            try
+            {
+                string legacy = Path.Combine(home, ".agent-halo", "AgentHaloHook.exe");
+                if (File.Exists(legacy))
+                {
+                    File.Delete(legacy);
+                }
+            }
+            catch
+            {
+            }
+        }
+
         private static Dictionary<string, object> ReadSettings(string path)
         {
             try
@@ -352,6 +371,8 @@ public static class ClaudeHookConfigurator
             {
                 string command = StringValue(hook, "command");
                 if (command.IndexOf("--claude-hook", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    command.IndexOf("AgentHaloHook.exe",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
                     command.IndexOf("claude-code-status-hook",
                         StringComparison.OrdinalIgnoreCase) >= 0)
                 {
@@ -442,6 +463,8 @@ public sealed class ClaudeHookStatusReducer
     {
         private readonly JavaScriptSerializer serializer;
         private DateTime workingVisibleUntilUtc;
+        private DateTime thinkingVisibleUntilUtc;
+        private string pendingWorkingAction;
         private bool permissionPrompt;
 
         public SessionSnapshot Snapshot { get; private set; }
@@ -483,6 +506,8 @@ public sealed class ClaudeHookStatusReducer
                 case "SessionStart":
                     permissionPrompt = false;
                     workingVisibleUntilUtc = DateTime.MinValue;
+                    thinkingVisibleUntilUtc = DateTime.MinValue;
+                    pendingWorkingAction = null;
                     Snapshot.Active = false;
                     Snapshot.State = HaloState.Idle;
                     Snapshot.Action = "Ready";
@@ -491,6 +516,8 @@ public sealed class ClaudeHookStatusReducer
                 case "UserPromptSubmit":
                     permissionPrompt = false;
                     workingVisibleUntilUtc = DateTime.MinValue;
+                    thinkingVisibleUntilUtc = eventUtc.AddSeconds(0.7);
+                    pendingWorkingAction = null;
                     Snapshot.Active = true;
                     Snapshot.State = HaloState.Thinking;
                     Snapshot.Action = "Thinking";
@@ -499,34 +526,99 @@ public sealed class ClaudeHookStatusReducer
                 case "PreToolUse":
                     permissionPrompt = false;
                     workingVisibleUntilUtc = DateTime.MinValue;
-                    Snapshot.Active = true;
-                    Snapshot.State = HaloState.Working;
-                    Snapshot.Action = GeneratedHaloSpec.FriendlyAction(
+                    string action = GeneratedHaloSpec.FriendlyAction(
                         NormalizeToolName(StringValue(root, "toolName")));
+                    Snapshot.Active = true;
+                    if (Snapshot.State == HaloState.Thinking &&
+                        eventUtc < thinkingVisibleUntilUtc)
+                    {
+                        pendingWorkingAction = action;
+                        Snapshot.Action = "Thinking";
+                    }
+                    else
+                    {
+                        thinkingVisibleUntilUtc = DateTime.MinValue;
+                        pendingWorkingAction = null;
+                        Snapshot.State = HaloState.Working;
+                        Snapshot.Action = action;
+                    }
                     Snapshot.CompletedUtc = DateTime.MinValue;
                     break;
                 case "PostToolUse":
+                case "PostToolBatch":
                     permissionPrompt = false;
                     Snapshot.Active = true;
-                    Snapshot.State = HaloState.Working;
-                    Snapshot.Action = "Reviewing result";
+                    if (Snapshot.State == HaloState.Thinking &&
+                        eventUtc < thinkingVisibleUntilUtc)
+                    {
+                        pendingWorkingAction = "Reviewing result";
+                    }
+                    else
+                    {
+                        thinkingVisibleUntilUtc = DateTime.MinValue;
+                        pendingWorkingAction = null;
+                        Snapshot.State = HaloState.Working;
+                        Snapshot.Action = "Reviewing result";
+                    }
                     Snapshot.CompletedUtc = DateTime.MinValue;
-                    workingVisibleUntilUtc = eventUtc.AddSeconds(1.8);
+                    workingVisibleUntilUtc = Math.Max(eventUtc.Ticks,
+                        thinkingVisibleUntilUtc.Ticks) == 0
+                        ? eventUtc.AddSeconds(0.65)
+                        : new DateTime(Math.Max(eventUtc.Ticks,
+                            thinkingVisibleUntilUtc.Ticks), DateTimeKind.Utc)
+                            .AddSeconds(0.65);
                     break;
                 case "PostToolUseFailure":
                     permissionPrompt = false;
                     Snapshot.Active = true;
-                    Snapshot.State = HaloState.Working;
-                    Snapshot.Action = "Tool failed";
+                    if (Snapshot.State == HaloState.Thinking &&
+                        eventUtc < thinkingVisibleUntilUtc)
+                    {
+                        pendingWorkingAction = "Tool failed";
+                    }
+                    else
+                    {
+                        thinkingVisibleUntilUtc = DateTime.MinValue;
+                        pendingWorkingAction = null;
+                        Snapshot.State = HaloState.Working;
+                        Snapshot.Action = "Tool failed";
+                    }
                     Snapshot.CompletedUtc = DateTime.MinValue;
-                    workingVisibleUntilUtc = eventUtc.AddSeconds(1.8);
+                    workingVisibleUntilUtc = Math.Max(eventUtc.Ticks,
+                        thinkingVisibleUntilUtc.Ticks) == 0
+                        ? eventUtc.AddSeconds(0.65)
+                        : new DateTime(Math.Max(eventUtc.Ticks,
+                            thinkingVisibleUntilUtc.Ticks), DateTimeKind.Utc)
+                            .AddSeconds(0.65);
                     break;
                 case "Notification":
                     ReduceNotification(root);
                     break;
+                case "PermissionRequest":
+                    permissionPrompt = true;
+                    workingVisibleUntilUtc = DateTime.MinValue;
+                    thinkingVisibleUntilUtc = DateTime.MinValue;
+                    pendingWorkingAction = null;
+                    Snapshot.Active = true;
+                    Snapshot.State = HaloState.Attention;
+                    Snapshot.Action = "Awaiting permission";
+                    Snapshot.CompletedUtc = DateTime.MinValue;
+                    break;
+                case "PermissionDenied":
+                    permissionPrompt = false;
+                    workingVisibleUntilUtc = DateTime.MinValue;
+                    thinkingVisibleUntilUtc = DateTime.MinValue;
+                    pendingWorkingAction = null;
+                    Snapshot.Active = true;
+                    Snapshot.State = HaloState.Attention;
+                    Snapshot.Action = "Permission denied";
+                    Snapshot.CompletedUtc = DateTime.MinValue;
+                    break;
                 case "Stop":
                     permissionPrompt = false;
                     workingVisibleUntilUtc = DateTime.MinValue;
+                    thinkingVisibleUntilUtc = DateTime.MinValue;
+                    pendingWorkingAction = null;
                     Snapshot.Active = false;
                     Snapshot.State = HaloState.Done;
                     Snapshot.Action = "Complete";
@@ -535,6 +627,8 @@ public sealed class ClaudeHookStatusReducer
                 case "StopFailure":
                     permissionPrompt = false;
                     workingVisibleUntilUtc = DateTime.MinValue;
+                    thinkingVisibleUntilUtc = DateTime.MinValue;
+                    pendingWorkingAction = null;
                     Snapshot.Active = false;
                     Snapshot.State = HaloState.Error;
                     Snapshot.Action = "Claude Code stopped with an error";
@@ -543,6 +637,8 @@ public sealed class ClaudeHookStatusReducer
                 case "PreCompact":
                     permissionPrompt = false;
                     workingVisibleUntilUtc = DateTime.MinValue;
+                    thinkingVisibleUntilUtc = DateTime.MinValue;
+                    pendingWorkingAction = null;
                     Snapshot.Active = true;
                     Snapshot.State = HaloState.Working;
                     Snapshot.Action = "Compressing context";
@@ -551,6 +647,8 @@ public sealed class ClaudeHookStatusReducer
                 case "PostCompact":
                     permissionPrompt = false;
                     workingVisibleUntilUtc = DateTime.MinValue;
+                    thinkingVisibleUntilUtc = DateTime.MinValue;
+                    pendingWorkingAction = null;
                     Snapshot.Active = true;
                     Snapshot.State = HaloState.Thinking;
                     Snapshot.Action = "Thinking";
@@ -558,6 +656,9 @@ public sealed class ClaudeHookStatusReducer
                     break;
                 case "SessionEnd":
                     permissionPrompt = false;
+                    workingVisibleUntilUtc = DateTime.MinValue;
+                    thinkingVisibleUntilUtc = DateTime.MinValue;
+                    pendingWorkingAction = null;
                     if (Snapshot.Active)
                     {
                         Snapshot.Active = false;
@@ -570,7 +671,20 @@ public sealed class ClaudeHookStatusReducer
 
         public void ApplyWorkingVisibility(DateTime nowUtc)
         {
-            if (!Snapshot.Active || Snapshot.State != HaloState.Working)
+            if (!Snapshot.Active)
+            {
+                return;
+            }
+            if (pendingWorkingAction != null && nowUtc >= thinkingVisibleUntilUtc)
+            {
+                string action = pendingWorkingAction;
+                pendingWorkingAction = null;
+                thinkingVisibleUntilUtc = DateTime.MinValue;
+                Snapshot.State = HaloState.Working;
+                Snapshot.Action = action;
+                return;
+            }
+            if (Snapshot.State != HaloState.Working)
             {
                 return;
             }
@@ -597,6 +711,8 @@ public sealed class ClaudeHookStatusReducer
                 case "permission_prompt":
                     permissionPrompt = true;
                     workingVisibleUntilUtc = DateTime.MinValue;
+                    thinkingVisibleUntilUtc = DateTime.MinValue;
+                    pendingWorkingAction = null;
                     Snapshot.Active = true;
                     Snapshot.State = HaloState.Attention;
                     Snapshot.Action = "Awaiting permission";
@@ -605,6 +721,8 @@ public sealed class ClaudeHookStatusReducer
                 case "idle_prompt":
                     permissionPrompt = false;
                     workingVisibleUntilUtc = DateTime.MinValue;
+                    thinkingVisibleUntilUtc = DateTime.MinValue;
+                    pendingWorkingAction = null;
                     Snapshot.Active = false;
                     Snapshot.State = HaloState.Idle;
                     Snapshot.Action = "Ready";
@@ -741,8 +859,7 @@ public sealed class ClaudeHookStatusMonitor
                     }
                 }
             }
-            ApplyAndPrune(now);
-            return changed;
+            return ApplyAndPrune(now) || changed;
         }
 
         public List<SessionSnapshot> Snapshots()
@@ -769,11 +886,20 @@ public sealed class ClaudeHookStatusMonitor
             .ToList();
         }
 
-        private void ApplyAndPrune(DateTime now)
+        private bool ApplyAndPrune(DateTime now)
         {
+            bool changed = false;
             foreach (ClaudeHookStatusReducer reducer in reducers.Values)
             {
+                HaloState previousState = reducer.Snapshot.State;
+                string previousAction = reducer.Snapshot.Action;
                 reducer.ApplyWorkingVisibility(now);
+                if (previousState != reducer.Snapshot.State ||
+                    !String.Equals(previousAction, reducer.Snapshot.Action,
+                        StringComparison.Ordinal))
+                {
+                    changed = true;
+                }
             }
             DateTime activeCutoff = now.AddMinutes(-10);
             DateTime inactiveCutoff = now.AddMinutes(-5);
@@ -790,7 +916,9 @@ public sealed class ClaudeHookStatusMonitor
             foreach (string key in stale)
             {
                 reducers.Remove(key);
+                changed = true;
             }
+            return changed;
         }
 
         private static string SessionIdFromLine(string line)
@@ -815,6 +943,764 @@ public sealed class ClaudeHookStatusMonitor
             {
             }
             return "claude-code";
+        }
+    }
+
+public sealed class ClaudeTranscriptSessionReducer
+    {
+        private readonly JavaScriptSerializer serializer;
+        private DateTime workingVisibleUntilUtc;
+        private int inFlightTools;
+        private bool liveTracking;
+
+        public SessionSnapshot Snapshot { get; private set; }
+
+        public ClaudeTranscriptSessionReducer(string filePath)
+            : this(filePath, DateTime.UtcNow, true)
+        {
+        }
+
+        public ClaudeTranscriptSessionReducer(string filePath, DateTime nowUtc,
+            bool live)
+        {
+            serializer = new JavaScriptSerializer();
+            liveTracking = live;
+            Snapshot = new SessionSnapshot
+            {
+                ThreadId = ThreadIdFromPath(filePath),
+                ProjectName = "Claude Code",
+                WorkingDirectory = String.Empty,
+                State = HaloState.Idle,
+                Action = "Ready",
+                LastEventUtc = nowUtc,
+                CompletedUtc = DateTime.MinValue,
+                Active = false,
+                Agent = AgentKind.ClaudeCode
+            };
+        }
+
+        public void SetLiveTracking(bool value)
+        {
+            liveTracking = value;
+        }
+
+        public void Consume(string jsonLine, DateTime nowUtc)
+        {
+            Dictionary<string, object> root = serializer.DeserializeObject(jsonLine)
+                as Dictionary<string, object>;
+            if (root == null)
+            {
+                return;
+            }
+            DateTime eventUtc = ParseDate(StringValue(root, "timestamp"));
+            if (eventUtc == DateTime.MinValue)
+            {
+                eventUtc = nowUtc;
+            }
+            Snapshot.LastEventUtc = eventUtc;
+            UpdateIdentity(root);
+
+            switch (StringValue(root, "type"))
+            {
+                case "user":
+                    ReduceUser(root, nowUtc);
+                    break;
+                case "assistant":
+                    ReduceAssistant(root, nowUtc);
+                    break;
+                case "system":
+                    ReduceSystem(root, eventUtc);
+                    break;
+            }
+        }
+
+        public void ApplyWorkingVisibility(DateTime nowUtc)
+        {
+            if (!Snapshot.Active || Snapshot.State != HaloState.Working)
+            {
+                return;
+            }
+            if (inFlightTools == 0 && workingVisibleUntilUtc != DateTime.MinValue &&
+                nowUtc >= workingVisibleUntilUtc)
+            {
+                workingVisibleUntilUtc = DateTime.MinValue;
+                Snapshot.State = HaloState.Thinking;
+                Snapshot.Action = "Thinking";
+                return;
+            }
+            if (inFlightTools == 0 && workingVisibleUntilUtc == DateTime.MinValue &&
+                (nowUtc - Snapshot.LastEventUtc).TotalSeconds > 180)
+            {
+                Snapshot.State = HaloState.Thinking;
+                Snapshot.Action = "Thinking";
+            }
+        }
+
+        private void ReduceUser(Dictionary<string, object> root, DateTime nowUtc)
+        {
+            if (IsLocalCommandUserRecord(root))
+            {
+                return;
+            }
+            if (ContainsContentType(root, "tool_result"))
+            {
+                if (inFlightTools > 0)
+                {
+                    inFlightTools--;
+                }
+                if (Snapshot.Active)
+                {
+                    if (inFlightTools > 0)
+                    {
+                        Snapshot.State = HaloState.Working;
+                    }
+                    else if (liveTracking)
+                    {
+                        SetWorkingVisibility(0.65, nowUtc);
+                        Snapshot.State = HaloState.Working;
+                        Snapshot.Action = "Reviewing result";
+                    }
+                    else
+                    {
+                        Snapshot.State = HaloState.Thinking;
+                        Snapshot.Action = "Thinking";
+                    }
+                }
+                return;
+            }
+
+            inFlightTools = 0;
+            workingVisibleUntilUtc = DateTime.MinValue;
+            Snapshot.Active = true;
+            Snapshot.State = HaloState.Thinking;
+            Snapshot.Action = "Thinking";
+            Snapshot.CompletedUtc = DateTime.MinValue;
+        }
+
+        private void ReduceAssistant(Dictionary<string, object> root, DateTime nowUtc)
+        {
+            string toolName = FirstToolName(root);
+            if (String.Equals(toolName, "AskUserQuestion",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                inFlightTools = 0;
+                workingVisibleUntilUtc = DateTime.MinValue;
+                Snapshot.Active = true;
+                Snapshot.State = HaloState.Attention;
+                Snapshot.Action = "Awaiting permission";
+                Snapshot.CompletedUtc = DateTime.MinValue;
+                return;
+            }
+            if (!String.IsNullOrEmpty(toolName))
+            {
+                inFlightTools += Math.Max(1, ToolUseCount(root));
+                ExtendWorkingVisibility(1.0, nowUtc);
+                Snapshot.Active = true;
+                Snapshot.State = HaloState.Working;
+                Snapshot.Action = GeneratedHaloSpec.FriendlyAction(
+                    NormalizeToolName(toolName));
+                Snapshot.CompletedUtc = DateTime.MinValue;
+                return;
+            }
+            if (ContainsContentType(root, "thinking") ||
+                ContainsContentType(root, "text"))
+            {
+                inFlightTools = 0;
+                workingVisibleUntilUtc = DateTime.MinValue;
+                Snapshot.Active = true;
+                Snapshot.State = HaloState.Thinking;
+                Snapshot.Action = "Thinking";
+                Snapshot.CompletedUtc = DateTime.MinValue;
+                return;
+            }
+            ApplyActiveThinkingOrWorking(nowUtc);
+        }
+
+        private void ReduceSystem(Dictionary<string, object> root, DateTime eventUtc)
+        {
+            string subtype = StringValue(root, "subtype");
+            if (subtype == "turn_duration" || subtype == "stop_hook_summary")
+            {
+                inFlightTools = 0;
+                workingVisibleUntilUtc = DateTime.MinValue;
+                Snapshot.Active = false;
+                Snapshot.State = HaloState.Done;
+                Snapshot.Action = "Complete";
+                Snapshot.CompletedUtc = eventUtc;
+            }
+            else if (subtype == "api_error")
+            {
+                inFlightTools = 0;
+                workingVisibleUntilUtc = DateTime.MinValue;
+                Snapshot.Active = false;
+                Snapshot.State = HaloState.Error;
+                Snapshot.Action = "Service unavailable";
+                Snapshot.CompletedUtc = DateTime.MinValue;
+            }
+        }
+
+        private void ApplyActiveThinkingOrWorking(DateTime nowUtc)
+        {
+            if (!Snapshot.Active)
+            {
+                return;
+            }
+            if (inFlightTools > 0)
+            {
+                Snapshot.State = HaloState.Working;
+            }
+            else if (workingVisibleUntilUtc != DateTime.MinValue &&
+                nowUtc < workingVisibleUntilUtc)
+            {
+                Snapshot.State = HaloState.Working;
+                Snapshot.Action = "Reviewing result";
+            }
+            else
+            {
+                Snapshot.State = HaloState.Thinking;
+                Snapshot.Action = "Thinking";
+            }
+        }
+
+        private void ExtendWorkingVisibility(double seconds, DateTime nowUtc)
+        {
+            if (!liveTracking)
+            {
+                return;
+            }
+            DateTime candidate = nowUtc.AddSeconds(seconds);
+            if (workingVisibleUntilUtc == DateTime.MinValue ||
+                candidate > workingVisibleUntilUtc)
+            {
+                workingVisibleUntilUtc = candidate;
+            }
+        }
+
+        private void SetWorkingVisibility(double seconds, DateTime nowUtc)
+        {
+            if (!liveTracking)
+            {
+                return;
+            }
+            workingVisibleUntilUtc = nowUtc.AddSeconds(seconds);
+        }
+
+        private void UpdateIdentity(Dictionary<string, object> root)
+        {
+            string sessionId = StringValue(root, "sessionId");
+            if (!String.IsNullOrEmpty(sessionId))
+            {
+                Snapshot.ThreadId = sessionId;
+            }
+            string cwd = StringValue(root, "cwd");
+            if (!String.IsNullOrEmpty(cwd))
+            {
+                Snapshot.WorkingDirectory = cwd;
+                string project = Path.GetFileName(cwd.TrimEnd(Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar));
+                Snapshot.ProjectName = String.IsNullOrEmpty(project)
+                    ? "Claude Code" : project;
+            }
+        }
+
+        private bool IsLocalCommandUserRecord(Dictionary<string, object> root)
+        {
+            string content = MessageContentString(root);
+            return content.IndexOf("<local-command-",
+                       StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   content.IndexOf("<command-name>",
+                       StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   content.IndexOf("<command-message>",
+                       StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   content.IndexOf("<command-args>",
+                       StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private string MessageContentString(Dictionary<string, object> root)
+        {
+            Dictionary<string, object> message = Child(root, "message");
+            object content = Value(message, "content");
+            if (content == null)
+            {
+                return String.Empty;
+            }
+            if (content is string)
+            {
+                return (string)content;
+            }
+            try
+            {
+                return serializer.Serialize(content);
+            }
+            catch
+            {
+                return Convert.ToString(content, CultureInfo.InvariantCulture);
+            }
+        }
+
+        private static bool ContainsContentType(Dictionary<string, object> root,
+            string type)
+        {
+            foreach (Dictionary<string, object> item in ContentItems(root))
+            {
+                if (String.Equals(StringValue(item, "type"), type,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static string FirstToolName(Dictionary<string, object> root)
+        {
+            foreach (Dictionary<string, object> item in ContentItems(root))
+            {
+                if (String.Equals(StringValue(item, "type"), "tool_use",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return StringValue(item, "name");
+                }
+            }
+            return String.Empty;
+        }
+
+        private static int ToolUseCount(Dictionary<string, object> root)
+        {
+            int count = 0;
+            foreach (Dictionary<string, object> item in ContentItems(root))
+            {
+                if (String.Equals(StringValue(item, "type"), "tool_use",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    count++;
+                }
+            }
+            return count;
+        }
+
+        private static IEnumerable<Dictionary<string, object>> ContentItems(
+            Dictionary<string, object> root)
+        {
+            Dictionary<string, object> message = Child(root, "message");
+            object value = Value(message, "content");
+            object[] items = value as object[];
+            if (items == null)
+            {
+                yield break;
+            }
+            foreach (object item in items)
+            {
+                Dictionary<string, object> dictionary =
+                    item as Dictionary<string, object>;
+                if (dictionary != null)
+                {
+                    yield return dictionary;
+                }
+            }
+        }
+
+        private static string NormalizeToolName(string name)
+        {
+            return String.Equals(name, "bash", StringComparison.OrdinalIgnoreCase)
+                ? "shell_command" : name;
+        }
+
+        private static Dictionary<string, object> Child(
+            Dictionary<string, object> dictionary, string key)
+        {
+            return Value(dictionary, key) as Dictionary<string, object>;
+        }
+
+        private static object Value(Dictionary<string, object> dictionary, string key)
+        {
+            object value;
+            return dictionary != null && dictionary.TryGetValue(key, out value)
+                ? value : null;
+        }
+
+        private static string StringValue(Dictionary<string, object> dictionary,
+            string key)
+        {
+            object value;
+            return dictionary != null && dictionary.TryGetValue(key, out value) &&
+                value != null
+                ? Convert.ToString(value, CultureInfo.InvariantCulture)
+                : String.Empty;
+        }
+
+        private static DateTime ParseDate(string value)
+        {
+            DateTime parsed;
+            if (DateTime.TryParse(value, CultureInfo.InvariantCulture,
+                DateTimeStyles.RoundtripKind, out parsed))
+            {
+                return parsed.ToUniversalTime();
+            }
+            return DateTime.MinValue;
+        }
+
+        private static string ThreadIdFromPath(string path)
+        {
+            string name = Path.GetFileNameWithoutExtension(path);
+            Guid parsed;
+            if (Guid.TryParse(name, out parsed))
+            {
+                return name;
+            }
+            if (!String.IsNullOrEmpty(name) && name.Length >= 36)
+            {
+                string suffix = name.Substring(name.Length - 36);
+                if (Guid.TryParse(suffix, out parsed))
+                {
+                    return suffix;
+                }
+            }
+            return String.IsNullOrEmpty(name) ? "claude-code" : name;
+        }
+    }
+
+public sealed class ClaudeTranscriptSessionMonitor
+    {
+        private const int MaxRecentFiles = 16;
+        private const int InitialTailBytes = 393216;
+        private readonly string projectsRoot;
+        private readonly Dictionary<string, ClaudeTranscriptSessionReducer> reducers;
+        private readonly Dictionary<string, long> offsets;
+        private readonly Dictionary<string, string> pending;
+        private readonly Dictionary<string, DateTime> lastModifiedUtc;
+        private DateTime lastDiscoveryUtc;
+
+        public ClaudeTranscriptSessionMonitor()
+            : this(Path.Combine(Environment.GetFolderPath(
+                Environment.SpecialFolder.UserProfile), ".claude", "projects"))
+        {
+        }
+
+        public ClaudeTranscriptSessionMonitor(string root)
+        {
+            projectsRoot = root;
+            reducers = new Dictionary<string, ClaudeTranscriptSessionReducer>(
+                StringComparer.OrdinalIgnoreCase);
+            offsets = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            pending = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            lastModifiedUtc = new Dictionary<string, DateTime>(
+                StringComparer.OrdinalIgnoreCase);
+            lastDiscoveryUtc = DateTime.MinValue;
+        }
+
+        public bool Refresh()
+        {
+            DateTime now = DateTime.UtcNow;
+            bool changed = false;
+            if ((now - lastDiscoveryUtc).TotalSeconds >= 2)
+            {
+                changed = Discover(now) || changed;
+            }
+            foreach (string path in reducers.Keys.ToList())
+            {
+                changed = ReadNewLines(path, now) || changed;
+                HaloState previousState = reducers[path].Snapshot.State;
+                string previousAction = reducers[path].Snapshot.Action;
+                reducers[path].ApplyWorkingVisibility(now);
+                if (previousState != reducers[path].Snapshot.State ||
+                    !String.Equals(previousAction, reducers[path].Snapshot.Action,
+                        StringComparison.Ordinal))
+                {
+                    changed = true;
+                }
+            }
+            return changed;
+        }
+
+        public List<SessionSnapshot> Snapshots()
+        {
+            return reducers.Values.Select(delegate(
+                ClaudeTranscriptSessionReducer reducer)
+            {
+                return new SessionSnapshot
+                {
+                    ThreadId = reducer.Snapshot.ThreadId,
+                    ProjectName = reducer.Snapshot.ProjectName,
+                    WorkingDirectory = reducer.Snapshot.WorkingDirectory,
+                    State = reducer.Snapshot.State,
+                    Action = reducer.Snapshot.Action,
+                    LastEventUtc = reducer.Snapshot.LastEventUtc,
+                    CompletedUtc = reducer.Snapshot.CompletedUtc,
+                    Active = reducer.Snapshot.Active,
+                    Agent = AgentKind.ClaudeCode
+                };
+            })
+            .OrderByDescending(delegate(SessionSnapshot snapshot)
+            {
+                return snapshot.LastEventUtc;
+            })
+            .ToList();
+        }
+
+        private bool Discover(DateTime now)
+        {
+            lastDiscoveryUtc = now;
+            if (!Directory.Exists(projectsRoot))
+            {
+                return false;
+            }
+            List<string> recent = Directory.GetFiles(projectsRoot, "*.jsonl",
+                SearchOption.AllDirectories)
+                .Where(delegate(string path)
+                {
+                    return path.IndexOf(Path.DirectorySeparatorChar +
+                        "subagents" + Path.DirectorySeparatorChar,
+                        StringComparison.OrdinalIgnoreCase) < 0 &&
+                        File.GetLastWriteTimeUtc(path) >= now.AddDays(-2);
+                })
+                .OrderByDescending(File.GetLastWriteTimeUtc)
+                .Take(MaxRecentFiles)
+                .ToList();
+            HashSet<string> keep = new HashSet<string>(recent,
+                StringComparer.OrdinalIgnoreCase);
+            bool changed = false;
+            foreach (string path in recent)
+            {
+                if (reducers.ContainsKey(path))
+                {
+                    continue;
+                }
+                ClaudeTranscriptSessionReducer reducer =
+                    new ClaudeTranscriptSessionReducer(path, now, false);
+                reducers[path] = reducer;
+                ReadInitialTail(path, reducer);
+                offsets[path] = File.Exists(path) ? new FileInfo(path).Length : 0;
+                lastModifiedUtc[path] = File.Exists(path)
+                    ? File.GetLastWriteTimeUtc(path) : DateTime.MinValue;
+                reducer.SetLiveTracking(true);
+                changed = true;
+            }
+            foreach (string path in reducers.Keys.ToList())
+            {
+                if (keep.Contains(path))
+                {
+                    continue;
+                }
+                reducers.Remove(path);
+                offsets.Remove(path);
+                pending.Remove(path);
+                lastModifiedUtc.Remove(path);
+                changed = true;
+            }
+            return changed;
+        }
+
+        private void ReadInitialTail(string path,
+            ClaudeTranscriptSessionReducer reducer)
+        {
+            if (!File.Exists(path))
+            {
+                return;
+            }
+            using (FileStream stream = new FileStream(path, FileMode.Open,
+                FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            {
+                long start = Math.Max(0, stream.Length - InitialTailBytes);
+                stream.Seek(start, SeekOrigin.Begin);
+                byte[] bytes = new byte[(int)(stream.Length - stream.Position)];
+                int read = stream.Read(bytes, 0, bytes.Length);
+                string text = Encoding.UTF8.GetString(bytes, 0, read);
+                if (start > 0)
+                {
+                    int firstNewline = text.IndexOf('\n');
+                    if (firstNewline >= 0 && firstNewline + 1 < text.Length)
+                    {
+                        text = text.Substring(firstNewline + 1);
+                    }
+                }
+                ConsumeLines(path, reducer, text, DateTime.UtcNow);
+            }
+        }
+
+        private bool ReadNewLines(string path, DateTime now)
+        {
+            if (!File.Exists(path))
+            {
+                return false;
+            }
+            long previous = offsets.ContainsKey(path) ? offsets[path] : 0;
+            FileInfo info = new FileInfo(path);
+            DateTime mtime = info.LastWriteTimeUtc;
+            DateTime previousMtime = lastModifiedUtc.ContainsKey(path)
+                ? lastModifiedUtc[path] : DateTime.MinValue;
+            if (info.Length < previous ||
+                (previousMtime != DateTime.MinValue && mtime != previousMtime &&
+                 info.Length <= previous))
+            {
+                reducers[path] = new ClaudeTranscriptSessionReducer(path, now, true);
+                offsets[path] = 0;
+                pending.Remove(path);
+                previous = 0;
+            }
+            if (info.Length <= previous)
+            {
+                lastModifiedUtc[path] = mtime;
+                return false;
+            }
+            using (FileStream stream = new FileStream(path, FileMode.Open,
+                FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            {
+                stream.Seek(previous, SeekOrigin.Begin);
+                byte[] bytes = new byte[(int)(stream.Length - stream.Position)];
+                int read = stream.Read(bytes, 0, bytes.Length);
+                offsets[path] = stream.Length;
+                lastModifiedUtc[path] = mtime;
+                string text = Encoding.UTF8.GetString(bytes, 0, read);
+                return ConsumeLines(path, reducers[path], text, now);
+            }
+        }
+
+        private bool ConsumeLines(string path,
+            ClaudeTranscriptSessionReducer reducer, string text, DateTime now)
+        {
+            string prefix;
+            if (!pending.TryGetValue(path, out prefix))
+            {
+                prefix = String.Empty;
+            }
+            text = prefix + text;
+            string[] lines = text.Split('\n');
+            int complete = lines.Length;
+            if (!text.EndsWith("\n", StringComparison.Ordinal))
+            {
+                pending[path] = lines[lines.Length - 1];
+                complete--;
+            }
+            else
+            {
+                pending.Remove(path);
+            }
+            bool changed = false;
+            for (int i = 0; i < complete; i++)
+            {
+                string line = lines[i].TrimEnd('\r').TrimStart('\ufeff');
+                if (String.IsNullOrWhiteSpace(line))
+                {
+                    continue;
+                }
+                reducer.Consume(line, now);
+                changed = true;
+            }
+            return changed;
+        }
+    }
+
+public static class ClaudeStatusSourceMerger
+    {
+        public static List<SessionSnapshot> Merge(
+            List<SessionSnapshot> hookSnapshots,
+            List<SessionSnapshot> transcriptSnapshots)
+        {
+            Dictionary<string, SessionSnapshot> byThread =
+                new Dictionary<string, SessionSnapshot>(StringComparer.OrdinalIgnoreCase);
+            AddSnapshots(byThread, transcriptSnapshots);
+            AddSnapshots(byThread, hookSnapshots);
+            return byThread.Values.OrderByDescending(delegate(SessionSnapshot snapshot)
+            {
+                return snapshot.LastEventUtc;
+            }).ToList();
+        }
+
+        private static void AddSnapshots(Dictionary<string, SessionSnapshot> byThread,
+            List<SessionSnapshot> snapshots)
+        {
+            foreach (SessionSnapshot snapshot in snapshots)
+            {
+                SessionSnapshot existing;
+                if (!byThread.TryGetValue(snapshot.ThreadId, out existing) ||
+                    snapshot.LastEventUtc >= existing.LastEventUtc)
+                {
+                    byThread[snapshot.ThreadId] = snapshot;
+                }
+            }
+        }
+    }
+
+public static class ClaudeLiveSessionReader
+    {
+        private static readonly JavaScriptSerializer Serializer =
+            new JavaScriptSerializer();
+
+        public static bool HasStandbySession()
+        {
+            return HasStandbySession(Environment.GetFolderPath(
+                Environment.SpecialFolder.UserProfile));
+        }
+
+        public static bool HasStandbySession(string home)
+        {
+            try
+            {
+                string sessionsDir = Path.Combine(home, ".claude", "sessions");
+                if (!Directory.Exists(sessionsDir))
+                {
+                    return false;
+                }
+                foreach (string path in Directory.GetFiles(sessionsDir, "*.json"))
+                {
+                    if (IsStandbySession(path))
+                    {
+                        return true;
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return false;
+        }
+
+        private static bool IsStandbySession(string path)
+        {
+            try
+            {
+                Dictionary<string, object> json = Serializer.DeserializeObject(
+                    File.ReadAllText(path, Encoding.UTF8)) as Dictionary<string, object>;
+                if (json == null)
+                {
+                    return false;
+                }
+                string status = StringValue(json, "status");
+                if (!String.Equals(status, "waiting", StringComparison.OrdinalIgnoreCase) &&
+                    !String.Equals(status, "idle", StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+                int pid;
+                if (!Int32.TryParse(Convert.ToString(Value(json, "pid"),
+                    CultureInfo.InvariantCulture), NumberStyles.Integer,
+                    CultureInfo.InvariantCulture, out pid))
+                {
+                    return false;
+                }
+                Process.GetProcessById(pid);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static object Value(Dictionary<string, object> dictionary, string key)
+        {
+            object value;
+            return dictionary != null && dictionary.TryGetValue(key, out value)
+                ? value : null;
+        }
+
+        private static string StringValue(Dictionary<string, object> dictionary,
+            string key)
+        {
+            object value = Value(dictionary, key);
+            return value == null ? String.Empty :
+                Convert.ToString(value, CultureInfo.InvariantCulture);
         }
     }
 

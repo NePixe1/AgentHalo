@@ -1,0 +1,561 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Halo 状态面板组合矩阵</title>
+  <style>
+    :root {
+      --idle: #71848c;
+      --thinking: #e2aa1f;
+      --working: #27a1d3;
+      --done: #26c66c;
+      --attention: #8e6cec;
+      --error: #da3256;
+      --ink: #17212b;
+      --muted: #667988;
+      --line: rgba(111, 132, 148, 0.18);
+      --paper: rgba(255, 255, 255, 0.86);
+      --soft: rgba(247, 250, 252, 0.78);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 40px;
+      color: var(--ink);
+      font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei", sans-serif;
+      background:
+        radial-gradient(circle at 12% 8%, rgba(39, 161, 211, 0.11), transparent 30%),
+        radial-gradient(circle at 90% 10%, rgba(38, 198, 108, 0.11), transparent 28%),
+        linear-gradient(135deg, #f8fbfd, #eef4f8);
+    }
+
+    .page {
+      max-width: 1180px;
+      margin: 0 auto;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      align-items: flex-end;
+      margin-bottom: 28px;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 32px;
+      letter-spacing: -0.04em;
+    }
+
+    .intro {
+      max-width: 760px;
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.7;
+      font-size: 15px;
+    }
+
+    .legend {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(120px, 1fr));
+      gap: 8px;
+      min-width: 390px;
+    }
+
+    .legend span {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.58);
+      color: #526879;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--c);
+      box-shadow: 0 0 10px color-mix(in srgb, var(--c) 55%, transparent);
+    }
+
+    .ring-section {
+      margin: 22px 0;
+      border: 1px solid rgba(124, 144, 158, 0.20);
+      border-radius: 26px;
+      overflow: hidden;
+      background: rgba(255, 255, 255, 0.68);
+      box-shadow: 0 18px 50px rgba(32, 58, 76, 0.08);
+      backdrop-filter: blur(18px);
+    }
+
+    .ring-head {
+      display: grid;
+      grid-template-columns: 98px 1fr;
+      gap: 18px;
+      padding: 22px 24px 18px;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(255, 255, 255, 0.50));
+      border-bottom: 1px solid var(--line);
+    }
+
+    .ring {
+      width: 78px;
+      height: 78px;
+      border-radius: 50%;
+      background:
+        conic-gradient(from -42deg,
+          transparent 0deg 42deg,
+          var(--ring) 42deg 206deg,
+          transparent 206deg 252deg,
+          var(--ring) 252deg 360deg);
+      -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 14px), #000 calc(100% - 13px));
+      mask: radial-gradient(farthest-side, transparent calc(100% - 14px), #000 calc(100% - 13px));
+      filter:
+        drop-shadow(0 0 4px color-mix(in srgb, var(--ring) 65%, transparent))
+        drop-shadow(0 0 14px color-mix(in srgb, var(--ring) 42%, transparent));
+    }
+
+    .ring.dim {
+      opacity: 0.72;
+      filter: drop-shadow(0 0 5px rgba(113, 132, 140, 0.28));
+    }
+
+    .ring.steady {
+      opacity: 0.78;
+      filter: drop-shadow(0 0 5px color-mix(in srgb, var(--ring) 26%, transparent));
+    }
+
+    .ring.flash {
+      filter:
+        drop-shadow(0 0 6px color-mix(in srgb, var(--ring) 72%, transparent))
+        drop-shadow(0 0 20px color-mix(in srgb, var(--ring) 52%, transparent));
+    }
+
+    .ring-meta h2 {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 0 0 6px;
+      font-size: 22px;
+      letter-spacing: -0.03em;
+    }
+
+    .ring-meta p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.65;
+      font-size: 14px;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      height: 24px;
+      padding: 0 9px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--ring) 12%, white);
+      border: 1px solid color-mix(in srgb, var(--ring) 30%, white);
+      color: color-mix(in srgb, var(--ring) 78%, #203040);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .agent-block {
+      padding: 18px 24px 24px;
+    }
+
+    .agent-block + .agent-block {
+      padding-top: 0;
+    }
+
+    .agent-title {
+      margin: 0 0 10px;
+      color: #4c6272;
+      font-size: 14px;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--paper);
+    }
+
+    th,
+    td {
+      padding: 12px 14px;
+      border-bottom: 1px solid rgba(111, 132, 148, 0.14);
+      text-align: left;
+      vertical-align: middle;
+      font-size: 13px;
+    }
+
+    th {
+      color: #637889;
+      background: rgba(246, 250, 252, 0.80);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .headline {
+      display: inline-flex;
+      align-items: center;
+      min-width: 118px;
+      color: var(--headline);
+      font-size: 20px;
+      font-weight: 900;
+      letter-spacing: 0.005em;
+    }
+
+    .subtitle {
+      color: #536978;
+      font-size: 15px;
+      font-weight: 600;
+    }
+
+    .swatch {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: #536978;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    .swatch::before {
+      content: "";
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--headline);
+      box-shadow: 0 0 10px color-mix(in srgb, var(--headline) 45%, transparent);
+    }
+
+    .note {
+      color: #718494;
+      line-height: 1.5;
+    }
+
+    .warning {
+      margin: 28px 0 0;
+      padding: 16px 18px;
+      border-radius: 18px;
+      border: 1px solid rgba(226, 170, 31, 0.24);
+      background: rgba(255, 249, 230, 0.72);
+      color: #745c16;
+      line-height: 1.7;
+      font-size: 14px;
+    }
+
+    @media (max-width: 820px) {
+      body {
+        padding: 22px;
+      }
+
+      header,
+      .ring-head {
+        display: block;
+      }
+
+      .legend {
+        min-width: 0;
+        grid-template-columns: repeat(2, minmax(120px, 1fr));
+        margin-top: 18px;
+      }
+
+      .ring {
+        margin-bottom: 16px;
+      }
+
+      table {
+        display: block;
+        overflow-x: auto;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header>
+      <div>
+        <h1>Agent Halo 状态面板组合矩阵</h1>
+        <p class="intro">
+          这张表按三层结构整理当前 Windows 面板的展示结果：第一层是光环视觉分类，第二层是 Agent，第三层是大标题与小标题组合。
+          大标题颜色来自 <code>HaloVisual.StateColor(aggregate.State)</code>；光环颜色通常跟状态一致，只有答案流式输出会切到绿色双脉冲环。
+        </p>
+      </div>
+      <div class="legend">
+        <span><i class="dot" style="--c: var(--idle)"></i>Idle #71848C</span>
+        <span><i class="dot" style="--c: var(--thinking)"></i>Thinking #E2AA1F</span>
+        <span><i class="dot" style="--c: var(--working)"></i>Working #27A1D3</span>
+        <span><i class="dot" style="--c: var(--done)"></i>Done #26C66C</span>
+        <span><i class="dot" style="--c: var(--attention)"></i>Attention #8E6CEC</span>
+        <span><i class="dot" style="--c: var(--error)"></i>Error #DA3256</span>
+      </div>
+    </header>
+
+    <section class="ring-section" style="--ring: var(--idle)">
+      <div class="ring-head">
+        <div class="ring dim"></div>
+        <div class="ring-meta">
+          <h2>灰白待机环 <span class="tag">Idle / 不发光</span></h2>
+          <p>用于未运行、无活动任务、暂停监听等非工作状态。大标题颜色同为灰白。</p>
+        </div>
+      </div>
+      <div class="agent-block">
+        <h3 class="agent-title">Codex</h3>
+        <table>
+          <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
+          <tbody>
+            <tr><td><span class="headline" style="--headline: var(--idle)">READY</span></td><td><span class="swatch" style="--headline: var(--idle)">#71848C</span></td><td><span class="subtitle">Codex 正在待命</span></td><td class="note">Codex 未运行，或没有可展示的任务会话。</td></tr>
+            <tr><td><span class="headline" style="--headline: var(--idle)">PAUSED</span></td><td><span class="swatch" style="--headline: var(--idle)">#71848C</span></td><td><span class="subtitle">Codex 正在待命</span></td><td class="note">暂停监听。当前小标题没有单独显示“已暂停”。</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="agent-block">
+        <h3 class="agent-title">Claude Code</h3>
+        <table>
+          <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
+          <tbody>
+            <tr><td><span class="headline" style="--headline: var(--idle)">READY</span></td><td><span class="swatch" style="--headline: var(--idle)">#71848C</span></td><td><span class="subtitle">Claude Code 正在待命</span></td><td class="note">没有检测到活动 Claude Code 会话。</td></tr>
+            <tr><td><span class="headline" style="--headline: var(--idle)">PAUSED</span></td><td><span class="swatch" style="--headline: var(--idle)">#71848C</span></td><td><span class="subtitle">Claude Code 正在待命</span></td><td class="note">暂停监听。当前小标题没有单独显示“已暂停”。</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="ring-section" style="--ring: var(--done)">
+      <div class="ring-head">
+        <div class="ring steady"></div>
+        <div class="ring-meta">
+          <h2>稳定暗绿待命环 <span class="tag">Steady Done</span></h2>
+          <p>Agent 进程仍在，但没有活动任务。视觉上是稳定绿色待命环，不做完成态呼吸。</p>
+        </div>
+      </div>
+      <div class="agent-block">
+        <h3 class="agent-title">Codex</h3>
+        <table>
+          <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
+          <tbody>
+            <tr><td><span class="headline" style="--headline: var(--done)">STANDBY</span></td><td><span class="swatch" style="--headline: var(--done)">#26C66C</span></td><td><span class="subtitle">任务已完成</span></td><td class="note">Codex 运行中且当前 Idle。注意：这里当前小标题按 Done 兜底，所以显示为“任务已完成”。</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="agent-block">
+        <h3 class="agent-title">Claude Code</h3>
+        <table>
+          <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
+          <tbody>
+            <tr><td><span class="headline" style="--headline: var(--done)">STANDBY</span></td><td><span class="swatch" style="--headline: var(--done)">#26C66C</span></td><td><span class="subtitle">任务已完成</span></td><td class="note">Claude Code live session 存在且无活动 hook session。注意：这里当前小标题也按 Done 兜底。</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="ring-section" style="--ring: var(--thinking)">
+      <div class="ring-head">
+        <div class="ring flash"></div>
+        <div class="ring-meta">
+          <h2>黄色思考环 <span class="tag">Thinking</span></h2>
+          <p>用于 reasoning、规划、用户刚提交 prompt 后的思考阶段。大标题颜色为黄色。</p>
+        </div>
+      </div>
+      <div class="agent-block">
+        <h3 class="agent-title">Codex</h3>
+        <table>
+          <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
+          <tbody>
+            <tr><td><span class="headline" style="--headline: var(--thinking)">THINKING</span></td><td><span class="swatch" style="--headline: var(--thinking)">#E2AA1F</span></td><td><span class="subtitle">正在思考与规划</span></td><td class="note">普通思考、计划、reasoning。</td></tr>
+            <tr><td><span class="headline" style="--headline: var(--thinking)">THINKING</span></td><td><span class="swatch" style="--headline: var(--thinking)">#E2AA1F</span></td><td><span class="subtitle">正在分析结果</span></td><td class="note">工具输出后回到思考，且 action 仍为 Reviewing result 的边缘路径。</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="agent-block">
+        <h3 class="agent-title">Claude Code</h3>
+        <table>
+          <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
+          <tbody>
+            <tr><td><span class="headline" style="--headline: var(--thinking)">THINKING</span></td><td><span class="swatch" style="--headline: var(--thinking)">#E2AA1F</span></td><td><span class="subtitle">正在思考与规划</span></td><td class="note">UserPromptSubmit、assistant thinking/text，或工具蓝色余韵结束后。</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="ring-section" style="--ring: var(--working)">
+      <div class="ring-head">
+        <div class="ring flash"></div>
+        <div class="ring-meta">
+          <h2>蓝色执行环 <span class="tag">Working</span></h2>
+          <p>用于工具、命令、编辑、搜索、压缩上下文等执行态。大标题颜色为蓝色。</p>
+        </div>
+      </div>
+      <div class="agent-block">
+        <h3 class="agent-title">Codex</h3>
+        <table>
+          <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
+          <tbody>
+            <tr><td><span class="headline" style="--headline: var(--working)">EXECUTING</span></td><td><span class="swatch" style="--headline: var(--working)">#27A1D3</span></td><td><span class="subtitle">正在输出答案</span></td><td class="note">JSONL final_answer fallback 路径；如果实时 SSE 识别到 streaming，则会归入下方绿色双脉冲环。</td></tr>
+            <tr><td><span class="headline" style="--headline: var(--working)">EXECUTING</span></td><td><span class="swatch" style="--headline: var(--working)">#27A1D3</span></td><td><span class="subtitle">正在执行命令</span></td><td class="note">shell / command 类工具。</td></tr>
+            <tr><td><span class="headline" style="--headline: var(--working)">EXECUTING</span></td><td><span class="swatch" style="--headline: var(--working)">#27A1D3</span></td><td><span class="subtitle">正在编辑文件</span></td><td class="note">apply_patch / edit / write 类工具。</td></tr>
+            <tr><td><span class="headline" style="--headline: var(--working)">EXECUTING</span></td><td><span class="swatch" style="--headline: var(--working)">#27A1D3</span></td><td><span class="subtitle">正在搜索信息</span></td><td class="note">web_search / search_query 类工具。</td></tr>
+            <tr><td><span class="headline" style="--headline: var(--working)">EXECUTING</span></td><td><span class="swatch" style="--headline: var(--working)">#27A1D3</span></td><td><span class="subtitle">正在分析结果</span></td><td class="note">工具输出后的蓝色保持。</td></tr>
+            <tr><td><span class="headline" style="--headline: var(--working)">EXECUTING</span></td><td><span class="swatch" style="--headline: var(--working)">#27A1D3</span></td><td><span class="subtitle">正在执行任务</span></td><td class="note">浏览器、图片、更新计划、未知工具等未命中特殊小标题时的兜底。</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="agent-block">
+        <h3 class="agent-title">Claude Code</h3>
+        <table>
+          <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
+          <tbody>
+            <tr><td><span class="headline" style="--headline: var(--working)">EXECUTING</span></td><td><span class="swatch" style="--headline: var(--working)">#27A1D3</span></td><td><span class="subtitle">正在执行命令</span></td><td class="note">Bash 被归一成 shell_command。</td></tr>
+            <tr><td><span class="headline" style="--headline: var(--working)">EXECUTING</span></td><td><span class="swatch" style="--headline: var(--working)">#27A1D3</span></td><td><span class="subtitle">正在编辑文件</span></td><td class="note">Edit / Write 类工具。</td></tr>
+            <tr><td><span class="headline" style="--headline: var(--working)">EXECUTING</span></td><td><span class="swatch" style="--headline: var(--working)">#27A1D3</span></td><td><span class="subtitle">正在搜索信息</span></td><td class="note">工具名包含 Search 时触发。</td></tr>
+            <tr><td><span class="headline" style="--headline: var(--working)">EXECUTING</span></td><td><span class="swatch" style="--headline: var(--working)">#27A1D3</span></td><td><span class="subtitle">正在压缩上下文</span></td><td class="note">PreCompact hook。</td></tr>
+            <tr><td><span class="headline" style="--headline: var(--working)">EXECUTING</span></td><td><span class="swatch" style="--headline: var(--working)">#27A1D3</span></td><td><span class="subtitle">正在分析结果</span></td><td class="note">PostToolUse / tool_result 后的短暂蓝色保持。</td></tr>
+            <tr><td><span class="headline" style="--headline: var(--working)">EXECUTING</span></td><td><span class="swatch" style="--headline: var(--working)">#27A1D3</span></td><td><span class="subtitle">正在执行任务</span></td><td class="note">未知工具、工具失败余韵、未命中特殊小标题时的兜底。</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="ring-section" style="--ring: var(--done)">
+      <div class="ring-head">
+        <div class="ring flash"></div>
+        <div class="ring-meta">
+          <h2>绿色双脉冲输出环 <span class="tag">Answer Streaming</span></h2>
+          <p>用于 Codex 正在流式输出最终答案。注意：光环视觉切到 Done 绿双脉冲，但面板大标题仍来自 Working，所以标题保持蓝色 EXECUTING。</p>
+        </div>
+      </div>
+      <div class="agent-block">
+        <h3 class="agent-title">Codex</h3>
+        <table>
+          <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
+          <tbody>
+            <tr><td><span class="headline" style="--headline: var(--working)">EXECUTING</span></td><td><span class="swatch" style="--headline: var(--working)">#27A1D3</span></td><td><span class="subtitle">正在输出答案</span></td><td class="note">CodexRealtimeActivityReader 识别到 response.output_text.delta，AnswerStreaming = true。</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="agent-block">
+        <h3 class="agent-title">Claude Code</h3>
+        <table>
+          <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
+          <tbody>
+            <tr><td colspan="4" class="note">当前 Claude Code 分支没有启用 AnswerStreaming 视觉模式。</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="ring-section" style="--ring: var(--done)">
+      <div class="ring-head">
+        <div class="ring flash"></div>
+        <div class="ring-meta">
+          <h2>绿色完成环 <span class="tag">Done</span></h2>
+          <p>任务完成时显示完成绿，进入时有双峰高亮，随后进入完成态呼吸。</p>
+        </div>
+      </div>
+      <div class="agent-block">
+        <h3 class="agent-title">Codex</h3>
+        <table>
+          <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
+          <tbody>
+            <tr><td><span class="headline" style="--headline: var(--done)">COMPLETE</span></td><td><span class="swatch" style="--headline: var(--done)">#26C66C</span></td><td><span class="subtitle">任务已完成</span></td><td class="note">普通模式 task_complete。</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="agent-block">
+        <h3 class="agent-title">Claude Code</h3>
+        <table>
+          <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
+          <tbody>
+            <tr><td><span class="headline" style="--headline: var(--done)">COMPLETE</span></td><td><span class="swatch" style="--headline: var(--done)">#26C66C</span></td><td><span class="subtitle">任务已完成</span></td><td class="note">Stop / turn_duration / stop_hook_summary。</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="ring-section" style="--ring: var(--attention)">
+      <div class="ring-head">
+        <div class="ring flash"></div>
+        <div class="ring-meta">
+          <h2>紫色等待指令环 <span class="tag">Attention</span></h2>
+          <p>用于需要用户授权、输入、选择或发号指令。大标题颜色为紫色。</p>
+        </div>
+      </div>
+      <div class="agent-block">
+        <h3 class="agent-title">Codex</h3>
+        <table>
+          <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
+          <tbody>
+            <tr><td><span class="headline" style="--headline: var(--attention)">NEEDS YOU</span></td><td><span class="swatch" style="--headline: var(--attention)">#8E6CEC</span></td><td><span class="subtitle">等待你的授权或输入</span></td><td class="note">approval / request_user / needs_input / Plan Mode 提案完成等待选择。</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="agent-block">
+        <h3 class="agent-title">Claude Code</h3>
+        <table>
+          <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
+          <tbody>
+            <tr><td><span class="headline" style="--headline: var(--attention)">NEEDS YOU</span></td><td><span class="swatch" style="--headline: var(--attention)">#8E6CEC</span></td><td><span class="subtitle">等待你的授权</span></td><td class="note">AskUserQuestion / PermissionRequest，Action = Awaiting permission。</td></tr>
+            <tr><td><span class="headline" style="--headline: var(--attention)">NEEDS YOU</span></td><td><span class="swatch" style="--headline: var(--attention)">#8E6CEC</span></td><td><span class="subtitle">等待你的授权或输入</span></td><td class="note">其他 Attention 兜底，例如 PermissionDenied 当前没有单独小标题。</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="ring-section" style="--ring: var(--error)">
+      <div class="ring-head">
+        <div class="ring flash"></div>
+        <div class="ring-meta">
+          <h2>红色故障环 <span class="tag">Error / Flashing / Bright / Dim</span></h2>
+          <p>故障有爆闪、常亮、暗红三个呈现阶段；面板大标题与小标题组合不变，区别只在光环亮度和闪烁方式。</p>
+        </div>
+      </div>
+      <div class="agent-block">
+        <h3 class="agent-title">Codex</h3>
+        <table>
+          <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
+          <tbody>
+            <tr><td><span class="headline" style="--headline: var(--error)">INTERRUPTED</span></td><td><span class="swatch" style="--headline: var(--error)">#DA3256</span></td><td><span class="subtitle">任务已中断</span></td><td class="note">Error 状态但 aggregate.Detail 为空。</td></tr>
+            <tr><td><span class="headline" style="--headline: var(--error)">INTERRUPTED</span></td><td><span class="swatch" style="--headline: var(--error)">#DA3256</span></td><td><span class="subtitle">具体错误详情</span></td><td class="note">认证失效、额度用尽、服务不可用、连接失败等会直接显示 detail。</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="agent-block">
+        <h3 class="agent-title">Claude Code</h3>
+        <table>
+          <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
+          <tbody>
+            <tr><td><span class="headline" style="--headline: var(--error)">INTERRUPTED</span></td><td><span class="swatch" style="--headline: var(--error)">#DA3256</span></td><td><span class="subtitle">任务已中断</span></td><td class="note">Error 状态但 aggregate.Detail 为空。</td></tr>
+            <tr><td><span class="headline" style="--headline: var(--error)">INTERRUPTED</span></td><td><span class="swatch" style="--headline: var(--error)">#DA3256</span></td><td><span class="subtitle">具体错误详情</span></td><td class="note">api_error、StopFailure 等。当前 aggregate.Detail 可能包含项目名和 action。</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <p class="warning">
+      当前实现里有两个语义不一致点：<strong>PAUSED</strong> 的小标题仍显示“正在待命”，<strong>STANDBY</strong> 的小标题仍显示“任务已完成”。
+      这张矩阵按现有代码如实列出，没有替它修正文案。
+    </p>
+  </main>
+</body>
+</html>

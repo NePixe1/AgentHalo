@@ -59,6 +59,11 @@ public static class Program
                 return Diagnostics.WriteClaudeSnapshot(args[2]);
             }
 
+            if (args.Length < 2)
+            {
+                DetachEphemeralConsole();
+            }
+
             Application app = new Application();
             app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
             app.DispatcherUnhandledException += delegate(object sender,
@@ -97,6 +102,41 @@ public static class Program
             GC.KeepAlive(mutex);
             return 0;
         }
+
+        private static void DetachEphemeralConsole()
+        {
+            try
+            {
+                IntPtr console = GetConsoleWindow();
+                if (console == IntPtr.Zero)
+                {
+                    return;
+                }
+                uint[] processes = new uint[8];
+                uint count = GetConsoleProcessList(processes, (uint)processes.Length);
+                if (count <= 1)
+                {
+                    ShowWindow(console, 0);
+                }
+                FreeConsole();
+            }
+            catch
+            {
+            }
+        }
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetConsoleWindow();
+
+        [DllImport("kernel32.dll")]
+        private static extern uint GetConsoleProcessList(
+            [Out] uint[] processList, uint processCount);
+
+        [DllImport("kernel32.dll")]
+        private static extern bool FreeConsole();
+
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
     }
 }
 
