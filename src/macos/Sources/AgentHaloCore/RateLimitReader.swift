@@ -16,9 +16,16 @@ public struct RateLimitReader: @unchecked Sendable {
     }
 
     public func read() -> RateLimitSnapshot? {
+        var primaryUsedPercent: Double?
+        var secondaryUsedPercent: Double?
+        var primaryResetAt: Date?
+        var secondaryResetAt: Date?
+        var contextUsedPercent: Double?
+
         for file in recentJSONLFiles().prefix(GeneratedHaloSpec.rateLimitRecentFileCount) {
             for line in tailLines(file).suffix(GeneratedHaloSpec.rateLimitRecentLineCount)
-                .reversed() where line.contains(GeneratedHaloSpec.rateLimitMarker) {
+                .reversed() where line.contains(GeneratedHaloSpec.rateLimitMarker)
+                    || line.contains("\"last_token_usage\"") {
                 guard let data = line.data(using: .utf8),
                       let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let payload = root[GeneratedHaloSpec.ratePayloadKey] as? [String: Any] else {
@@ -27,22 +34,42 @@ public struct RateLimitReader: @unchecked Sendable {
                 let info = payload[GeneratedHaloSpec.rateInfoKey] as? [String: Any]
                 let limits = (payload[GeneratedHaloSpec.rateLimitsKey] as? [String: Any])
                     ?? (info?[GeneratedHaloSpec.rateLimitsKey] as? [String: Any])
-                guard let primary = limits?[GeneratedHaloSpec.ratePrimaryKey] as? [String: Any],
-                      let secondary = limits?[GeneratedHaloSpec.rateSecondaryKey] as? [String: Any],
-                      let primaryUsed = Self.number(primary[GeneratedHaloSpec.rateUsedPercentKey]),
-                      let secondaryUsed = Self.number(secondary[GeneratedHaloSpec.rateUsedPercentKey]) else {
-                    continue
+                if primaryUsedPercent == nil,
+                   let primary = limits?[GeneratedHaloSpec.ratePrimaryKey] as? [String: Any],
+                   let used = Self.number(primary[GeneratedHaloSpec.rateUsedPercentKey]) {
+                    primaryUsedPercent = used
+                    primaryResetAt = Self.unixTime(primary["resets_at"])
                 }
-                return RateLimitSnapshot(
-                    primaryUsedPercent: primaryUsed,
-                    secondaryUsedPercent: secondaryUsed,
-                    primaryResetAt: Self.unixTime(primary["resets_at"]),
-                    secondaryResetAt: Self.unixTime(secondary["resets_at"]),
-                    contextUsedPercent: Self.contextUsedPercent(info: info)
-                )
+                if secondaryUsedPercent == nil,
+                   let secondary = limits?[GeneratedHaloSpec.rateSecondaryKey] as? [String: Any],
+                   let used = Self.number(secondary[GeneratedHaloSpec.rateUsedPercentKey]) {
+                    secondaryUsedPercent = used
+                    secondaryResetAt = Self.unixTime(secondary["resets_at"])
+                }
+                if contextUsedPercent == nil {
+                    contextUsedPercent = Self.contextUsedPercent(info: info)
+                }
+                if let primaryUsedPercent, let secondaryUsedPercent, contextUsedPercent != nil {
+                    return RateLimitSnapshot(
+                        primaryUsedPercent: primaryUsedPercent,
+                        secondaryUsedPercent: secondaryUsedPercent,
+                        primaryResetAt: primaryResetAt,
+                        secondaryResetAt: secondaryResetAt,
+                        contextUsedPercent: contextUsedPercent
+                    )
+                }
             }
         }
-        return nil
+        guard let primaryUsedPercent, let secondaryUsedPercent else {
+            return nil
+        }
+        return RateLimitSnapshot(
+            primaryUsedPercent: primaryUsedPercent,
+            secondaryUsedPercent: secondaryUsedPercent,
+            primaryResetAt: primaryResetAt,
+            secondaryResetAt: secondaryResetAt,
+            contextUsedPercent: contextUsedPercent
+        )
     }
 
     private func recentJSONLFiles() -> [URL] {

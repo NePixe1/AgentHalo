@@ -217,6 +217,7 @@ final class DetailsPanel: NSPanel {
         if action.localizedCaseInsensitiveContains("Compressing context") { return "正在压缩上下文" }
         if action.localizedCaseInsensitiveContains("Context compacted") { return "上下文压缩完成" }
         if action.localizedCaseInsensitiveContains("Awaiting permission") { return "等待你的授权" }
+        if action.localizedCaseInsensitiveContains("Permission denied") { return "授权已拒绝" }
         if action.localizedCaseInsensitiveContains("Reviewing result") { return "正在分析结果" }
         switch aggregate.state {
         case .thinking: return "正在思考与规划"

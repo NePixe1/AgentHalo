@@ -16,7 +16,7 @@ private func expect<T: Equatable>(_ actual: T, _ expected: T, _ message: String)
 @MainActor
 func runHaloInteractionChecks() {
     testRightClickInvokesContextMenuCallback()
-    testSingleClickInvokesPrimaryAction()
+    testSingleClickDoesNotActivateCodex()
     testHaloContextMenuContainsCurrentControls()
     testHaloClickWaitsForMouseUpAndDragCancelsClick()
     testHaloHoverUsesFilledCircularSurface()
@@ -39,6 +39,7 @@ func runHaloInteractionChecks() {
     testFocusSubmenuMarksCodexInitially()
     testFocusSubmenuSwitchesToClaudeCode()
     testSingleClickDoesNotActivateCodexWhenClaudeCodeFocused()
+    testClaudeLiveStandbyUsesStableGreenAggregate()
     testDetailsPanelShowsCodexQuotaAndIdleCopy()
     testDetailsPanelShowsSessionMetadataForCodexAndClaudeCode()
     testDetailsPanelShowsExpiredQuotaAsWaitingForRefresh()
@@ -102,7 +103,7 @@ private func testRightClickInvokesContextMenuCallback() {
 }
 
 @MainActor
-private func testSingleClickInvokesPrimaryAction() {
+private func testSingleClickDoesNotActivateCodex() {
     var activations = 0
     let delegate = AppDelegate(
         settingsStore: SettingsStore(settingsURL: temporarySettingsURL()),
@@ -113,7 +114,7 @@ private func testSingleClickInvokesPrimaryAction() {
 
     delegate.handleHaloPrimaryClick()
 
-    expect(activations == 1, "single click should activate Codex")
+    expect(activations == 0, "single click should not activate Codex")
 }
 
 @MainActor
@@ -494,6 +495,25 @@ private func testSingleClickDoesNotActivateCodexWhenClaudeCodeFocused() {
     expect(activations == 0, "single click should not activate Codex when Claude Code is focused")
 }
 
+@MainActor
+private func testClaudeLiveStandbyUsesStableGreenAggregate() {
+    let idle = AggregateSnapshot(
+        state: .idle,
+        label: "READY",
+        detail: AgentKind.claudeCode.standbyDetail,
+        sessions: [],
+        focusedAgent: .claudeCode
+    )
+
+    let standby = AppDelegate.claudeStandbyAggregate(aggregate: idle, hasLiveSession: true)
+    expect(standby.state, .done, "live idle Claude Code should use the stable green state")
+    expect(standby.label, "STANDBY", "live idle Claude Code label")
+    expect(standby.detail, AgentKind.claudeCode.localizedStandbyDetail, "live idle Claude Code detail")
+
+    let offline = AppDelegate.claudeStandbyAggregate(aggregate: idle, hasLiveSession: false)
+    expect(offline, idle, "offline Claude Code should retain the normal idle aggregate")
+}
+
 private func previewSubmenu(in menu: NSMenu) -> NSMenu {
     guard let preview = menu.items.first(where: { $0.title == "预览状态" })?.submenu else {
         fatalError("preview submenu should exist")
@@ -690,6 +710,7 @@ private func testDetailsPanelLocalizesClaudeActivityDetails() {
         ("Compressing context", "正在压缩上下文"),
         ("Context compacted", "上下文压缩完成"),
         ("Awaiting permission", "等待你的授权"),
+        ("Permission denied", "授权已拒绝"),
         ("Reviewing result", "正在分析结果"),
     ]
 

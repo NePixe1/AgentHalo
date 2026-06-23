@@ -4,32 +4,30 @@ import Foundation
 /// keyed by `threadId`.
 ///
 /// **Source precedence:**
-/// - Hook status is the only UI authority for Claude Code focus.
-/// - Transcript snapshots are deliberately ignored; transcripts are chat records, not
-///   lifecycle records, and can leave old sessions falsely active.
+/// - Hook status remains authoritative whenever at least one hook snapshot exists.
+/// - Transcript snapshots are a fallback only when hook data is unavailable, so stale
+///   chat records cannot override a hook completion or permission state.
 ///
 /// **Crash safety:** duplicate `threadId`s within a single source (resume / multi-window
 /// scenarios) are collapsed last-write-wins by `lastEventAt` rather than crashing the tick.
 public enum ClaudeStatusSourceMerger {
-    /// Return hook snapshots as a de-duplicated list, sorted newest-first.
-    ///
-    /// `transcriptSnapshots` and `now` are kept in the signature so existing callers and
-    /// tests remain source-compatible while the display policy is hook-only.
+    /// Return the authoritative source as a de-duplicated list, sorted newest-first.
     public static func merge(
         hookSnapshots: [SessionSnapshot],
-        transcriptSnapshots _: [SessionSnapshot],
+        transcriptSnapshots: [SessionSnapshot],
         now _: Date = Date()
     ) -> [SessionSnapshot] {
+        let authoritative = hookSnapshots.isEmpty ? transcriptSnapshots : hookSnapshots
         // Use uniquingKeysWith so duplicate threadIds (resume / multi-window) cannot crash
         // the tick. On collision, keep the snapshot with the newer lastEventAt.
-        let hooksByThread = Dictionary(
-            hookSnapshots.map { ($0.threadId, $0) },
+        let snapshotsByThread = Dictionary(
+            authoritative.map { ($0.threadId, $0) },
             uniquingKeysWith: { Self.newerByEventTime($0, $1) }
         )
 
         // Order-within-tie when `lastEventAt` is equal is unspecified; downstream
         // aggregation must not rely on it.
-        return hooksByThread.values.sorted { $0.lastEventAt > $1.lastEventAt }
+        return snapshotsByThread.values.sorted { $0.lastEventAt > $1.lastEventAt }
     }
 
     /// On equal `lastEventAt`, prefer `rhs` (the later-arriving entry) so duplicate-keyed

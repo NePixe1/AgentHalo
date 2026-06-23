@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settings: HaloSettings
     private let monitor = CodexSessionMonitor()
     private let claudeHookMonitor = ClaudeHookStatusMonitor()
+    private let claudeSessionMonitor = ClaudeSessionMonitor()
     private var selectedPreview = PreviewPayload.live
     private var aggregate: AggregateSnapshot
     private var statusItem: NSStatusItem!
@@ -95,6 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateSystemOverlaySuspension(for: NSWorkspace.shared.frontmostApplication)
         _ = monitor.refresh()
         _ = claudeHookMonitor.refresh()
+        _ = claudeSessionMonitor.refresh()
         acknowledgeCompletedIfCodexIsForeground()
         aggregate = SessionAggregator.aggregate(
             snapshots: allSnapshots(),
@@ -102,6 +104,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             recentFailure: failureReader.readRecent(),
             codexRunning: CodexAppDetector.isCodexRunning(),
             focusedAgent: settings.focusedAgent
+        )
+        aggregate = Self.claudeStandbyAggregate(
+            aggregate: aggregate,
+            hasLiveSession: settings.focusedAgent == .claudeCode
+                && aggregate.state == .idle
+                && ClaudeLiveSessionReader.hasStandbySession()
         )
         applyRealtimeCodexActivity()
         haloView?.aggregate = aggregate
@@ -317,7 +325,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func handleHaloPrimaryClick() {
-        bringCodexForward()
+        // Keep single-click non-activating. Double-click remains the explicit
+        // path for bringing Codex forward.
     }
 
     func setFocusedAgent(_ agent: AgentKind) {
@@ -406,7 +415,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func claudeSnapshots() -> [SessionSnapshot] {
         ClaudeStatusSourceMerger.merge(
             hookSnapshots: claudeHookMonitor.snapshots(),
-            transcriptSnapshots: []
+            transcriptSnapshots: claudeSessionMonitor.snapshots()
+        )
+    }
+
+    static func claudeStandbyAggregate(
+        aggregate: AggregateSnapshot,
+        hasLiveSession: Bool
+    ) -> AggregateSnapshot {
+        guard hasLiveSession,
+              aggregate.focusedAgent == .claudeCode,
+              aggregate.state == .idle else {
+            return aggregate
+        }
+        return AggregateSnapshot(
+            state: .done,
+            label: "STANDBY",
+            detail: AgentKind.claudeCode.localizedStandbyDetail,
+            sessions: [],
+            focusedAgent: .claudeCode
         )
     }
 

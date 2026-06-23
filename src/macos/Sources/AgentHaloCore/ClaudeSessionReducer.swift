@@ -76,7 +76,7 @@ public struct ClaudeSessionReducer: Sendable {
         if isLocalCommandUserRecord(root) {
             return
         }
-        if firstContentType(root) == "tool_result" {
+        if containsContentType(root, type: "tool_result") {
             if inFlightTools > 0 {
                 inFlightTools -= 1
             }
@@ -84,7 +84,7 @@ public struct ClaudeSessionReducer: Sendable {
                 if inFlightTools > 0 {
                     snapshot.state = .working
                 } else if liveTracking {
-                    extendWorkingVisibility(seconds: ClaudeContextUsageConstants.workingVisibilityExtension, now: now)
+                    setWorkingVisibility(seconds: 0.65, now: now)
                     snapshot.state = .working
                     snapshot.action = "Reviewing result"
                 } else {
@@ -111,17 +111,38 @@ public struct ClaudeSessionReducer: Sendable {
     }
 
     private mutating func reduceAssistant(_ root: [String: Any], now: Date) {
-        guard firstContentType(root) == "tool_use" else {
-            applyActiveThinkingOrWorking(now: now)
+        let toolNames = contentItems(root)
+            .filter { Self.string($0["type"]).caseInsensitiveCompare("tool_use") == .orderedSame }
+            .map { Self.string($0["name"]) }
+        if let toolName = toolNames.first,
+           toolName.caseInsensitiveCompare("AskUserQuestion") == .orderedSame {
+            inFlightTools = 0
+            workingVisibleUntil = nil
+            snapshot.active = true
+            snapshot.state = .attention
+            snapshot.action = "Awaiting permission"
+            snapshot.completedAt = nil
             return
         }
-
-        let toolName = firstContentString(root, key: "name")
-        inFlightTools += 1
-        extendWorkingVisibility(seconds: 2.2, now: now)
-        snapshot.active = true
-        snapshot.state = .working
-        snapshot.action = GeneratedHaloSpec.friendlyAction(Self.normalizedToolName(toolName))
+        if let toolName = toolNames.first {
+            inFlightTools += toolNames.count
+            extendWorkingVisibility(seconds: 1.0, now: now)
+            snapshot.active = true
+            snapshot.state = .working
+            snapshot.action = GeneratedHaloSpec.friendlyAction(Self.normalizedToolName(toolName))
+            snapshot.completedAt = nil
+            return
+        }
+        if containsContentType(root, type: "thinking") || containsContentType(root, type: "text") {
+            inFlightTools = 0
+            workingVisibleUntil = nil
+            snapshot.active = true
+            snapshot.state = .thinking
+            snapshot.action = "Thinking"
+            snapshot.completedAt = nil
+            return
+        }
+        applyActiveThinkingOrWorking(now: now)
     }
 
     private mutating func reduceSystem(_ root: [String: Any], eventAt: Date) {
@@ -133,6 +154,13 @@ public struct ClaudeSessionReducer: Sendable {
             snapshot.state = .done
             snapshot.action = "Complete"
             snapshot.completedAt = eventAt
+        } else if subtype == "api_error" {
+            inFlightTools = 0
+            workingVisibleUntil = nil
+            snapshot.active = false
+            snapshot.state = .error
+            snapshot.action = "Service unavailable"
+            snapshot.completedAt = nil
         }
     }
 
@@ -161,17 +189,25 @@ public struct ClaudeSessionReducer: Sendable {
         }
     }
 
-    private func firstContentType(_ root: [String: Any]) -> String {
-        firstContentString(root, key: "type")
+    private mutating func setWorkingVisibility(seconds: TimeInterval, now: Date) {
+        guard liveTracking else {
+            return
+        }
+        workingVisibleUntil = now.addingTimeInterval(seconds)
     }
 
-    private func firstContentString(_ root: [String: Any], key: String) -> String {
-        guard let message = root["message"] as? [String: Any],
-              let content = message["content"] as? [Any],
-              let first = content.first as? [String: Any] else {
-            return ""
+    private func containsContentType(_ root: [String: Any], type: String) -> Bool {
+        contentItems(root).contains {
+            Self.string($0["type"]).caseInsensitiveCompare(type) == .orderedSame
         }
-        return Self.string(first[key])
+    }
+
+    private func contentItems(_ root: [String: Any]) -> [[String: Any]] {
+        guard let message = root["message"] as? [String: Any],
+              let content = message["content"] as? [Any] else {
+            return []
+        }
+        return content.compactMap { $0 as? [String: Any] }
     }
 
     private func messageContentString(_ root: [String: Any]) -> String {

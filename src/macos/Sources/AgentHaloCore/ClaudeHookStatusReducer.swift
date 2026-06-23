@@ -7,6 +7,8 @@ public struct ClaudeHookStatusReducer: Sendable {
     /// delayed Halo tick or a startup replay still settles correctly. `nil` means
     /// "do not auto-fade" (e.g. permission_prompt holds indefinitely).
     private var workingVisibleUntil: Date?
+    private var thinkingVisibleUntil: Date?
+    private var pendingWorkingAction: String?
     /// Tracks whether the current `.working` state was entered via a permission_prompt
     /// notification. Per the plan, permission prompts must never auto-fade — the user
     /// must explicitly approve or reject. Distinguished from PreToolUse so the stuck-
@@ -46,6 +48,8 @@ public struct ClaudeHookStatusReducer: Sendable {
             if wasActiveBeforeCompaction != nil {
                 isPermissionPrompt = false
                 workingVisibleUntil = nil
+                thinkingVisibleUntil = nil
+                pendingWorkingAction = nil
                 snapshot.active = true
                 snapshot.state = .working
                 snapshot.action = "Compressing context"
@@ -57,6 +61,8 @@ public struct ClaudeHookStatusReducer: Sendable {
             // SessionStart and the reducer can never return to idle on replay.
             isPermissionPrompt = false
             workingVisibleUntil = nil
+            thinkingVisibleUntil = nil
+            pendingWorkingAction = nil
             snapshot.active = false
             snapshot.state = .idle
             snapshot.action = "Ready"
@@ -64,6 +70,8 @@ public struct ClaudeHookStatusReducer: Sendable {
         case "UserPromptSubmit":
             wasActiveBeforeCompaction = nil
             workingVisibleUntil = nil
+            thinkingVisibleUntil = eventAt.addingTimeInterval(0.7)
+            pendingWorkingAction = nil
             isPermissionPrompt = false
             snapshot.active = true
             snapshot.state = .thinking
@@ -77,24 +85,51 @@ public struct ClaudeHookStatusReducer: Sendable {
             // the safety net in applyWorkingVisibility recovers after 30 s.
             workingVisibleUntil = nil
             snapshot.active = true
-            snapshot.state = .working
-            snapshot.action = GeneratedHaloSpec.friendlyAction(Self.normalizedToolName(Self.string(root["toolName"])))
+            let action = GeneratedHaloSpec.friendlyAction(Self.normalizedToolName(Self.string(root["toolName"])))
+            if snapshot.state == .thinking,
+               let thinkingVisibleUntil,
+               eventAt < thinkingVisibleUntil {
+                pendingWorkingAction = action
+                snapshot.action = "Thinking"
+            } else {
+                thinkingVisibleUntil = nil
+                pendingWorkingAction = nil
+                snapshot.state = .working
+                snapshot.action = action
+            }
             snapshot.completedAt = nil
-        case "PostToolUse":
+        case "PostToolUse", "PostToolBatch":
             wasActiveBeforeCompaction = nil
+            isPermissionPrompt = false
             snapshot.active = true
-            snapshot.state = .working
-            snapshot.action = "Reviewing result"
+            if snapshot.state == .thinking,
+               let thinkingVisibleUntil,
+               eventAt < thinkingVisibleUntil {
+                pendingWorkingAction = "Reviewing result"
+            } else {
+                thinkingVisibleUntil = nil
+                pendingWorkingAction = nil
+                snapshot.state = .working
+                snapshot.action = "Reviewing result"
+            }
             snapshot.completedAt = nil
-            // Anchored on event time, NOT `now`. A late tick still gets correct fade behavior.
-            workingVisibleUntil = eventAt.addingTimeInterval(1.8)
+            workingVisibleUntil = max(eventAt, thinkingVisibleUntil ?? eventAt).addingTimeInterval(0.65)
         case "PostToolUseFailure":
             wasActiveBeforeCompaction = nil
+            isPermissionPrompt = false
             snapshot.active = true
-            snapshot.state = .working
-            snapshot.action = "Tool failed"
+            if snapshot.state == .thinking,
+               let thinkingVisibleUntil,
+               eventAt < thinkingVisibleUntil {
+                pendingWorkingAction = "Tool failed"
+            } else {
+                thinkingVisibleUntil = nil
+                pendingWorkingAction = nil
+                snapshot.state = .working
+                snapshot.action = "Tool failed"
+            }
             snapshot.completedAt = nil
-            workingVisibleUntil = eventAt.addingTimeInterval(1.8)
+            workingVisibleUntil = max(eventAt, thinkingVisibleUntil ?? eventAt).addingTimeInterval(0.65)
         case "Notification":
             switch Self.string(root["notificationType"]) {
             case "permission_prompt":
@@ -104,6 +139,8 @@ public struct ClaudeHookStatusReducer: Sendable {
                 // — only the next PreToolUse / Stop / UserPromptSubmit clears this.
                 isPermissionPrompt = true
                 workingVisibleUntil = nil
+                thinkingVisibleUntil = nil
+                pendingWorkingAction = nil
                 snapshot.active = true
                 snapshot.state = .attention
                 snapshot.action = "Awaiting permission"
@@ -112,6 +149,8 @@ public struct ClaudeHookStatusReducer: Sendable {
                 wasActiveBeforeCompaction = nil
                 isPermissionPrompt = false
                 workingVisibleUntil = nil
+                thinkingVisibleUntil = nil
+                pendingWorkingAction = nil
                 snapshot.active = false
                 snapshot.state = .idle
                 snapshot.action = "Ready"
@@ -119,10 +158,32 @@ public struct ClaudeHookStatusReducer: Sendable {
             default:
                 break
             }
+        case "PermissionRequest":
+            wasActiveBeforeCompaction = nil
+            isPermissionPrompt = true
+            workingVisibleUntil = nil
+            thinkingVisibleUntil = nil
+            pendingWorkingAction = nil
+            snapshot.active = true
+            snapshot.state = .attention
+            snapshot.action = "Awaiting permission"
+            snapshot.completedAt = nil
+        case "PermissionDenied":
+            wasActiveBeforeCompaction = nil
+            isPermissionPrompt = false
+            workingVisibleUntil = nil
+            thinkingVisibleUntil = nil
+            pendingWorkingAction = nil
+            snapshot.active = true
+            snapshot.state = .attention
+            snapshot.action = "Permission denied"
+            snapshot.completedAt = nil
         case "Stop":
             wasActiveBeforeCompaction = nil
             isPermissionPrompt = false
             workingVisibleUntil = nil
+            thinkingVisibleUntil = nil
+            pendingWorkingAction = nil
             snapshot.active = false
             snapshot.state = .done
             snapshot.action = "Complete"
@@ -131,6 +192,8 @@ public struct ClaudeHookStatusReducer: Sendable {
             wasActiveBeforeCompaction = nil
             isPermissionPrompt = false
             workingVisibleUntil = nil
+            thinkingVisibleUntil = nil
+            pendingWorkingAction = nil
             snapshot.active = false
             snapshot.state = .error
             snapshot.action = "Claude Code stopped with an error"
@@ -141,6 +204,8 @@ public struct ClaudeHookStatusReducer: Sendable {
             }
             isPermissionPrompt = false
             workingVisibleUntil = nil
+            thinkingVisibleUntil = nil
+            pendingWorkingAction = nil
             snapshot.active = true
             snapshot.state = .working
             snapshot.action = "Compressing context"
@@ -150,6 +215,8 @@ public struct ClaudeHookStatusReducer: Sendable {
             wasActiveBeforeCompaction = nil
             isPermissionPrompt = false
             workingVisibleUntil = nil
+            thinkingVisibleUntil = nil
+            pendingWorkingAction = nil
             switch shouldResumeActiveTurn {
             case .some(let shouldResumeActiveTurn):
                 if shouldResumeActiveTurn {
@@ -172,6 +239,9 @@ public struct ClaudeHookStatusReducer: Sendable {
         case "SessionEnd":
             wasActiveBeforeCompaction = nil
             isPermissionPrompt = false
+            workingVisibleUntil = nil
+            thinkingVisibleUntil = nil
+            pendingWorkingAction = nil
             if snapshot.active {
                 snapshot.active = false
                 snapshot.state = .idle
@@ -183,7 +253,19 @@ public struct ClaudeHookStatusReducer: Sendable {
     }
 
     public mutating func applyWorkingVisibility(now: Date = Date()) {
-        guard snapshot.active, snapshot.state == .working else { return }
+        guard snapshot.active else { return }
+
+        if let pendingWorkingAction,
+           let thinkingVisibleUntil,
+           now >= thinkingVisibleUntil {
+            self.pendingWorkingAction = nil
+            self.thinkingVisibleUntil = nil
+            snapshot.state = .working
+            snapshot.action = pendingWorkingAction
+            return
+        }
+
+        guard snapshot.state == .working else { return }
 
         // Normal PostToolUse / PostToolUseFailure fade: anchored on event time.
         if let until = workingVisibleUntil, now >= until {

@@ -528,6 +528,9 @@ func testClaudeHookConfiguratorWritesUserSettingsNotLegacyClaudeJson() throws {
     let agentHaloHooks = preToolUse?.last?["hooks"] as? [[String: Any]]
     let command = agentHaloHooks?.first?["command"] as? String
     expect(command, "\(home.path)/.agent-halo/claude-code-status-hook PreToolUse", "Agent Halo hook should be appended to ~/.claude/settings.json")
+    expect(hooks?["PostToolBatch"] != nil, true, "PostToolBatch hook should be configured")
+    expect(hooks?["PermissionRequest"] != nil, true, "PermissionRequest hook should be configured")
+    expect(hooks?["PermissionDenied"] != nil, true, "PermissionDenied hook should be configured")
     expect(settings?["env"] as? [String: String], ["AGENT_HALO_TEST": "1"], "existing settings should be preserved")
 
     let legacy = try JSONSerialization.jsonObject(with: Data(contentsOf: legacyURL)) as? [String: Any]
@@ -666,6 +669,23 @@ func testRateLimitReaderFindsContextUsageAndResetTimes() throws {
     expect(snapshot?.primaryResetAt, Date(timeIntervalSince1970: 1_781_765_880), "primary reset time")
     expect(snapshot?.secondaryResetAt, Date(timeIntervalSince1970: 1_781_938_560), "secondary reset time")
     expectAlmost(snapshot?.contextUsedPercent ?? 0, 78.405, tolerance: 0.01, "context usage")
+}
+
+func testRateLimitReaderCombinesSplitQuotaAndContextSnapshots() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-split-rate-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+    try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+    let file = sessions.appendingPathComponent("split.jsonl")
+    let quota = #"{"type":"event_msg","payload":{"info":{"rate_limits":{"primary":{"used_percent":25,"resets_at":1781765880},"secondary":{"used_percent":40,"resets_at":1781938560}}}}}"#
+    let context = #"{"type":"event_msg","payload":{"info":{"last_token_usage":{"input_tokens":50},"model_context_window":100}}}"#
+    try Data("\(quota)\n\(context)\n".utf8).write(to: file)
+
+    let snapshot = RateLimitReader(roots: [sessions]).read()
+    expect(snapshot?.primaryUsedPercent, 25, "split snapshot primary quota")
+    expect(snapshot?.secondaryUsedPercent, 40, "split snapshot secondary quota")
+    expect(snapshot?.contextUsedPercent, 50, "split snapshot context usage")
 }
 
 func testClaudeStatusLineUsageParserReadsAuthoritativeContextPercent() {
@@ -1061,6 +1081,45 @@ func testClaudeHookReducerMapsLifecycleEvents() {
     expect(reducer.snapshot.completedAt, now.addingTimeInterval(5), "Stop should set completedAt")
 }
 
+func testClaudeHookReducerPreservesThinkingBeforeQuickToolAndUsesShortResultHold() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
+    var reducer = ClaudeHookStatusReducer(threadId: "quick-tool", now: now)
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"quick-tool","cwd":"/tmp","source":"claude-hook"}"#, now: now)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:00.120Z","event":"PreToolUse","sessionId":"quick-tool","cwd":"/tmp","toolName":"Bash","source":"claude-hook"}"#, now: now.addingTimeInterval(0.12))
+
+    expect(reducer.snapshot.state, .thinking, "quick PreToolUse should preserve the initial thinking beat")
+    reducer.applyWorkingVisibility(now: now.addingTimeInterval(0.5))
+    expect(reducer.snapshot.state, .thinking, "thinking beat should remain visible for 0.7 seconds")
+    reducer.applyWorkingVisibility(now: now.addingTimeInterval(0.8))
+    expect(reducer.snapshot.state, .working, "pending tool action should appear after the thinking beat")
+    expect(reducer.snapshot.action, "Running command", "pending tool action should preserve the friendly tool name")
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:01Z","event":"PostToolUse","sessionId":"quick-tool","cwd":"/tmp","toolName":"Bash","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
+    reducer.applyWorkingVisibility(now: now.addingTimeInterval(1.5))
+    expect(reducer.snapshot.state, .working, "PostToolUse should remain blue inside the short hold")
+    reducer.applyWorkingVisibility(now: now.addingTimeInterval(1.8))
+    expect(reducer.snapshot.state, .thinking, "PostToolUse should fade after the 0.65 second hold")
+}
+
+func testClaudeHookReducerMapsBatchAndDirectPermissionEvents() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
+    var reducer = ClaudeHookStatusReducer(threadId: "new-hook-events", now: now)
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"new-hook-events","cwd":"/tmp","source":"claude-hook"}"#, now: now)
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:01Z","event":"PostToolBatch","sessionId":"new-hook-events","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(1))
+    expect(reducer.snapshot.state, .working, "PostToolBatch should use the post-tool working state")
+    expect(reducer.snapshot.action, "Reviewing result", "PostToolBatch action")
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:02Z","event":"PermissionRequest","sessionId":"new-hook-events","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(2))
+    expect(reducer.snapshot.state, .attention, "PermissionRequest should request attention")
+    expect(reducer.snapshot.action, "Awaiting permission", "PermissionRequest action")
+
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-16T04:00:03Z","event":"PermissionDenied","sessionId":"new-hook-events","cwd":"/tmp","source":"claude-hook"}"#, now: now.addingTimeInterval(3))
+    expect(reducer.snapshot.state, .attention, "PermissionDenied should remain attention")
+    expect(reducer.snapshot.action, "Permission denied", "PermissionDenied action")
+}
+
 func testClaudeHookReducerPostToolUseFailureSurfacesThenSettles() {
     let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
     var reducer = ClaudeHookStatusReducer(threadId: "tool-failure", now: now)
@@ -1419,7 +1478,7 @@ func testClaudeStatusMergerPrefersHookDoneOverTranscriptThinking() {
     expect(merged.map(\.state), [.done], "recent hook completion should suppress transcript reactivation")
 }
 
-func testClaudeStatusMergerIgnoresTranscriptWhenNoHookSnapshotExists() {
+func testClaudeStatusMergerFallsBackToTranscriptWhenNoHookSnapshotExists() {
     let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:10Z")!
     let transcriptThinking = SessionSnapshot(
         threadId: "transcript-only",
@@ -1439,7 +1498,45 @@ func testClaudeStatusMergerIgnoresTranscriptWhenNoHookSnapshotExists() {
         now: now
     )
 
-    expect(merged.isEmpty, true, "transcript-only Claude sessions should not drive the halo")
+    expect(merged.map(\.threadId), ["transcript-only"], "transcript should drive Claude status only when hook data is unavailable")
+}
+
+func testClaudeTranscriptReducerHandlesMultipleItemsAttentionAndErrors() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
+    var reducer = ClaudeSessionReducer(filePath: "/tmp/transcript-parity.jsonl", now: now)
+
+    reducer.consume(jsonLine: #"{"type":"user","timestamp":"2026-06-16T04:00:00Z","sessionId":"transcript-parity","message":{"content":"work"}}"#, now: now)
+    reducer.consume(jsonLine: #"{"type":"assistant","timestamp":"2026-06-16T04:00:01Z","sessionId":"transcript-parity","message":{"content":[{"type":"text","text":"checking"},{"type":"tool_use","name":"Bash"},{"type":"tool_use","name":"Read"}]}}"#, now: now.addingTimeInterval(1))
+    expect(reducer.snapshot.state, .working, "tool_use should be found beyond the first transcript content item")
+    expect(reducer.snapshot.action, "Running command", "first tool action should be localized through the shared spec")
+
+    reducer.consume(jsonLine: #"{"type":"assistant","timestamp":"2026-06-16T04:00:02Z","sessionId":"transcript-parity","message":{"content":[{"type":"text","text":"analysis continues"}]}}"#, now: now.addingTimeInterval(2))
+    expect(reducer.snapshot.state, .thinking, "assistant text should interrupt a stale working hold")
+
+    reducer.consume(jsonLine: #"{"type":"assistant","timestamp":"2026-06-16T04:00:03Z","sessionId":"transcript-parity","message":{"content":[{"type":"tool_use","name":"AskUserQuestion"}]}}"#, now: now.addingTimeInterval(3))
+    expect(reducer.snapshot.state, .attention, "AskUserQuestion should request attention")
+    expect(reducer.snapshot.action, "Awaiting permission", "AskUserQuestion action")
+
+    reducer.consume(jsonLine: #"{"type":"system","subtype":"api_error","timestamp":"2026-06-16T04:00:04Z","sessionId":"transcript-parity"}"#, now: now.addingTimeInterval(4))
+    expect(reducer.snapshot.state, .error, "api_error should become an error state")
+    expect(reducer.snapshot.action, "Service unavailable", "api_error action")
+    expect(reducer.snapshot.active, false, "api_error should deactivate the session")
+}
+
+func testClaudeLiveSessionReaderRequiresLiveWaitingProcess() throws {
+    let home = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-live-session-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: home) }
+    let sessions = home.appendingPathComponent(".claude/sessions", isDirectory: true)
+    try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+    let file = sessions.appendingPathComponent("live.json")
+
+    try Data(#"{"status":"waiting","pid":99999999,"sessionId":"dead"}"#.utf8).write(to: file)
+    expect(ClaudeLiveSessionReader.hasStandbySession(homeDirectory: home), false, "dead Claude session pid should not show standby")
+
+    let live = #"{"status":"idle","pid":\#(ProcessInfo.processInfo.processIdentifier),"sessionId":"live"}"#
+    try Data(live.utf8).write(to: file)
+    expect(ClaudeLiveSessionReader.hasStandbySession(homeDirectory: home), true, "live idle Claude session should show standby")
 }
 
 func testClaudeStatusMergerKeepsHookWhenTranscriptCompletionIsNewer() {
@@ -1767,6 +1864,11 @@ do {
 } catch {
     fatalError("\(error)")
 }
+do {
+    try testRateLimitReaderCombinesSplitQuotaAndContextSnapshots()
+} catch {
+    fatalError("\(error)")
+}
 testClaudeStatusLineUsageParserReadsAuthoritativeContextPercent()
 do {
     try testClaudeContextUsageReaderKeepsLastKnownUsageForMatchingSession()
@@ -1798,6 +1900,8 @@ testAggregatorKeepsCodexCompletionVisibleUntilAcknowledged()
 testClaudeReducerMapsTranscriptEvents()
 testClaudeReducerIgnoresLocalCommandUserRecords()
 testClaudeHookReducerMapsLifecycleEvents()
+testClaudeHookReducerPreservesThinkingBeforeQuickToolAndUsesShortResultHold()
+testClaudeHookReducerMapsBatchAndDirectPermissionEvents()
 testClaudeHookReducerPostToolUseFailureSurfacesThenSettles()
 testClaudeHookReducerPermissionPromptHoldsUntilResolved()
 testClaudeHookReducerIdlePromptReturnsToReady()
@@ -1828,9 +1932,15 @@ do {
     fatalError("\(error)")
 }
 testClaudeStatusMergerPrefersHookDoneOverTranscriptThinking()
-testClaudeStatusMergerIgnoresTranscriptWhenNoHookSnapshotExists()
+testClaudeStatusMergerFallsBackToTranscriptWhenNoHookSnapshotExists()
 testClaudeStatusMergerKeepsHookWhenTranscriptCompletionIsNewer()
 testClaudeStatusMergerSurvivesDuplicateThreadIds()
+testClaudeTranscriptReducerHandlesMultipleItemsAttentionAndErrors()
+do {
+    try testClaudeLiveSessionReaderRequiresLiveWaitingProcess()
+} catch {
+    fatalError("\(error)")
+}
 testClaudeHookStopShowsDoneThenReadyWhileWaitingForInput()
 testStartupExecutablePathUsesAppBundleRoot()
 do {
