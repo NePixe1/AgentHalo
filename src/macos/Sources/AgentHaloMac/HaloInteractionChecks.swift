@@ -42,6 +42,8 @@ func runHaloInteractionChecks() {
     testClaudeLiveStandbyUsesStableGreenAggregate()
     testDetailsPanelShowsCodexQuotaAndIdleCopy()
     testDetailsPanelShowsSessionMetadataForCodexAndClaudeCode()
+    testDetailsPanelUsesCompactMetadataLayout()
+    testDetailsPanelUsesTightBottomInset()
     testDetailsPanelShowsExpiredQuotaAsWaitingForRefresh()
     testDetailsPanelShowsAnswerStreamingCopy()
     testDetailsPanelRefreshesStatusFromLatestAggregate()
@@ -614,6 +616,69 @@ private func testDetailsPanelShowsSessionMetadataForCodexAndClaudeCode() {
     expect(panel.focusedAgentForTesting == .claudeCode, "details panel should select Claude Code")
     expect(!panel.metadataGroupHiddenForTesting, "Claude Code metadata should be visible")
     expect(panel.tokenValueForTesting, "输入 38k · 输出 1.2k", "Claude Code token value")
+}
+
+@MainActor
+private func testDetailsPanelUsesCompactMetadataLayout() {
+    let panel = DetailsPanel()
+    guard let contentView = panel.contentView else {
+        fatalError("details panel should have a content view")
+    }
+    let metadataGroup = allDescendants(of: contentView)
+        .compactMap { $0 as? NSStackView }
+        .first { stack in
+            let labels = allDescendants(of: stack)
+                .compactMap { $0 as? NSTextField }
+                .map(\.stringValue)
+            let firstLabels = stack.arrangedSubviews.first.map {
+                ([$0] + allDescendants(of: $0))
+                    .compactMap { $0 as? NSTextField }
+                    .map(\.stringValue)
+            } ?? []
+            return labels.contains("项目") && labels.contains("模型") && labels.contains("Token")
+                && firstLabels.contains("项目")
+        }
+
+    guard let metadataGroup else {
+        fatalError("details panel should expose its metadata group")
+    }
+    expect(
+        metadataGroup.arrangedSubviews.count,
+        5,
+        "metadata should separate project from model and model from token"
+    )
+    let arranged = metadataGroup.arrangedSubviews
+    for item in arranged.dropLast() {
+        expect(
+            metadataGroup.customSpacing(after: item) == NSStackView.useDefaultSpacing,
+            "metadata rows and separators should not use asymmetric custom spacing"
+        )
+    }
+    for row in [arranged[0], arranged[2], arranged[4]] {
+        expect(
+            row.constraints.contains { $0.firstAttribute == .height && $0.constant == 25 },
+            "each metadata row should use the same 25pt height"
+        )
+    }
+    for separator in [arranged[1], arranged[3]] {
+        expect(
+            separator.constraints.contains { $0.firstAttribute == .height && $0.constant == 1 },
+            "each metadata separator should be a standalone 1pt rule"
+        )
+    }
+}
+
+@MainActor
+private func testDetailsPanelUsesTightBottomInset() {
+    let panel = DetailsPanel()
+    guard let contentView = panel.contentView,
+          let contentStack = allDescendants(of: contentView)
+            .compactMap({ $0 as? NSStackView })
+            .first(where: { $0.edgeInsets.top == 14 && $0.edgeInsets.left == 17 }) else {
+        fatalError("details panel should expose its content stack")
+    }
+
+    expect(contentStack.edgeInsets.bottom, 10, "details panel bottom inset")
 }
 
 @MainActor

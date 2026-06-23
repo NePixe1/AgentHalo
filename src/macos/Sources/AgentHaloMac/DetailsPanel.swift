@@ -15,14 +15,19 @@ final class DetailsPanel: NSPanel {
     private let metadataGroup = NSStackView()
     private let projectRow = MetadataRowView(title: "项目")
     private let modelRow = MetadataRowView(title: "模型")
-    private let tokenRow = MetadataRowView(title: "Token", showsSeparator: false)
+    private let projectModelSeparator = NSView()
+    private let modelTokenSeparator = NSView()
+    private let tokenRow = MetadataRowView(
+        title: "Token",
+        valueFont: .systemFont(ofSize: 11.5, weight: .medium)
+    )
     var onMouseEntered: (() -> Void)?
     var onMouseExited: (() -> Void)?
     var onAgentSelected: ((AgentKind) -> Void)?
 
     init() {
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 338, height: 206),
+            contentRect: NSRect(x: 0, y: 0, width: 338, height: 191),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -47,7 +52,7 @@ final class DetailsPanel: NSPanel {
         stack.orientation = .vertical
         stack.spacing = 0
         stack.alignment = .leading
-        stack.edgeInsets = NSEdgeInsets(top: 14, left: 17, bottom: 16, right: 17)
+        stack.edgeInsets = NSEdgeInsets(top: 14, left: 17, bottom: 10, right: 17)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         let topRow = makeTopRow()
@@ -67,7 +72,7 @@ final class DetailsPanel: NSPanel {
         stack.setCustomSpacing(13, after: detailField)
 
         quotaGroup.orientation = .vertical
-        quotaGroup.spacing = 10
+        quotaGroup.spacing = 8
         quotaGroup.alignment = .leading
         quotaGroup.translatesAutoresizingMaskIntoConstraints = false
         quotaGroup.addArrangedSubview(primaryQuota)
@@ -78,8 +83,15 @@ final class DetailsPanel: NSPanel {
         metadataGroup.spacing = 0
         metadataGroup.alignment = .leading
         metadataGroup.translatesAutoresizingMaskIntoConstraints = false
+        [projectModelSeparator, modelTokenSeparator].forEach {
+            $0.wantsLayer = true
+            $0.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.27).cgColor
+            $0.translatesAutoresizingMaskIntoConstraints = false
+        }
         metadataGroup.addArrangedSubview(projectRow)
+        metadataGroup.addArrangedSubview(projectModelSeparator)
         metadataGroup.addArrangedSubview(modelRow)
+        metadataGroup.addArrangedSubview(modelTokenSeparator)
         metadataGroup.addArrangedSubview(tokenRow)
         metadataGroup.isHidden = true
         stack.addArrangedSubview(metadataGroup)
@@ -107,7 +119,11 @@ final class DetailsPanel: NSPanel {
             secondaryQuota.trailingAnchor.constraint(equalTo: quotaGroup.trailingAnchor),
             metadataGroup.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
             projectRow.trailingAnchor.constraint(equalTo: metadataGroup.trailingAnchor),
+            projectModelSeparator.trailingAnchor.constraint(equalTo: metadataGroup.trailingAnchor),
+            projectModelSeparator.heightAnchor.constraint(equalToConstant: 1),
             modelRow.trailingAnchor.constraint(equalTo: metadataGroup.trailingAnchor),
+            modelTokenSeparator.trailingAnchor.constraint(equalTo: metadataGroup.trailingAnchor),
+            modelTokenSeparator.heightAnchor.constraint(equalToConstant: 1),
             tokenRow.trailingAnchor.constraint(equalTo: metadataGroup.trailingAnchor)
         ])
     }
@@ -331,45 +347,37 @@ final class DetailsPanel: NSPanel {
 private final class MetadataRowView: NSView {
     private let nameField: NSTextField
     private let valueField = NSTextField(labelWithString: "--")
-    private let separator = NSView()
 
     var value: String {
         get { valueField.stringValue }
         set { valueField.stringValue = newValue }
     }
 
-    init(title: String, showsSeparator: Bool = true) {
+    init(title: String, valueFont: NSFont = .systemFont(ofSize: 12, weight: .semibold)) {
         nameField = NSTextField(labelWithString: title)
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
 
-        nameField.font = .systemFont(ofSize: 12, weight: .semibold)
+        nameField.font = .systemFont(ofSize: 12)
         nameField.textColor = .labelColor
-        valueField.font = .systemFont(ofSize: 12, weight: .semibold)
+        valueField.font = valueFont
         valueField.textColor = .labelColor
         valueField.alignment = .right
         valueField.lineBreakMode = .byTruncatingTail
         valueField.maximumNumberOfLines = 1
-        separator.wantsLayer = true
-        separator.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.55).cgColor
-        separator.isHidden = !showsSeparator
 
-        [nameField, valueField, separator].forEach {
+        [nameField, valueField].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             addSubview($0)
         }
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 29),
+            heightAnchor.constraint(equalToConstant: 25),
             nameField.leadingAnchor.constraint(equalTo: leadingAnchor),
-            nameField.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -1),
+            nameField.centerYAnchor.constraint(equalTo: centerYAnchor),
             nameField.widthAnchor.constraint(equalToConstant: 52),
             valueField.leadingAnchor.constraint(greaterThanOrEqualTo: nameField.trailingAnchor, constant: 10),
             valueField.trailingAnchor.constraint(equalTo: trailingAnchor),
-            valueField.centerYAnchor.constraint(equalTo: nameField.centerYAnchor),
-            separator.leadingAnchor.constraint(equalTo: leadingAnchor),
-            separator.trailingAnchor.constraint(equalTo: trailingAnchor),
-            separator.bottomAnchor.constraint(equalTo: bottomAnchor),
-            separator.heightAnchor.constraint(equalToConstant: 1)
+            valueField.centerYAnchor.constraint(equalTo: nameField.centerYAnchor)
         ])
     }
 
@@ -463,7 +471,7 @@ private final class QuotaRowView: NSView {
         }
         resetField.isHidden = true
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 38),
+            heightAnchor.constraint(equalToConstant: 34),
             nameField.leadingAnchor.constraint(equalTo: leadingAnchor),
             nameField.topAnchor.constraint(equalTo: topAnchor),
             resetField.leadingAnchor.constraint(equalTo: nameField.trailingAnchor, constant: 7),
