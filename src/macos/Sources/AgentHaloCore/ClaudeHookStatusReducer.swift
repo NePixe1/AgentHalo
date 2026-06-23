@@ -151,17 +151,19 @@ public struct ClaudeHookStatusReducer: Sendable {
             isPermissionPrompt = false
             workingVisibleUntil = nil
             switch shouldResumeActiveTurn {
-            case true:
-                snapshot.active = true
-                snapshot.state = .thinking
-                snapshot.action = "Thinking"
-                snapshot.completedAt = nil
-            case false:
-                snapshot.active = false
-                snapshot.state = .done
-                snapshot.action = "Context compacted"
-                snapshot.completedAt = eventAt
-            case nil:
+            case .some(let shouldResumeActiveTurn):
+                if shouldResumeActiveTurn {
+                    snapshot.active = true
+                    snapshot.state = .thinking
+                    snapshot.action = "Thinking"
+                    snapshot.completedAt = nil
+                } else {
+                    snapshot.active = false
+                    snapshot.state = .done
+                    snapshot.action = "Context compacted"
+                    snapshot.completedAt = eventAt
+                }
+            case .none:
                 snapshot.active = false
                 snapshot.state = .idle
                 snapshot.action = "Ready"
