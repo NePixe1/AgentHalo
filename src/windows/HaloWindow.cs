@@ -35,6 +35,7 @@ public sealed class HaloWindow : Window
         private readonly HaloSettings settings;
         private readonly CodexSessionMonitor monitor;
         private readonly ClaudeHookStatusMonitor claudeMonitor;
+        private readonly ClaudeTranscriptSessionMonitor claudeTranscriptMonitor;
         private readonly HaloVisual visual;
         private readonly DetailsWindow details;
         private readonly Forms.NotifyIcon tray;
@@ -66,6 +67,7 @@ public sealed class HaloWindow : Window
             Background = System.Windows.Media.Brushes.Transparent;
             ResizeMode = ResizeMode.NoResize;
             ShowInTaskbar = false;
+            ShowActivated = false;
             Topmost = settings.AlwaysOnTop;
             Title = "Agent Halo";
 
@@ -90,6 +92,7 @@ public sealed class HaloWindow : Window
             };
             monitor = new CodexSessionMonitor();
             claudeMonitor = new ClaudeHookStatusMonitor();
+            claudeTranscriptMonitor = new ClaudeTranscriptSessionMonitor();
             monitor.Changed += delegate { RefreshState(); };
             foregroundTimer = new DispatcherTimer(DispatcherPriority.Background);
             foregroundTimer.Interval = TimeSpan.FromMilliseconds(300);
@@ -214,6 +217,7 @@ public sealed class HaloWindow : Window
         private void OnForegroundTick(object sender, EventArgs e)
         {
             bool claudeChanged = claudeMonitor.Refresh();
+            claudeChanged = claudeTranscriptMonitor.Refresh() || claudeChanged;
             if (claudeChanged && settings.GetFocusedAgent() == AgentKind.ClaudeCode)
             {
                 RefreshState();
@@ -272,7 +276,7 @@ public sealed class HaloWindow : Window
         {
             IntPtr handle = new WindowInteropHelper(this).Handle;
             int style = GetWindowLong(handle, -20);
-            SetWindowLong(handle, -20, style | 0x00000080);
+            SetWindowLong(handle, -20, style | 0x08000000 | 0x00000080);
         }
 
         private void RestorePosition()
@@ -295,6 +299,7 @@ public sealed class HaloWindow : Window
             if (settings.GetFocusedAgent() == AgentKind.ClaudeCode)
             {
                 claudeMonitor.Refresh();
+                claudeTranscriptMonitor.Refresh();
                 aggregate = GetClaudeAggregate();
                 if (demoState.HasValue)
                 {
@@ -303,13 +308,30 @@ public sealed class HaloWindow : Window
                     aggregate.Detail = "Preview mode";
                 }
                 int claudeCount = aggregate.Sessions == null ? 0 : aggregate.Sessions.Count;
-                visual.SetSteadyDone(false);
+                bool showClaudeStandby = !demoState.HasValue &&
+                    aggregate.State == HaloState.Idle &&
+                    ClaudeLiveSessionReader.HasStandbySession();
+                visual.SetSteadyDone(showClaudeStandby);
                 visual.SetErrorPresentation(demoErrorPresentation ?? ErrorPresentation.Flashing);
-                visual.SetState(aggregate.State, aggregate.Label, claudeCount);
+                visual.SetState(showClaudeStandby ? HaloState.Done : aggregate.State,
+                    showClaudeStandby ? "待命" : aggregate.Label, claudeCount);
                 visual.SetAnswerStreaming(false);
                 tray.Text = ("Agent Halo · " + aggregate.Label).Substring(0,
                     Math.Min(63, ("Agent Halo · " + aggregate.Label).Length));
-                details.UpdateContent(aggregate, aggregate.Sessions);
+                AggregateSnapshot claudeDisplayAggregate = aggregate;
+                if (showClaudeStandby)
+                {
+                    claudeDisplayAggregate = new AggregateSnapshot
+                    {
+                        State = HaloState.Done,
+                        Label = "STANDBY",
+                        Detail = "Claude Code 正在待命",
+                        Sessions = aggregate.Sessions,
+                        AnswerStreaming = false,
+                        FocusedAgent = AgentKind.ClaudeCode
+                    };
+                }
+                details.UpdateContent(claudeDisplayAggregate, aggregate.Sessions);
                 UpdateAgentMenuChecks();
                 return;
             }
@@ -455,13 +477,6 @@ public sealed class HaloWindow : Window
                 SnapToEdges();
                 SavePosition();
             }
-            else
-            {
-                if (settings.GetFocusedAgent() == AgentKind.Codex)
-                {
-                    BringCodexForward();
-                }
-            }
         }
 
         private void OnDoubleClick(object sender, MouseButtonEventArgs e)
@@ -496,7 +511,10 @@ public sealed class HaloWindow : Window
             {
                 return;
             }
-            details.Topmost = Topmost;
+            if (details.Topmost != Topmost)
+            {
+                details.Topmost = Topmost;
+            }
             details.UpdateContent(aggregate, DetailsSessions());
             PositionDetails();
             if (!details.IsVisible)
@@ -505,10 +523,6 @@ public sealed class HaloWindow : Window
                 details.UpdateLayout();
             }
             PositionDetails();
-            if (activate)
-            {
-                details.Activate();
-            }
             QueueDetailsReposition();
         }
 
@@ -730,14 +744,17 @@ public sealed class HaloWindow : Window
         private AggregateSnapshot GetClaudeAggregate()
         {
             DateTime now = DateTime.UtcNow;
-            List<SessionSnapshot> sessions = claudeMonitor.Snapshots()
+            List<SessionSnapshot> merged = ClaudeStatusSourceMerger.Merge(
+                claudeMonitor.Snapshots(), claudeTranscriptMonitor.Snapshots());
+            List<SessionSnapshot> sessions = merged
                 .Where(delegate(SessionSnapshot snapshot)
                 {
                     if (snapshot.State == HaloState.Done)
                     {
                         return snapshot.CompletedUtc >= now.AddSeconds(-8);
                     }
-                    return snapshot.Active ||
+                    return (snapshot.Active &&
+                            snapshot.LastEventUtc >= now.AddMinutes(-10)) ||
                         (snapshot.State == HaloState.Error &&
                          snapshot.LastEventUtc >= now.AddHours(-1));
                 })

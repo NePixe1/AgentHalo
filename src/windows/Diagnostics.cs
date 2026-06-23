@@ -452,6 +452,25 @@ public static class Diagnostics
                 Assert(!DetailsWindow.IsQuotaExpired(
                     DateTime.UtcNow.AddMinutes(5), DateTime.UtcNow),
                     "future quota reset remains valid");
+                string contextOnlyRate =
+                    "{\"payload\":{\"info\":{\"rate_limits\":{}," +
+                    "\"last_token_usage\":{\"input_tokens\":50}," +
+                    "\"model_context_window\":100}}}";
+                string quotaOnlyRate =
+                    "{\"payload\":{\"info\":{\"rate_limits\":{\"primary\":{" +
+                    "\"used_percent\":25,\"resets_at\":4102444800}," +
+                    "\"secondary\":{\"used_percent\":40," +
+                    "\"resets_at\":4102444800}}}}}";
+                UsageMetrics parsedUsage;
+                Assert(RateLimitReader.TryReadFromNewestLinesForTest(
+                    new[] { contextOnlyRate, quotaOnlyRate }, out parsedUsage),
+                    "rate limit parser reads split snapshots");
+                Assert(parsedUsage.HasPrimary && parsedUsage.HasSecondary &&
+                    parsedUsage.HasContext, "rate limit parser fills all fields");
+                Assert(Math.Abs(parsedUsage.PrimaryUsedPercent - 25) < 0.001 &&
+                    Math.Abs(parsedUsage.SecondaryUsedPercent - 40) < 0.001 &&
+                    Math.Abs(parsedUsage.ContextUsedPercent - 50) < 0.001,
+                    "rate limit parser preserves latest field values");
 
                 ClaudeHookStatusReducer claude =
                     new ClaudeHookStatusReducer("claude-test");
@@ -464,17 +483,23 @@ public static class Diagnostics
                     "Claude prompt submit -> thinking");
                 claude.Consume(ClaudeHookLine("PreToolUse", "claude-test",
                     "C:\\work\\agenthalo", "Bash", null, claudeNow), DateTime.UtcNow);
+                Assert(claude.Snapshot.State == HaloState.Thinking,
+                    "Claude quick pre tool keeps thinking briefly visible");
+                claude.ApplyWorkingVisibility(DateTime.UtcNow.AddMilliseconds(800));
                 Assert(claude.Snapshot.State == HaloState.Working &&
                     claude.Snapshot.Action == "Running command",
                     "Claude bash tool -> working command");
-                DateTime postToolAt = DateTime.UtcNow.AddSeconds(-2);
+                DateTime postToolAt = DateTime.UtcNow;
                 claude.Consume(ClaudeHookLine("PostToolUse", "claude-test",
                     "C:\\work\\agenthalo", "Bash", null,
                     postToolAt.ToString("o", CultureInfo.InvariantCulture)),
-                    DateTime.UtcNow);
+                    postToolAt);
                 Assert(claude.Snapshot.State == HaloState.Working,
                     "Claude post tool remains briefly working");
-                claude.ApplyWorkingVisibility(DateTime.UtcNow);
+                claude.ApplyWorkingVisibility(postToolAt.AddMilliseconds(500));
+                Assert(claude.Snapshot.State == HaloState.Working,
+                    "Claude post tool remains working within short hold");
+                claude.ApplyWorkingVisibility(postToolAt.AddMilliseconds(800));
                 Assert(claude.Snapshot.State == HaloState.Thinking,
                     "Claude post tool fades to thinking");
                 claude.Consume(ClaudeHookLine("Notification", "claude-test",
@@ -548,28 +573,154 @@ public static class Diagnostics
                     "Claude monitor reads status JSONL");
                 File.Delete(claudeStatus);
 
+                string claudeTranscriptNow = DateTime.UtcNow.ToString("o",
+                    CultureInfo.InvariantCulture);
+                ClaudeTranscriptSessionReducer transcript =
+                    new ClaudeTranscriptSessionReducer(
+                        "C:\\tmp\\304976ed-0876-44e9-99ce-2c9a74ab4ee2.jsonl",
+                        DateTime.UtcNow, true);
+                transcript.Consume(ClaudeTranscriptUserLine("claude-transcript",
+                    "C:\\work\\agenthalo", "Build Claude status",
+                    claudeTranscriptNow), DateTime.UtcNow);
+                Assert(transcript.Snapshot.State == HaloState.Thinking &&
+                    transcript.Snapshot.ProjectName == "agenthalo",
+                    "Claude transcript user prompt -> thinking");
+                transcript.Consume(ClaudeTranscriptAssistantToolLine(
+                    "claude-transcript", "C:\\work\\agenthalo", "Bash",
+                    claudeTranscriptNow), DateTime.UtcNow);
+                Assert(transcript.Snapshot.State == HaloState.Working &&
+                    transcript.Snapshot.Action == "Running command",
+                    "Claude transcript tool use -> working");
+                transcript.Consume(ClaudeTranscriptToolResultLine(
+                    "claude-transcript", "C:\\work\\agenthalo",
+                    claudeTranscriptNow), DateTime.UtcNow);
+                Assert(transcript.Snapshot.State == HaloState.Working,
+                    "Claude transcript tool result remains briefly working");
+                DateTime transcriptHoldStart = DateTime.UtcNow;
+                transcript.ApplyWorkingVisibility(transcriptHoldStart.AddMilliseconds(500));
+                Assert(transcript.Snapshot.State == HaloState.Working,
+                    "Claude transcript tool result remains working within short hold");
+                transcript.ApplyWorkingVisibility(transcriptHoldStart.AddMilliseconds(800));
+                Assert(transcript.Snapshot.State == HaloState.Thinking,
+                    "Claude transcript post tool fades to thinking");
+                transcript.Consume(ClaudeTranscriptAssistantToolLine(
+                    "claude-transcript", "C:\\work\\agenthalo", "Bash",
+                    claudeTranscriptNow), DateTime.UtcNow);
+                Assert(transcript.Snapshot.State == HaloState.Working,
+                    "Claude transcript second tool use -> working");
+                transcript.Consume(ClaudeTranscriptAssistantTextLine(
+                    "claude-transcript", "C:\\work\\agenthalo",
+                    claudeTranscriptNow), DateTime.UtcNow);
+                Assert(transcript.Snapshot.State == HaloState.Thinking,
+                    "Claude transcript assistant text interrupts working hold");
+                transcript.Consume(ClaudeTranscriptAssistantToolLine(
+                    "claude-transcript", "C:\\work\\agenthalo",
+                    "AskUserQuestion", claudeTranscriptNow), DateTime.UtcNow);
+                Assert(transcript.Snapshot.State == HaloState.Attention,
+                    "Claude transcript AskUserQuestion -> attention");
+                transcript.Consume(ClaudeTranscriptTurnDurationLine(
+                    "claude-transcript", "C:\\work\\agenthalo",
+                    claudeTranscriptNow), DateTime.UtcNow);
+                Assert(transcript.Snapshot.State == HaloState.Done &&
+                    !transcript.Snapshot.Active,
+                    "Claude transcript turn duration -> done");
+                transcript.Consume(ClaudeTranscriptSystemLine(
+                    "claude-transcript", "C:\\work\\agenthalo", "api_error",
+                    claudeTranscriptNow), DateTime.UtcNow);
+                Assert(transcript.Snapshot.State == HaloState.Error,
+                    "Claude transcript api error -> error");
+
+                ClaudeHookStatusReducer quickHook =
+                    new ClaudeHookStatusReducer("quick-hook");
+                DateTime quickStart = DateTime.UtcNow;
+                quickHook.Consume(ClaudeHookLine("UserPromptSubmit", "quick-hook",
+                    "C:\\work\\agenthalo", quickStart.ToString("o",
+                        CultureInfo.InvariantCulture)), quickStart);
+                quickHook.Consume(ClaudeHookLine("PreToolUse", "quick-hook",
+                    "C:\\work\\agenthalo", quickStart.AddMilliseconds(120)
+                        .ToString("o", CultureInfo.InvariantCulture), "Bash"),
+                    quickStart.AddMilliseconds(120));
+                quickHook.ApplyWorkingVisibility(quickStart.AddMilliseconds(500));
+                Assert(quickHook.Snapshot.State == HaloState.Thinking,
+                    "Claude quick tool keeps thinking briefly visible");
+                quickHook.ApplyWorkingVisibility(quickStart.AddMilliseconds(800));
+                Assert(quickHook.Snapshot.State == HaloState.Working,
+                    "Claude quick tool switches to working after thinking hold");
+
+                string claudeProjects = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-claude-projects-" + Guid.NewGuid().ToString("N"));
+                string claudeTranscriptDir = Path.Combine(claudeProjects, "project");
+                Directory.CreateDirectory(claudeTranscriptDir);
+                string claudeTranscriptFile = Path.Combine(claudeTranscriptDir,
+                    "monitor.jsonl");
+                File.WriteAllText(claudeTranscriptFile,
+                    ClaudeTranscriptUserLine("claude-monitor-transcript",
+                        "C:\\work\\monitor", "Work", claudeTranscriptNow) +
+                    Environment.NewLine, Encoding.UTF8);
+                ClaudeTranscriptSessionMonitor transcriptMonitor =
+                    new ClaudeTranscriptSessionMonitor(claudeProjects);
+                transcriptMonitor.Refresh();
+                List<SessionSnapshot> transcriptSnapshots =
+                    transcriptMonitor.Snapshots();
+                Assert(transcriptSnapshots.Count == 1 &&
+                    transcriptSnapshots[0].State == HaloState.Thinking,
+                    "Claude transcript monitor reads project JSONL");
+                Directory.Delete(claudeProjects, true);
+
                 string claudeHome = Path.Combine(Path.GetTempPath(),
                     "agent-halo-claude-home-" + Guid.NewGuid().ToString("N"));
                 Directory.CreateDirectory(Path.Combine(claudeHome, ".claude"));
+                string mainExe = Path.Combine(claudeHome, "bundle",
+                    "AgentHalo.exe");
+                Directory.CreateDirectory(Path.GetDirectoryName(mainExe));
+                File.WriteAllText(mainExe, "fake exe", Encoding.UTF8);
+                string legacyHelper = Path.Combine(claudeHome, ".agent-halo",
+                    "AgentHaloHook.exe");
+                Directory.CreateDirectory(Path.GetDirectoryName(legacyHelper));
+                File.WriteAllText(legacyHelper, "legacy", Encoding.UTF8);
                 string claudeSettings = Path.Combine(claudeHome, ".claude",
                     "settings.json");
                 File.WriteAllText(claudeSettings,
                     "{\"hooks\":{\"Notification\":[{\"hooks\":[{\"type\":\"command\"," +
-                    "\"command\":\"user-command\"}]}]}}", Encoding.UTF8);
-                ClaudeHookConfigurator.Configure(claudeHome,
-                    "C:\\Program Files\\Agent Halo\\AgentHalo.exe");
+                    "\"command\":\"user-command\"}]}],\"PreToolUse\":[{\"matcher\":\".*\"," +
+                    "\"hooks\":[{\"type\":\"command\",\"command\":\"old.exe AgentHaloHook.exe PreToolUse\"}]}]}}",
+                    Encoding.UTF8);
+                ClaudeHookConfigurator.Configure(claudeHome, mainExe);
                 string configured = File.ReadAllText(claudeSettings, Encoding.UTF8);
-                Assert(configured.Contains("--claude-hook PreToolUse") &&
-                    configured.Contains("user-command"),
+                Assert(!File.Exists(legacyHelper),
+                    "Claude hook configurator removes legacy helper");
+                Assert(configured.Contains("AgentHalo.exe") &&
+                    configured.Contains("--claude-hook") &&
+                    configured.Contains("PreToolUse") &&
+                    configured.Contains("PostToolBatch") &&
+                    configured.Contains("PermissionRequest") &&
+                    configured.Contains("PermissionDenied") &&
+                    configured.Contains("user-command") &&
+                    !configured.Contains("AgentHaloHook.exe"),
                     "Claude hook configurator merges settings");
-                ClaudeHookConfigurator.Configure(claudeHome,
-                    "C:\\Program Files\\Agent Halo\\AgentHalo.exe");
+                ClaudeHookConfigurator.Configure(claudeHome, mainExe);
                 string configuredAgain = File.ReadAllText(claudeSettings, Encoding.UTF8);
-                Assert(configuredAgain.IndexOf("--claude-hook PreToolUse",
-                    StringComparison.Ordinal) ==
-                    configuredAgain.LastIndexOf("--claude-hook PreToolUse",
-                    StringComparison.Ordinal),
+                Assert(CountOccurrences(configuredAgain, "--claude-hook") ==
+                    CountOccurrences(configured, "--claude-hook"),
                     "Claude hook configurator is idempotent");
+
+                string liveHome = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-claude-live-" + Guid.NewGuid().ToString("N"));
+                string liveSessions = Path.Combine(liveHome, ".claude", "sessions");
+                Directory.CreateDirectory(liveSessions);
+                File.WriteAllText(Path.Combine(liveSessions, "live.json"),
+                    "{\"status\":\"waiting\",\"pid\":" +
+                    Process.GetCurrentProcess().Id.ToString(CultureInfo.InvariantCulture) +
+                    ",\"sessionId\":\"live\",\"cwd\":\"C:\\\\work\"}",
+                    Encoding.UTF8);
+                Assert(ClaudeLiveSessionReader.HasStandbySession(liveHome),
+                    "Claude live session reader detects standby CLI");
+                File.WriteAllText(Path.Combine(liveSessions, "live.json"),
+                    "{\"status\":\"waiting\",\"pid\":999999,\"sessionId\":\"dead\"}",
+                    Encoding.UTF8);
+                Assert(!ClaudeLiveSessionReader.HasStandbySession(liveHome),
+                    "Claude live session reader ignores dead pid");
+                Directory.Delete(liveHome, true);
                 Directory.Delete(claudeHome, true);
 
                 string claudeMetricsHome = Path.Combine(Path.GetTempPath(),
@@ -753,7 +904,11 @@ public static class Diagnostics
             {
                 ClaudeHookStatusMonitor monitor = new ClaudeHookStatusMonitor();
                 monitor.Refresh();
-                List<SessionSnapshot> snapshots = monitor.Snapshots();
+                ClaudeTranscriptSessionMonitor transcriptMonitor =
+                    new ClaudeTranscriptSessionMonitor();
+                transcriptMonitor.Refresh();
+                List<SessionSnapshot> snapshots = ClaudeStatusSourceMerger.Merge(
+                    monitor.Snapshots(), transcriptMonitor.Snapshots());
                 List<Dictionary<string, object>> rows =
                     new List<Dictionary<string, object>>();
                 foreach (SessionSnapshot snapshot in snapshots)
@@ -798,12 +953,125 @@ public static class Diagnostics
             return new JavaScriptSerializer().Serialize(record);
         }
 
+        private static string ClaudeHookLine(string eventName, string sessionId,
+            string cwd, string timestamp)
+        {
+            return ClaudeHookLine(eventName, sessionId, cwd, null, null, timestamp);
+        }
+
+        private static string ClaudeHookLine(string eventName, string sessionId,
+            string cwd, string timestamp, string toolName)
+        {
+            return ClaudeHookLine(eventName, sessionId, cwd, toolName, null, timestamp);
+        }
+
+        private static string ClaudeTranscriptUserLine(string sessionId,
+            string cwd, string content, string timestamp)
+        {
+            Dictionary<string, object> message = new Dictionary<string, object>();
+            message["role"] = "user";
+            message["content"] = content;
+            return ClaudeTranscriptLine("user", null, sessionId, cwd, message,
+                timestamp);
+        }
+
+        private static string ClaudeTranscriptAssistantToolLine(string sessionId,
+            string cwd, string toolName, string timestamp)
+        {
+            Dictionary<string, object> tool = new Dictionary<string, object>();
+            tool["type"] = "tool_use";
+            tool["id"] = "toolu_1";
+            tool["name"] = toolName;
+            Dictionary<string, object> message = new Dictionary<string, object>();
+            message["role"] = "assistant";
+            message["stop_reason"] = "tool_use";
+            message["content"] = new object[] { tool };
+            return ClaudeTranscriptLine("assistant", null, sessionId, cwd, message,
+                timestamp);
+        }
+
+        private static string ClaudeTranscriptToolResultLine(string sessionId,
+            string cwd, string timestamp)
+        {
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["type"] = "tool_result";
+            result["tool_use_id"] = "toolu_1";
+            result["content"] = "ok";
+            result["is_error"] = false;
+            Dictionary<string, object> message = new Dictionary<string, object>();
+            message["role"] = "user";
+            message["content"] = new object[] { result };
+            return ClaudeTranscriptLine("user", null, sessionId, cwd, message,
+                timestamp);
+        }
+
+        private static string ClaudeTranscriptAssistantTextLine(string sessionId,
+            string cwd, string timestamp)
+        {
+            Dictionary<string, object> text = new Dictionary<string, object>();
+            text["type"] = "text";
+            text["text"] = "Thinking through the next step.";
+            Dictionary<string, object> message = new Dictionary<string, object>();
+            message["role"] = "assistant";
+            message["stop_reason"] = "end_turn";
+            message["content"] = new object[] { text };
+            return ClaudeTranscriptLine("assistant", null, sessionId, cwd, message,
+                timestamp);
+        }
+
+        private static string ClaudeTranscriptTurnDurationLine(string sessionId,
+            string cwd, string timestamp)
+        {
+            return ClaudeTranscriptSystemLine(sessionId, cwd, "turn_duration",
+                timestamp);
+        }
+
+        private static string ClaudeTranscriptSystemLine(string sessionId,
+            string cwd, string subtype, string timestamp)
+        {
+            return ClaudeTranscriptLine("system", subtype, sessionId, cwd, null,
+                timestamp);
+        }
+
+        private static string ClaudeTranscriptLine(string type, string subtype,
+            string sessionId, string cwd, Dictionary<string, object> message,
+            string timestamp)
+        {
+            Dictionary<string, object> record = new Dictionary<string, object>();
+            record["type"] = type;
+            if (!String.IsNullOrEmpty(subtype))
+            {
+                record["subtype"] = subtype;
+            }
+            record["sessionId"] = sessionId;
+            record["cwd"] = cwd;
+            record["timestamp"] = timestamp;
+            if (message != null)
+            {
+                record["message"] = message;
+            }
+            return new JavaScriptSerializer().Serialize(record);
+        }
+
         private static void Assert(bool condition, string name)
         {
             if (!condition)
             {
                 throw new InvalidOperationException("Assertion failed: " + name);
             }
+        }
+
+        private static int CountOccurrences(string text, string value)
+        {
+            int count = 0;
+            int index = 0;
+            while (!String.IsNullOrEmpty(value) &&
+                (index = text.IndexOf(value, index, StringComparison.Ordinal)) >= 0)
+            {
+                count++;
+                index += value.Length;
+            }
+            return count;
         }
 
         private static double ColorSaturation(MediaColor color)

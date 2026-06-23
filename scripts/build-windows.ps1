@@ -58,7 +58,7 @@ $sources = Get-ChildItem -LiteralPath $windows -Filter *.cs |
     Sort-Object Name |
     ForEach-Object { $_.FullName }
 
-& $csc /nologo /target:winexe /platform:anycpu /optimize+ `
+& $csc /nologo /target:exe /platform:anycpu /optimize+ /main:CodexHalo.Program `
     /out:$exe /win32manifest:"$windows\app.manifest" /win32icon:$iconPath `
     $referenceArgs $sources
 
@@ -69,6 +69,7 @@ if ($LASTEXITCODE -ne 0) {
 Copy-Item -LiteralPath "$root\README.md" -Destination "$output\README.md" -Force
 Remove-Item -LiteralPath (Join-Path $output "AgentHalo.pdb") -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $output "sqlite3.exe") -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $output "AgentHaloHook.exe") -ErrorAction SilentlyContinue
 
 $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
 $hashLine = "$hash  AgentHalo.exe"

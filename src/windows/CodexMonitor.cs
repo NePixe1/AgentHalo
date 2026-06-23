@@ -1312,6 +1312,8 @@ public static class RateLimitReader
                     })
                     .OrderByDescending(File.GetLastWriteTimeUtc)
                     .Take(GeneratedHaloSpec.RateLimitRecentFileCount);
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                serializer.MaxJsonLength = Int32.MaxValue;
                 foreach (string path in files)
                 {
                     string[] lines = ReadTailLines(path);
@@ -1323,49 +1325,8 @@ public static class RateLimitReader
                         {
                             continue;
                         }
-                        object parsed = new JavaScriptSerializer().DeserializeObject(lines[index]);
-                        Dictionary<string, object> rootObject = parsed as Dictionary<string, object>;
-                        Dictionary<string, object> payload = Child(rootObject,
-                            GeneratedHaloSpec.RatePayloadKey);
-                        Dictionary<string, object> info = Child(payload,
-                            GeneratedHaloSpec.RateInfoKey);
-                        Dictionary<string, object> limits = Child(payload,
-                            GeneratedHaloSpec.RateLimitsKey);
-                        if (limits == null)
-                        {
-                            limits = Child(info, GeneratedHaloSpec.RateLimitsKey);
-                        }
-                        Dictionary<string, object> primary = Child(limits,
-                            GeneratedHaloSpec.RatePrimaryKey);
-                        Dictionary<string, object> secondary = Child(limits,
-                            GeneratedHaloSpec.RateSecondaryKey);
-                        if (primary != null)
-                        {
-                            metrics.PrimaryUsedPercent = Number(primary,
-                                GeneratedHaloSpec.RateUsedPercentKey);
-                            metrics.PrimaryResetUtc = UnixTime(primary, "resets_at");
-                            metrics.HasPrimary = true;
-                        }
-                        if (secondary != null)
-                        {
-                            metrics.SecondaryUsedPercent = Number(secondary,
-                                GeneratedHaloSpec.RateUsedPercentKey);
-                            metrics.SecondaryResetUtc = UnixTime(secondary, "resets_at");
-                            metrics.HasSecondary = true;
-                        }
-                        Dictionary<string, object> lastUsage = Child(info,
-                            "last_token_usage");
-                        if (lastUsage != null && info != null &&
-                            lastUsage.ContainsKey("input_tokens") &&
-                            info.ContainsKey("model_context_window"))
-                        {
-                            metrics.ContextInputTokens = Convert.ToInt64(
-                                lastUsage["input_tokens"], CultureInfo.InvariantCulture);
-                            metrics.ContextWindowTokens = Convert.ToInt64(
-                                info["model_context_window"], CultureInfo.InvariantCulture);
-                        }
-                        if (metrics.HasPrimary || metrics.HasSecondary ||
-                            metrics.HasContext)
+                        ApplyRateLimitLine(lines[index], metrics, serializer);
+                        if (HasCompleteMetrics(metrics))
                         {
                             return true;
                         }
@@ -1375,7 +1336,82 @@ public static class RateLimitReader
             catch
             {
             }
-            return false;
+            return metrics.HasPrimary || metrics.HasSecondary || metrics.HasContext;
+        }
+
+        internal static bool TryReadFromNewestLinesForTest(
+            IEnumerable<string> newestFirst, out UsageMetrics metrics)
+        {
+            metrics = new UsageMetrics
+            {
+                ContextInputTokens = -1
+            };
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            serializer.MaxJsonLength = Int32.MaxValue;
+            foreach (string line in newestFirst)
+            {
+                if (String.IsNullOrEmpty(line) ||
+                    !line.Contains(GeneratedHaloSpec.RateLimitMarker))
+                {
+                    continue;
+                }
+                ApplyRateLimitLine(line, metrics, serializer);
+                if (HasCompleteMetrics(metrics))
+                {
+                    return true;
+                }
+            }
+            return metrics.HasPrimary || metrics.HasSecondary || metrics.HasContext;
+        }
+
+        private static bool HasCompleteMetrics(UsageMetrics metrics)
+        {
+            return metrics.HasPrimary && metrics.HasSecondary && metrics.HasContext;
+        }
+
+        private static void ApplyRateLimitLine(string line, UsageMetrics metrics,
+            JavaScriptSerializer serializer)
+        {
+            object parsed = serializer.DeserializeObject(line);
+            Dictionary<string, object> rootObject = parsed as Dictionary<string, object>;
+            Dictionary<string, object> payload = Child(rootObject,
+                GeneratedHaloSpec.RatePayloadKey);
+            Dictionary<string, object> info = Child(payload,
+                GeneratedHaloSpec.RateInfoKey);
+            Dictionary<string, object> limits = Child(payload,
+                GeneratedHaloSpec.RateLimitsKey);
+            if (limits == null)
+            {
+                limits = Child(info, GeneratedHaloSpec.RateLimitsKey);
+            }
+            Dictionary<string, object> primary = Child(limits,
+                GeneratedHaloSpec.RatePrimaryKey);
+            Dictionary<string, object> secondary = Child(limits,
+                GeneratedHaloSpec.RateSecondaryKey);
+            if (!metrics.HasPrimary && primary != null)
+            {
+                metrics.PrimaryUsedPercent = Number(primary,
+                    GeneratedHaloSpec.RateUsedPercentKey);
+                metrics.PrimaryResetUtc = UnixTime(primary, "resets_at");
+                metrics.HasPrimary = true;
+            }
+            if (!metrics.HasSecondary && secondary != null)
+            {
+                metrics.SecondaryUsedPercent = Number(secondary,
+                    GeneratedHaloSpec.RateUsedPercentKey);
+                metrics.SecondaryResetUtc = UnixTime(secondary, "resets_at");
+                metrics.HasSecondary = true;
+            }
+            Dictionary<string, object> lastUsage = Child(info, "last_token_usage");
+            if (!metrics.HasContext && lastUsage != null && info != null &&
+                lastUsage.ContainsKey("input_tokens") &&
+                info.ContainsKey("model_context_window"))
+            {
+                metrics.ContextInputTokens = Convert.ToInt64(
+                    lastUsage["input_tokens"], CultureInfo.InvariantCulture);
+                metrics.ContextWindowTokens = Convert.ToInt64(
+                    info["model_context_window"], CultureInfo.InvariantCulture);
+            }
         }
 
         private static double Number(Dictionary<string, object> source, string key)

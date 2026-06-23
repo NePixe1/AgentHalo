@@ -119,10 +119,12 @@ public sealed class DetailsWindow : Window
             AllowsTransparency = true;
             Background = System.Windows.Media.Brushes.Transparent;
             ShowInTaskbar = false;
+            ShowActivated = false;
             ResizeMode = ResizeMode.NoResize;
             Topmost = true;
             UseLayoutRounding = true;
             SnapsToDevicePixels = true;
+            SourceInitialized += OnSourceInitialized;
 
             shell = new Border();
             shell.CornerRadius = new CornerRadius(16);
@@ -245,6 +247,13 @@ public sealed class DetailsWindow : Window
                 }
             };
             quotaTimer.Start();
+        }
+
+        private void OnSourceInitialized(object sender, EventArgs e)
+        {
+            IntPtr handle = new WindowInteropHelper(this).Handle;
+            int style = GetWindowLong(handle, -20);
+            SetWindowLong(handle, -20, style | 0x08000000 | 0x00000080);
         }
 
         public void UpdateContent(AggregateSnapshot aggregate, List<SessionSnapshot> sessions)
@@ -881,5 +890,11 @@ public sealed class DetailsWindow : Window
             TextOptions.SetTextRenderingMode(block, TextRenderingMode.Auto);
             return block;
         }
+
+        [DllImport("user32.dll")]
+        private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+        [DllImport("user32.dll")]
+        private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
     }
 }
