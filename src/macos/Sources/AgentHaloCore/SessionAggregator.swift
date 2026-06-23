@@ -64,7 +64,8 @@ public enum SessionAggregator {
             if snapshot.agent == .codex && !codexRunning {
                 return false
             }
-            if now.timeIntervalSince(snapshot.lastEventAt) >= 600 {
+            if (snapshot.state == .thinking || snapshot.state == .working)
+                && now.timeIntervalSince(snapshot.lastEventAt) >= 600 {
                 return false
             }
             return true

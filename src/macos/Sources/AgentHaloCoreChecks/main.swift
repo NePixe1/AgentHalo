@@ -1880,6 +1880,29 @@ func testAggregateFiltersInactiveAndTimedOutSessions() {
     expect(timedOutAgg.state, .idle, "timed out active session should filter out to idle")
     expect(timedOutAgg.sessions.count, 0, "should filter out timed out session")
 
+    // 2b. 测试 attention 状态（等待授权等）即使超过 10 分钟也不应该被超时过滤
+    let timedOutAttentionSnap = SessionSnapshot(
+        threadId: "timedout-attention-codex",
+        projectName: "CodexTimedOutAttention",
+        workingDirectory: "",
+        state: .attention,
+        action: "Needs you",
+        lastEventAt: now.addingTimeInterval(-601),
+        completedAt: nil,
+        active: true,
+        agent: .codex
+    )
+    let timedOutAttentionAgg = SessionAggregator.aggregate(
+        snapshots: [timedOutAttentionSnap],
+        settings: HaloSettings(paused: false),
+        recentFailure: nil,
+        codexRunning: true,
+        focusedAgent: .codex,
+        now: now
+    )
+    expect(timedOutAttentionAgg.state, .attention, "timed out attention session should NOT filter out")
+    expect(timedOutAttentionAgg.sessions.count, 1, "should preserve timed out attention session")
+
     // 3. 测试 codexRunning == false 时的过滤
     let notRunningAgg = SessionAggregator.aggregate(
         snapshots: [activeSnap],
