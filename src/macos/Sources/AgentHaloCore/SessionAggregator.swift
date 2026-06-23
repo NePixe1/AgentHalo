@@ -14,7 +14,7 @@ public enum SessionAggregator {
             snapshots: snapshots,
             settings: settings,
             recentFailure: nil,
-            codexRunning: false,
+            codexRunning: true,
             focusedAgent: focusedAgent,
             now: now
         )
@@ -58,7 +58,16 @@ public enum SessionAggregator {
                 }
                 return snapshot.lastEventAt >= now.addingTimeInterval(-43_200)
             }
-            return snapshot.active
+            guard snapshot.active else {
+                return false
+            }
+            if snapshot.agent == .codex && !codexRunning {
+                return false
+            }
+            if now.timeIntervalSince(snapshot.lastEventAt) >= 600 {
+                return false
+            }
+            return true
         }
         .sorted { left, right in
             let leftPriority = priority(left.state)

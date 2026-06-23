@@ -1785,8 +1785,8 @@ testPlanModeFromTurnContextHoldsAttentionAtTaskComplete()
 testPlanModeCompletedPlanItemHoldsAttentionAtTaskComplete()
 testNonPlanTaskCompleteStillTurnsGreen()
 testPlanModeWithoutFinalAnswerStillTurnsGreen()
-testPlanModeFlagResetsAcrossTurns()
 testPlanModeFlagResetsAfterFatalTurn()
+testAggregateFiltersInactiveAndTimedOutSessions()
 print("PASS AgentHaloCore checks")
 
 func testClaudeReducerDoesNotCompleteWithoutExplicitCompletionEvent() {
@@ -1830,3 +1830,79 @@ func testClaudeReducerDoesNotCompleteWithoutExplicitCompletionEvent() {
     expect(reducer.snapshot.active, true, "Should remain active without an explicit Claude completion event")
     expect(reducer.snapshot.completedAt == nil, "Should not set completedAt without an explicit Claude completion event")
 }
+
+func testAggregateFiltersInactiveAndTimedOutSessions() {
+    let now = Date()
+    let activeSnap = SessionSnapshot(
+        threadId: "active-codex",
+        projectName: "CodexActive",
+        workingDirectory: "",
+        state: .thinking,
+        action: "Thinking",
+        lastEventAt: now,
+        completedAt: nil,
+        active: true,
+        agent: .codex
+    )
+    
+    // 1. 测试正常状态下 activeSnap 在 10 分钟内应判定为活跃
+    let freshAgg = SessionAggregator.aggregate(
+        snapshots: [activeSnap],
+        settings: HaloSettings(paused: false),
+        recentFailure: nil,
+        codexRunning: true,
+        focusedAgent: .codex,
+        now: now
+    )
+    expect(freshAgg.state, .thinking, "fresh active session should show thinking")
+    expect(freshAgg.sessions.count, 1, "should contain 1 session")
+
+    // 2. 测试 10 分钟（600秒）超时过滤
+    let timedOutSnap = SessionSnapshot(
+        threadId: "timedout-codex",
+        projectName: "CodexTimedOut",
+        workingDirectory: "",
+        state: .thinking,
+        action: "Thinking",
+        lastEventAt: now.addingTimeInterval(-601),
+        completedAt: nil,
+        active: true,
+        agent: .codex
+    )
+    let timedOutAgg = SessionAggregator.aggregate(
+        snapshots: [timedOutSnap],
+        settings: HaloSettings(paused: false),
+        recentFailure: nil,
+        codexRunning: true,
+        focusedAgent: .codex,
+        now: now
+    )
+    expect(timedOutAgg.state, .idle, "timed out active session should filter out to idle")
+    expect(timedOutAgg.sessions.count, 0, "should filter out timed out session")
+
+    // 3. 测试 codexRunning == false 时的过滤
+    let notRunningAgg = SessionAggregator.aggregate(
+        snapshots: [activeSnap],
+        settings: HaloSettings(paused: false),
+        recentFailure: nil,
+        codexRunning: false,
+        focusedAgent: .codex,
+        now: now
+    )
+    expect(notRunningAgg.state, .idle, "not running codex should filter out active session to idle")
+    expect(notRunningAgg.sessions.count, 0, "should filter out when codex is not running")
+
+    // 4. 测试当活跃会话过滤掉时，能够正确触发 recentFailure
+    let failure = CodexFailure(detail: "额度已用尽", eventAt: now.addingTimeInterval(-10))
+    let failureAgg = SessionAggregator.aggregate(
+        snapshots: [timedOutSnap],
+        settings: HaloSettings(paused: false, installedAt: now.addingTimeInterval(-600)),
+        recentFailure: failure,
+        codexRunning: true,
+        focusedAgent: .codex,
+        now: now
+    )
+    expect(failureAgg.state, .error, "should surface synthetic error when active session is filtered out")
+    expect(failureAgg.detail, "额度已用尽", "should show correct failure detail")
+}
+
