@@ -31,7 +31,7 @@ final class DetailsPanel: NSPanel {
 
     init() {
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 318, height: 191),
+            contentRect: NSRect(x: 0, y: 0, width: 268, height: 191),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -307,7 +307,7 @@ final class DetailsPanel: NSPanel {
             row.heightAnchor.constraint(equalToConstant: 24),
             agentToggle.leadingAnchor.constraint(equalTo: row.leadingAnchor),
             agentToggle.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            agentToggle.widthAnchor.constraint(equalToConstant: 110),
+            agentToggle.widthAnchor.constraint(equalToConstant: 76),
             agentToggle.heightAnchor.constraint(equalToConstant: 24),
             contextPill.trailingAnchor.constraint(equalTo: row.trailingAnchor),
             contextPill.centerYAnchor.constraint(equalTo: row.centerYAnchor),
