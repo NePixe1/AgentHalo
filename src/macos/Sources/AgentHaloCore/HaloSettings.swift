@@ -9,6 +9,9 @@ public struct HaloSettings: Codable, Equatable, Sendable {
     public var hasPosition: Bool
     public var left: Double
     public var top: Double
+    public var preferredDisplayUUID: String?
+    public var preferredDisplayOffsetX: Double?
+    public var preferredDisplayOffsetY: Double?
     public var haloSize: Double
     public var alwaysOnTop: Bool
     public var alwaysOnTopBehaviorVersion: Int
@@ -22,6 +25,9 @@ public struct HaloSettings: Codable, Equatable, Sendable {
         case hasPosition
         case left
         case top
+        case preferredDisplayUUID
+        case preferredDisplayOffsetX
+        case preferredDisplayOffsetY
         case haloSize
         case alwaysOnTop
         case alwaysOnTopBehaviorVersion
@@ -36,6 +42,9 @@ public struct HaloSettings: Codable, Equatable, Sendable {
         hasPosition: Bool = false,
         left: Double = 0,
         top: Double = 0,
+        preferredDisplayUUID: String? = nil,
+        preferredDisplayOffsetX: Double? = nil,
+        preferredDisplayOffsetY: Double? = nil,
         haloSize: Double = HaloSettings.defaultHaloSize,
         alwaysOnTop: Bool = true,
         alwaysOnTopBehaviorVersion: Int = HaloSettings.currentAlwaysOnTopBehaviorVersion,
@@ -48,6 +57,9 @@ public struct HaloSettings: Codable, Equatable, Sendable {
         self.hasPosition = hasPosition
         self.left = left
         self.top = top
+        self.preferredDisplayUUID = preferredDisplayUUID
+        self.preferredDisplayOffsetX = preferredDisplayOffsetX
+        self.preferredDisplayOffsetY = preferredDisplayOffsetY
         self.haloSize = Self.clampedHaloSize(haloSize)
         self.alwaysOnTop = alwaysOnTop
         self.alwaysOnTopBehaviorVersion = alwaysOnTopBehaviorVersion
@@ -63,6 +75,9 @@ public struct HaloSettings: Codable, Equatable, Sendable {
         self.hasPosition = try container.decodeIfPresent(Bool.self, forKey: .hasPosition) ?? false
         self.left = try container.decodeIfPresent(Double.self, forKey: .left) ?? 0
         self.top = try container.decodeIfPresent(Double.self, forKey: .top) ?? 0
+        self.preferredDisplayUUID = try container.decodeIfPresent(String.self, forKey: .preferredDisplayUUID)
+        self.preferredDisplayOffsetX = try container.decodeIfPresent(Double.self, forKey: .preferredDisplayOffsetX)
+        self.preferredDisplayOffsetY = try container.decodeIfPresent(Double.self, forKey: .preferredDisplayOffsetY)
         self.haloSize = Self.clampedHaloSize(
             try container.decodeIfPresent(Double.self, forKey: .haloSize) ?? Self.defaultHaloSize
         )

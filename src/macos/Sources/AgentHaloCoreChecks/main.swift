@@ -279,6 +279,40 @@ func testSettingsPersistFormalFieldsAndNormalizePaused() {
     expect(loaded.acknowledgedErrorAt, acknowledgedErrorAt, "acknowledgedErrorAt should persist")
 }
 
+func testSettingsDefaultsPreferredDisplayPlacementForLegacyFiles() throws {
+    let data = Data(#"{"hasPosition":true,"left":1800,"top":600}"#.utf8)
+    let settings = try JSONDecoder().decode(HaloSettings.self, from: data)
+
+    expect(settings.preferredDisplayUUID == nil, "legacy settings should not invent a display UUID")
+    expect(settings.preferredDisplayOffsetX == nil, "legacy settings should not invent an x offset")
+    expect(settings.preferredDisplayOffsetY == nil, "legacy settings should not invent a y offset")
+}
+
+func testSettingsPersistPreferredDisplayPlacement() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-display-placement-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
+    let url = root.appendingPathComponent("settings.json")
+    let store = SettingsStore(settingsURL: url)
+    let settings = HaloSettings(
+        hasPosition: true,
+        left: 1800,
+        top: 600,
+        preferredDisplayUUID: "secondary-display",
+        preferredDisplayOffsetX: 120,
+        preferredDisplayOffsetY: 80
+    )
+
+    store.save(settings)
+    let loaded = store.load()
+
+    expect(loaded.preferredDisplayUUID, "secondary-display", "preferred display UUID")
+    expect(loaded.preferredDisplayOffsetX, 120, "preferred display x offset")
+    expect(loaded.preferredDisplayOffsetY, 80, "preferred display y offset")
+}
+
 func testSettingsUsesDefaultHaloSizeForLegacyFilesAndClampsInvalidSizes() {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-size-\(UUID().uuidString)", isDirectory: true)
@@ -1824,6 +1858,12 @@ testAggregatePrioritizesActionableSessions()
 testAggregateRemovesSupersededSessionErrors()
 testAcknowledgingCompletedSessionsStoresLatestVisibleCompletionOnly()
 testSettingsPersistFormalFieldsAndNormalizePaused()
+do {
+    try testSettingsDefaultsPreferredDisplayPlacementForLegacyFiles()
+    try testSettingsPersistPreferredDisplayPlacement()
+} catch {
+    fatalError("preferred display placement settings checks failed: \(error)")
+}
 testSettingsUsesDefaultHaloSizeForLegacyFilesAndClampsInvalidSizes()
 testSettingsMigratesLegacyAlwaysOnTopOffToDefaultOn()
 testSettingsPreservesExplicitAlwaysOnTopOffAfterMigrationVersion()
