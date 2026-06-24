@@ -13,10 +13,14 @@ final class DetailsPanel: NSPanel {
     private let contextPill = NSView()
     private let quotaGroup = NSStackView()
     private let metadataGroup = NSStackView()
-    private let projectRow = MetadataRowView(title: "项目")
-    private let modelRow = MetadataRowView(title: "模型")
-    private let projectModelSeparator = NSView()
-    private let modelTokenSeparator = NSView()
+    private let projectRow = MetadataRowView(
+        title: "项目"
+    )
+    private let modelRow = MetadataRowView(
+        title: "模型"
+    )
+    private let projectModelSeparator = SeparatorView()
+    private let modelTokenSeparator = SeparatorView()
     private let tokenRow = MetadataRowView(
         title: "Token",
         valueFont: .systemFont(ofSize: 11.5, weight: .medium)
@@ -27,7 +31,7 @@ final class DetailsPanel: NSPanel {
 
     init() {
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 338, height: 191),
+            contentRect: NSRect(x: 0, y: 0, width: 318, height: 191),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -52,7 +56,7 @@ final class DetailsPanel: NSPanel {
         stack.orientation = .vertical
         stack.spacing = 0
         stack.alignment = .leading
-        stack.edgeInsets = NSEdgeInsets(top: 14, left: 17, bottom: 10, right: 17)
+        stack.edgeInsets = NSEdgeInsets(top: 14, left: 17, bottom: 4, right: 17)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         let topRow = makeTopRow()
@@ -81,13 +85,10 @@ final class DetailsPanel: NSPanel {
 
         metadataGroup.orientation = .vertical
         metadataGroup.spacing = 0
-        metadataGroup.alignment = .leading
+        metadataGroup.alignment = .width
         metadataGroup.translatesAutoresizingMaskIntoConstraints = false
-        [projectModelSeparator, modelTokenSeparator].forEach {
-            $0.wantsLayer = true
-            $0.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.27).cgColor
-            $0.translatesAutoresizingMaskIntoConstraints = false
-        }
+        
+        metadataGroup.edgeInsets = NSEdgeInsets(top: 4, left: 0, bottom: 0, right: 0)
         metadataGroup.addArrangedSubview(projectRow)
         metadataGroup.addArrangedSubview(projectModelSeparator)
         metadataGroup.addArrangedSubview(modelRow)
@@ -117,14 +118,8 @@ final class DetailsPanel: NSPanel {
             quotaGroup.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
             primaryQuota.trailingAnchor.constraint(equalTo: quotaGroup.trailingAnchor),
             secondaryQuota.trailingAnchor.constraint(equalTo: quotaGroup.trailingAnchor),
-            metadataGroup.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
-            projectRow.trailingAnchor.constraint(equalTo: metadataGroup.trailingAnchor),
-            projectModelSeparator.trailingAnchor.constraint(equalTo: metadataGroup.trailingAnchor),
-            projectModelSeparator.heightAnchor.constraint(equalToConstant: 1),
-            modelRow.trailingAnchor.constraint(equalTo: metadataGroup.trailingAnchor),
-            modelTokenSeparator.trailingAnchor.constraint(equalTo: metadataGroup.trailingAnchor),
-            modelTokenSeparator.heightAnchor.constraint(equalToConstant: 1),
-            tokenRow.trailingAnchor.constraint(equalTo: metadataGroup.trailingAnchor)
+            metadataGroup.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 17),
+            metadataGroup.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17)
         ])
     }
 
@@ -148,6 +143,7 @@ final class DetailsPanel: NSPanel {
         updateStatus(aggregate: aggregate)
 
         let showsCodexQuota = showsQuota ?? (aggregate.focusedAgent == .codex)
+        stack.setCustomSpacing(showsCodexQuota ? 13 : 4, after: detailField)
         contextPill.isHidden = contextUsedPercent == nil
         contextValue.stringValue = contextUsedPercent.map {
             "上下文 \(Int($0.rounded()))%"
@@ -158,7 +154,14 @@ final class DetailsPanel: NSPanel {
         metadataGroup.isHidden = showsCodexQuota
         projectRow.value = Self.displayValue(sessionDetails?.projectName)
         modelRow.value = Self.displayValue(sessionDetails?.modelName)
-        tokenRow.value = "输入 \(Self.compactTokenCount(sessionDetails?.inputTokens)) · 输出 \(Self.compactTokenCount(sessionDetails?.outputTokens))"
+        if sessionDetails?.inputTokens != nil || sessionDetails?.outputTokens != nil {
+            tokenRow.attributedStringValue = Self.formatTokenAttributedString(
+                input: sessionDetails?.inputTokens,
+                output: sessionDetails?.outputTokens
+            )
+        } else {
+            tokenRow.value = "--"
+        }
 
         guard showsCodexQuota else {
             primaryQuota.updateUnavailable()
@@ -213,6 +216,38 @@ final class DetailsPanel: NSPanel {
             return "\(Int(thousands))k"
         }
         return String(format: "%.1fk", locale: Locale(identifier: "en_US_POSIX"), thousands)
+    }
+
+    static func formatTokenAttributedString(input: Int64?, output: Int64?) -> NSAttributedString {
+        let inputStr = compactTokenCount(input)
+        let outputStr = compactTokenCount(output)
+        
+        let font = NSFont.systemFont(ofSize: 11.5, weight: .medium)
+        // 莫兰迪蓝灰色：输入 (In)
+        let inColor = NSColor(calibratedRed: 0.25, green: 0.45, blue: 0.65, alpha: 1)
+        // 莫兰迪绿灰色：输出 (Out)
+        let outColor = NSColor(calibratedRed: 0.25, green: 0.55, blue: 0.45, alpha: 1)
+        // 中间分隔点颜色
+        let sepColor = NSColor.secondaryLabelColor
+        
+        let attrStr = NSMutableAttributedString()
+        
+        attrStr.append(NSAttributedString(string: "↑ \(inputStr)", attributes: [
+            .font: font,
+            .foregroundColor: inColor
+        ]))
+        
+        attrStr.append(NSAttributedString(string: "  ·  ", attributes: [
+            .font: font,
+            .foregroundColor: sepColor
+        ]))
+        
+        attrStr.append(NSAttributedString(string: "↓ \(outputStr)", attributes: [
+            .font: font,
+            .foregroundColor: outColor
+        ]))
+        
+        return attrStr
     }
 
     private static func displayValue(_ value: String?) -> String {
@@ -344,40 +379,92 @@ final class DetailsPanel: NSPanel {
 }
 
 @MainActor
+private final class SeparatorView: NSView {
+    private let line = NSView()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+        heightAnchor.constraint(equalToConstant: 1).isActive = true
+
+        line.wantsLayer = true
+        line.layer?.backgroundColor = NSColor.textColor.withAlphaComponent(0.06).cgColor
+        line.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(line)
+
+        NSLayoutConstraint.activate([
+            line.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 0),
+            line.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 0),
+            line.topAnchor.constraint(equalTo: topAnchor),
+            line.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+}
+
+@MainActor
 private final class MetadataRowView: NSView {
     private let nameField: NSTextField
     private let valueField = NSTextField(labelWithString: "--")
+    private let valueBackground = NSView()
 
     var value: String {
         get { valueField.stringValue }
         set { valueField.stringValue = newValue }
     }
 
-    init(title: String, valueFont: NSFont = .systemFont(ofSize: 12, weight: .semibold)) {
+    var attributedStringValue: NSAttributedString {
+        get { valueField.attributedStringValue }
+        set { valueField.attributedStringValue = newValue }
+    }
+
+    init(title: String, isTagStyle: Bool = false, valueFont: NSFont = .systemFont(ofSize: 12, weight: .semibold)) {
         nameField = NSTextField(labelWithString: title)
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
 
-        nameField.font = .systemFont(ofSize: 12)
-        nameField.textColor = .labelColor
+        nameField.font = .systemFont(ofSize: 11.5)
+        nameField.textColor = .secondaryLabelColor
+        nameField.translatesAutoresizingMaskIntoConstraints = false
+        
         valueField.font = valueFont
         valueField.textColor = .labelColor
         valueField.alignment = .right
         valueField.lineBreakMode = .byTruncatingTail
         valueField.maximumNumberOfLines = 1
+        valueField.translatesAutoresizingMaskIntoConstraints = false
 
-        [nameField, valueField].forEach {
-            $0.translatesAutoresizingMaskIntoConstraints = false
-            addSubview($0)
+        valueBackground.translatesAutoresizingMaskIntoConstraints = false
+        if isTagStyle {
+            valueBackground.wantsLayer = true
+            valueBackground.layer?.cornerRadius = 5
+            valueBackground.layer?.backgroundColor = NSColor.textColor.withAlphaComponent(0.06).cgColor
+            valueBackground.layer?.borderWidth = 0.5
+            valueBackground.layer?.borderColor = NSColor.textColor.withAlphaComponent(0.08).cgColor
         }
+
+        addSubview(nameField)
+        addSubview(valueBackground)
+        valueBackground.addSubview(valueField)
+
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 25),
-            nameField.leadingAnchor.constraint(equalTo: leadingAnchor),
+            heightAnchor.constraint(equalToConstant: 28),
+
+            nameField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 0),
             nameField.centerYAnchor.constraint(equalTo: centerYAnchor),
-            nameField.widthAnchor.constraint(equalToConstant: 52),
-            valueField.leadingAnchor.constraint(greaterThanOrEqualTo: nameField.trailingAnchor, constant: 10),
-            valueField.trailingAnchor.constraint(equalTo: trailingAnchor),
-            valueField.centerYAnchor.constraint(equalTo: nameField.centerYAnchor)
+
+            valueBackground.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 0),
+            valueBackground.centerYAnchor.constraint(equalTo: centerYAnchor),
+            valueBackground.leadingAnchor.constraint(greaterThanOrEqualTo: nameField.trailingAnchor, constant: 10),
+
+            valueField.leadingAnchor.constraint(equalTo: valueBackground.leadingAnchor, constant: isTagStyle ? 6 : 0),
+            valueField.trailingAnchor.constraint(equalTo: valueBackground.trailingAnchor, constant: isTagStyle ? -6 : 0),
+            valueField.topAnchor.constraint(equalTo: valueBackground.topAnchor, constant: isTagStyle ? 2 : 0),
+            valueField.bottomAnchor.constraint(equalTo: valueBackground.bottomAnchor, constant: isTagStyle ? -2 : 0),
         ])
     }
 

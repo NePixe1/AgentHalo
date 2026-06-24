@@ -822,7 +822,7 @@ private func testDetailsPanelShowsSessionMetadataForCodexAndClaudeCode() {
     expect(!panel.metadataGroupHiddenForTesting, "third-party Codex metadata should be visible")
     expect(panel.projectValueForTesting, "AgentHalo", "details project value")
     expect(panel.modelValueForTesting, "gpt-5.5", "details model value")
-    expect(panel.tokenValueForTesting, "输入 38k · 输出 1.2k", "details token value")
+    expect(panel.tokenValueForTesting, "↑ 38k  ·  ↓ 1.2k", "details token value")
 
     let claude = AggregateSnapshot(
         state: .working,
@@ -841,7 +841,7 @@ private func testDetailsPanelShowsSessionMetadataForCodexAndClaudeCode() {
 
     expect(panel.focusedAgentForTesting == .claudeCode, "details panel should select Claude Code")
     expect(!panel.metadataGroupHiddenForTesting, "Claude Code metadata should be visible")
-    expect(panel.tokenValueForTesting, "输入 38k · 输出 1.2k", "Claude Code token value")
+    expect(panel.tokenValueForTesting, "↑ 38k  ·  ↓ 1.2k", "Claude Code token value")
 }
 
 @MainActor
@@ -882,8 +882,8 @@ private func testDetailsPanelUsesCompactMetadataLayout() {
     }
     for row in [arranged[0], arranged[2], arranged[4]] {
         expect(
-            row.constraints.contains { $0.firstAttribute == .height && $0.constant == 25 },
-            "each metadata row should use the same 25pt height"
+            row.constraints.contains { $0.firstAttribute == .height && $0.constant == 28 },
+            "each metadata row should use the same 28pt height"
         )
     }
     for separator in [arranged[1], arranged[3]] {
