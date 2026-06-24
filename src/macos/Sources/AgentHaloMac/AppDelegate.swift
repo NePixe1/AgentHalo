@@ -11,6 +11,69 @@ struct DetailsPresentation: Equatable {
     var contextUsedPercent: Double?
 }
 
+struct LiveErrorPresentationUpdate: Equatable {
+    var presentation: ErrorPresentation
+    var acknowledgeErrorAt: Date?
+}
+
+struct LiveErrorPresentationState {
+    private(set) var presentation: ErrorPresentation = .flashing
+    private var activeErrorAt: Date?
+    private var dimmedAt: Date?
+
+    mutating func update(
+        aggregate: AggregateSnapshot,
+        codexIsForeground: Bool,
+        codexWasForeground: Bool,
+        now: Date
+    ) -> LiveErrorPresentationUpdate {
+        guard aggregate.focusedAgent == .codex,
+              aggregate.state == .error else {
+            presentation = .flashing
+            activeErrorAt = nil
+            dimmedAt = nil
+            return LiveErrorPresentationUpdate(
+                presentation: presentation,
+                acknowledgeErrorAt: nil
+            )
+        }
+
+        let errorAt = aggregate.sessions
+            .filter { $0.state == .error }
+            .map(\.lastEventAt)
+            .max() ?? now
+
+        if activeErrorAt == nil || errorAt > activeErrorAt! {
+            activeErrorAt = errorAt
+            dimmedAt = nil
+            presentation = codexIsForeground ? .bright : .flashing
+        } else if codexIsForeground {
+            presentation = .bright
+            dimmedAt = nil
+        } else if codexWasForeground {
+            presentation = .dim
+            dimmedAt = now
+        } else if presentation == .dim,
+                  let dimmedAt,
+                  now.timeIntervalSince(dimmedAt) >= 60 {
+            presentation = .flashing
+            activeErrorAt = nil
+            self.dimmedAt = nil
+            return LiveErrorPresentationUpdate(
+                presentation: presentation,
+                acknowledgeErrorAt: errorAt
+            )
+        } else if presentation != .dim {
+            presentation = .flashing
+        }
+
+        return LiveErrorPresentationUpdate(
+            presentation: presentation,
+            acknowledgeErrorAt: nil
+        )
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let settingsStore: SettingsStore
@@ -39,6 +102,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let realtimeActivityReader = CodexRealtimeActivityReader()
     private let instanceLock = InstanceLock()
     private let codexActivator: () -> Void
+    private var liveErrorPresentationState = LiveErrorPresentationState()
+    private var codexWasForeground = false
     private var currentHaloSize: CGFloat {
         CGFloat(settings.haloSize)
     }
@@ -101,21 +166,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = claudeHookMonitor.refresh()
         _ = claudeSessionMonitor.refresh()
         acknowledgeCompletedIfCodexIsForeground()
+        let codexRunning = CodexAppDetector.isCodexRunning()
         aggregate = SessionAggregator.aggregate(
             snapshots: allSnapshots(),
             settings: settings,
             recentFailure: failureReader.readRecent(),
-            codexRunning: CodexAppDetector.isCodexRunning(),
+            codexRunning: codexRunning,
             focusedAgent: settings.focusedAgent
         )
-        aggregate = Self.claudeStandbyAggregate(
+        aggregate = Self.standbyAggregate(
             aggregate: aggregate,
-            hasLiveSession: settings.focusedAgent == .claudeCode
-                && aggregate.state == .idle
-                && ClaudeLiveSessionReader.hasStandbySession()
+            hasLiveSession: settings.focusedAgent == .codex
+                ? codexRunning
+                : ClaudeLiveSessionReader.hasStandbySession()
         )
         applyRealtimeCodexActivity()
-        haloView?.aggregate = aggregate
+        let codexIsForeground = CodexAppDetector.isCodexForeground()
+        let errorUpdate = liveErrorPresentationState.update(
+            aggregate: aggregate,
+            codexIsForeground: codexIsForeground,
+            codexWasForeground: codexWasForeground,
+            now: Date()
+        )
+        codexWasForeground = codexIsForeground
+        if let errorAt = errorUpdate.acknowledgeErrorAt {
+            settings = settings.acknowledgingError(at: errorAt)
+            settingsStore.save(settings)
+            aggregate = SessionAggregator.aggregate(
+                snapshots: allSnapshots(),
+                settings: settings,
+                recentFailure: failureReader.readRecent(),
+                codexRunning: codexRunning,
+                focusedAgent: settings.focusedAgent
+            )
+            aggregate = Self.standbyAggregate(
+                aggregate: aggregate,
+                hasLiveSession: settings.focusedAgent == .codex
+                    ? codexRunning
+                    : ClaudeLiveSessionReader.hasStandbySession()
+            )
+            applyRealtimeCodexActivity()
+        }
+        haloView?.updateLiveAggregate(
+            aggregate,
+            errorPresentation: errorUpdate.presentation
+        )
         refreshVisibleDetailsStatus()
         if !systemOverlaySuspended {
             haloView?.needsDisplay = true
@@ -477,21 +572,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
-    static func claudeStandbyAggregate(
+    static func standbyAggregate(
         aggregate: AggregateSnapshot,
         hasLiveSession: Bool
     ) -> AggregateSnapshot {
         guard hasLiveSession,
-              aggregate.focusedAgent == .claudeCode,
-              aggregate.state == .idle else {
+              aggregate.state == .idle,
+              aggregate.label == "READY" else {
             return aggregate
         }
         return AggregateSnapshot(
             state: .done,
             label: "STANDBY",
-            detail: AgentKind.claudeCode.localizedStandbyDetail,
+            detail: aggregate.focusedAgent.localizedStandbyDetail,
             sessions: [],
-            focusedAgent: .claudeCode
+            focusedAgent: aggregate.focusedAgent
         )
     }
 

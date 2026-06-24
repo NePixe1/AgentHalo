@@ -20,7 +20,7 @@ final class HaloView: NSView {
             }
             applyVisualState(
                 aggregate.state,
-                presentation: .flashing,
+                presentation: liveErrorPresentation,
                 answerStreaming: aggregate.answerStreaming
             )
         }
@@ -44,6 +44,7 @@ final class HaloView: NSView {
     private var lastFrameTimestamp = CACurrentMediaTime()
     private var visualState: HaloState = .idle
     private var errorPresentation: ErrorPresentation = .flashing
+    private var liveErrorPresentation: ErrorPresentation = .flashing
     private var steadyDone = false
     private var answerStreaming = false
     private var transitionFromVisual = HaloVisualModel.targetVisual(
@@ -167,6 +168,14 @@ final class HaloView: NSView {
         (animationTime, gapA, gapB)
     }
 
+    func updateLiveAggregate(
+        _ aggregate: AggregateSnapshot,
+        errorPresentation: ErrorPresentation
+    ) {
+        liveErrorPresentation = errorPresentation
+        self.aggregate = aggregate
+    }
+
     private func stepAnimation(delta: Double) {
         animationTime += max(0.001, min(delta, 0.08))
         sinceState += max(0.001, min(delta, 0.08))
@@ -242,7 +251,7 @@ final class HaloView: NSView {
         previewMode = false
         applyVisualState(
             aggregate.state,
-            presentation: .flashing,
+            presentation: liveErrorPresentation,
             answerStreaming: aggregate.answerStreaming
         )
     }

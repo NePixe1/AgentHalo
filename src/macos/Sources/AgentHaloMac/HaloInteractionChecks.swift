@@ -46,6 +46,9 @@ func runHaloInteractionChecks() {
     testFocusSubmenuSwitchesToClaudeCode()
     testSingleClickDoesNotActivateCodexWhenClaudeCodeFocused()
     testClaudeLiveStandbyUsesStableGreenAggregate()
+    testCodexRunningIdleUsesStableGreenAggregate()
+    testPausedAgentDoesNotUseStableGreenStandby()
+    testLiveCodexErrorCyclesThroughBrightAndDimPresentations()
     testDetailsPanelShowsCodexQuotaAndIdleCopy()
     testDetailsPanelShowsSessionMetadataForCodexAndClaudeCode()
     testDetailsPanelUsesCompactMetadataLayout()
@@ -628,13 +631,115 @@ private func testClaudeLiveStandbyUsesStableGreenAggregate() {
         focusedAgent: .claudeCode
     )
 
-    let standby = AppDelegate.claudeStandbyAggregate(aggregate: idle, hasLiveSession: true)
+    let standby = AppDelegate.standbyAggregate(aggregate: idle, hasLiveSession: true)
     expect(standby.state, .done, "live idle Claude Code should use the stable green state")
     expect(standby.label, "STANDBY", "live idle Claude Code label")
     expect(standby.detail, AgentKind.claudeCode.localizedStandbyDetail, "live idle Claude Code detail")
 
-    let offline = AppDelegate.claudeStandbyAggregate(aggregate: idle, hasLiveSession: false)
+    let offline = AppDelegate.standbyAggregate(aggregate: idle, hasLiveSession: false)
     expect(offline, idle, "offline Claude Code should retain the normal idle aggregate")
+}
+
+@MainActor
+private func testCodexRunningIdleUsesStableGreenAggregate() {
+    let idle = AggregateSnapshot(
+        state: .idle,
+        label: "READY",
+        detail: AgentKind.codex.standbyDetail,
+        sessions: [],
+        focusedAgent: .codex
+    )
+
+    let standby = AppDelegate.standbyAggregate(aggregate: idle, hasLiveSession: true)
+    expect(standby.state, .done, "running idle Codex should use the stable green state")
+    expect(standby.label, "STANDBY", "running idle Codex label")
+    expect(standby.detail, AgentKind.codex.localizedStandbyDetail, "running idle Codex detail")
+    expect(standby.sessions.isEmpty, "running idle Codex standby should not look like a completed session")
+}
+
+@MainActor
+private func testPausedAgentDoesNotUseStableGreenStandby() {
+    for agent in AgentKind.allCases {
+        let paused = AggregateSnapshot(
+            state: .idle,
+            label: "PAUSED",
+            detail: "Monitoring paused",
+            sessions: [],
+            focusedAgent: agent
+        )
+
+        let displayed = AppDelegate.standbyAggregate(
+            aggregate: paused,
+            hasLiveSession: true
+        )
+        expect(displayed, paused, "paused \(agent.menuTitle) should retain the idle presentation")
+    }
+}
+
+@MainActor
+private func testLiveCodexErrorCyclesThroughBrightAndDimPresentations() {
+    let eventAt = Date(timeIntervalSince1970: 1_750_000_000)
+    let errorSession = SessionSnapshot(
+        threadId: "codex-error",
+        projectName: "AgentHalo",
+        workingDirectory: "/tmp/AgentHalo",
+        state: .error,
+        action: "Connection failed",
+        lastEventAt: eventAt,
+        completedAt: nil,
+        active: false,
+        agent: .codex
+    )
+    let aggregate = AggregateSnapshot(
+        state: .error,
+        label: "INTERRUPTED",
+        detail: "Connection failed",
+        sessions: [errorSession],
+        focusedAgent: .codex
+    )
+    var state = LiveErrorPresentationState()
+
+    let flashing = state.update(
+        aggregate: aggregate,
+        codexIsForeground: false,
+        codexWasForeground: false,
+        now: eventAt
+    )
+    expect(flashing.presentation, .flashing, "background Codex error should begin by flashing")
+    expect(flashing.acknowledgeErrorAt == nil, "new Codex error should remain visible")
+
+    let bright = state.update(
+        aggregate: aggregate,
+        codexIsForeground: true,
+        codexWasForeground: false,
+        now: eventAt.addingTimeInterval(1)
+    )
+    expect(bright.presentation, .bright, "foreground Codex error should become bright")
+
+    let dim = state.update(
+        aggregate: aggregate,
+        codexIsForeground: false,
+        codexWasForeground: true,
+        now: eventAt.addingTimeInterval(2)
+    )
+    expect(dim.presentation, .dim, "Codex error should become dim after leaving the foreground")
+
+    let stillDim = state.update(
+        aggregate: aggregate,
+        codexIsForeground: false,
+        codexWasForeground: false,
+        now: eventAt.addingTimeInterval(61)
+    )
+    expect(stillDim.presentation, .dim, "dim Codex error should remain visible for one minute")
+    expect(stillDim.acknowledgeErrorAt == nil, "dim Codex error should not acknowledge early")
+
+    let acknowledged = state.update(
+        aggregate: aggregate,
+        codexIsForeground: false,
+        codexWasForeground: false,
+        now: eventAt.addingTimeInterval(63)
+    )
+    expect(acknowledged.acknowledgeErrorAt, eventAt, "dim Codex error should acknowledge after one minute")
 }
 
 private func previewSubmenu(in menu: NSMenu) -> NSMenu {
