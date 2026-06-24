@@ -298,8 +298,8 @@
       <div>
         <h1>Agent Halo 状态面板组合矩阵</h1>
         <p class="intro">
-          这张表按三层结构整理当前 Windows 面板的展示结果：第一层是光环视觉分类，第二层是 Agent，第三层是大标题与小标题组合。
-          大标题颜色来自 <code>HaloVisual.StateColor(aggregate.State)</code>；光环颜色通常跟状态一致，只有答案流式输出会切到绿色双脉冲环。
+          这张表按三层结构整理 Agent Halo 的目标展示结果：第一层是光环视觉分类，第二层是 Agent，第三层是大标题与小标题组合。
+          大标题颜色来自当前状态的颜色映射；光环颜色通常跟状态一致，只有答案流式输出会切到绿色双脉冲环。
         </p>
       </div>
       <div class="legend">
@@ -488,6 +488,7 @@
           <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
           <tbody>
             <tr><td><span class="headline" style="--headline: var(--done)">COMPLETE</span></td><td><span class="swatch" style="--headline: var(--done)">#26C66C</span></td><td><span class="subtitle">任务已完成</span></td><td class="note">Stop / turn_duration / stop_hook_summary。</td></tr>
+            <tr><td><span class="headline" style="--headline: var(--done)">COMPLETE</span></td><td><span class="swatch" style="--headline: var(--done)">#26C66C</span></td><td><span class="subtitle">上下文压缩完成</span></td><td class="note">非活动会话触发 PostCompact，Action = Context compacted。</td></tr>
           </tbody>
         </table>
       </div>
@@ -516,7 +517,7 @@
           <thead><tr><th>大标题</th><th>大标题颜色</th><th>小标题</th><th>触发说明</th></tr></thead>
           <tbody>
             <tr><td><span class="headline" style="--headline: var(--attention)">NEEDS YOU</span></td><td><span class="swatch" style="--headline: var(--attention)">#8E6CEC</span></td><td><span class="subtitle">等待你的授权</span></td><td class="note">AskUserQuestion / PermissionRequest，Action = Awaiting permission。</td></tr>
-            <tr><td><span class="headline" style="--headline: var(--attention)">NEEDS YOU</span></td><td><span class="swatch" style="--headline: var(--attention)">#8E6CEC</span></td><td><span class="subtitle">等待你的授权或输入</span></td><td class="note">其他 Attention 兜底，例如 PermissionDenied 当前没有单独小标题。</td></tr>
+            <tr><td><span class="headline" style="--headline: var(--attention)">NEEDS YOU</span></td><td><span class="swatch" style="--headline: var(--attention)">#8E6CEC</span></td><td><span class="subtitle">授权已拒绝</span></td><td class="note">PermissionDenied，Action = Permission denied。</td></tr>
           </tbody>
         </table>
       </div>
