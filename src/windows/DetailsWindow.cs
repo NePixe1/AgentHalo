@@ -74,10 +74,14 @@ public sealed class DetailsWindow : Window
         private readonly TextBlock headline;
         private readonly TextBlock subtitle;
         private readonly Border shell;
+        private readonly TextBlock fiveHourLabel;
         private readonly TextBlock fiveHourValue;
+        private readonly TextBlock weekLabel;
         private readonly TextBlock weekValue;
         private readonly TextBlock fiveHourReset;
         private readonly TextBlock weekReset;
+        private readonly Grid fiveHourRow;
+        private readonly Grid weekRow;
         private readonly TextBlock contextLabel;
         private readonly TextBlock contextHundredsDigit;
         private readonly TextBlock contextTensDigit;
@@ -199,12 +203,13 @@ public sealed class DetailsWindow : Window
             content.Children.Add(subtitle);
 
             quotaGroup = new StackPanel();
-            Grid fiveHour = CreateQuotaRow("5 小时额度", out fiveHourReset,
-                out fiveHourValue, out fiveHourBar);
-            quotaGroup.Children.Add(fiveHour);
-            Grid week = CreateQuotaRow("周额度", out weekReset, out weekValue, out weekBar);
-            week.Margin = new Thickness(0, 8, 0, 0);
-            quotaGroup.Children.Add(week);
+            fiveHourRow = CreateQuotaRow("5 小时额度", out fiveHourLabel,
+                out fiveHourReset, out fiveHourValue, out fiveHourBar);
+            quotaGroup.Children.Add(fiveHourRow);
+            weekRow = CreateQuotaRow("周额度", out weekLabel, out weekReset,
+                out weekValue, out weekBar);
+            weekRow.Margin = new Thickness(0, 8, 0, 0);
+            quotaGroup.Children.Add(weekRow);
 
             claudeGroup = new StackPanel();
             claudeProjectRow = CreateInfoRow("项目", out claudeProjectValue);
@@ -381,23 +386,13 @@ public sealed class DetailsWindow : Window
             }
             if (metrics != null)
             {
-                ApplyQuota(metrics.HasPrimary, metrics.PrimaryUsedPercent,
-                    metrics.PrimaryResetUtc, fiveHourValue, fiveHourReset, fiveHourBar);
-                ApplyQuota(metrics.HasSecondary, metrics.SecondaryUsedPercent,
-                    metrics.SecondaryResetUtc, weekValue, weekReset, weekBar);
+                ApplyQuotaMetrics(metrics);
                 SetContextPercent(metrics.HasContext, metrics.ContextUsedPercent);
             }
             else
             {
-                fiveHourValue.Text = "暂无数据";
-                weekValue.Text = "暂无数据";
-                fiveHourReset.Text = String.Empty;
-                weekReset.Text = String.Empty;
-                fiveHourReset.Visibility = Visibility.Collapsed;
-                weekReset.Visibility = Visibility.Collapsed;
+                ApplyPlusQuota(new UsageMetrics { ContextInputTokens = -1 });
                 SetContextPercent(false, 0);
-                fiveHourBar.Value = 0;
-                weekBar.Value = 0;
             }
         }
 
@@ -510,6 +505,59 @@ public sealed class DetailsWindow : Window
             }
         }
 
+        private void ApplyQuotaMetrics(UsageMetrics metrics)
+        {
+            if (metrics.HasPrimary && metrics.HasSecondary)
+            {
+                ApplyPlusQuota(metrics);
+            }
+            else if (metrics.HasMonthly)
+            {
+                ApplyMonthlyQuota(metrics, true);
+            }
+            else if (metrics.HasContext)
+            {
+                ApplyMonthlyQuota(metrics, false);
+            }
+            else
+            {
+                ApplyPlusQuota(metrics);
+            }
+        }
+
+        private void ApplyPlusQuota(UsageMetrics metrics)
+        {
+            quotaGroup.VerticalAlignment = VerticalAlignment.Top;
+            fiveHourLabel.Text = "5 小时额度";
+            weekLabel.Text = "周额度";
+            fiveHourRow.Visibility = Visibility.Visible;
+            weekRow.Visibility = Visibility.Visible;
+            fiveHourRow.Margin = new Thickness(0);
+            weekRow.Margin = new Thickness(0, 8, 0, 0);
+            ApplyQuota(metrics.HasPrimary, metrics.PrimaryUsedPercent,
+                metrics.PrimaryResetUtc, fiveHourValue, fiveHourReset, fiveHourBar);
+            ApplyQuota(metrics.HasSecondary, metrics.SecondaryUsedPercent,
+                metrics.SecondaryResetUtc, weekValue, weekReset, weekBar);
+        }
+
+        private void ApplyMonthlyQuota(UsageMetrics metrics, bool hasMonthlyData)
+        {
+            quotaGroup.VerticalAlignment = VerticalAlignment.Center;
+            fiveHourLabel.Text = "月额度";
+            fiveHourRow.Visibility = Visibility.Visible;
+            weekRow.Visibility = Visibility.Collapsed;
+            fiveHourRow.Margin = new Thickness(0, 11, 0, 0);
+            if (hasMonthlyData)
+            {
+                ApplyQuota(true, metrics.MonthlyUsedPercent,
+                    metrics.MonthlyResetUtc, fiveHourValue, fiveHourReset, fiveHourBar);
+            }
+            else
+            {
+                ApplyQuotaPending(fiveHourValue, fiveHourReset, fiveHourBar);
+            }
+        }
+
         private static void ApplyQuota(bool available, double usedPercent,
             DateTime resetUtc, TextBlock value, TextBlock reset, RoundedMeter bar)
         {
@@ -538,6 +586,15 @@ public sealed class DetailsWindow : Window
             bar.Value = remaining;
         }
 
+        private static void ApplyQuotaPending(TextBlock value, TextBlock reset,
+            RoundedMeter bar)
+        {
+            value.Text = "等待 Codex 刷新";
+            reset.Text = String.Empty;
+            reset.Visibility = Visibility.Collapsed;
+            bar.Value = 0;
+        }
+
         public static bool IsQuotaExpired(DateTime resetUtc, DateTime nowUtc)
         {
             return resetUtc != DateTime.MinValue && nowUtc >= resetUtc.ToUniversalTime();
@@ -555,8 +612,8 @@ public sealed class DetailsWindow : Window
                 : local.ToString("M月d日 HH:mm '刷新'", CultureInfo.CurrentCulture);
         }
 
-        private static Grid CreateQuotaRow(string title, out TextBlock reset,
-            out TextBlock value, out RoundedMeter bar)
+        private static Grid CreateQuotaRow(string title, out TextBlock name,
+            out TextBlock reset, out TextBlock value, out RoundedMeter bar)
         {
             Grid grid = new Grid();
             grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -565,7 +622,7 @@ public sealed class DetailsWindow : Window
             labels.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             labels.ColumnDefinitions.Add(new ColumnDefinition());
             labels.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            TextBlock name = NewText(title, 12, MediaColor.FromRgb(99, 112, 120),
+            name = NewText(title, 12, MediaColor.FromRgb(99, 112, 120),
                 FontWeights.Normal, true);
             labels.Children.Add(name);
             reset = NewText(String.Empty, 10.5, MediaColor.FromRgb(130, 145, 153),

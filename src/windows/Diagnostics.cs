@@ -148,6 +148,31 @@ public static class Diagnostics
                     out realtimeState, out realtimeAction) &&
                     realtimeState == HaloState.Attention,
                     "live request_user_input -> attention");
+                string realtimeArgumentsDelta =
+                    "SSE event: {\"type\":\"response.function_call_arguments.delta\"," +
+                    "\"item_id\":\"fc-test\",\"delta\":\"{\\\"cmd\\\":\\\"git\"}";
+                string realtimeArgumentsDone =
+                    "SSE event: {\"type\":\"response.function_call_arguments.done\"," +
+                    "\"item_id\":\"fc-test\"}";
+                string realtimeFunctionDone =
+                    "SSE event: {\"type\":\"response.output_item.done\",\"item\":{" +
+                    "\"id\":\"fc-test\",\"type\":\"function_call\"," +
+                    "\"status\":\"completed\",\"name\":\"exec_command\"}}";
+                Assert(realtime.FindActive(new[] { realtimeArgumentsDelta },
+                    out realtimeState, out realtimeAction) &&
+                    realtimeState == HaloState.Working,
+                    "live function argument stream keeps Codex active");
+                Assert(!realtime.FindActive(new[] { realtimeFunctionDone,
+                    realtimeArgumentsDone, realtimeArgumentsDelta },
+                    out realtimeState, out realtimeAction),
+                    "live function argument stream clears after item done");
+                string realtimeEscalatedArguments =
+                    "SSE event: {\"type\":\"response.function_call_arguments.delta\"," +
+                    "\"item_id\":\"fc-approval\",\"delta\":\"require_escalated sandbox_permissions justification\"}";
+                Assert(realtime.FindActive(new[] { realtimeEscalatedArguments },
+                    out realtimeState, out realtimeAction) &&
+                    realtimeState == HaloState.Attention,
+                    "live escalated command arguments -> attention");
 
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call_output\"}}\n",
@@ -163,6 +188,16 @@ public static class Diagnostics
                 tracker.Refresh();
                 Assert(tracker.Snapshot.State == HaloState.Attention,
                     "request_user_input -> attention");
+
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\"," +
+                    "\"name\":\"exec_command\",\"arguments\":\"{" +
+                    "\\\\\"sandbox_permissions\\\\\":\\\\\"require_escalated\\\\\"," +
+                    "\\\\\"justification\\\\\":\\\\\"approve\\\\\"}\"}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Attention,
+                    "escalated exec command -> attention");
 
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"approval_requested\"}}\n",
@@ -471,6 +506,27 @@ public static class Diagnostics
                     Math.Abs(parsedUsage.SecondaryUsedPercent - 40) < 0.001 &&
                     Math.Abs(parsedUsage.ContextUsedPercent - 50) < 0.001,
                     "rate limit parser preserves latest field values");
+                string monthlyRate =
+                    "{\"payload\":{\"info\":{\"rate_limits\":{\"monthly\":{" +
+                    "\"used_percent\":37,\"resets_at\":4102444800}}," +
+                    "\"last_token_usage\":{\"input_tokens\":25}," +
+                    "\"model_context_window\":100}}}";
+                Assert(RateLimitReader.TryReadFromNewestLinesForTest(
+                    new[] { monthlyRate }, out parsedUsage),
+                    "rate limit parser reads monthly quota");
+                Assert(parsedUsage.HasMonthly && !parsedUsage.HasPrimary &&
+                    !parsedUsage.HasSecondary &&
+                    Math.Abs(parsedUsage.MonthlyUsedPercent - 37) < 0.001,
+                    "monthly quota stays separate from Plus buckets");
+                string longPrimaryRate =
+                    "{\"payload\":{\"info\":{\"rate_limits\":{\"primary\":{" +
+                    "\"used_percent\":41,\"window_minutes\":43200," +
+                    "\"resets_at\":4102444800}}}}}";
+                Assert(RateLimitReader.TryReadFromNewestLinesForTest(
+                    new[] { longPrimaryRate }, out parsedUsage) &&
+                    parsedUsage.HasMonthly &&
+                    Math.Abs(parsedUsage.MonthlyUsedPercent - 41) < 0.001,
+                    "single long-window primary quota becomes monthly");
 
                 ClaudeHookStatusReducer claude =
                     new ClaudeHookStatusReducer("claude-test");
@@ -1252,6 +1308,44 @@ public static class Diagnostics
                 encoder.Save(stream);
             }
             panel.Close();
+
+            DetailsWindow monthlyPanel = new DetailsWindow();
+            monthlyPanel.SetPreviewMetrics(new UsageMetrics
+            {
+                HasMonthly = true,
+                MonthlyUsedPercent = 62,
+                MonthlyResetUtc = DateTime.Today.AddDays(12).AddHours(9)
+                    .AddMinutes(30).ToUniversalTime(),
+                ContextInputTokens = 89120,
+                ContextWindowTokens = 258400
+            });
+            monthlyPanel.UpdateContent(aggregate, sessions);
+            FrameworkElement monthlyContent = monthlyPanel.Content as FrameworkElement;
+            monthlyPanel.Content = null;
+
+            Grid monthlyStage = new Grid();
+            monthlyStage.Width = 380;
+            monthlyStage.Background = new SolidColorBrush(MediaColor.FromRgb(7, 10, 15));
+            monthlyContent.Width = 324;
+            monthlyContent.Margin = new Thickness(28);
+            monthlyStage.Children.Add(monthlyContent);
+            monthlyStage.Measure(new System.Windows.Size(380, 1000));
+            double monthlyHeight = Math.Ceiling(monthlyStage.DesiredSize.Height);
+            monthlyStage.Height = monthlyHeight;
+            monthlyStage.Arrange(new Rect(0, 0, 380, monthlyHeight));
+            monthlyStage.UpdateLayout();
+
+            RenderTargetBitmap monthlyBitmap = new RenderTargetBitmap(760,
+                (int)(monthlyHeight * 2), 192, 192, PixelFormats.Pbgra32);
+            monthlyBitmap.Render(monthlyStage);
+            PngBitmapEncoder monthlyEncoder = new PngBitmapEncoder();
+            monthlyEncoder.Frames.Add(BitmapFrame.Create(monthlyBitmap));
+            using (FileStream stream = File.Create(Path.Combine(outputDirectory,
+                "panel-monthly.png")))
+            {
+                monthlyEncoder.Save(stream);
+            }
+            monthlyPanel.Close();
 
             List<SessionSnapshot> claudeSessions = new List<SessionSnapshot>();
             claudeSessions.Add(new SessionSnapshot

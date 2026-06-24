@@ -401,7 +401,7 @@ public sealed class SessionTracker
             {
                 string name = GetString(payload, "name");
                 Snapshot.Active = true;
-                if (name == "request_user_input")
+                if (IsAttentionFunctionCall(name, payload))
                 {
                     Snapshot.State = HaloState.Attention;
                     Snapshot.Action = "Needs you";
@@ -550,6 +550,34 @@ public sealed class SessionTracker
                 }
             }
             return false;
+        }
+
+        private static bool IsAttentionFunctionCall(string name,
+            Dictionary<string, object> payload)
+        {
+            if (String.Equals(name, "request_user_input",
+                StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+            string lowerName = (name ?? String.Empty).ToLowerInvariant();
+            if (lowerName.IndexOf("approval", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lowerName.IndexOf("permission", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lowerName.IndexOf("request_user", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lowerName.IndexOf("needs_input", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return true;
+            }
+            string arguments = GetString(payload, "arguments");
+            return IsEscalatedCommandArguments(arguments);
+        }
+
+        private static bool IsEscalatedCommandArguments(string arguments)
+        {
+            return !String.IsNullOrEmpty(arguments) &&
+                arguments.IndexOf("require_escalated", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                (arguments.IndexOf("sandbox_permissions", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 arguments.IndexOf("justification", StringComparison.OrdinalIgnoreCase) >= 0);
         }
 
         private static DateTime ParseTimestamp(string value)
@@ -989,6 +1017,8 @@ public sealed class CodexRealtimeActivityReader
             state = HaloState.Working;
             action = String.Empty;
             answerStreaming = false;
+            bool hasArgumentActivity = false;
+            bool hasAttentionArgumentActivity = false;
             HashSet<string> completed = new HashSet<string>(
                 StringComparer.OrdinalIgnoreCase);
             foreach (string body in newestFirst)
@@ -997,8 +1027,9 @@ public sealed class CodexRealtimeActivityReader
                 string itemId;
                 string itemType;
                 string name;
+                bool attentionHint;
                 if (!TryParseToolEvent(body, out eventType, out itemId,
-                    out itemType, out name))
+                    out itemType, out name, out attentionHint))
                 {
                     continue;
                 }
@@ -1020,13 +1051,27 @@ public sealed class CodexRealtimeActivityReader
                     completed.Add(itemId);
                     continue;
                 }
+                if (eventType == "response.function_call_arguments.delta" ||
+                    eventType == "response.function_call_arguments.done")
+                {
+                    if (completed.Contains(itemId))
+                    {
+                        continue;
+                    }
+                    hasArgumentActivity = true;
+                    if (attentionHint)
+                    {
+                        hasAttentionArgumentActivity = true;
+                    }
+                    continue;
+                }
                 if (eventType != "response.output_item.added" ||
                     completed.Contains(itemId))
                 {
                     continue;
                 }
                 if (String.Equals(name, "request_user_input",
-                    StringComparison.OrdinalIgnoreCase))
+                    StringComparison.OrdinalIgnoreCase) || IsAttentionToolName(name))
                 {
                     state = HaloState.Attention;
                     action = "Needs you";
@@ -1041,16 +1086,30 @@ public sealed class CodexRealtimeActivityReader
                 }
                 return true;
             }
+            if (hasAttentionArgumentActivity)
+            {
+                state = HaloState.Attention;
+                action = "Needs you";
+                return true;
+            }
+            if (hasArgumentActivity)
+            {
+                state = HaloState.Working;
+                action = "Preparing command";
+                return true;
+            }
             return false;
         }
 
         private bool TryParseToolEvent(string body, out string eventType,
-            out string itemId, out string itemType, out string name)
+            out string itemId, out string itemType, out string name,
+            out bool attentionHint)
         {
             eventType = String.Empty;
             itemId = String.Empty;
             itemType = String.Empty;
             name = String.Empty;
+            attentionHint = false;
             try
             {
                 int jsonStart = body.IndexOf('{');
@@ -1066,6 +1125,15 @@ public sealed class CodexRealtimeActivityReader
                 }
                 eventType = ReadString(root, "type");
                 Dictionary<string, object> item = ReadDictionary(root, "item");
+                if (eventType == "response.function_call_arguments.delta" ||
+                    eventType == "response.function_call_arguments.done")
+                {
+                    itemId = ReadString(root, "item_id");
+                    string delta = ReadString(root, "delta");
+                    attentionHint = IsEscalatedArgumentsFragment(delta) ||
+                        IsEscalatedArgumentsFragment(body);
+                    return !String.IsNullOrEmpty(itemId);
+                }
                 if (eventType == "response.output_text.delta" ||
                     eventType == "response.output_text.done" ||
                     eventType == "response.content_part.done" ||
@@ -1090,6 +1158,24 @@ public sealed class CodexRealtimeActivityReader
             {
                 return false;
             }
+        }
+
+        private static bool IsAttentionToolName(string name)
+        {
+            string lower = (name ?? String.Empty).ToLowerInvariant();
+            return lower == "request_user_input" ||
+                lower.IndexOf("approval", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("permission", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("request_user", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("needs_input", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsEscalatedArgumentsFragment(string value)
+        {
+            return !String.IsNullOrEmpty(value) &&
+                value.IndexOf("require_escalated", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                (value.IndexOf("sandbox_permissions", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 value.IndexOf("justification", StringComparison.OrdinalIgnoreCase) >= 0);
         }
 
         private static string ReadString(Dictionary<string, object> dictionary,
@@ -1290,6 +1376,14 @@ public static class RateLimitReader
             return result && metrics.HasPrimary && metrics.HasSecondary;
         }
 
+        public static bool TryReadMonthly(out double monthlyUsed)
+        {
+            UsageMetrics metrics;
+            bool result = TryRead(out metrics);
+            monthlyUsed = metrics.MonthlyUsedPercent;
+            return result && metrics.HasMonthly;
+        }
+
         public static bool TryRead(out UsageMetrics metrics)
         {
             metrics = new UsageMetrics
@@ -1336,7 +1430,8 @@ public static class RateLimitReader
             catch
             {
             }
-            return metrics.HasPrimary || metrics.HasSecondary || metrics.HasContext;
+            return metrics.HasPrimary || metrics.HasSecondary || metrics.HasMonthly ||
+                metrics.HasContext;
         }
 
         internal static bool TryReadFromNewestLinesForTest(
@@ -1361,12 +1456,14 @@ public static class RateLimitReader
                     return true;
                 }
             }
-            return metrics.HasPrimary || metrics.HasSecondary || metrics.HasContext;
+            return metrics.HasPrimary || metrics.HasSecondary || metrics.HasMonthly ||
+                metrics.HasContext;
         }
 
         private static bool HasCompleteMetrics(UsageMetrics metrics)
         {
-            return metrics.HasPrimary && metrics.HasSecondary && metrics.HasContext;
+            return metrics.HasContext &&
+                ((metrics.HasPrimary && metrics.HasSecondary) || metrics.HasMonthly);
         }
 
         private static void ApplyRateLimitLine(string line, UsageMetrics metrics,
@@ -1388,7 +1485,18 @@ public static class RateLimitReader
                 GeneratedHaloSpec.RatePrimaryKey);
             Dictionary<string, object> secondary = Child(limits,
                 GeneratedHaloSpec.RateSecondaryKey);
-            if (!metrics.HasPrimary && primary != null)
+            Dictionary<string, object> monthly = FindMonthlyLimit(limits);
+            if (!metrics.HasMonthly && monthly != null)
+            {
+                ApplyMonthly(metrics, monthly);
+            }
+            bool primaryLooksMonthly = primary != null && secondary == null &&
+                LooksLikeMonthlyLimit(primary, limits);
+            if (!metrics.HasMonthly && primaryLooksMonthly)
+            {
+                ApplyMonthly(metrics, primary);
+            }
+            if (!metrics.HasPrimary && primary != null && !primaryLooksMonthly)
             {
                 metrics.PrimaryUsedPercent = Number(primary,
                     GeneratedHaloSpec.RateUsedPercentKey);
@@ -1414,11 +1522,111 @@ public static class RateLimitReader
             }
         }
 
+        private static Dictionary<string, object> FindMonthlyLimit(
+            Dictionary<string, object> limits)
+        {
+            if (limits == null)
+            {
+                return null;
+            }
+            string[] keys = { "monthly", "month", "monthly_usage", "monthly_quota" };
+            foreach (string key in keys)
+            {
+                Dictionary<string, object> child = Child(limits, key);
+                if (child != null)
+                {
+                    return child;
+                }
+            }
+            Dictionary<string, object> credits = Child(limits, "credits");
+            if (credits != null && HasAnyNumber(credits,
+                "used_percent", "remaining_percent", "resets_at"))
+            {
+                return credits;
+            }
+            return null;
+        }
+
+        private static bool LooksLikeMonthlyLimit(Dictionary<string, object> limit,
+            Dictionary<string, object> limits)
+        {
+            if (limit == null)
+            {
+                return false;
+            }
+            object window;
+            if (limit.TryGetValue("window_minutes", out window))
+            {
+                double minutes = Convert.ToDouble(window, CultureInfo.InvariantCulture);
+                if (minutes >= 28 * 24 * 60)
+                {
+                    return true;
+                }
+            }
+            string plan = Convert.ToString(Value(limits, "plan_type"),
+                CultureInfo.InvariantCulture);
+            string name = Convert.ToString(Value(limits, "limit_name"),
+                CultureInfo.InvariantCulture);
+            string combined = (plan + " " + name).ToLowerInvariant();
+            return combined.IndexOf("monthly", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                combined.IndexOf("month", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                combined.IndexOf("free", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                combined.IndexOf("basic", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static void ApplyMonthly(UsageMetrics metrics,
+            Dictionary<string, object> source)
+        {
+            metrics.MonthlyUsedPercent = UsedPercent(source);
+            metrics.MonthlyResetUtc = UnixTime(source, "resets_at");
+            metrics.HasMonthly = true;
+        }
+
         private static double Number(Dictionary<string, object> source, string key)
         {
             object value;
             return source != null && source.TryGetValue(key, out value)
                 ? Convert.ToDouble(value, CultureInfo.InvariantCulture) : 0;
+        }
+
+        private static double UsedPercent(Dictionary<string, object> source)
+        {
+            if (HasAnyNumber(source, GeneratedHaloSpec.RateUsedPercentKey))
+            {
+                return Number(source, GeneratedHaloSpec.RateUsedPercentKey);
+            }
+            if (HasAnyNumber(source, "remaining_percent"))
+            {
+                return 100 - Number(source, "remaining_percent");
+            }
+            return 0;
+        }
+
+        private static bool HasAnyNumber(Dictionary<string, object> source,
+            params string[] keys)
+        {
+            if (source == null)
+            {
+                return false;
+            }
+            foreach (string key in keys)
+            {
+                object value;
+                double parsed;
+                if (source.TryGetValue(key, out value) && value != null &&
+                    Double.TryParse(Convert.ToString(value, CultureInfo.InvariantCulture),
+                        NumberStyles.Float, CultureInfo.InvariantCulture, out parsed))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static object Value(Dictionary<string, object> source, string key)
+        {
+            object value;
+            return source != null && source.TryGetValue(key, out value) ? value : null;
         }
 
         private static DateTime UnixTime(Dictionary<string, object> source, string key)
