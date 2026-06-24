@@ -710,8 +710,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 ?? displayedAggregate.sessions.first
                 ?? rawClaudeSnapshots.first
             let matchingUsage = session.flatMap { session in
-                claudeUsage?.sessionId == session.threadId ? claudeUsage : nil
-            }
+                (claudeUsage?.sessionId == session.threadId || session.threadId == "claude-code") ? claudeUsage : nil
+            } ?? claudeUsage
             return DetailsPresentation(
                 sessionDetails: SessionDetailsSnapshot(
                     projectName: session?.projectName,
