@@ -29,6 +29,7 @@ func runHaloInteractionChecks() {
     testLegacyPlacementWaitsForItsDisplayAndThenMigrates()
     testRestoredPlacementClampsInsideChangedVisibleFrame()
     testTemporaryFallbackStateProtectsPreferredPlacementUntilUserMove()
+    testDisplayRecoveryWiresPreferredPlacementWithoutPersistingFallback()
     testHaloViewResizeKeepsAnimationMoving()
     testHaloViewSystemOverlaySuspensionStopsAnimation()
     testPreviewSubmenuMarksLiveStateInitially()
@@ -171,6 +172,32 @@ private func testTemporaryFallbackStateProtectsPreferredPlacementUntilUserMove()
     state.didChoosePlacement()
     expect(state.shouldPersistCurrentFrame, "user movement should make the new placement persistent")
     expect(!state.isUsingTemporaryFallback, "user movement should cancel pending restoration")
+}
+
+@MainActor
+private func testDisplayRecoveryWiresPreferredPlacementWithoutPersistingFallback() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let appDelegateURL = sourceDirectory.appendingPathComponent("AppDelegate.swift")
+    guard let source = try? String(contentsOf: appDelegateURL, encoding: .utf8) else {
+        fatalError("AppDelegate source should be readable")
+    }
+
+    expect(
+        source.contains("placementState.didUseTemporaryFallback()"),
+        "display loss should enter temporary fallback"
+    )
+    expect(
+        source.contains("placementState.didApplyPreferredPlacement()"),
+        "display return should leave temporary fallback"
+    )
+    expect(
+        source.contains("self?.commitPreferredPlacement(frame: frame)"),
+        "user movement should commit preferred placement"
+    )
+    expect(
+        source.contains("placementState.shouldPersistCurrentFrame"),
+        "termination should protect fallback coordinates"
+    )
 }
 
 @MainActor

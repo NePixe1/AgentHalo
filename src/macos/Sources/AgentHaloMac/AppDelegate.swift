@@ -28,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hoverHideTimer: Timer?
     private var settingsSaveTimer: Timer?
     private var systemOverlaySuspended = false
+    private var placementState = HaloPlacementRuntimeState()
     private let rateLimitReader = RateLimitReader()
     private let claudeContextUsageReader = ClaudeContextUsageReader()
     private let contextReaderQueue = DispatchQueue(
@@ -67,7 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         createStatusItem()
         createHaloPanel()
-        recoverHaloIfOffscreen()
+        reconcileHaloPlacement()
         registerSystemOverlayObservers()
         updateSystemOverlaySuspension(for: NSWorkspace.shared.frontmostApplication)
         tick()
@@ -77,12 +78,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         settingsSaveTimer?.invalidate()
-        saveWindowPosition()
+        if placementState.shouldPersistCurrentFrame, let panel {
+            commitPreferredPlacement(frame: panel.frame, persist: false)
+        }
         settingsStore.save(settings)
     }
 
     func applicationDidChangeScreenParameters(_ notification: Notification) {
-        recoverHaloIfOffscreen()
+        reconcileHaloPlacement()
     }
 
     @objc private func timerDidFire() {
@@ -136,12 +139,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.bringCodexForward()
         }
         haloView.onMoved = { [weak self] frame in
-            self?.settings.left = frame.origin.x
-            self?.settings.top = frame.origin.y
-            self?.settings.hasPosition = true
-            if let settings = self?.settings {
-                self?.settingsStore.save(settings)
-            }
+            self?.commitPreferredPlacement(frame: frame)
         }
         haloView.onMouseEntered = { [weak self] in self?.showDetails() }
         haloView.onMouseExited = { [weak self] in self?.scheduleHideDetails() }
@@ -292,21 +290,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func escapeOffscreen() {
         let origin = defaultWindowOrigin(topOffset: 28)
         panel.setFrameOrigin(origin)
-        settings.left = origin.x
-        settings.top = origin.y
-        settings.hasPosition = true
-        settingsStore.save(settings)
+        commitPreferredPlacement(frame: panel.frame)
     }
 
-    private func recoverHaloIfOffscreen() {
+    private func reconcileHaloPlacement() {
         guard let panel else {
             return
         }
-        let visibleFrames = NSScreen.screens.map(\.visibleFrame)
-        guard !Self.isHaloFrameVisible(panel.frame, in: visibleFrames) else {
+        let displays = displaySnapshots()
+        guard !displays.isEmpty else {
             return
         }
-        escapeOffscreen()
+
+        if !settings.hasPosition {
+            panel.setFrameOrigin(defaultWindowOrigin(topOffset: 28))
+            commitPreferredPlacement(frame: panel.frame)
+            return
+        }
+
+        if let resolved = HaloPlacementResolver.resolve(
+            storedPreferredPlacement(),
+            haloSize: currentHaloSize,
+            displays: displays
+        ) {
+            panel.setFrameOrigin(resolved.origin)
+            storeResolvedPlacement(resolved)
+            placementState.didApplyPreferredPlacement()
+            settingsStore.save(settings)
+            return
+        }
+
+        panel.setFrameOrigin(defaultWindowOrigin(topOffset: 28))
+        placementState.didUseTemporaryFallback()
     }
 
     @objc private func haloSizeSliderChanged(_ sender: NSSlider) {
@@ -355,13 +370,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         makeControlMenu()
     }
 
-    private func saveWindowPosition() {
-        guard let panel else {
+    private func displaySnapshots() -> [HaloDisplaySnapshot] {
+        NSScreen.screens.compactMap { screen in
+            guard let identifier = HaloScreenIdentity.identifier(for: screen) else {
+                return nil
+            }
+            return HaloDisplaySnapshot(identifier: identifier, visibleFrame: screen.visibleFrame)
+        }
+    }
+
+    private func storedPreferredPlacement() -> HaloStoredPlacement {
+        let relativeOffset: NSPoint?
+        if let x = settings.preferredDisplayOffsetX,
+           let y = settings.preferredDisplayOffsetY {
+            relativeOffset = NSPoint(x: x, y: y)
+        } else {
+            relativeOffset = nil
+        }
+        return HaloStoredPlacement(
+            displayIdentifier: settings.preferredDisplayUUID,
+            absoluteOrigin: NSPoint(x: settings.left, y: settings.top),
+            relativeOffset: relativeOffset
+        )
+    }
+
+    private func commitPreferredPlacement(frame: NSRect, persist: Bool = true) {
+        guard let captured = HaloPlacementResolver.capture(
+            frame: frame,
+            displays: displaySnapshots()
+        ) else {
             return
         }
-        settings.left = panel.frame.origin.x
-        settings.top = panel.frame.origin.y
         settings.hasPosition = true
+        settings.left = captured.absoluteOrigin.x
+        settings.top = captured.absoluteOrigin.y
+        settings.preferredDisplayUUID = captured.displayIdentifier
+        settings.preferredDisplayOffsetX = captured.relativeOffset.map { Double($0.x) }
+        settings.preferredDisplayOffsetY = captured.relativeOffset.map { Double($0.y) }
+        placementState.didChoosePlacement()
+        if persist {
+            settingsStore.save(settings)
+        }
+    }
+
+    private func storeResolvedPlacement(_ resolved: HaloResolvedPlacement) {
+        settings.hasPosition = true
+        settings.left = resolved.origin.x
+        settings.top = resolved.origin.y
+        settings.preferredDisplayUUID = resolved.display.identifier
+        settings.preferredDisplayOffsetX = resolved.relativeOffset.x
+        settings.preferredDisplayOffsetY = resolved.relativeOffset.y
     }
 
     private func applyHaloSize(_ size: CGFloat) {
@@ -376,9 +434,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let frame = Self.haloFrameByKeepingOrigin(oldFrame: oldFrame, requestedSize: clampedSize)
         panel.setFrame(frame, display: true)
         haloView.resizeForHaloSize(clampedSize)
-        settings.left = frame.origin.x
-        settings.top = frame.origin.y
-        settings.hasPosition = true
+        if placementState.shouldPersistCurrentFrame {
+            commitPreferredPlacement(frame: frame, persist: false)
+        }
         scheduleSettingsSave()
         positionDetailsPanel()
     }
@@ -820,10 +878,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static func haloFrameByKeepingOrigin(oldFrame: NSRect, requestedSize: CGFloat) -> NSRect {
         let size = CGFloat(HaloSettings.clampedHaloSize(Double(requestedSize)))
         return NSRect(x: oldFrame.origin.x, y: oldFrame.origin.y, width: size, height: size)
-    }
-
-    static func isHaloFrameVisible(_ frame: NSRect, in visibleFrames: [NSRect]) -> Bool {
-        visibleFrames.contains { $0.intersects(frame) }
     }
 
     private struct PreviewPayload: Equatable {
