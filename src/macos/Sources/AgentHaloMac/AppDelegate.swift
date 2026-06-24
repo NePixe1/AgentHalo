@@ -81,6 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let monitor = CodexSessionMonitor()
     private let claudeHookMonitor = ClaudeHookStatusMonitor()
     private let claudeSessionMonitor = ClaudeSessionMonitor()
+    private var claudeLiveSessions: [ClaudeLiveSessionSnapshot] = []
     private var preferredClaudeStandbySession: ClaudeLiveSessionSnapshot?
     private var nextStatusLineReconciliationAt = Date.distantPast
     private let statusLineReconciliationInterval: TimeInterval = 2
@@ -170,8 +171,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = monitor.refresh()
         _ = claudeHookMonitor.refresh()
         _ = claudeSessionMonitor.refresh()
+        claudeLiveSessions = ClaudeLiveSessionReader.liveSessions()
         preferredClaudeStandbySession = ClaudeLiveSessionReader.preferredStandbySession(
-            sessions: ClaudeLiveSessionReader.standbySessions(),
+            sessions: claudeLiveSessions.filter { $0.status == "waiting" || $0.status == "idle" },
             hookSnapshots: claudeHookMonitor.snapshots()
         )
         acknowledgeCompletedIfCodexIsForeground()
@@ -657,9 +659,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 liveSession: preferredClaudeStandbySession
             )
             : nil
+        let claudeUsageFreshness = Self.claudeUsageFreshness(
+            mainSessionId: claudeMainSessionId,
+            liveSessions: claudeLiveSessions
+        )
         let claudeUsage = claudeMainSessionId.flatMap { sessionId in
             contextReaderQueue.sync {
-                claudeContextUsageReader.read(sessionId: sessionId)
+                claudeContextUsageReader.read(
+                    sessionId: sessionId,
+                    freshness: claudeUsageFreshness
+                )
             }
         }
         let presentation = Self.detailsPresentationForDetails(
@@ -695,6 +704,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .filter { $0.threadId != "claude-code" }
             .max { $0.lastEventAt < $1.lastEventAt }?
             .threadId
+    }
+
+    static func claudeUsageFreshness(
+        mainSessionId: String?,
+        liveSessions: [ClaudeLiveSessionSnapshot]
+    ) -> ClaudeContextUsageFreshness {
+        guard let mainSessionId,
+              liveSessions.contains(where: { $0.sessionId == mainSessionId }) else {
+            return .recentOnly
+        }
+        return .whileSessionIsLive
     }
 
     static func detailsPresentationForDetails(

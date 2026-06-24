@@ -56,6 +56,7 @@ func runHaloInteractionChecks() {
     testStatusLineConfigurationReconciliationIsWiredToTick()
     testDetailsPresentationUsesFocusedSessionAndRejectsStaleQuota()
     testClaudeStandbyDetailsPreferLiveSessionIdentity()
+    testClaudeUsageFreshnessTracksExactLiveSession()
     testDetailsPanelUsesTightBottomInset()
     testDetailsPanelShowsExpiredQuotaAsWaitingForRefresh()
     testDetailsPanelShowsAnswerStreamingCopy()
@@ -1052,6 +1053,47 @@ private func testClaudeStandbyDetailsPreferLiveSessionIdentity() {
         ),
         "live-session",
         "standby details must use the selected live session before stale hook snapshots"
+    )
+}
+
+@MainActor
+private func testClaudeUsageFreshnessTracksExactLiveSession() {
+    let now = Date()
+    let live = ClaudeLiveSessionSnapshot(
+        sessionId: "live-main",
+        workingDirectory: "/tmp/live-project",
+        processId: 1,
+        status: "busy",
+        updatedAt: now
+    )
+    let other = ClaudeLiveSessionSnapshot(
+        sessionId: "other-main",
+        workingDirectory: "/tmp/other-project",
+        processId: 2,
+        status: "idle",
+        updatedAt: now
+    )
+
+    expect(
+        AppDelegate.claudeUsageFreshness(
+            mainSessionId: "live-main",
+            liveSessions: [live, other]
+        ),
+        .whileSessionIsLive,
+        "an exact live Claude session should retain its last status-line metadata"
+    )
+    expect(
+        AppDelegate.claudeUsageFreshness(
+            mainSessionId: "missing-main",
+            liveSessions: [live, other]
+        ),
+        .recentOnly,
+        "another live Claude session must not keep stale metadata alive"
+    )
+    expect(
+        AppDelegate.claudeUsageFreshness(mainSessionId: nil, liveSessions: [live]),
+        .recentOnly,
+        "missing session identity must use the bounded freshness policy"
     )
 }
 

@@ -859,6 +859,39 @@ func testClaudeContextUsageReaderRequiresExactFreshSession() throws {
     )
 }
 
+func testClaudeContextUsageReaderRetainsExactUsageWhileSessionIsLive() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-live-usage-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+    let now = ISO8601DateFormatter().date(from: "2026-06-24T09:30:00Z")!
+    let stale = ClaudeContextUsageSnapshot(
+        sessionId: "live-main",
+        usedPercent: 27,
+        modelName: "glm-5.2",
+        inputTokens: 53_016,
+        outputTokens: 852,
+        updatedAt: now.addingTimeInterval(-600)
+    )
+    try ClaudeContextUsageStorage.write(stale, directory: root)
+
+    let reader = ClaudeContextUsageReader(snapshotsDirectory: root, legacySnapshotURL: nil)
+    expect(
+        reader.read(sessionId: "live-main", now: now, freshness: .whileSessionIsLive)?.modelName,
+        "glm-5.2",
+        "an exact live Claude session should retain its last known usage beyond five minutes"
+    )
+    expect(
+        reader.read(sessionId: "other-main", now: now, freshness: .whileSessionIsLive) == nil,
+        "live-session retention must never substitute another session's usage"
+    )
+    expect(
+        reader.read(sessionId: "live-main", now: now, freshness: .recentOnly) == nil,
+        "the normal policy should continue rejecting usage older than five minutes"
+    )
+}
+
 func testClaudeContextUsageReaderMigratesMatchingLegacySnapshot() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-legacy-usage-\(UUID().uuidString)", isDirectory: true)
@@ -1673,6 +1706,20 @@ func testClaudeLiveSessionReaderRequiresLiveWaitingProcess() throws {
     try Data(live.utf8).write(to: file)
     expect(ClaudeLiveSessionReader.hasStandbySession(homeDirectory: home), true, "live idle Claude session should show standby")
 
+    let busyFile = sessions.appendingPathComponent("busy.json")
+    let busy = #"{"status":"busy","pid":\#(ProcessInfo.processInfo.processIdentifier),"sessionId":"busy","cwd":"/tmp/busy-project","updatedAt":4000}"#
+    try Data(busy.utf8).write(to: busyFile)
+    expect(
+        ClaudeLiveSessionReader.liveSessions(homeDirectory: home).contains { $0.sessionId == "busy" },
+        true,
+        "a live busy Claude session should be available for metadata retention"
+    )
+    expect(
+        ClaudeLiveSessionReader.standbySessions(homeDirectory: home).contains { $0.sessionId == "busy" },
+        false,
+        "a live busy Claude session must not be classified as standby"
+    )
+
     let newerFile = sessions.appendingPathComponent("newer.json")
     let newer = #"{"status":"waiting","pid":\#(ProcessInfo.processInfo.processIdentifier),"sessionId":"newer","cwd":"/tmp/newer-project","updatedAt":3000}"#
     try Data(newer.utf8).write(to: newerFile)
@@ -2133,6 +2180,7 @@ do {
 do {
     try testClaudeContextUsageStorageSeparatesSessionsAndRejectsUnsafeIds()
     try testClaudeContextUsageReaderRequiresExactFreshSession()
+    try testClaudeContextUsageReaderRetainsExactUsageWhileSessionIsLive()
     try testClaudeContextUsageReaderMigratesMatchingLegacySnapshot()
 } catch {
     fatalError("\(error)")

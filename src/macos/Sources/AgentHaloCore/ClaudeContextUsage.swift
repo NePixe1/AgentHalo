@@ -28,6 +28,11 @@ public struct ClaudeContextUsageSnapshot: Codable, Equatable, Sendable {
     }
 }
 
+public enum ClaudeContextUsageFreshness: Equatable, Sendable {
+    case recentOnly
+    case whileSessionIsLive
+}
+
 public enum ClaudeStatusLineUsageParser {
     public static func parse(data: Data, updatedAt: Date = Date()) -> ClaudeContextUsageSnapshot? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -135,7 +140,11 @@ public struct ClaudeContextUsageReader: Sendable {
         legacySnapshotURL = snapshotURL
     }
 
-    public func read(sessionId: String, now: Date = Date()) -> ClaudeContextUsageSnapshot? {
+    public func read(
+        sessionId: String,
+        now: Date = Date(),
+        freshness: ClaudeContextUsageFreshness = .recentOnly
+    ) -> ClaudeContextUsageSnapshot? {
         guard let snapshotURL = ClaudeContextUsageStorage.snapshotURL(
             directory: snapshotsDirectory,
             sessionId: sessionId
@@ -143,13 +152,14 @@ public struct ClaudeContextUsageReader: Sendable {
             return nil
         }
 
-        if let snapshot = decode(snapshotURL), isUsable(snapshot, sessionId: sessionId, now: now) {
+        if let snapshot = decode(snapshotURL),
+           isUsable(snapshot, sessionId: sessionId, now: now, freshness: freshness) {
             return snapshot
         }
 
         if let legacySnapshotURL,
            let snapshot = decode(legacySnapshotURL),
-           isUsable(snapshot, sessionId: sessionId, now: now) {
+           isUsable(snapshot, sessionId: sessionId, now: now, freshness: freshness) {
             return snapshot
         }
         return nil
@@ -172,11 +182,19 @@ public struct ClaudeContextUsageReader: Sendable {
     private func isUsable(
         _ snapshot: ClaudeContextUsageSnapshot,
         sessionId: String,
-        now: Date
+        now: Date,
+        freshness: ClaudeContextUsageFreshness
     ) -> Bool {
         guard snapshot.sessionId == sessionId else { return false }
         let age = now.timeIntervalSince(snapshot.updatedAt)
-        return age >= -ClaudeContextUsageConstants.clockSkewTolerance
-            && age <= ClaudeContextUsageConstants.snapshotMaxAge
+        guard age >= -ClaudeContextUsageConstants.clockSkewTolerance else {
+            return false
+        }
+        switch freshness {
+        case .recentOnly:
+            return age <= ClaudeContextUsageConstants.snapshotMaxAge
+        case .whileSessionIsLive:
+            return true
+        }
     }
 }

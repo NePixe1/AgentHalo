@@ -48,6 +48,15 @@ public enum ClaudeLiveSessionReader {
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         fileManager: FileManager = .default
     ) -> [ClaudeLiveSessionSnapshot] {
+        liveSessions(homeDirectory: homeDirectory, fileManager: fileManager).filter {
+            $0.status == "waiting" || $0.status == "idle"
+        }
+    }
+
+    public static func liveSessions(
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        fileManager: FileManager = .default
+    ) -> [ClaudeLiveSessionSnapshot] {
         let sessionsDirectory = homeDirectory
             .appendingPathComponent(".claude", isDirectory: true)
             .appendingPathComponent("sessions", isDirectory: true)
@@ -66,7 +75,7 @@ public enum ClaudeLiveSessionReader {
                 return nil
             }
             let status = String(describing: root["status"] ?? "").lowercased()
-            guard status == "waiting" || status == "idle",
+            guard status == "busy" || status == "waiting" || status == "idle",
                   let sessionId = root["sessionId"] as? String,
                   !sessionId.isEmpty,
                   let number = root["pid"] as? NSNumber,
