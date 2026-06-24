@@ -607,6 +607,29 @@ func testClaudeStatusLineConfiguratorPreservesAndChainsExistingCommand() throws 
     expect(configured["theme"] as? String, "dark", "unrelated Claude settings should be preserved")
     expect(try String(contentsOf: storedCommand, encoding: .utf8), originalCommand, "existing ccline command should be preserved exactly")
     expect(FileManager.default.isExecutableFile(atPath: installedProxy.path), "installed statusline proxy should be executable")
+    expect(
+        ClaudeStatusLineConfigurator.isConfigured(homeDirectory: home),
+        "fresh AgentHalo proxy configuration should be recognized"
+    )
+
+    var externallyRewritten = configured
+    externallyRewritten["statusLine"] = [
+        "type": "command",
+        "command": originalCommand,
+        "padding": 0,
+    ]
+    try JSONSerialization.data(withJSONObject: externallyRewritten).write(to: settingsURL, options: [.atomic])
+    expect(
+        !ClaudeStatusLineConfigurator.isConfigured(homeDirectory: home),
+        "external ccline rewrite should require reconciliation"
+    )
+
+    ClaudeStatusLineConfigurator.configure(homeDirectory: home, bundledProxyBinary: bundledProxy)
+    let repaired = try JSONSerialization.jsonObject(with: Data(contentsOf: settingsURL)) as! [String: Any]
+    let repairedStatusLine = repaired["statusLine"] as! [String: Any]
+    expect(repairedStatusLine["command"] as? String, installedProxy.path, "proxy should be restored")
+    expect(try String(contentsOf: storedCommand, encoding: .utf8), originalCommand, "ccline should remain downstream")
+    expect(repaired["theme"] as? String, "dark", "unrelated settings should survive repair")
 }
 
 extension FileHandle {
@@ -758,11 +781,10 @@ func testClaudeContextUsageReaderKeepsLastKnownUsageForMatchingSession() throws 
 
     expect(reader.read(sessionIds: ["cc-session"], now: now)?.usedPercent, 52.75, "matching fresh Claude context")
     expect(reader.read(sessionIds: ["other-session"], now: now) == nil, "mismatched Claude session should be rejected")
-    expect(reader.read(sessionIds: [], now: now)?.usedPercent, 52.75, "fresh Claude context should survive hook snapshot pruning")
+    expect(reader.read(sessionIds: [], now: now) == nil, "missing session identity must not select arbitrary context")
     expect(
-        reader.read(sessionIds: ["cc-session"], now: now.addingTimeInterval(301))?.usedPercent,
-        52.75,
-        "matching Claude context should remain visible after five minutes"
+        reader.read(sessionIds: ["cc-session"], now: now.addingTimeInterval(301)) == nil,
+        "Claude context older than five minutes should expire"
     )
 }
 
@@ -792,19 +814,89 @@ func testClaudeContextUsageReaderDoesNotShareSnapshotsAcrossFiles() throws {
     expect(secondRead?.usedPercent, 90, "second Claude context reader should not reuse another file's snapshot")
 }
 
+func testClaudeContextUsageStorageSeparatesSessionsAndRejectsUnsafeIds() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-session-usage-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let first = ClaudeContextUsageStorage.snapshotURL(directory: root, sessionId: "session-a")
+    let second = ClaudeContextUsageStorage.snapshotURL(directory: root, sessionId: "session-b")
+
+    expect(first != nil, "safe session id should produce a snapshot URL")
+    expect(second != nil, "second safe session id should produce a snapshot URL")
+    expect(first != second, "different sessions must not share a snapshot URL")
+    expect(
+        ClaudeContextUsageStorage.snapshotURL(directory: root, sessionId: "../escape") == nil,
+        "path traversal session id must be rejected"
+    )
+}
+
+func testClaudeContextUsageReaderRequiresExactFreshSession() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-exact-usage-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+    let now = ISO8601DateFormatter().date(from: "2026-06-23T02:00:00Z")!
+    let first = ClaudeContextUsageSnapshot(
+        sessionId: "session-a",
+        usedPercent: 26.5,
+        modelName: "glm-latest",
+        inputTokens: 53_100,
+        outputTokens: 1_200,
+        updatedAt: now
+    )
+    let second = ClaudeContextUsageSnapshot(sessionId: "session-b", usedPercent: 80, updatedAt: now)
+    try ClaudeContextUsageStorage.write(first, directory: root)
+    try ClaudeContextUsageStorage.write(second, directory: root)
+
+    let reader = ClaudeContextUsageReader(snapshotsDirectory: root, legacySnapshotURL: nil)
+    expect(reader.read(sessionId: "session-a", now: now)?.usedPercent, 26.5, "exact session usage")
+    expect(reader.read(sessionId: "missing", now: now) == nil, "another session must not be substituted")
+    expect(
+        reader.read(sessionId: "session-a", now: now.addingTimeInterval(301)) == nil,
+        "usage older than five minutes must be rejected"
+    )
+}
+
+func testClaudeContextUsageReaderMigratesMatchingLegacySnapshot() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-legacy-usage-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+    let legacyURL = root.appendingPathComponent("claude-code-context.json")
+    let now = ISO8601DateFormatter().date(from: "2026-06-23T02:00:00Z")!
+    let legacy = ClaudeContextUsageSnapshot(sessionId: "legacy-main", usedPercent: 31, updatedAt: now)
+    try JSONEncoder().encode(legacy).write(to: legacyURL)
+
+    let reader = ClaudeContextUsageReader(
+        snapshotsDirectory: root.appendingPathComponent("contexts", isDirectory: true),
+        legacySnapshotURL: legacyURL
+    )
+    expect(reader.read(sessionId: "legacy-main", now: now)?.usedPercent, 31, "matching legacy fallback")
+    expect(reader.read(sessionId: "other-main", now: now) == nil, "mismatched legacy fallback")
+}
+
 func testClaudeStatusLineProxyRuntimeCapturesUsageAndForwardsInput() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-statusline-runtime-\(UUID().uuidString)", isDirectory: true)
     defer {
         try? FileManager.default.removeItem(at: root)
     }
-    let snapshotURL = root.appendingPathComponent("claude-code-context.json")
+    let snapshotsDirectory = root.appendingPathComponent("claude-code-contexts", isDirectory: true)
     let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
     let input = Data(#"{"session_id":"cc-session","context_window":{"used_percentage":61.5,"context_window_size":200000}}"#.utf8)
+    let otherInput = Data(#"{"session_id":"other-session","context_window":{"used_percentage":18,"context_window_size":200000}}"#.utf8)
 
     let captured = try ClaudeStatusLineProxyRuntime.capture(
         input: input,
-        snapshotURL: snapshotURL,
+        snapshotsDirectory: snapshotsDirectory,
+        updatedAt: now
+    )
+    _ = try ClaudeStatusLineProxyRuntime.capture(
+        input: otherInput,
+        snapshotsDirectory: snapshotsDirectory,
         updatedAt: now
     )
     let forwarded = try ClaudeStatusLineProxyRuntime.runOriginalCommand(command: "cat", input: input)
@@ -812,8 +904,17 @@ func testClaudeStatusLineProxyRuntimeCapturesUsageAndForwardsInput() throws {
     expect(captured?.usedPercent, 61.5, "statusline proxy should capture Claude context")
     expect(forwarded.standardOutput, input, "statusline proxy should forward input unchanged")
     expect(forwarded.terminationStatus, 0, "statusline proxy should preserve successful command status")
+    let snapshotURL = ClaudeContextUsageStorage.snapshotURL(
+        directory: snapshotsDirectory,
+        sessionId: "cc-session"
+    )!
     let stored = try JSONDecoder().decode(ClaudeContextUsageSnapshot.self, from: Data(contentsOf: snapshotURL))
     expect(stored, captured, "statusline proxy should persist the captured context atomically")
+    let otherURL = ClaudeContextUsageStorage.snapshotURL(
+        directory: snapshotsDirectory,
+        sessionId: "other-session"
+    )!
+    expect(FileManager.default.fileExists(atPath: otherURL.path), "another Claude session should have its own snapshot")
 }
 
 func testCodexRealtimeActivityReaderDetectsAnswerStreaming() {
@@ -1568,9 +1669,118 @@ func testClaudeLiveSessionReaderRequiresLiveWaitingProcess() throws {
     try Data(#"{"status":"waiting","pid":99999999,"sessionId":"dead"}"#.utf8).write(to: file)
     expect(ClaudeLiveSessionReader.hasStandbySession(homeDirectory: home), false, "dead Claude session pid should not show standby")
 
-    let live = #"{"status":"idle","pid":\#(ProcessInfo.processInfo.processIdentifier),"sessionId":"live"}"#
+    let live = #"{"status":"idle","pid":\#(ProcessInfo.processInfo.processIdentifier),"sessionId":"live","cwd":"/tmp/live-project","updatedAt":2000}"#
     try Data(live.utf8).write(to: file)
     expect(ClaudeLiveSessionReader.hasStandbySession(homeDirectory: home), true, "live idle Claude session should show standby")
+
+    let newerFile = sessions.appendingPathComponent("newer.json")
+    let newer = #"{"status":"waiting","pid":\#(ProcessInfo.processInfo.processIdentifier),"sessionId":"newer","cwd":"/tmp/newer-project","updatedAt":3000}"#
+    try Data(newer.utf8).write(to: newerFile)
+    let standbySessions = ClaudeLiveSessionReader.standbySessions(homeDirectory: home)
+    expect(standbySessions.count, 2, "all live idle Claude sessions should be returned")
+    expect(
+        ClaudeLiveSessionReader.preferredStandbySession(
+            sessions: standbySessions,
+            hookSnapshots: []
+        )?.sessionId,
+        "newer",
+        "most recently updated live session should win without hook evidence"
+    )
+
+    let recentHook = SessionSnapshot(
+        threadId: "live",
+        projectName: "live-project",
+        workingDirectory: "/tmp/live-project",
+        state: .done,
+        action: "Complete",
+        lastEventAt: Date(timeIntervalSince1970: 10),
+        completedAt: Date(timeIntervalSince1970: 10),
+        active: false,
+        agent: .claudeCode
+    )
+    expect(
+        ClaudeLiveSessionReader.preferredStandbySession(
+            sessions: standbySessions,
+            hookSnapshots: [recentHook]
+        )?.sessionId,
+        "live",
+        "recent matching hook activity should identify the visible standby session"
+    )
+}
+
+func testClaudeMainSessionDetailsResolverUsesExactSessionAndSafeLiveProject() {
+    let now = ISO8601DateFormatter().date(from: "2026-06-23T02:00:00Z")!
+    let main = SessionSnapshot(
+        threadId: "main-session",
+        projectName: "text-extract",
+        workingDirectory: "/Users/wjs/work/xisoft/text-extract",
+        state: .idle,
+        action: "Ready",
+        lastEventAt: now,
+        completedAt: nil,
+        active: false,
+        agent: .claudeCode
+    )
+    let live = ClaudeLiveSessionSnapshot(
+        sessionId: "main-session",
+        workingDirectory: "/Users/wjs/work/xisoft/text-extract",
+        processId: 1,
+        status: "idle",
+        updatedAt: now
+    )
+    let usage = ClaudeContextUsageSnapshot(
+        sessionId: "main-session",
+        usedPercent: 26.5,
+        modelName: "glm-latest",
+        inputTokens: 53_100,
+        outputTokens: 1_200,
+        updatedAt: now
+    )
+
+    let resolved = ClaudeMainSessionDetailsResolver.resolve(
+        mainSessionId: "main-session",
+        mainSessions: [main],
+        liveSession: live,
+        usage: usage
+    )
+    expect(resolved.sessionDetails.projectName, "text-extract", "main transcript project")
+    expect(resolved.sessionDetails.modelName, "glm-latest", "exact statusline model")
+    expect(resolved.sessionDetails.inputTokens, 53_100, "exact statusline input tokens")
+    expect(resolved.contextUsedPercent, 26.5, "exact statusline context")
+
+    let liveOnly = ClaudeMainSessionDetailsResolver.resolve(
+        mainSessionId: "main-session",
+        mainSessions: [],
+        liveSession: live,
+        usage: usage
+    )
+    expect(liveOnly.sessionDetails.projectName, "text-extract", "standby live session should retain a safe project")
+
+    var mismatched = usage
+    mismatched.sessionId = "other-session"
+    let rejected = ClaudeMainSessionDetailsResolver.resolve(
+        mainSessionId: "main-session",
+        mainSessions: [main],
+        liveSession: live,
+        usage: mismatched
+    )
+    expect(rejected.sessionDetails.modelName == nil, "another session model must be rejected")
+    expect(rejected.contextUsedPercent == nil, "another session context must be rejected")
+
+    let worktree = ClaudeLiveSessionSnapshot(
+        sessionId: "missing-main",
+        workingDirectory: "/Users/wjs/work/xisoft/text-extract/.claude/worktrees/agent-a47ee146bdd2ba852",
+        processId: 1,
+        status: "idle",
+        updatedAt: now
+    )
+    let unsafe = ClaudeMainSessionDetailsResolver.resolve(
+        mainSessionId: "missing-main",
+        mainSessions: [],
+        liveSession: worktree,
+        usage: nil
+    )
+    expect(unsafe.sessionDetails.projectName == nil, "agent worktree name must not become the project")
 }
 
 func testClaudeStatusMergerKeepsHookWhenTranscriptCompletionIsNewer() {
@@ -1921,6 +2131,13 @@ do {
     fatalError("\(error)")
 }
 do {
+    try testClaudeContextUsageStorageSeparatesSessionsAndRejectsUnsafeIds()
+    try testClaudeContextUsageReaderRequiresExactFreshSession()
+    try testClaudeContextUsageReaderMigratesMatchingLegacySnapshot()
+} catch {
+    fatalError("\(error)")
+}
+do {
     try testClaudeStatusLineProxyRuntimeCapturesUsageAndForwardsInput()
 } catch {
     fatalError("\(error)")
@@ -1981,6 +2198,7 @@ do {
 } catch {
     fatalError("\(error)")
 }
+testClaudeMainSessionDetailsResolverUsesExactSessionAndSafeLiveProject()
 testClaudeHookStopShowsDoneThenReadyWhileWaitingForInput()
 testStartupExecutablePathUsesAppBundleRoot()
 do {

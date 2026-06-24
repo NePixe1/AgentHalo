@@ -5,10 +5,10 @@ import Foundation
 let input = FileHandle.standardInput.readDataToEndOfFile()
 let home = FileManager.default.homeDirectoryForCurrentUser
 let agentHaloDirectory = home.appendingPathComponent(".agent-halo", isDirectory: true)
-let snapshotURL = agentHaloDirectory.appendingPathComponent("claude-code-context.json")
+let snapshotsDirectory = agentHaloDirectory.appendingPathComponent("claude-code-contexts", isDirectory: true)
 let originalCommandURL = agentHaloDirectory.appendingPathComponent("claude-code-statusline-original-command")
 
-_ = try? ClaudeStatusLineProxyRuntime.capture(input: input, snapshotURL: snapshotURL)
+_ = try? ClaudeStatusLineProxyRuntime.capture(input: input, snapshotsDirectory: snapshotsDirectory)
 
 guard let commandData = try? Data(contentsOf: originalCommandURL),
       let command = String(data: commandData, encoding: .utf8),

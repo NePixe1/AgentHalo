@@ -14,19 +14,13 @@ public enum ClaudeStatusLineProxyRuntime {
     @discardableResult
     public static func capture(
         input: Data,
-        snapshotURL: URL,
+        snapshotsDirectory: URL,
         updatedAt: Date = Date()
     ) throws -> ClaudeContextUsageSnapshot? {
         guard let snapshot = ClaudeStatusLineUsageParser.parse(data: input, updatedAt: updatedAt) else {
             return nil
         }
-
-        try FileManager.default.createDirectory(
-            at: snapshotURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        try JSONEncoder().encode(snapshot).write(to: snapshotURL, options: [.atomic])
+        try ClaudeContextUsageStorage.write(snapshot, directory: snapshotsDirectory)
         return snapshot
     }
 

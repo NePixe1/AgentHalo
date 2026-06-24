@@ -52,16 +52,16 @@ func runHaloInteractionChecks() {
     testDetailsPanelShowsCodexQuotaAndIdleCopy()
     testDetailsPanelShowsSessionMetadataForCodexAndClaudeCode()
     testDetailsPanelUsesCompactMetadataLayout()
+    testVisibleDetailsPanelStatusRefreshIsWiredToTick()
+    testStatusLineConfigurationReconciliationIsWiredToTick()
+    testDetailsPresentationUsesFocusedSessionAndRejectsStaleQuota()
+    testClaudeStandbyDetailsPreferLiveSessionIdentity()
     testDetailsPanelUsesTightBottomInset()
     testDetailsPanelShowsExpiredQuotaAsWaitingForRefresh()
     testDetailsPanelShowsAnswerStreamingCopy()
     testDetailsPanelRefreshesStatusFromLatestAggregate()
-    testVisibleDetailsPanelStatusRefreshIsWiredToTick()
     testDetailsPanelLocalizesClaudeActivityDetails()
     testDetailsPanelShowsContextAndHidesQuotaForClaudeCode()
-    testDetailsPresentationUsesFocusedSessionAndRejectsStaleQuota()
-    testClaudeContextUsesRawSessionAfterCompletionAcknowledgement()
-    testClaudeContextSurvivesHookSnapshotPruning()
     testAgentToggleUsesSharedSVGAssets()
     testAgentToggleUsesCodexAndClaudeIcons()
     testAgentToggleKeepsWholeControlClickable()
@@ -904,7 +904,7 @@ private func testDetailsPanelUsesTightBottomInset() {
         fatalError("details panel should expose its content stack")
     }
 
-    expect(contentStack.edgeInsets.bottom, 10, "details panel bottom inset")
+    expect(contentStack.edgeInsets.bottom, 4, "details panel bottom inset")
 }
 
 @MainActor
@@ -990,8 +990,68 @@ private func testVisibleDetailsPanelStatusRefreshIsWiredToTick() {
 
     let tickSource = source[tickStart..<tickEnd]
     expect(
-        tickSource.contains("refreshVisibleDetailsStatus()"),
-        "tick should refresh status while the details panel remains visible"
+        tickSource.contains("refreshVisibleDetailsPanel()"),
+        "tick should refresh visible status and metadata"
+    )
+    expect(
+        !tickSource.contains("refreshVisibleDetailsStatus()"),
+        "status-only refresh must not leave Claude metadata stale"
+    )
+}
+
+private func testStatusLineConfigurationReconciliationIsWiredToTick() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let appDelegateURL = sourceDirectory.appendingPathComponent("AppDelegate.swift")
+    guard let source = try? String(contentsOf: appDelegateURL, encoding: .utf8),
+          let tickStart = source.range(of: "    private func tick() {")?.lowerBound,
+          let tickEnd = source.range(of: "    private func createStatusItem()", range: tickStart..<source.endIndex)?.lowerBound else {
+        fatalError("AppDelegate tick source should be readable")
+    }
+
+    let tickSource = source[tickStart..<tickEnd]
+    expect(
+        tickSource.contains("reconcileClaudeStatusLineConfiguration(now:"),
+        "AppDelegate tick should reconcile status-line drift"
+    )
+}
+
+@MainActor
+private func testClaudeStandbyDetailsPreferLiveSessionIdentity() {
+    let now = Date()
+    let staleHook = SessionSnapshot(
+        threadId: "stale-session",
+        projectName: "stale-project",
+        workingDirectory: "/tmp/stale-project",
+        state: .done,
+        action: "Complete",
+        lastEventAt: now.addingTimeInterval(-60),
+        completedAt: now.addingTimeInterval(-60),
+        active: false,
+        agent: .claudeCode
+    )
+    let standby = AggregateSnapshot(
+        state: .done,
+        label: "STANDBY",
+        detail: AgentKind.claudeCode.standbyDetail,
+        sessions: [],
+        focusedAgent: .claudeCode
+    )
+    let live = ClaudeLiveSessionSnapshot(
+        sessionId: "live-session",
+        workingDirectory: "/tmp/live-project",
+        processId: 1,
+        status: "idle",
+        updatedAt: now
+    )
+
+    expect(
+        AppDelegate.claudeMainSessionIdForDetails(
+            displayedAggregate: standby,
+            rawClaudeSnapshots: [staleHook],
+            liveSession: live
+        ),
+        "live-session",
+        "standby details must use the selected live session before stale hook snapshots"
     )
 }
 
@@ -1089,7 +1149,9 @@ private func testDetailsPresentationUsesFocusedSessionAndRejectsStaleQuota() {
     let thirdParty = AppDelegate.detailsPresentationForDetails(
         focusedAgent: .codex,
         displayedAggregate: codexAggregate,
-        rawClaudeSnapshots: [],
+        claudeMainSessionId: nil,
+        mainClaudeSessions: [],
+        liveClaudeSession: nil,
         quota: staleQuota,
         claudeUsage: nil
     )
@@ -1109,7 +1171,9 @@ private func testDetailsPresentationUsesFocusedSessionAndRejectsStaleQuota() {
     let subscription = AppDelegate.detailsPresentationForDetails(
         focusedAgent: .codex,
         displayedAggregate: subscriptionAggregate,
-        rawClaudeSnapshots: [],
+        claudeMainSessionId: nil,
+        mainClaudeSessions: [],
+        liveClaudeSession: nil,
         quota: staleQuota,
         claudeUsage: nil
     )
@@ -1117,8 +1181,8 @@ private func testDetailsPresentationUsesFocusedSessionAndRejectsStaleQuota() {
 
     let claudeSession = SessionSnapshot(
         threadId: "cc-current",
-        projectName: "AgentHalo",
-        workingDirectory: "/tmp/AgentHalo",
+        projectName: "agent-a47ee146bdd2ba852",
+        workingDirectory: "/tmp/AgentHalo/.claude/worktrees/agent-a47ee146bdd2ba852",
         state: .working,
         action: "Thinking",
         lastEventAt: now,
@@ -1141,96 +1205,10 @@ private func testDetailsPresentationUsesFocusedSessionAndRejectsStaleQuota() {
         outputTokens: 1_200,
         updatedAt: now
     )
-    let claude = AppDelegate.detailsPresentationForDetails(
-        focusedAgent: .claudeCode,
-        displayedAggregate: claudeAggregate,
-        rawClaudeSnapshots: [claudeSession],
-        quota: nil,
-        claudeUsage: matchingUsage
-    )
-    expect(!claude.showsQuota, "Claude Code should use metadata UI")
-    expect(claude.contextUsedPercent, 58, "Claude Code should retain context usage")
-    expect(claude.sessionDetails.modelName, "claude-sonnet-4", "Claude details should use matching statusline model")
-
-    var mismatchedUsage = matchingUsage
-    mismatchedUsage.sessionId = "cc-other"
-    let mismatched = AppDelegate.detailsPresentationForDetails(
-        focusedAgent: .claudeCode,
-        displayedAggregate: claudeAggregate,
-        rawClaudeSnapshots: [claudeSession],
-        quota: nil,
-        claudeUsage: mismatchedUsage
-    )
-    expect(mismatched.sessionDetails.modelName == nil, "Claude details must reject another session's model")
-    expect(mismatched.contextUsedPercent == nil, "Claude details must reject another session's context usage")
-}
-
-@MainActor
-private func testClaudeContextUsesRawSessionAfterCompletionAcknowledgement() {
-    let root = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("agent-halo-claude-context-ui-\(UUID().uuidString)", isDirectory: true)
-    let snapshotURL = root.appendingPathComponent("claude-code-context.json")
-    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    let now = Date()
-    let context = ClaudeContextUsageSnapshot(
-        sessionId: "cc-done",
-        usedPercent: 30,
-        contextWindowSize: 200_000,
-        updatedAt: now
-    )
-    try! JSONEncoder().encode(context).write(to: snapshotURL)
-    let rawClaudeSession = SessionSnapshot(
-        threadId: "cc-done",
+    let mainTranscript = SessionSnapshot(
+        threadId: "cc-current",
         projectName: "AgentHalo",
         workingDirectory: "/tmp/AgentHalo",
-        state: .done,
-        action: "Complete",
-        lastEventAt: now,
-        completedAt: now,
-        active: false,
-        agent: .claudeCode
-    )
-    let acknowledgedAggregate = AggregateSnapshot(
-        state: .idle,
-        label: "READY",
-        detail: AgentKind.claudeCode.standbyDetail,
-        sessions: [],
-        focusedAgent: .claudeCode
-    )
-
-    let testQueue = DispatchQueue(label: "com.agenthalo.test-context-reader")
-    let percent = AppDelegate.contextUsedPercentForDetails(
-        focusedAgent: .claudeCode,
-        quota: nil,
-        displayedAggregate: acknowledgedAggregate,
-        rawClaudeSnapshots: [rawClaudeSession],
-        claudeContextUsageReader: ClaudeContextUsageReader(snapshotURL: snapshotURL),
-        contextReaderQueue: testQueue,
-        now: now
-    )
-
-    expect(percent == 30, "acknowledged Claude completion should retain matching context usage")
-}
-
-@MainActor
-private func testClaudeContextSurvivesHookSnapshotPruning() {
-    let root = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("agent-halo-claude-context-pruned-\(UUID().uuidString)", isDirectory: true)
-    let snapshotURL = root.appendingPathComponent("claude-code-context.json")
-    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    let testQueue = DispatchQueue(label: "com.agenthalo.test-context-reader")
-    let now = Date()
-    let context = ClaudeContextUsageSnapshot(
-        sessionId: "cc-recent",
-        usedPercent: 30,
-        contextWindowSize: 200_000,
-        updatedAt: now.addingTimeInterval(-60)
-    )
-    try! JSONEncoder().encode(context).write(to: snapshotURL)
-    let placeholderSession = SessionSnapshot(
-        threadId: "claude-code",
-        projectName: "Claude Code",
-        workingDirectory: "",
         state: .idle,
         action: "Ready",
         lastEventAt: now,
@@ -1238,25 +1216,40 @@ private func testClaudeContextSurvivesHookSnapshotPruning() {
         active: false,
         agent: .claudeCode
     )
-    let readyAggregate = AggregateSnapshot(
-        state: .idle,
-        label: "READY",
-        detail: AgentKind.claudeCode.standbyDetail,
-        sessions: [placeholderSession],
-        focusedAgent: .claudeCode
+    let liveSession = ClaudeLiveSessionSnapshot(
+        sessionId: "cc-current",
+        workingDirectory: "/tmp/AgentHalo",
+        processId: 1,
+        status: "idle",
+        updatedAt: now
     )
-
-    let percent = AppDelegate.contextUsedPercentForDetails(
+    let claude = AppDelegate.detailsPresentationForDetails(
         focusedAgent: .claudeCode,
+        displayedAggregate: claudeAggregate,
+        claudeMainSessionId: "cc-current",
+        mainClaudeSessions: [mainTranscript],
+        liveClaudeSession: liveSession,
         quota: nil,
-        displayedAggregate: readyAggregate,
-        rawClaudeSnapshots: [],
-        claudeContextUsageReader: ClaudeContextUsageReader(snapshotURL: snapshotURL),
-        contextReaderQueue: testQueue,
-        now: now
+        claudeUsage: matchingUsage
     )
+    expect(!claude.showsQuota, "Claude Code should use metadata UI")
+    expect(claude.contextUsedPercent, 58, "Claude Code should retain context usage")
+    expect(claude.sessionDetails.projectName, "AgentHalo", "standby details should use the main project")
+    expect(claude.sessionDetails.modelName, "claude-sonnet-4", "Claude details should use matching statusline model")
 
-    expect(percent == 30, "fresh Claude context should remain visible after hook snapshots prune")
+    var mismatchedUsage = matchingUsage
+    mismatchedUsage.sessionId = "cc-other"
+    let mismatched = AppDelegate.detailsPresentationForDetails(
+        focusedAgent: .claudeCode,
+        displayedAggregate: claudeAggregate,
+        claudeMainSessionId: "cc-current",
+        mainClaudeSessions: [mainTranscript],
+        liveClaudeSession: liveSession,
+        quota: nil,
+        claudeUsage: mismatchedUsage
+    )
+    expect(mismatched.sessionDetails.modelName == nil, "Claude details must reject another session's model")
+    expect(mismatched.contextUsedPercent == nil, "Claude details must reject another session's context usage")
 }
 
 @MainActor

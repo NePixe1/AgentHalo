@@ -1,6 +1,22 @@
 import Foundation
 
 public enum ClaudeStatusLineConfigurator {
+    public static func isConfigured(
+        homeDirectory home: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> Bool {
+        let settingsURL = home.appendingPathComponent(".claude/settings.json", isDirectory: false)
+        let installedProxy = home
+            .appendingPathComponent(".agent-halo", isDirectory: true)
+            .appendingPathComponent("claude-code-statusline-proxy", isDirectory: false)
+        guard let data = try? Data(contentsOf: settingsURL),
+              let settings = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let statusLine = settings["statusLine"] as? [String: Any],
+              let command = statusLine["command"] as? String else {
+            return false
+        }
+        return URL(fileURLWithPath: command).standardizedFileURL == installedProxy.standardizedFileURL
+    }
+
     public static func configure() {
         let home = FileManager.default.homeDirectoryForCurrentUser
         configure(homeDirectory: home, bundledProxyBinary: bundledProxyBinary())

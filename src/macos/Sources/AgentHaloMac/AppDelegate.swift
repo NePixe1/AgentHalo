@@ -81,6 +81,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let monitor = CodexSessionMonitor()
     private let claudeHookMonitor = ClaudeHookStatusMonitor()
     private let claudeSessionMonitor = ClaudeSessionMonitor()
+    private var preferredClaudeStandbySession: ClaudeLiveSessionSnapshot?
+    private var nextStatusLineReconciliationAt = Date.distantPast
+    private let statusLineReconciliationInterval: TimeInterval = 2
     private var selectedPreview = PreviewPayload.live
     private var aggregate: AggregateSnapshot
     private var statusItem: NSStatusItem!
@@ -161,10 +164,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if haloView?.isDragging == true {
             return
         }
+        let now = Date()
+        reconcileClaudeStatusLineConfiguration(now: now)
         updateSystemOverlaySuspension(for: NSWorkspace.shared.frontmostApplication)
         _ = monitor.refresh()
         _ = claudeHookMonitor.refresh()
         _ = claudeSessionMonitor.refresh()
+        preferredClaudeStandbySession = ClaudeLiveSessionReader.preferredStandbySession(
+            sessions: ClaudeLiveSessionReader.standbySessions(),
+            hookSnapshots: claudeHookMonitor.snapshots()
+        )
         acknowledgeCompletedIfCodexIsForeground()
         let codexRunning = CodexAppDetector.isCodexRunning()
         aggregate = SessionAggregator.aggregate(
@@ -178,7 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             aggregate: aggregate,
             hasLiveSession: settings.focusedAgent == .codex
                 ? codexRunning
-                : ClaudeLiveSessionReader.hasStandbySession()
+                : preferredClaudeStandbySession != nil
         )
         applyRealtimeCodexActivity()
         let codexIsForeground = CodexAppDetector.isCodexForeground()
@@ -203,7 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 aggregate: aggregate,
                 hasLiveSession: settings.focusedAgent == .codex
                     ? codexRunning
-                    : ClaudeLiveSessionReader.hasStandbySession()
+                    : preferredClaudeStandbySession != nil
             )
             applyRealtimeCodexActivity()
         }
@@ -211,7 +220,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             aggregate,
             errorPresentation: errorUpdate.presentation
         )
-        refreshVisibleDetailsStatus()
+        refreshVisibleDetailsPanel()
         if !systemOverlaySuspended {
             haloView?.needsDisplay = true
         }
@@ -224,6 +233,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = StatusIcon.image(color: NSColor.systemTeal)
         statusItem.button?.toolTip = "Agent Halo"
+    }
+
+    private func reconcileClaudeStatusLineConfiguration(now: Date) {
+        guard now >= nextStatusLineReconciliationAt else { return }
+        nextStatusLineReconciliationAt = now.addingTimeInterval(statusLineReconciliationInterval)
+        guard !ClaudeStatusLineConfigurator.isConfigured() else { return }
+        ClaudeStatusLineConfigurator.configure()
     }
 
     private func createHaloPanel() {
@@ -615,32 +631,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if settings.focusedAgent == .claudeCode {
             acknowledgeCompletedSessions(rawClaudeSnapshots)
         }
-        let displayedAggregate = displayAggregate()
-        let quota = settings.focusedAgent == .codex ? rateLimitReader.read() : nil
-        let claudeSessionIds = rawClaudeSnapshots.isEmpty
-            ? displayedAggregate.sessions.map(\.threadId)
-            : rawClaudeSnapshots.map(\.threadId)
-        let claudeUsage = settings.focusedAgent == .claudeCode
-            ? contextReaderQueue.sync {
-                claudeContextUsageReader.read(
-                    sessionIds: claudeSessionIds.filter { $0 != "claude-code" }
-                )
-            }
-            : nil
-        let presentation = Self.detailsPresentationForDetails(
-            focusedAgent: settings.focusedAgent,
-            displayedAggregate: displayedAggregate,
-            rawClaudeSnapshots: rawClaudeSnapshots,
-            quota: quota,
-            claudeUsage: claudeUsage
-        )
-        detailsPanel.update(
-            aggregate: displayedAggregate,
-            quota: quota,
-            contextUsedPercent: presentation.contextUsedPercent,
-            sessionDetails: presentation.sessionDetails,
-            showsQuota: presentation.showsQuota
-        )
+        updateDetailsPanelContent(rawClaudeSnapshots: rawClaudeSnapshots)
         detailsPanel.onMouseEntered = { [weak self] in
             self?.hoverHideTimer?.invalidate()
         }
@@ -654,36 +645,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         detailsPanel.orderFrontRegardless()
     }
 
-    static func contextUsedPercentForDetails(
-        focusedAgent: AgentKind,
-        quota: RateLimitSnapshot?,
-        displayedAggregate: AggregateSnapshot,
-        rawClaudeSnapshots: [SessionSnapshot],
-        claudeContextUsageReader: ClaudeContextUsageReader,
-        contextReaderQueue: DispatchQueue,
-        now: Date = Date()
-    ) -> Double? {
-        switch focusedAgent {
-        case .codex:
-            return quota?.contextUsedPercent
-        case .claudeCode:
-            let sessionIds = rawClaudeSnapshots.isEmpty
-                ? displayedAggregate.sessions.map(\.threadId)
-                : rawClaudeSnapshots.map(\.threadId)
-            let comparableSessionIds = sessionIds.filter { $0 != "claude-code" }
-            return contextReaderQueue.sync {
-                claudeContextUsageReader.read(
-                    sessionIds: comparableSessionIds,
-                    now: now
-                )?.usedPercent
+    private func updateDetailsPanelContent(rawClaudeSnapshots: [SessionSnapshot]? = nil) {
+        let rawClaudeSnapshots = rawClaudeSnapshots
+            ?? (settings.focusedAgent == .claudeCode ? claudeSnapshots() : [])
+        let displayedAggregate = displayAggregate()
+        let quota = settings.focusedAgent == .codex ? rateLimitReader.read() : nil
+        let claudeMainSessionId = settings.focusedAgent == .claudeCode
+            ? Self.claudeMainSessionIdForDetails(
+                displayedAggregate: displayedAggregate,
+                rawClaudeSnapshots: rawClaudeSnapshots,
+                liveSession: preferredClaudeStandbySession
+            )
+            : nil
+        let claudeUsage = claudeMainSessionId.flatMap { sessionId in
+            contextReaderQueue.sync {
+                claudeContextUsageReader.read(sessionId: sessionId)
             }
         }
+        let presentation = Self.detailsPresentationForDetails(
+            focusedAgent: settings.focusedAgent,
+            displayedAggregate: displayedAggregate,
+            claudeMainSessionId: claudeMainSessionId,
+            mainClaudeSessions: claudeSessionMonitor.snapshots(),
+            liveClaudeSession: preferredClaudeStandbySession,
+            quota: quota,
+            claudeUsage: claudeUsage
+        )
+        detailsPanel.update(
+            aggregate: displayedAggregate,
+            quota: quota,
+            contextUsedPercent: presentation.contextUsedPercent,
+            sessionDetails: presentation.sessionDetails,
+            showsQuota: presentation.showsQuota
+        )
+    }
+
+    static func claudeMainSessionIdForDetails(
+        displayedAggregate: AggregateSnapshot,
+        rawClaudeSnapshots: [SessionSnapshot],
+        liveSession: ClaudeLiveSessionSnapshot?
+    ) -> String? {
+        if let displayed = displayedAggregate.sessions.first(where: { $0.threadId != "claude-code" }) {
+            return displayed.threadId
+        }
+        if let liveSession {
+            return liveSession.sessionId
+        }
+        return rawClaudeSnapshots
+            .filter { $0.threadId != "claude-code" }
+            .max { $0.lastEventAt < $1.lastEventAt }?
+            .threadId
     }
 
     static func detailsPresentationForDetails(
         focusedAgent: AgentKind,
         displayedAggregate: AggregateSnapshot,
-        rawClaudeSnapshots: [SessionSnapshot],
+        claudeMainSessionId: String?,
+        mainClaudeSessions: [SessionSnapshot],
+        liveClaudeSession: ClaudeLiveSessionSnapshot?,
         quota: RateLimitSnapshot?,
         claudeUsage: ClaudeContextUsageSnapshot?
     ) -> DetailsPresentation {
@@ -703,24 +722,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     ?? (showsQuota ? quota?.contextUsedPercent : nil)
             )
         case .claudeCode:
-            let matchingRawSession = claudeUsage.flatMap { usage in
-                rawClaudeSnapshots.first { $0.threadId == usage.sessionId }
-            }
-            let session = matchingRawSession
-                ?? displayedAggregate.sessions.first
-                ?? rawClaudeSnapshots.first
-            let matchingUsage = session.flatMap { session in
-                (claudeUsage?.sessionId == session.threadId || session.threadId == "claude-code") ? claudeUsage : nil
-            } ?? claudeUsage
+            let resolved = ClaudeMainSessionDetailsResolver.resolve(
+                mainSessionId: claudeMainSessionId,
+                mainSessions: mainClaudeSessions,
+                liveSession: liveClaudeSession,
+                usage: claudeUsage
+            )
             return DetailsPresentation(
-                sessionDetails: SessionDetailsSnapshot(
-                    projectName: session?.projectName,
-                    modelName: matchingUsage?.modelName,
-                    inputTokens: matchingUsage?.inputTokens,
-                    outputTokens: matchingUsage?.outputTokens
-                ),
+                sessionDetails: resolved.sessionDetails,
                 showsQuota: false,
-                contextUsedPercent: matchingUsage?.usedPercent
+                contextUsedPercent: resolved.contextUsedPercent
             )
         }
     }
@@ -729,14 +740,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard detailsPanel.isVisible else {
             return
         }
-        showDetails()
-    }
-
-    private func refreshVisibleDetailsStatus() {
-        guard detailsPanel.isVisible else {
-            return
-        }
-        detailsPanel.updateStatus(aggregate: displayAggregate())
+        updateDetailsPanelContent()
     }
 
     private func scheduleHideDetails() {

@@ -87,78 +87,96 @@ public enum ClaudeStatusLineUsageParser {
     }
 }
 
+public enum ClaudeContextUsageStorage {
+    public static func snapshotURL(directory: URL, sessionId: String) -> URL? {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_."))
+        guard !sessionId.isEmpty,
+              sessionId.count <= 128,
+              sessionId.unicodeScalars.allSatisfy({ allowed.contains($0) }) else {
+            return nil
+        }
+        return directory.appendingPathComponent("\(sessionId).json", isDirectory: false)
+    }
+
+    public static func write(_ snapshot: ClaudeContextUsageSnapshot, directory: URL) throws {
+        guard let url = snapshotURL(directory: directory, sessionId: snapshot.sessionId) else {
+            throw CocoaError(.fileWriteInvalidFileName)
+        }
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try JSONEncoder().encode(snapshot).write(to: url, options: [.atomic])
+    }
+}
+
 public struct ClaudeContextUsageReader: Sendable {
-    public var snapshotURL: URL
-
-    private struct CachedSnapshot: Sendable {
-        var snapshotURL: URL
-        var snapshot: ClaudeContextUsageSnapshot
-        var fileModificationDate: Date
-    }
-
-    private final class Cache: @unchecked Sendable {
-        private let queue = DispatchQueue(label: "com.agenthalo.context-cache")
-        private var cachedSnapshot: CachedSnapshot?
-
-        func get() -> CachedSnapshot? {
-            queue.sync { cachedSnapshot }
-        }
-
-        func set(_ snapshot: CachedSnapshot?) {
-            queue.sync { cachedSnapshot = snapshot }
-        }
-    }
-
-    private static let cache = Cache()
+    public var snapshotsDirectory: URL
+    public var legacySnapshotURL: URL?
 
     public init(
-        snapshotURL: URL = FileManager.default.homeDirectoryForCurrentUser
+        snapshotsDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".agent-halo", isDirectory: true)
-            .appendingPathComponent("claude-code-context.json")
+            .appendingPathComponent("claude-code-contexts", isDirectory: true),
+        legacySnapshotURL: URL? = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".agent-halo", isDirectory: true)
+            .appendingPathComponent("claude-code-context.json", isDirectory: false)
     ) {
-        self.snapshotURL = snapshotURL
+        self.snapshotsDirectory = snapshotsDirectory
+        self.legacySnapshotURL = legacySnapshotURL
+    }
+
+    /// Compatibility initializer for callers that still provide the legacy
+    /// single-file location. Reads remain exact-session and freshness checked.
+    public init(snapshotURL: URL) {
+        snapshotsDirectory = snapshotURL.deletingLastPathComponent()
+            .appendingPathComponent("claude-code-contexts", isDirectory: true)
+        legacySnapshotURL = snapshotURL
+    }
+
+    public func read(sessionId: String, now: Date = Date()) -> ClaudeContextUsageSnapshot? {
+        guard let snapshotURL = ClaudeContextUsageStorage.snapshotURL(
+            directory: snapshotsDirectory,
+            sessionId: sessionId
+        ) else {
+            return nil
+        }
+
+        if let snapshot = decode(snapshotURL), isUsable(snapshot, sessionId: sessionId, now: now) {
+            return snapshot
+        }
+
+        if let legacySnapshotURL,
+           let snapshot = decode(legacySnapshotURL),
+           isUsable(snapshot, sessionId: sessionId, now: now) {
+            return snapshot
+        }
+        return nil
     }
 
     public func read(sessionIds: [String], now: Date = Date()) -> ClaudeContextUsageSnapshot? {
-        let normalizedSnapshotURL = snapshotURL.standardizedFileURL
-        let attributes = try? FileManager.default.attributesOfItem(atPath: snapshotURL.path)
-        guard let modDate = attributes?[.modificationDate] as? Date else {
-            return nil
-        }
-
-        if let cachedValue = Self.cache.get(),
-           cachedValue.snapshotURL == normalizedSnapshotURL,
-           cachedValue.fileModificationDate == modDate,
-           (sessionIds.isEmpty || sessionIds.contains(cachedValue.snapshot.sessionId)) {
-            let age = now.timeIntervalSince(cachedValue.snapshot.updatedAt)
-            guard age >= -ClaudeContextUsageConstants.clockSkewTolerance else {
-                return nil
+        for sessionId in sessionIds where sessionId != "claude-code" {
+            if let snapshot = read(sessionId: sessionId, now: now) {
+                return snapshot
             }
-            return cachedValue.snapshot
         }
+        return nil
+    }
 
-        guard let data = try? Data(contentsOf: snapshotURL),
-              let snapshot = try? JSONDecoder().decode(ClaudeContextUsageSnapshot.self, from: data) else {
-            Self.cache.set(nil)
-            return nil
-        }
+    private func decode(_ url: URL) -> ClaudeContextUsageSnapshot? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(ClaudeContextUsageSnapshot.self, from: data)
+    }
 
-        if !sessionIds.isEmpty, !sessionIds.contains(snapshot.sessionId) {
-            Self.cache.set(nil)
-            return nil
-        }
-
+    private func isUsable(
+        _ snapshot: ClaudeContextUsageSnapshot,
+        sessionId: String,
+        now: Date
+    ) -> Bool {
+        guard snapshot.sessionId == sessionId else { return false }
         let age = now.timeIntervalSince(snapshot.updatedAt)
-        guard age >= -ClaudeContextUsageConstants.clockSkewTolerance else {
-            Self.cache.set(nil)
-            return nil
-        }
-
-        Self.cache.set(CachedSnapshot(
-            snapshotURL: normalizedSnapshotURL,
-            snapshot: snapshot,
-            fileModificationDate: modDate
-        ))
-        return snapshot
+        return age >= -ClaudeContextUsageConstants.clockSkewTolerance
+            && age <= ClaudeContextUsageConstants.snapshotMaxAge
     }
 }
