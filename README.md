@@ -69,9 +69,14 @@ OpenAI API key.
 - Right-click for state previews, pause, startup, and exit controls.
 - Use the `光环大小` submenu to select `75% / 100% / 125%`;
   the selected size persists across restarts.
-- If launch or a display change leaves the halo fully off-screen, Agent Halo
-  automatically returns it to the primary display. Select `脱离卡死` from the
-  context menu to force the same reset manually.
+- On macOS, Agent Halo remembers the halo's display and relative position. If
+  that display disconnects, the halo temporarily moves to the primary display's
+  upper-right corner and returns when the display reconnects. Dragging it while
+  temporarily recovered makes the new position preferred instead.
+- Windows keeps its existing off-screen recovery behavior: after launch or a
+  display change, a fully off-screen halo returns to the primary display.
+- On either platform, select `脱离卡死` from the context menu to explicitly
+  reset the halo to the primary display's upper-right corner.
 - Click the halo to bring the Codex window forward.
 
 ## Status language
