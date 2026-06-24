@@ -23,7 +23,12 @@ func runHaloInteractionChecks() {
     testDraggingHaloSuppressesHoverDetails()
     testDraggingHaloPausesAnimationDuringDrag()
     testHaloSizeResizeKeepsWindowOrigin()
-    testHaloFrameVisibilityAcrossScreens()
+    testMissingPreferredDisplayRequiresFallbackDespiteCurrentSliver()
+    testReconnectedPreferredDisplayRestoresRelativePlacement()
+    testUserMoveDuringFallbackReplacesOldDisplayPreference()
+    testLegacyPlacementWaitsForItsDisplayAndThenMigrates()
+    testRestoredPlacementClampsInsideChangedVisibleFrame()
+    testTemporaryFallbackStateProtectsPreferredPlacementUntilUserMove()
     testHaloViewResizeKeepsAnimationMoving()
     testHaloViewSystemOverlaySuspensionStopsAnimation()
     testPreviewSubmenuMarksLiveStateInitially()
@@ -60,23 +65,112 @@ func runHaloInteractionChecks() {
 }
 
 @MainActor
-private func testHaloFrameVisibilityAcrossScreens() {
-    let screens = [
-        NSRect(x: 0, y: 0, width: 1440, height: 900),
-        NSRect(x: 1440, y: 0, width: 1920, height: 1080)
-    ]
-    expect(
-        AppDelegate.isHaloFrameVisible(NSRect(x: 1200, y: 700, width: 112, height: 112), in: screens),
-        "halo wholly inside a screen should remain visible"
+private func testMissingPreferredDisplayRequiresFallbackDespiteCurrentSliver() {
+    let primary = HaloDisplaySnapshot(
+        identifier: "primary",
+        visibleFrame: NSRect(x: 0, y: 0, width: 1440, height: 900)
     )
-    expect(
-        AppDelegate.isHaloFrameVisible(NSRect(x: 3320, y: 900, width: 112, height: 112), in: screens),
-        "halo partially intersecting a screen should remain visible"
+    let preference = HaloStoredPlacement(
+        displayIdentifier: "secondary",
+        absoluteOrigin: NSPoint(x: 1900, y: 600),
+        relativeOffset: NSPoint(x: 100, y: 80)
     )
+
     expect(
-        !AppDelegate.isHaloFrameVisible(NSRect(x: 3500, y: 1200, width: 112, height: 112), in: screens),
-        "halo outside every screen should be recovered"
+        HaloPlacementResolver.resolve(preference, haloSize: 112, displays: [primary]) == nil,
+        "a missing preferred display should require fallback even if macOS moved a sliver onscreen"
     )
+}
+
+@MainActor
+private func testReconnectedPreferredDisplayRestoresRelativePlacement() {
+    let secondary = HaloDisplaySnapshot(
+        identifier: "secondary",
+        visibleFrame: NSRect(x: 1440, y: 0, width: 1920, height: 1080)
+    )
+    let preference = HaloStoredPlacement(
+        displayIdentifier: "secondary",
+        absoluteOrigin: NSPoint(x: 1900, y: 600),
+        relativeOffset: NSPoint(x: 100, y: 80)
+    )
+
+    let resolved = HaloPlacementResolver.resolve(preference, haloSize: 112, displays: [secondary])
+
+    expect(resolved?.origin, NSPoint(x: 1540, y: 80), "reconnected display origin")
+    expect(resolved?.display.identifier, "secondary", "reconnected display identity")
+}
+
+@MainActor
+private func testUserMoveDuringFallbackReplacesOldDisplayPreference() {
+    let primary = HaloDisplaySnapshot(
+        identifier: "primary",
+        visibleFrame: NSRect(x: 0, y: 0, width: 1440, height: 900)
+    )
+    let secondary = HaloDisplaySnapshot(
+        identifier: "secondary",
+        visibleFrame: NSRect(x: 1440, y: 0, width: 1920, height: 1080)
+    )
+    let movedFrame = NSRect(x: 1100, y: 700, width: 112, height: 112)
+
+    let captured = HaloPlacementResolver.capture(frame: movedFrame, displays: [primary, secondary])
+    let restored = captured.flatMap {
+        HaloPlacementResolver.resolve($0, haloSize: 112, displays: [primary, secondary])
+    }
+
+    expect(captured?.displayIdentifier, "primary", "user move should choose the primary display")
+    expect(restored?.origin, movedFrame.origin, "reconnection should retain the new user position")
+}
+
+@MainActor
+private func testLegacyPlacementWaitsForItsDisplayAndThenMigrates() {
+    let primary = HaloDisplaySnapshot(
+        identifier: "primary",
+        visibleFrame: NSRect(x: 0, y: 0, width: 1440, height: 900)
+    )
+    let secondary = HaloDisplaySnapshot(
+        identifier: "secondary",
+        visibleFrame: NSRect(x: 1440, y: 0, width: 1920, height: 1080)
+    )
+    let legacy = HaloStoredPlacement(
+        displayIdentifier: nil,
+        absoluteOrigin: NSPoint(x: 1800, y: 600),
+        relativeOffset: nil
+    )
+
+    expect(
+        HaloPlacementResolver.resolve(legacy, haloSize: 112, displays: [primary]) == nil,
+        "unmatched legacy coordinates should remain pending"
+    )
+    let migrated = HaloPlacementResolver.resolve(legacy, haloSize: 112, displays: [primary, secondary])
+    expect(migrated?.display.identifier, "secondary", "legacy coordinates should bind after reconnect")
+    expect(migrated?.relativeOffset, NSPoint(x: 360, y: 600), "legacy relative offset")
+}
+
+@MainActor
+private func testRestoredPlacementClampsInsideChangedVisibleFrame() {
+    let display = HaloDisplaySnapshot(
+        identifier: "secondary",
+        visibleFrame: NSRect(x: 100, y: 50, width: 800, height: 600)
+    )
+    let preference = HaloStoredPlacement(
+        displayIdentifier: "secondary",
+        absoluteOrigin: .zero,
+        relativeOffset: NSPoint(x: 900, y: 700)
+    )
+
+    let resolved = HaloPlacementResolver.resolve(preference, haloSize: 112, displays: [display])
+    expect(resolved?.origin, NSPoint(x: 788, y: 538), "restored frame should fit the usable area")
+}
+
+@MainActor
+private func testTemporaryFallbackStateProtectsPreferredPlacementUntilUserMove() {
+    var state = HaloPlacementRuntimeState()
+    state.didUseTemporaryFallback()
+    expect(!state.shouldPersistCurrentFrame, "untouched fallback must not overwrite preferred placement")
+
+    state.didChoosePlacement()
+    expect(state.shouldPersistCurrentFrame, "user movement should make the new placement persistent")
+    expect(!state.isUsingTemporaryFallback, "user movement should cancel pending restoration")
 }
 
 @MainActor
