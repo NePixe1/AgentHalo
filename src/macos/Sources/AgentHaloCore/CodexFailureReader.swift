@@ -1,37 +1,38 @@
 import Foundation
 
 public struct CodexFailureReader: Sendable {
-    public var databaseURL: URL
-    public var sqlitePath: String
+    public var logStore: CodexSQLiteLogStore
 
     public init(
         databaseURL: URL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".codex", isDirectory: true)
-            .appendingPathComponent("logs_2.sqlite"),
-        sqlitePath: String = "/usr/bin/sqlite3"
+            .appendingPathComponent("logs_2.sqlite")
     ) {
-        self.databaseURL = databaseURL
-        self.sqlitePath = sqlitePath
+        self.logStore = CodexSQLiteLogStore(databaseURL: databaseURL)
     }
 
     public func readRecent(now: Date = Date()) -> CodexFailure? {
-        guard FileManager.default.fileExists(atPath: databaseURL.path(percentEncoded: false)) else {
+        let cutoff = now.addingTimeInterval(-120).timeIntervalSince1970
+        let query = """
+        select ts || char(9) || coalesce(level,'') || char(9) || coalesce(target,'') || char(9) || \
+        replace(replace(coalesce(feedback_log_body,''),char(10),' '),char(13),' ') from logs \
+        order by id desc limit 256;
+        """
+        let rows: [String]
+        do {
+            rows = try logStore.readSingleColumn(query: query)
+        } catch {
+            AgentHaloLogger.log("Codex failure sqlite read failed: \(error)")
             return nil
         }
-        let cutoff = Int(now.addingTimeInterval(-120).timeIntervalSince1970)
-        let query = """
-        select ts || char(9) || replace(replace(coalesce(feedback_log_body,''),char(10),' '),char(13),' ') from logs \
-        where ts >= \(cutoff) and lower(level)='error' and (\
-        lower(target) like '%client%' or lower(target) like '%auth%' or \
-        lower(target) like '%response%' or lower(target) like '%session%') \
-        order by id desc limit 24;
-        """
-        let output = runSQLite(query: query)
-        for line in output.split(whereSeparator: \.isNewline) {
-            let parts = line.split(separator: "\t", maxSplits: 1).map(String.init)
-            guard parts.count == 2,
+        for line in rows {
+            let parts = line.split(separator: "\t", maxSplits: 3).map(String.init)
+            guard parts.count == 4,
                   let seconds = TimeInterval(parts[0]),
-                  let detail = Self.classify(parts[1]) else {
+                  seconds >= cutoff,
+                  parts[1].lowercased() == "error",
+                  Self.isRelevantTarget(parts[2]),
+                  let detail = Self.classify(parts[3]) else {
                 continue
             }
             return CodexFailure(detail: detail, eventAt: Date(timeIntervalSince1970: seconds))
@@ -43,26 +44,11 @@ public struct CodexFailureReader: Sendable {
         GeneratedHaloSpec.classifyFailure(text)
     }
 
-    private func runSQLite(query: String) -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: sqlitePath)
-        process.arguments = [
-            "-readonly",
-            "-batch",
-            databaseURL.path(percentEncoded: false),
-            query
-        ]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        do {
-            try process.run()
-            process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            return String(data: data, encoding: .utf8) ?? ""
-        } catch {
-            AgentHaloLogger.log("Codex failure sqlite read failed: \(error)")
-            return ""
-        }
+    private static func isRelevantTarget(_ target: String) -> Bool {
+        let value = target.lowercased()
+        return value.contains("client")
+            || value.contains("auth")
+            || value.contains("response")
+            || value.contains("session")
     }
 }

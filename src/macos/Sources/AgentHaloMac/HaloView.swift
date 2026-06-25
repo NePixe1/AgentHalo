@@ -5,7 +5,14 @@ import QuartzCore
 @MainActor
 final class HaloView: NSView {
     private static let dragActivationDistance = 3.0
-    private static let normalAnimationInterval = 1.0 / 60.0
+    // Active cadence stays at 30fps to preserve the original orbit smoothness.
+    // This is now cheap because the ring is rendered as CAShapeLayer sublayers,
+    // so Core Animation rasterizes on the render server (GPU) each frame instead
+    // of the app rasterizing a backing store via draw(_:). The per-frame CPU cost
+    // is just the path/width/color property sets in applyRingLayers, so 30fps no
+    // longer carries the ripc_DrawPath cost that previously justified lowering it.
+    private static let normalAnimationInterval = 1.0 / 30.0
+    private static let lowPowerAnimationInterval = 1.0 / 15.0
 
     var aggregate = AggregateSnapshot(
         state: .idle,
@@ -41,6 +48,7 @@ final class HaloView: NSView {
     nonisolated(unsafe) private var animationTimer: Timer?
     private var systemOverlaySuspended = false
     private var pointerInsideHoverSurface = false
+    private var ringLayers: [CAShapeLayer] = []
     private var lastFrameTimestamp = CACurrentMediaTime()
     private var visualState: HaloState = .idle
     private var errorPresentation: ErrorPresentation = .flashing
@@ -76,7 +84,8 @@ final class HaloView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
-        startAnimationDriver(interval: Self.normalAnimationInterval)
+        setupRingLayers()
+        startAnimationDriver(interval: preferredAnimationInterval())
     }
 
     required init?(coder: NSCoder) {
@@ -87,6 +96,54 @@ final class HaloView: NSView {
 
     deinit {
         animationTimer?.invalidate()
+    }
+
+    // Host the ring as CAShapeLayer sublayers so Core Animation rasterizes on the
+    // render server (GPU) instead of the app rasterizing a backing store via
+    // draw(_:) every frame. All eight layers share one two-arc CGPath; only line
+    // width and stroke color differ per layer.
+    private func setupRingLayers() {
+        guard let host = layer else { return }
+        var layers: [CAShapeLayer] = []
+        for _ in 0..<HaloRenderer.ringLayerCount {
+            let shape = CAShapeLayer()
+            shape.fillColor = NSColor.clear.cgColor
+            shape.lineCap = .round
+            shape.lineJoin = .round
+            shape.frame = bounds
+            host.addSublayer(shape)
+            layers.append(shape)
+        }
+        ringLayers = layers
+        redrawRing()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+        for layer in ringLayers {
+            layer.contentsScale = scale
+        }
+    }
+
+    private func currentRenderInput() -> HaloRenderInput {
+        HaloRenderInput(
+            state: visualState,
+            errorPresentation: errorPresentation,
+            steadyDone: steadyDone,
+            answerStreaming: answerStreaming,
+            transitionFrom: transitionFromVisual,
+            time: animationTime,
+            sinceState: sinceState,
+            transition: HaloMath.smootherStep(transitionProgress),
+            gapA: gapA,
+            gapB: gapB
+        )
+    }
+
+    func redrawRing() {
+        guard !ringLayers.isEmpty else { return }
+        HaloRenderer.applyRingLayers(ringLayers, bounds: bounds, input: currentRenderInput())
     }
 
     private func startAnimationDriver(interval: TimeInterval) {
@@ -135,9 +192,9 @@ final class HaloView: NSView {
             isDraggingWindow = false
             pendingClickActivation = false
         } else {
-            startAnimationDriver(interval: Self.normalAnimationInterval)
+            startAnimationDriver(interval: preferredAnimationInterval())
         }
-        needsDisplay = true
+        redrawRing()
     }
 
     func resizeForHaloSize(_ size: CGFloat) {
@@ -145,8 +202,11 @@ final class HaloView: NSView {
         frame = resizedBounds
         bounds = resizedBounds
         layer?.frame = resizedBounds
+        for shape in ringLayers {
+            shape.frame = resizedBounds
+        }
         updateTrackingAreas()
-        needsDisplay = true
+        redrawRing()
     }
 
     var usesCommonRunLoopAnimationDriverForChecks: Bool {
@@ -239,7 +299,8 @@ final class HaloView: NSView {
             smallGapAnchor -= 36_000
         }
         transitionProgress = min(1, transitionProgress + delta / max(0.01, transitionDuration))
-        needsDisplay = true
+        redrawRing()
+        setAnimationFrameInterval(preferredAnimationInterval())
     }
 
     func showPreview(state: HaloState, presentation: ErrorPresentation) {
@@ -287,31 +348,26 @@ final class HaloView: NSView {
         errorPresentation = nextPresentation
         steadyDone = nextSteadyDone
         answerStreaming = nextAnswerStreaming
-        needsDisplay = true
+        setAnimationFrameInterval(preferredAnimationInterval())
+        redrawRing()
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        NSColor.clear.setFill()
-        dirtyRect.fill()
-        guard let context = NSGraphicsContext.current?.cgContext else {
-            return
+    private func preferredAnimationInterval() -> TimeInterval {
+        if isLowPowerAnimationState {
+            return Self.lowPowerAnimationInterval
         }
-        HaloRenderer.drawPureRing(
-            context: context,
-            bounds: bounds,
-            input: HaloRenderInput(
-                state: visualState,
-                errorPresentation: errorPresentation,
-                steadyDone: steadyDone,
-                answerStreaming: answerStreaming,
-                transitionFrom: transitionFromVisual,
-                time: animationTime,
-                sinceState: sinceState,
-                transition: HaloMath.smootherStep(transitionProgress),
-                gapA: gapA,
-                gapB: gapB
-            )
-        )
+        return Self.normalAnimationInterval
+    }
+
+    private var isLowPowerAnimationState: Bool {
+        guard transitionProgress >= 0.999,
+              !answerStreaming else {
+            return false
+        }
+        if visualState == .error, errorPresentation == .flashing {
+            return false
+        }
+        return visualState == .idle || (visualState == .done && steadyDone)
     }
 
     private func renderState(state: HaloState, answerStreaming: Bool) -> HaloState {
@@ -410,7 +466,7 @@ final class HaloView: NSView {
             onClick?()
         }
         if completedDrag {
-            startAnimationDriver(interval: Self.normalAnimationInterval)
+            startAnimationDriver(interval: preferredAnimationInterval())
         }
         dragStart = nil
         dragStartInWindow = nil

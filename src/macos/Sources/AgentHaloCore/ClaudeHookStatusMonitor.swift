@@ -20,8 +20,9 @@ public final class ClaudeHookStatusMonitor {
 
     public func refresh(now: Date = Date()) -> Bool {
         let previous = offset
-        let current = fileSize(statusURL)
-        let mtime = modificationDate(statusURL)
+        let meta = FastFileMetadata.read(statusURL)
+        let current = meta?.size ?? 0
+        let mtime = meta?.modifiedAt
         let mtimeChanged = mtime != nil && lastModified != nil && mtime != lastModified
         let truncated = current < previous || (mtimeChanged && current <= previous)
 
@@ -118,20 +119,5 @@ public final class ClaudeHookStatusMonitor {
             }
             return t >= inactiveStaleThreshold
         }
-    }
-
-    private func fileSize(_ url: URL) -> UInt64 {
-        if let attrs = try? fileManager.attributesOfItem(atPath: url.path),
-           let size = attrs[.size] as? NSNumber {
-            return size.uint64Value
-        }
-        return 0
-    }
-
-    private func modificationDate(_ url: URL) -> Date? {
-        if let attrs = try? fileManager.attributesOfItem(atPath: url.path) {
-            return attrs[.modificationDate] as? Date
-        }
-        return nil
     }
 }

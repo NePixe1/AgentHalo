@@ -54,6 +54,16 @@ func runHaloInteractionChecks() {
     testDetailsPanelUsesCompactMetadataLayout()
     testVisibleDetailsPanelStatusRefreshIsWiredToTick()
     testStatusLineConfigurationReconciliationIsWiredToTick()
+    testCodexPollingWorkIsNotPerformedOnMainTick()
+    testCodexActivityDispatchIsThrottled()
+    testCodexSQLiteReadersUseInProcessSQLite()
+    testCodexSQLiteReadersUseRecentRowWindows()
+    testCodexAppDetectorCachesRunningApplicationScans()
+    testSessionMonitorsUseFastFileMetadata()
+    testClaudePollingIsThrottledWhenCodexFocused()
+    testClaudeLiveSessionsRefreshIsThrottled()
+    testHaloUsesShapeLayersNotCpuRasterization()
+    testIdleAnimationUsesLowPowerCadence()
     testDetailsPresentationUsesFocusedSessionAndRejectsStaleQuota()
     testClaudeStandbyDetailsPreferLiveSessionIdentity()
     testClaudeUsageFreshnessTracksExactLiveSession()
@@ -1014,6 +1024,221 @@ private func testStatusLineConfigurationReconciliationIsWiredToTick() {
         tickSource.contains("reconcileClaudeStatusLineConfiguration(now:"),
         "AppDelegate tick should reconcile status-line drift"
     )
+}
+
+private func testCodexPollingWorkIsNotPerformedOnMainTick() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let appDelegateURL = sourceDirectory.appendingPathComponent("AppDelegate.swift")
+    guard let source = try? String(contentsOf: appDelegateURL, encoding: .utf8),
+          let tickStart = source.range(of: "    private func tick() {")?.lowerBound,
+          let tickEnd = source.range(of: "    private func createStatusItem()", range: tickStart..<source.endIndex)?.lowerBound else {
+        fatalError("AppDelegate tick source should be readable")
+    }
+
+    let tickSource = source[tickStart..<tickEnd]
+    expect(
+        !tickSource.contains("_ = monitor.refresh()"),
+        "main tick should not synchronously refresh Codex sessions"
+    )
+    expect(
+        !tickSource.contains("failureReader.readRecent("),
+        "main tick should not synchronously query Codex failures"
+    )
+    expect(
+        source.contains("private let codexActivityMonitor"),
+        "Codex polling should move behind a background activity monitor"
+    )
+}
+
+private func testCodexActivityDispatchIsThrottled() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let monitorURL = sourceDirectory.appendingPathComponent("CodexActivityMonitor.swift")
+    guard let source = try? String(contentsOf: monitorURL, encoding: .utf8) else {
+        fatalError("CodexActivityMonitor source should be readable")
+    }
+
+    expect(source.contains("dispatchThrottleSeconds"), "Codex activity dispatch should define a throttle window")
+    expect(source.contains("pendingSnapshot"), "Codex activity dispatch should coalesce bursts into a pending snapshot")
+    expect(source.contains("pendingDispatchWorkItem"), "Codex activity dispatch should schedule a trailing delivery")
+    expect(source.contains("asyncAfter"), "Codex activity dispatch should defer the trailing delivery to the utility queue")
+    expect(source.contains("DispatchQueue.main.async"), "Codex activity dispatch should still hop to the main thread for onChange")
+}
+
+private func testCodexSQLiteReadersUseInProcessSQLite() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("AgentHaloCore")
+    let failureURL = sourceDirectory.appendingPathComponent("CodexFailureReader.swift")
+    let realtimeURL = sourceDirectory.appendingPathComponent("CodexRealtimeActivityReader.swift")
+    guard let failureSource = try? String(contentsOf: failureURL, encoding: .utf8),
+          let realtimeSource = try? String(contentsOf: realtimeURL, encoding: .utf8) else {
+        fatalError("Codex SQLite reader sources should be readable")
+    }
+
+    let combined = failureSource + "\n" + realtimeSource
+    expect(!combined.contains("Process()"), "Codex SQLite readers should not launch sqlite3 subprocesses")
+    expect(!combined.contains("waitUntilExit()"), "Codex SQLite readers should not block on sqlite3 subprocesses")
+    expect(!combined.contains("sqlitePath"), "Codex SQLite readers should not depend on an external sqlite3 path")
+    expect(combined.contains("CodexSQLiteLogStore"), "Codex SQLite readers should share the in-process SQLite store")
+}
+
+private func testCodexSQLiteReadersUseRecentRowWindows() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("AgentHaloCore")
+    let failureURL = sourceDirectory.appendingPathComponent("CodexFailureReader.swift")
+    let realtimeURL = sourceDirectory.appendingPathComponent("CodexRealtimeActivityReader.swift")
+    guard let failureSource = try? String(contentsOf: failureURL, encoding: .utf8),
+          let realtimeSource = try? String(contentsOf: realtimeURL, encoding: .utf8) else {
+        fatalError("Codex SQLite reader sources should be readable")
+    }
+
+    expect(
+        !failureSource.contains("where ts >="),
+        "failure reader should not scan the logs table with a timestamp predicate"
+    )
+    expect(
+        !realtimeSource.contains("where ts >="),
+        "realtime reader should not scan the logs table with a timestamp predicate"
+    )
+    expect(
+        failureSource.contains("order by id desc limit 256"),
+        "failure reader should inspect a bounded recent row window"
+    )
+    expect(
+        realtimeSource.contains("order by id desc limit 512"),
+        "realtime reader should inspect a bounded recent row window"
+    )
+}
+
+private func testCodexAppDetectorCachesRunningApplicationScans() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let detectorURL = sourceDirectory.appendingPathComponent("CodexAppDetector.swift")
+    guard let source = try? String(contentsOf: detectorURL, encoding: .utf8) else {
+        fatalError("CodexAppDetector source should be readable")
+    }
+
+    expect(source.contains("runningCacheExpiresAt"), "Codex running detection should cache app scans")
+    expect(source.contains("runningCacheInterval"), "Codex running detection should throttle LaunchServices work")
+    expect(source.contains("executableURL"), "Codex app detection should prefer cheap executable metadata before localizedName")
+    expect(source.contains("allowLocalizedName: false"), "Codex running scans should skip localizedName fallback")
+}
+
+private func testSessionMonitorsUseFastFileMetadata() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("AgentHaloCore")
+    for fileName in ["CodexSessionMonitor.swift", "ClaudeSessionMonitor.swift", "ClaudeHookStatusMonitor.swift"] {
+        let url = sourceDirectory.appendingPathComponent(fileName)
+        guard let source = try? String(contentsOf: url, encoding: .utf8) else {
+            fatalError("\(fileName) should be readable")
+        }
+        expect(
+            !source.contains("attributesOfItem"),
+            "\(fileName) should not use Foundation attributes in high-frequency refresh"
+        )
+        expect(
+            source.contains("FastFileMetadata.read"),
+            "\(fileName) should use POSIX stat-backed file metadata"
+        )
+    }
+}
+
+private func testClaudePollingIsThrottledWhenCodexFocused() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let monitorURL = sourceDirectory.appendingPathComponent("ClaudeActivityMonitor.swift")
+    guard let monitorSource = try? String(contentsOf: monitorURL, encoding: .utf8) else {
+        fatalError("ClaudeActivityMonitor source should be readable")
+    }
+    let appDelegateURL = sourceDirectory.appendingPathComponent("AppDelegate.swift")
+    guard let appDelegateSource = try? String(contentsOf: appDelegateURL, encoding: .utf8) else {
+        fatalError("AppDelegate source should be readable")
+    }
+
+    expect(monitorSource.contains("idleIntervalMilliseconds"), "Claude activity monitor should define a slower idle cadence")
+    expect(monitorSource.contains("activeIntervalMilliseconds"), "Claude activity monitor should define an active cadence")
+    expect(monitorSource.contains("focusedAgent == .claudeCode"), "Claude polling should slow down when Claude Code is not focused")
+    expect(monitorSource.contains("dispatchThrottleSeconds"), "Claude activity dispatch should throttle main-thread wakeups")
+    expect(appDelegateSource.contains("claudeActivityMonitor"), "AppDelegate should delegate Claude polling to a background monitor")
+    expect(!appDelegateSource.contains("refreshClaudeSourcesIfNeeded"), "AppDelegate should not poll Claude sources on the main tick")
+    expect(!appDelegateSource.contains("claudeHookMonitor.refresh"), "AppDelegate should not refresh Claude hook status on the main thread")
+    expect(!appDelegateSource.contains("claudeSessionMonitor.refresh"), "AppDelegate should not refresh Claude transcripts on the main thread")
+}
+
+private func testHaloUsesShapeLayersNotCpuRasterization() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let haloViewURL = sourceDirectory.appendingPathComponent("HaloView.swift")
+    guard let haloViewSource = try? String(contentsOf: haloViewURL, encoding: .utf8) else {
+        fatalError("HaloView source should be readable")
+    }
+    let rendererURL = sourceDirectory.appendingPathComponent("HaloRenderer.swift")
+    guard let rendererSource = try? String(contentsOf: rendererURL, encoding: .utf8) else {
+        fatalError("HaloRenderer source should be readable")
+    }
+
+    expect(haloViewSource.contains("CAShapeLayer"), "HaloView should host ring strokes as CAShapeLayer sublayers")
+    expect(haloViewSource.contains("ringLayers"), "HaloView should keep a ringLayers array")
+    expect(haloViewSource.contains("setupRingLayers"), "HaloView should set up shape sublayers")
+    expect(haloViewSource.contains("redrawRing"), "HaloView should refresh shape layers via redrawRing")
+    expect(haloViewSource.contains("HaloRenderer.applyRingLayers"), "HaloView should apply ring layers through HaloRenderer")
+    expect(!haloViewSource.contains("override func draw(_ dirtyRect"), "HaloView should not rasterize via draw(_:) CPU backing store")
+    expect(!haloViewSource.contains("needsDisplay = true"), "HaloView should not drive CPU rasterization via needsDisplay")
+    expect(rendererSource.contains("applyRingLayers"), "HaloRenderer should expose applyRingLayers for shape-layer rendering")
+    expect(rendererSource.contains("ringLayerCount"), "HaloRenderer should declare the fixed ring layer count")
+    expect(rendererSource.contains("CATransaction.setDisableActions(true)"), "HaloRenderer should disable implicit animations so per-frame updates snap instead of smoothing")
+    expect(rendererSource.contains("path.move(to: startPoint)"), "HaloRenderer should start each ring arc as a fresh subpath so the two gaps are not bridged by a connecting chord")
+}
+
+private func testClaudeLiveSessionsRefreshIsThrottled() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let monitorURL = sourceDirectory.appendingPathComponent("ClaudeActivityMonitor.swift")
+    guard let monitorSource = try? String(contentsOf: monitorURL, encoding: .utf8) else {
+        fatalError("ClaudeActivityMonitor source should be readable")
+    }
+
+    expect(
+        monitorSource.contains("liveSessionsPollIntervalSeconds"),
+        "Claude activity monitor should bound live-session reads with a safety interval"
+    )
+    expect(
+        monitorSource.contains("cachedLiveSessions"),
+        "Claude activity monitor should cache live sessions between refreshes"
+    )
+    expect(
+        monitorSource.contains("lastLiveSessionsPollAt"),
+        "Claude activity monitor should track when live sessions were last read"
+    )
+    // The expensive reader call must be gated behind a condition, not unconditional.
+    expect(
+        monitorSource.contains("if forceLiveSessions"),
+        "Claude live-session reads should be gated by a force/sources-changed/interval condition"
+    )
+    expect(
+        monitorSource.contains("now.timeIntervalSince(lastLiveSessionsPollAt) >= Self.liveSessionsPollIntervalSeconds"),
+        "Claude live-session reads should be bounded by the safety interval"
+    )
+    // preferredStandbySession must still be recomputed every poll with fresh hooks
+    // so standby selection stays responsive without re-reading the sessions dir.
+    expect(
+        monitorSource.contains("ClaudeLiveSessionReader.preferredStandbySession"),
+        "Claude activity monitor should still recompute preferred standby each poll"
+    )
+}
+
+private func testIdleAnimationUsesLowPowerCadence() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let haloViewURL = sourceDirectory.appendingPathComponent("HaloView.swift")
+    guard let source = try? String(contentsOf: haloViewURL, encoding: .utf8) else {
+        fatalError("HaloView source should be readable")
+    }
+
+    expect(source.contains("lowPowerAnimationInterval"), "HaloView should define a low-power animation interval")
+    expect(source.contains("normalAnimationInterval = 1.0 / 30.0"), "HaloView should keep active animation at 30fps to preserve orbit smoothness (cheap once the ring is GPU-rasterized via CAShapeLayer)")
+    expect(source.contains("preferredAnimationInterval"), "HaloView should choose animation cadence by visual state")
+    expect(source.contains("steadyDone"), "steady standby state should be eligible for low-power animation")
 }
 
 @MainActor

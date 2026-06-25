@@ -16,7 +16,12 @@ let package = Package(
         .executable(name: "ClaudeCodeStatusLineProxy", targets: ["ClaudeCodeStatusLineProxy"]),
     ],
     targets: [
-        .target(name: "AgentHaloCore"),
+        .target(
+            name: "AgentHaloCore",
+            linkerSettings: [
+                .linkedLibrary("sqlite3")
+            ]
+        ),
         .executableTarget(
             name: "AgentHaloMac",
             dependencies: ["AgentHaloCore"]

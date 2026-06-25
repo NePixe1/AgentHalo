@@ -64,8 +64,9 @@ public final class ClaudeSessionMonitor {
         for url in recent where reducers[url] == nil {
             reducers[url] = ClaudeSessionReducer(filePath: url.path(percentEncoded: false), liveTracking: false)
             readInitialTail(from: url)
-            offsets[url] = fileSize(url)
-            lastModified[url] = modificationDate(url)
+            let meta = FastFileMetadata.read(url)
+            offsets[url] = meta?.size ?? 0
+            lastModified[url] = meta?.modifiedAt
             reducers[url]?.setLiveTracking(true)
             changed = true
         }
@@ -114,8 +115,9 @@ public final class ClaudeSessionMonitor {
 
     private func readNewLines(from url: URL, now: Date) -> Bool {
         let previous = offsets[url] ?? 0
-        let current = fileSize(url)
-        let mtime = modificationDate(url)
+        let meta = FastFileMetadata.read(url)
+        let current = meta?.size ?? 0
+        let mtime = meta?.modifiedAt
         let priorMtime = lastModified[url]
         let mtimeChanged = mtime != nil && priorMtime != nil && mtime != priorMtime
         let truncated = current < previous || (mtimeChanged && current <= previous)
@@ -159,20 +161,5 @@ public final class ClaudeSessionMonitor {
             AgentHaloLogger.log("Claude session refresh failed: \(error)")
             return false
         }
-    }
-
-    private func fileSize(_ url: URL) -> UInt64 {
-        if let attrs = try? fileManager.attributesOfItem(atPath: url.path),
-           let size = attrs[.size] as? NSNumber {
-            return size.uint64Value
-        }
-        return 0
-    }
-
-    private func modificationDate(_ url: URL) -> Date? {
-        if let attrs = try? fileManager.attributesOfItem(atPath: url.path) {
-            return attrs[.modificationDate] as? Date
-        }
-        return nil
     }
 }

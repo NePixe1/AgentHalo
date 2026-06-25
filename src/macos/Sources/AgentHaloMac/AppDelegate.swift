@@ -16,6 +16,19 @@ struct LiveErrorPresentationUpdate: Equatable {
     var acknowledgeErrorAt: Date?
 }
 
+struct StatusMenuSignature: Equatable {
+    var settings: HaloSettings
+    var selectedPreview: PreviewPayload
+    var startupEnabled: Bool
+}
+
+struct PreviewPayload: Equatable {
+    static let live = PreviewPayload(state: nil, presentation: nil)
+
+    let state: HaloState?
+    let presentation: ErrorPresentation?
+}
+
 struct LiveErrorPresentationState {
     private(set) var presentation: ErrorPresentation = .flashing
     private var activeErrorAt: Date?
@@ -78,11 +91,10 @@ struct LiveErrorPresentationState {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let settingsStore: SettingsStore
     private var settings: HaloSettings
-    private let monitor = CodexSessionMonitor()
-    private let claudeHookMonitor = ClaudeHookStatusMonitor()
-    private let claudeSessionMonitor = ClaudeSessionMonitor()
-    private var claudeLiveSessions: [ClaudeLiveSessionSnapshot] = []
-    private var preferredClaudeStandbySession: ClaudeLiveSessionSnapshot?
+    private let codexActivityMonitor = CodexActivityMonitor()
+    private var codexActivitySnapshot = CodexActivitySnapshot.empty
+    private let claudeActivityMonitor = ClaudeActivityMonitor()
+    private var claudeActivitySnapshot = ClaudeActivitySnapshot.empty
     private var nextStatusLineReconciliationAt = Date.distantPast
     private let statusLineReconciliationInterval: TimeInterval = 2
     private var selectedPreview = PreviewPayload.live
@@ -102,19 +114,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         label: "com.agenthalo.context-reader",
         qos: .userInteractive
     )
-    private let failureReader = CodexFailureReader()
-    private let realtimeActivityReader = CodexRealtimeActivityReader()
     private let instanceLock = InstanceLock()
-    private let codexActivator: () -> Void
+    private let codexActivator: @MainActor () -> Void
     private var liveErrorPresentationState = LiveErrorPresentationState()
     private var codexWasForeground = false
+    private var lastStatusMenuSignature: StatusMenuSignature?
+    private var lastStatusIconState: HaloState?
+    private var cachedStartupEnabled = false
+    private var cachedStartupExpiresAt = Date.distantPast
+    private let startupCheckInterval: TimeInterval = 2
     private var currentHaloSize: CGFloat {
         CGFloat(settings.haloSize)
     }
 
     init(
         settingsStore: SettingsStore = SettingsStore(),
-        codexActivator: @escaping () -> Void = CodexAppDetector.activateCodex
+        codexActivator: @escaping @MainActor () -> Void = CodexAppDetector.activateCodex
     ) {
         self.settingsStore = settingsStore
         self.codexActivator = codexActivator
@@ -140,11 +155,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         reconcileHaloPlacement()
         registerSystemOverlayObservers()
         updateSystemOverlaySuspension(for: NSWorkspace.shared.frontmostApplication)
+        codexActivitySnapshot = codexActivityMonitor.snapshot()
+        codexActivityMonitor.start { [weak self] snapshot in
+            Task { @MainActor in
+                self?.codexActivityDidChange(snapshot)
+            }
+        }
+        claudeActivitySnapshot = claudeActivityMonitor.snapshot()
+        claudeActivityMonitor.start { [weak self] snapshot in
+            Task { @MainActor in
+                self?.claudeActivityDidChange(snapshot)
+            }
+        }
         tick()
-        timer = Timer.scheduledTimer(timeInterval: 0.22, target: self, selector: #selector(timerDidFire), userInfo: nil, repeats: true)
+        timer = Timer.scheduledTimer(timeInterval: 0.3, target: self, selector: #selector(timerDidFire), userInfo: nil, repeats: true)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        codexActivityMonitor.stop()
+        claudeActivityMonitor.stop()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         settingsSaveTimer?.invalidate()
         if placementState.shouldPersistCurrentFrame, let panel {
@@ -168,20 +197,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let now = Date()
         reconcileClaudeStatusLineConfiguration(now: now)
         updateSystemOverlaySuspension(for: NSWorkspace.shared.frontmostApplication)
-        _ = monitor.refresh()
-        _ = claudeHookMonitor.refresh()
-        _ = claudeSessionMonitor.refresh()
-        claudeLiveSessions = ClaudeLiveSessionReader.liveSessions()
-        preferredClaudeStandbySession = ClaudeLiveSessionReader.preferredStandbySession(
-            sessions: claudeLiveSessions.filter { $0.status == "waiting" || $0.status == "idle" },
-            hookSnapshots: claudeHookMonitor.snapshots()
-        )
         acknowledgeCompletedIfCodexIsForeground()
         let codexRunning = CodexAppDetector.isCodexRunning()
+        codexActivityMonitor.updatePollingContext(
+            focusedAgent: settings.focusedAgent,
+            codexRunning: codexRunning
+        )
+        claudeActivityMonitor.updatePollingContext(
+            focusedAgent: settings.focusedAgent,
+            detailsPanelVisible: detailsPanel.isVisible
+        )
+        refreshAggregateAndUI(now: now, codexRunning: codexRunning)
+    }
+
+    private func claudeActivityDidChange(_ snapshot: ClaudeActivitySnapshot) {
+        guard haloView?.isDragging != true else {
+            claudeActivitySnapshot = snapshot
+            return
+        }
+        claudeActivitySnapshot = snapshot
+        let codexRunning = CodexAppDetector.isCodexRunning()
+        refreshAggregateAndUI(now: Date(), codexRunning: codexRunning)
+    }
+
+    private func codexActivityDidChange(_ snapshot: CodexActivitySnapshot) {
+        guard haloView?.isDragging != true else {
+            codexActivitySnapshot = snapshot
+            return
+        }
+        codexActivitySnapshot = snapshot
+        let codexRunning = CodexAppDetector.isCodexRunning()
+        codexActivityMonitor.updatePollingContext(
+            focusedAgent: settings.focusedAgent,
+            codexRunning: codexRunning
+        )
+        refreshAggregateAndUI(now: Date(), codexRunning: codexRunning)
+    }
+
+    private func refreshAggregateAndUI(now: Date, codexRunning: Bool) {
         aggregate = SessionAggregator.aggregate(
             snapshots: allSnapshots(),
             settings: settings,
-            recentFailure: failureReader.readRecent(),
+            recentFailure: codexActivitySnapshot.recentFailure,
             codexRunning: codexRunning,
             focusedAgent: settings.focusedAgent
         )
@@ -189,9 +246,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             aggregate: aggregate,
             hasLiveSession: settings.focusedAgent == .codex
                 ? codexRunning
-                : preferredClaudeStandbySession != nil
+                : claudeActivitySnapshot.preferredStandbySession != nil
         )
-        applyRealtimeCodexActivity()
+        applyRealtimeCodexActivity(codexActivitySnapshot.realtimeActivity)
         let codexIsForeground = CodexAppDetector.isCodexForeground()
         let errorUpdate = liveErrorPresentationState.update(
             aggregate: aggregate,
@@ -206,7 +263,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             aggregate = SessionAggregator.aggregate(
                 snapshots: allSnapshots(),
                 settings: settings,
-                recentFailure: failureReader.readRecent(),
+                recentFailure: codexActivitySnapshot.recentFailure,
                 codexRunning: codexRunning,
                 focusedAgent: settings.focusedAgent
             )
@@ -214,9 +271,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 aggregate: aggregate,
                 hasLiveSession: settings.focusedAgent == .codex
                     ? codexRunning
-                    : preferredClaudeStandbySession != nil
+                    : claudeActivitySnapshot.preferredStandbySession != nil
             )
-            applyRealtimeCodexActivity()
+            applyRealtimeCodexActivity(codexActivitySnapshot.realtimeActivity)
         }
         haloView?.updateLiveAggregate(
             aggregate,
@@ -224,7 +281,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         refreshVisibleDetailsPanel()
         if !systemOverlaySuspended {
-            haloView?.needsDisplay = true
+            haloView?.redrawRing()
         }
         if statusItem != nil {
             updateStatusMenu()
@@ -326,7 +383,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         } else {
             haloView?.aggregate = aggregate
-            haloView?.needsDisplay = true
+            haloView?.redrawRing()
             panel?.orderFrontRegardless()
             reconcileDetailsVisibilityAfterSystemOverlay()
         }
@@ -346,16 +403,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateStatusMenu() {
-        statusItem.menu = makeControlMenu()
+        rebuildStatusMenuIfNeeded()
+        updateStatusIcon()
+    }
+
+    private func updateStatusIcon() {
+        guard let statusItem else {
+            return
+        }
+        if lastStatusIconState == aggregate.state {
+            return
+        }
+        lastStatusIconState = aggregate.state
         let rgb = HaloVisualModel.stateColor(aggregate.state)
         let color = NSColor(calibratedRed: rgb.red / 255, green: rgb.green / 255, blue: rgb.blue / 255, alpha: 1)
         statusItem.button?.image = StatusIcon.image(color: color)
     }
 
+    private func rebuildStatusMenuIfNeeded() {
+        guard let statusItem else {
+            return
+        }
+        let signature = StatusMenuSignature(
+            settings: settings,
+            selectedPreview: selectedPreview,
+            startupEnabled: currentStartupEnabled()
+        )
+        if statusItem.menu != nil, lastStatusMenuSignature == signature {
+            return
+        }
+        lastStatusMenuSignature = signature
+        statusItem.menu = makeControlMenu()
+    }
+
+    private func currentStartupEnabled() -> Bool {
+        let now = Date()
+        if now < cachedStartupExpiresAt {
+            return cachedStartupEnabled
+        }
+        cachedStartupEnabled = StartupManager.isEnabled()
+        cachedStartupExpiresAt = now.addingTimeInterval(startupCheckInterval)
+        return cachedStartupEnabled
+    }
+
     private func makeControlMenu() -> NSMenu {
         let menu = NSMenu()
         addCheckItem("始终置顶", checked: settings.alwaysOnTop, action: #selector(toggleAlwaysOnTop), to: menu)
-        addCheckItem("开机自动启动", checked: StartupManager.isEnabled(), action: #selector(toggleStartup), to: menu)
+        addCheckItem("开机自动启动", checked: currentStartupEnabled(), action: #selector(toggleStartup), to: menu)
         addCheckItem("暂停状态监听", checked: settings.paused, action: #selector(togglePause), to: menu)
         addHaloSizeItem(to: menu)
         let focus = NSMenuItem(title: "监控对象", action: nil, keyEquivalent: "")
@@ -397,6 +491,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleStartup() {
         StartupManager.setEnabled(!StartupManager.isEnabled(), appBundleURL: Bundle.main.bundleURL)
+        cachedStartupExpiresAt = .distantPast
         tick()
     }
 
@@ -465,6 +560,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         settings.focusedAgent = agent
         settingsStore.save(settings)
+        if agent == .claudeCode {
+            claudeActivityMonitor.requestRefresh()
+        }
         tick()
         refreshVisibleDetailsPanel()
     }
@@ -580,14 +678,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func codexSnapshots() -> [SessionSnapshot] {
-        monitor.snapshots()
+        codexActivitySnapshot.sessions
     }
 
     private func claudeSnapshots() -> [SessionSnapshot] {
-        ClaudeStatusSourceMerger.merge(
-            hookSnapshots: claudeHookMonitor.snapshots(),
-            transcriptSnapshots: claudeSessionMonitor.snapshots()
-        )
+        claudeActivitySnapshot.mergedClaudeSnapshots
     }
 
     static func standbyAggregate(
@@ -616,11 +711,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             aggregate = SessionAggregator.aggregate(
                 snapshots: allSnapshots(),
                 settings: settings,
-                recentFailure: failureReader.readRecent(),
+                recentFailure: codexActivitySnapshot.recentFailure,
                 codexRunning: CodexAppDetector.isCodexRunning(),
                 focusedAgent: settings.focusedAgent
             )
-            applyRealtimeCodexActivity()
+            applyRealtimeCodexActivity(codexActivitySnapshot.realtimeActivity)
         }
     }
 
@@ -656,12 +751,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ? Self.claudeMainSessionIdForDetails(
                 displayedAggregate: displayedAggregate,
                 rawClaudeSnapshots: rawClaudeSnapshots,
-                liveSession: preferredClaudeStandbySession
+                liveSession: claudeActivitySnapshot.preferredStandbySession
             )
             : nil
         let claudeUsageFreshness = Self.claudeUsageFreshness(
             mainSessionId: claudeMainSessionId,
-            liveSessions: claudeLiveSessions
+            liveSessions: claudeActivitySnapshot.liveSessions
         )
         let claudeUsage = claudeMainSessionId.flatMap { sessionId in
             contextReaderQueue.sync {
@@ -675,8 +770,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             focusedAgent: settings.focusedAgent,
             displayedAggregate: displayedAggregate,
             claudeMainSessionId: claudeMainSessionId,
-            mainClaudeSessions: claudeSessionMonitor.snapshots(),
-            liveClaudeSession: preferredClaudeStandbySession,
+            mainClaudeSessions: claudeActivitySnapshot.transcriptSnapshots,
+            liveClaudeSession: claudeActivitySnapshot.preferredStandbySession,
             quota: quota,
             claudeUsage: claudeUsage
         )
@@ -814,9 +909,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         aggregate
     }
 
-    private func applyRealtimeCodexActivity() {
+    private func applyRealtimeCodexActivity(_ activity: CodexRealtimeActivity?) {
         guard settings.focusedAgent == .codex,
-              let activity = realtimeActivityReader.readActive() else {
+              let activity else {
             return
         }
         let projectName = aggregate.sessions.first?.projectName ?? "Codex"
@@ -831,7 +926,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func allSnapshots() -> [SessionSnapshot] {
-        monitor.snapshots() + claudeSnapshots()
+        codexActivitySnapshot.sessions + claudeSnapshots()
     }
 
     private func addMenuItem(_ title: String, _ action: Selector, enabled: Bool, to menu: NSMenu) {
@@ -997,13 +1092,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static func haloFrameByKeepingOrigin(oldFrame: NSRect, requestedSize: CGFloat) -> NSRect {
         let size = CGFloat(HaloSettings.clampedHaloSize(Double(requestedSize)))
         return NSRect(x: oldFrame.origin.x, y: oldFrame.origin.y, width: size, height: size)
-    }
-
-    private struct PreviewPayload: Equatable {
-        static let live = PreviewPayload(state: nil, presentation: nil)
-
-        let state: HaloState?
-        let presentation: ErrorPresentation?
     }
 
     enum SystemOverlayHaloVisibility {
