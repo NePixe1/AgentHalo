@@ -13,9 +13,16 @@ public struct CodexRealtimeActivityReader: Sendable {
 
     public func readActive(now: Date = Date()) -> CodexRealtimeActivity? {
         let cutoff = now.addingTimeInterval(-120).timeIntervalSince1970
+        // Filter `target='codex_api::sse::responses'` server-side so only SSE
+        // response rows are materialized and transferred, instead of reading
+        // 512 arbitrary rows of every target and discarding the rest in Swift.
+        // The timestamp cutoff and body-prefix shape check stay in Swift (no
+        // `ts >=` predicate) so the bounded `order by id desc limit` window —
+        // not a timestamp scan — drives the query plan.
         let query = """
         select ts || char(9) || coalesce(target,'') || char(9) || \
         replace(replace(coalesce(feedback_log_body,''),char(10),' '),char(13),' ') from logs \
+        where target='codex_api::sse::responses' \
         order by id desc limit 512;
         """
         let rows: [String]

@@ -1111,6 +1111,17 @@ private func testCodexSQLiteReadersUseRecentRowWindows() {
         realtimeSource.contains("order by id desc limit 512"),
         "realtime reader should inspect a bounded recent row window"
     )
+    // Cheap equality predicates are pushed server-side so only matching rows
+    // (and their feedback_log_body) are materialized and transferred, instead
+    // of reading a full window of arbitrary rows and discarding the rest.
+    expect(
+        failureSource.contains("where lower(level)='error'"),
+        "failure reader should filter error rows server-side instead of transferring all levels"
+    )
+    expect(
+        realtimeSource.contains("where target='codex_api::sse::responses'"),
+        "realtime reader should filter SSE response rows server-side instead of transferring all targets"
+    )
 }
 
 private func testCodexAppDetectorCachesRunningApplicationScans() {
