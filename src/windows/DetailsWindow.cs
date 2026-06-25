@@ -100,7 +100,8 @@ public sealed class DetailsWindow : Window
         private readonly Grid claudeProjectRow;
         private readonly Grid claudeModelRow;
         private readonly Grid claudeTokenRow;
-        private readonly Border claudeSeparator;
+        private readonly Border claudeProjectSeparator;
+        private readonly Border claudeModelSeparator;
         private readonly TextBlock claudeProjectValue;
         private readonly TextBlock claudeModelValue;
         private readonly TextBlock claudeTokenValue;
@@ -163,7 +164,7 @@ public sealed class DetailsWindow : Window
             {
                 Width = 90,
                 Height = 26,
-                CornerRadius = new CornerRadius(13),
+                CornerRadius = new CornerRadius(9),
                 Padding = new Thickness(0),
                 HorizontalAlignment = HorizontalAlignment.Right,
                 VerticalAlignment = VerticalAlignment.Center,
@@ -172,13 +173,13 @@ public sealed class DetailsWindow : Window
                 BorderThickness = new Thickness(1)
             };
             Grid contextGrid = new Grid();
-            contextGrid.Width = 74;
+            contextGrid.Width = 78;
             contextGrid.HorizontalAlignment = HorizontalAlignment.Center;
-            contextGrid.Margin = new Thickness(7, 0, 7, 0);
-            contextGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(38) });
+            contextGrid.Margin = new Thickness(6, 0, 6, 0);
+            contextGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(40) });
             contextGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(2) });
-            contextGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(34) });
-            contextLabel = NewText("上下文", 11.5, MediaColor.FromRgb(53, 125, 145),
+            contextGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(36) });
+            contextLabel = NewText("上下文", 12.2, MediaColor.FromRgb(53, 125, 145),
                 FontWeights.Normal, true);
             contextLabel.HorizontalAlignment = HorizontalAlignment.Right;
             contextLabel.VerticalAlignment = VerticalAlignment.Center;
@@ -194,12 +195,12 @@ public sealed class DetailsWindow : Window
             top.Margin = new Thickness(0, 0, 0, 7);
             content.Children.Add(top);
 
-            headline = NewText("READY", 20, MediaColor.FromRgb(40, 52, 60),
+            headline = NewText("OFFLINE", 20, MediaColor.FromRgb(40, 52, 60),
                 FontWeights.Bold);
             content.Children.Add(headline);
-            subtitle = NewText("Codex is standing by", 13,
+            subtitle = NewText("Codex 未运行", 13,
                 MediaColor.FromRgb(103, 117, 126), FontWeights.Normal, true);
-            subtitle.Margin = new Thickness(0, 1, 0, 11);
+            subtitle.Margin = new Thickness(0, 1, 0, 13);
             content.Children.Add(subtitle);
 
             quotaGroup = new StackPanel();
@@ -214,24 +215,19 @@ public sealed class DetailsWindow : Window
             claudeGroup = new StackPanel();
             claudeProjectRow = CreateInfoRow("项目", out claudeProjectValue);
             claudeGroup.Children.Add(claudeProjectRow);
+            claudeProjectSeparator = CreateInfoSeparator();
+            claudeGroup.Children.Add(claudeProjectSeparator);
             claudeModelRow = CreateInfoRow("模型", out claudeModelValue);
-            claudeModelRow.Margin = new Thickness(0, 8, 0, 0);
             claudeGroup.Children.Add(claudeModelRow);
-            claudeSeparator = new Border
-            {
-                Height = 1,
-                Margin = new Thickness(0, 11, 0, 0),
-                Background = new SolidColorBrush(MediaColor.FromArgb(68, 174, 189, 198))
-            };
-            claudeGroup.Children.Add(claudeSeparator);
-            claudeTokenRow = CreateInfoRow("Token", out claudeTokenValue);
-            claudeTokenRow.Margin = new Thickness(0, 11, 0, 0);
+            claudeModelSeparator = CreateInfoSeparator();
+            claudeGroup.Children.Add(claudeModelSeparator);
+            claudeTokenRow = CreateInfoRow("输入输出", out claudeTokenValue);
             claudeTokenValue.FontSize = 11.5;
             claudeTokenValue.FontWeight = FontWeights.Medium;
             claudeGroup.Children.Add(claudeTokenRow);
 
             dataLayer = new Grid();
-            dataLayer.Height = 64;
+            dataLayer.Height = 80;
             dataLayer.VerticalAlignment = VerticalAlignment.Top;
             dataLayer.Children.Add(quotaGroup);
             dataLayer.Children.Add(claudeGroup);
@@ -281,13 +277,28 @@ public sealed class DetailsWindow : Window
         private static string FriendlyStatusDetail(AggregateSnapshot aggregate,
             List<SessionSnapshot> sessions)
         {
+            if (aggregate.State == HaloState.Idle)
+            {
+                if (String.Equals(aggregate.Label, "PAUSED",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    return "状态监听已暂停";
+                }
+                return aggregate.FocusedAgent == AgentKind.ClaudeCode
+                    ? "Claude Code 未运行" : "Codex 未运行";
+            }
+            if (String.Equals(aggregate.Label, "STANDBY",
+                StringComparison.OrdinalIgnoreCase) &&
+                !String.IsNullOrWhiteSpace(aggregate.Detail))
+            {
+                return aggregate.Detail;
+            }
             SessionSnapshot active = sessions.FirstOrDefault(delegate(SessionSnapshot session)
             {
                 return session.Active;
             });
             string action = active == null ? String.Empty : active.Action;
-            if (aggregate.AnswerStreaming ||
-                action.IndexOf("Writing answer", StringComparison.OrdinalIgnoreCase) >= 0)
+            if (action.IndexOf("Writing answer", StringComparison.OrdinalIgnoreCase) >= 0)
             {
                 return "正在输出答案";
             }
@@ -305,7 +316,7 @@ public sealed class DetailsWindow : Window
             }
             if (action.IndexOf("Compressing context", StringComparison.OrdinalIgnoreCase) >= 0)
             {
-                return "正在压缩上下文";
+                return "正在自动压缩上下文";
             }
             if (action.IndexOf("Context compacted", StringComparison.OrdinalIgnoreCase) >= 0)
             {
@@ -329,8 +340,8 @@ public sealed class DetailsWindow : Window
                     return String.IsNullOrEmpty(aggregate.Detail)
                         ? "任务已中断" : aggregate.Detail;
                 default:
-                    return aggregate.FocusedAgent == AgentKind.ClaudeCode
-                        ? "Claude Code 正在待命" : "Codex 正在待命";
+                    return String.IsNullOrEmpty(aggregate.Detail)
+                        ? "状态未知" : aggregate.Detail;
             }
         }
 
@@ -354,23 +365,86 @@ public sealed class DetailsWindow : Window
                 {
                     return session.Agent == AgentKind.ClaudeCode;
                 });
-            bool showProject = !metrics.IsCustomApi;
-            claudeProjectRow.Visibility = showProject
-                ? Visibility.Visible : Visibility.Collapsed;
-            claudeModelRow.Margin = showProject
-                ? new Thickness(0, 8, 0, 0) : new Thickness(0);
-            claudeSeparator.Margin = showProject
-                ? new Thickness(0, 11, 0, 0) : new Thickness(0, 11, 0, 0);
-            claudeTokenRow.Margin = new Thickness(0, 11, 0, 0);
-            claudeProjectValue.Text = primary == null ||
-                String.IsNullOrWhiteSpace(primary.ProjectName)
-                ? "Claude Code" : primary.ProjectName;
+            claudeProjectRow.Visibility = Visibility.Visible;
+            claudeProjectSeparator.Visibility = Visibility.Visible;
+            claudeModelSeparator.Visibility = Visibility.Visible;
+            claudeModelRow.Margin = new Thickness(0);
+            claudeTokenRow.Margin = new Thickness(0);
+            claudeProjectValue.Text = DisplayProjectName(primary);
             claudeModelValue.Text = metrics.HasModel ? metrics.Model : "暂无数据";
             claudeTokenValue.Text = metrics.HasTokenUsage
-                ? "输入 " + FormatCompactNumber(metrics.InputTokens) +
-                  " · 输出 " + FormatCompactNumber(metrics.OutputTokens)
+                ? "↑" + FormatCompactNumber(metrics.InputTokens) +
+                  " · ↓" + FormatCompactNumber(metrics.OutputTokens)
                 : "暂无数据";
             SetContextPercent(metrics.HasContext, metrics.ContextUsedPercent);
+        }
+
+        private static string DisplayProjectName(SessionSnapshot snapshot)
+        {
+            if (snapshot != null)
+            {
+                string leaf = ProjectLeaf(snapshot.WorkingDirectory);
+                if (!String.IsNullOrWhiteSpace(leaf))
+                {
+                    return leaf;
+                }
+                if (!String.IsNullOrWhiteSpace(snapshot.ProjectName) &&
+                    !String.Equals(snapshot.ProjectName, "Claude Code",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return snapshot.ProjectName;
+                }
+            }
+            return LatestClaudeSessionProjectName();
+        }
+
+        private static string LatestClaudeSessionProjectName()
+        {
+            string sessionsPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".claude", "sessions");
+            if (!Directory.Exists(sessionsPath))
+            {
+                return "Claude Code";
+            }
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            foreach (string file in Directory.GetFiles(sessionsPath, "*.json")
+                .OrderByDescending(File.GetLastWriteTimeUtc).Take(8))
+            {
+                try
+                {
+                    Dictionary<string, object> data =
+                        serializer.DeserializeObject(File.ReadAllText(file))
+                        as Dictionary<string, object>;
+                    if (data == null || !data.ContainsKey("cwd"))
+                    {
+                        continue;
+                    }
+                    string leaf = ProjectLeaf(Convert.ToString(data["cwd"],
+                        CultureInfo.InvariantCulture));
+                    if (!String.IsNullOrWhiteSpace(leaf))
+                    {
+                        return leaf;
+                    }
+                }
+                catch
+                {
+                    // Ignore incomplete session files while Claude Code is updating them.
+                }
+            }
+            return "Claude Code";
+        }
+
+        private static string ProjectLeaf(string workingDirectory)
+        {
+            if (String.IsNullOrWhiteSpace(workingDirectory))
+            {
+                return null;
+            }
+            string trimmed = workingDirectory.TrimEnd(
+                Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string leaf = Path.GetFileName(trimmed);
+            return String.IsNullOrWhiteSpace(leaf) ? null : leaf;
         }
 
         private void RefreshQuota()
@@ -527,13 +601,13 @@ public sealed class DetailsWindow : Window
 
         private void ApplyPlusQuota(UsageMetrics metrics)
         {
-            quotaGroup.VerticalAlignment = VerticalAlignment.Top;
+            quotaGroup.VerticalAlignment = VerticalAlignment.Center;
             fiveHourLabel.Text = "5 小时额度";
             weekLabel.Text = "周额度";
             fiveHourRow.Visibility = Visibility.Visible;
             weekRow.Visibility = Visibility.Visible;
             fiveHourRow.Margin = new Thickness(0);
-            weekRow.Margin = new Thickness(0, 8, 0, 0);
+            weekRow.Margin = new Thickness(0, 10, 0, 0);
             ApplyQuota(metrics.HasPrimary, metrics.PrimaryUsedPercent,
                 metrics.PrimaryResetUtc, fiveHourValue, fiveHourReset, fiveHourBar);
             ApplyQuota(metrics.HasSecondary, metrics.SecondaryUsedPercent,
@@ -546,7 +620,7 @@ public sealed class DetailsWindow : Window
             fiveHourLabel.Text = "月额度";
             fiveHourRow.Visibility = Visibility.Visible;
             weekRow.Visibility = Visibility.Collapsed;
-            fiveHourRow.Margin = new Thickness(0, 11, 0, 0);
+            fiveHourRow.Margin = new Thickness(0);
             if (hasMonthlyData)
             {
                 ApplyQuota(true, metrics.MonthlyUsedPercent,
@@ -648,6 +722,16 @@ public sealed class DetailsWindow : Window
             return grid;
         }
 
+        private static Border CreateInfoSeparator()
+        {
+            return new Border
+            {
+                Height = 1,
+                Margin = new Thickness(0, 5, 0, 5),
+                Background = new SolidColorBrush(MediaColor.FromArgb(58, 174, 189, 198))
+            };
+        }
+
         private static Grid CreateInfoRow(string title, out TextBlock value)
         {
             Grid grid = new Grid();
@@ -670,15 +754,15 @@ public sealed class DetailsWindow : Window
         {
             Grid layer = new Grid
             {
-                Width = 34,
+                Width = 36,
                 HorizontalAlignment = HorizontalAlignment.Left,
                 VerticalAlignment = VerticalAlignment.Center
             };
             Grid digits = new Grid();
-            digits.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(7) });
-            digits.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(7) });
-            digits.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(7) });
-            digits.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(13) });
+            digits.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(7.5) });
+            digits.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(7.5) });
+            digits.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(7.5) });
+            digits.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(13.5) });
             hundreds = NewContextDigitText();
             tens = NewContextDigitText();
             ones = NewContextDigitText();
@@ -693,7 +777,7 @@ public sealed class DetailsWindow : Window
             digits.Children.Add(percent);
             layer.Children.Add(digits);
 
-            unavailable = NewText("--", 12.5, MediaColor.FromRgb(45, 118, 139),
+            unavailable = NewText("--", 13.2, MediaColor.FromRgb(45, 118, 139),
                 FontWeights.SemiBold, false);
             unavailable.HorizontalAlignment = HorizontalAlignment.Center;
             unavailable.VerticalAlignment = VerticalAlignment.Center;
@@ -704,7 +788,7 @@ public sealed class DetailsWindow : Window
 
         private static TextBlock NewContextDigitText()
         {
-            TextBlock block = NewText(String.Empty, 12.5,
+            TextBlock block = NewText(String.Empty, 13.2,
                 MediaColor.FromRgb(45, 118, 139), FontWeights.SemiBold, false);
             block.HorizontalAlignment = HorizontalAlignment.Center;
             block.VerticalAlignment = VerticalAlignment.Center;

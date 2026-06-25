@@ -43,6 +43,7 @@ public sealed class HaloWindow : Window
         private readonly DispatcherTimer hoverHideTimer;
         private readonly DispatcherTimer performanceTimer;
         private AggregateSnapshot aggregate;
+        private AggregateSnapshot displayAggregate;
         private MediaPoint dragStart;
         private MediaPoint windowStart;
         private bool dragging;
@@ -314,10 +315,8 @@ public sealed class HaloWindow : Window
                 visual.SetSteadyDone(showClaudeStandby);
                 visual.SetErrorPresentation(demoErrorPresentation ?? ErrorPresentation.Flashing);
                 visual.SetState(showClaudeStandby ? HaloState.Done : aggregate.State,
-                    showClaudeStandby ? "待命" : aggregate.Label, claudeCount);
+                    showClaudeStandby ? "STANDBY" : aggregate.Label, claudeCount);
                 visual.SetAnswerStreaming(false);
-                tray.Text = ("Agent Halo · " + aggregate.Label).Substring(0,
-                    Math.Min(63, ("Agent Halo · " + aggregate.Label).Length));
                 AggregateSnapshot claudeDisplayAggregate = aggregate;
                 if (showClaudeStandby)
                 {
@@ -331,13 +330,16 @@ public sealed class HaloWindow : Window
                         FocusedAgent = AgentKind.ClaudeCode
                     };
                 }
+                displayAggregate = claudeDisplayAggregate;
+                tray.Text = ("Agent Halo · " + claudeDisplayAggregate.Label).Substring(0,
+                    Math.Min(63, ("Agent Halo · " + claudeDisplayAggregate.Label).Length));
                 details.UpdateContent(claudeDisplayAggregate, aggregate.Sessions);
                 UpdateAgentMenuChecks();
                 return;
             }
 
             aggregate = monitor.GetAggregate(settings);
-            bool codexRunning = IsCodexRunning();
+            bool codexRunning = CodexRuntimeReader.IsRunning();
             string appFailure;
             DateTime appFailureUtc;
             if (codexRunning && aggregate.State == HaloState.Idle &&
@@ -409,14 +411,12 @@ public sealed class HaloWindow : Window
             visual.SetSteadyDone(showGreenStandby);
             visual.SetErrorPresentation(demoErrorPresentation ?? errorPresentation);
             visual.SetState(showGreenStandby ? HaloState.Done : aggregate.State,
-                showGreenStandby ? "待命" : aggregate.Label, count);
-            visual.SetAnswerStreaming(!showGreenStandby && aggregate.AnswerStreaming);
-            tray.Text = ("Agent Halo · " + aggregate.Label).Substring(0,
-                Math.Min(63, ("Agent Halo · " + aggregate.Label).Length));
-            AggregateSnapshot displayAggregate = aggregate;
+                showGreenStandby ? "STANDBY" : aggregate.Label, count);
+            visual.SetAnswerStreaming(false);
+            AggregateSnapshot codexDisplayAggregate = aggregate;
             if (showGreenStandby)
             {
-                displayAggregate = new AggregateSnapshot
+                codexDisplayAggregate = new AggregateSnapshot
                 {
                     State = HaloState.Done,
                     Label = "STANDBY",
@@ -426,7 +426,10 @@ public sealed class HaloWindow : Window
                     FocusedAgent = AgentKind.Codex
                 };
             }
-            details.UpdateContent(displayAggregate, monitor.GetAllRecent());
+            displayAggregate = codexDisplayAggregate;
+            tray.Text = ("Agent Halo · " + codexDisplayAggregate.Label).Substring(0,
+                Math.Min(63, ("Agent Halo · " + codexDisplayAggregate.Label).Length));
+            details.UpdateContent(codexDisplayAggregate, monitor.GetAllRecent());
             UpdateAgentMenuChecks();
         }
 
@@ -507,7 +510,8 @@ public sealed class HaloWindow : Window
 
         private void ShowOrRefreshDetails(bool activate)
         {
-            if (aggregate == null)
+            AggregateSnapshot detailsAggregate = displayAggregate ?? aggregate;
+            if (detailsAggregate == null)
             {
                 return;
             }
@@ -515,7 +519,7 @@ public sealed class HaloWindow : Window
             {
                 details.Topmost = Topmost;
             }
-            details.UpdateContent(aggregate, DetailsSessions());
+            details.UpdateContent(detailsAggregate, DetailsSessions(detailsAggregate));
             PositionDetails();
             if (!details.IsVisible)
             {
@@ -534,11 +538,11 @@ public sealed class HaloWindow : Window
                 new Action(PositionDetails));
         }
 
-        private List<SessionSnapshot> DetailsSessions()
+        private List<SessionSnapshot> DetailsSessions(AggregateSnapshot detailsAggregate)
         {
             return settings.GetFocusedAgent() == AgentKind.ClaudeCode
-                ? (aggregate == null || aggregate.Sessions == null
-                    ? new List<SessionSnapshot>() : aggregate.Sessions)
+                ? (detailsAggregate == null || detailsAggregate.Sessions == null
+                    ? new List<SessionSnapshot>() : detailsAggregate.Sessions)
                 : monitor.GetAllRecent();
         }
 
@@ -781,8 +785,8 @@ public sealed class HaloWindow : Window
             if (sessions.Count == 0)
             {
                 result.State = HaloState.Idle;
-                result.Label = "READY";
-                result.Detail = "Claude Code is standing by";
+                result.Label = CodexSessionMonitor.StateLabel(HaloState.Idle);
+                result.Detail = "Claude Code is not running";
                 return result;
             }
             SessionSnapshot primary = sessions[0];
@@ -793,29 +797,6 @@ public sealed class HaloWindow : Window
                 : primary.ProjectName + " +" +
                     (sessions.Count - 1).ToString(CultureInfo.InvariantCulture);
             return result;
-        }
-
-        private static bool IsCodexRunning()
-        {
-            try
-            {
-                return Process.GetProcesses().Any(delegate(Process process)
-                {
-                    try
-                    {
-                        return process.ProcessName.IndexOf("codex",
-                            StringComparison.OrdinalIgnoreCase) >= 0;
-                    }
-                    catch
-                    {
-                        return false;
-                    }
-                });
-            }
-            catch
-            {
-                return false;
-            }
         }
 
         private void BuildTrayMenu()
@@ -951,7 +932,8 @@ public sealed class HaloWindow : Window
             RefreshState();
             if (details.IsVisible)
             {
-                details.UpdateContent(aggregate, DetailsSessions());
+                AggregateSnapshot detailsAggregate = displayAggregate ?? aggregate;
+                details.UpdateContent(detailsAggregate, DetailsSessions(detailsAggregate));
                 PositionDetails();
             }
         }

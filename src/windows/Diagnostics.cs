@@ -132,14 +132,23 @@ public static class Diagnostics
                     out realtimeState, out realtimeAction, out answerStreaming) &&
                     realtimeState == HaloState.Working &&
                     realtimeAction == "Writing answer" &&
-                    answerStreaming,
-                    "live text delta -> answer streaming");
+                    !answerStreaming,
+                    "live text delta -> working without answer streaming");
+                string realtimeContextCompactDelta =
+                    "SSE event: {\"type\":\"response.output_text.delta\"," +
+                    "\"delta\":\"Compressing context\"}";
+                Assert(realtime.FindActive(new[] { realtimeContextCompactDelta },
+                    out realtimeState, out realtimeAction, out answerStreaming) &&
+                    realtimeState == HaloState.Working &&
+                    realtimeAction == "Compressing context" &&
+                    !answerStreaming,
+                    "live context compact delta -> working without answer streaming");
                 Assert(!realtime.FindActive(new[] { realtimeCompleted, realtimeTextDelta },
                     out realtimeState, out realtimeAction, out answerStreaming),
-                    "live response completed clears answer streaming");
+                    "live response completed clears realtime working");
                 Assert(!realtime.FindActive(new[] { realtimeTextDone, realtimeTextDelta },
                     out realtimeState, out realtimeAction, out answerStreaming),
-                    "live text done clears answer streaming");
+                    "live text done clears realtime working");
                 string realtimeInputAdded =
                     "SSE event: {\"type\":\"response.output_item.added\",\"item\":{" +
                     "\"id\":\"input-test\",\"type\":\"function_call\"," +
@@ -765,12 +774,12 @@ public static class Diagnostics
                 string liveSessions = Path.Combine(liveHome, ".claude", "sessions");
                 Directory.CreateDirectory(liveSessions);
                 File.WriteAllText(Path.Combine(liveSessions, "live.json"),
-                    "{\"status\":\"waiting\",\"pid\":" +
+                    "{\"status\":\"busy\",\"pid\":" +
                     Process.GetCurrentProcess().Id.ToString(CultureInfo.InvariantCulture) +
                     ",\"sessionId\":\"live\",\"cwd\":\"C:\\\\work\"}",
                     Encoding.UTF8);
                 Assert(ClaudeLiveSessionReader.HasStandbySession(liveHome),
-                    "Claude live session reader detects standby CLI");
+                    "Claude live session reader detects live CLI");
                 File.WriteAllText(Path.Combine(liveSessions, "live.json"),
                     "{\"status\":\"waiting\",\"pid\":999999,\"sessionId\":\"dead\"}",
                     Encoding.UTF8);
@@ -932,6 +941,13 @@ public static class Diagnostics
                 {
                     monitor.Start();
                     AggregateSnapshot aggregate = monitor.GetAggregate(settings);
+                    if (!settings.Paused && aggregate.State == HaloState.Idle &&
+                        CodexRuntimeReader.IsRunning())
+                    {
+                        aggregate.State = HaloState.Done;
+                        aggregate.Label = "STANDBY";
+                        aggregate.Detail = "Codex 正在待命";
+                    }
                     StringBuilder report = new StringBuilder();
                     report.AppendLine(aggregate.Label);
                     report.AppendLine(aggregate.Detail);

@@ -11,7 +11,7 @@
   "states": {
     "idle": {
       "priority": 5,
-      "label": "READY",
+      "label": "OFFLINE",
       "color": [113, 132, 140],
       "breath": {"period": 6.8, "visualMaximum": 0.40, "visualMinimum": 0.18, "poweredMaximum": 0.0, "poweredMinimum": 0.0, "brightShare": 0.50},
       "orbit": {"velocity": 27, "envelopePeriod": 7.6, "driftAmplitude": 5.2, "driftPeriod": 4.8, "inertiaDamping": 0.62},
@@ -30,7 +30,7 @@
     "working": {
       "priority": 2,
       "label": "EXECUTING",
-      "color": [52, 158, 199],
+      "color": [39, 161, 211],
       "breath": {"period": 7.2, "visualMaximum": 1.0, "visualMinimum": 0.22, "poweredMaximum": 1.0, "poweredMinimum": 0.16, "brightShare": 0.78},
       "orbit": {"velocity": 106, "envelopePeriod": 2.2, "driftAmplitude": 8.5, "driftPeriod": 2.8, "inertiaDamping": 0.72},
       "coreWhite": 0.86,

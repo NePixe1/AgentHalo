@@ -306,14 +306,189 @@ public static class ClaudeHookConfigurator
                 hooks[spec.Event] = list.ToArray();
             }
 
-            if (!changed)
+            if (!changed && !SettingsJsonNeedsPrettyPrint(settingsPath))
             {
                 return;
             }
             config["hooks"] = hooks;
             Directory.CreateDirectory(claudeDir);
-            File.WriteAllText(settingsPath, Serializer.Serialize(config),
+            File.WriteAllText(settingsPath,
+                PrettyPrintJson(Serializer.Serialize(config)),
                 new UTF8Encoding(false));
+        }
+
+        // Detects a settings.json that is valid JSON but written as a single
+        // unindented line (e.g. produced by older builds, or a hand-rolled
+        // compact variant the user swapped in). We re-emit it pretty so users
+        // never have to manually format after swapping configs. Already-pretty
+        // files return false so we don't touch the timestamp every launch.
+        private static bool SettingsJsonNeedsPrettyPrint(string settingsPath)
+        {
+            string raw;
+            try
+            {
+                raw = File.ReadAllText(settingsPath, Encoding.UTF8);
+            }
+            catch
+            {
+                return false;
+            }
+            if (String.IsNullOrWhiteSpace(raw))
+            {
+                return false;
+            }
+            // A pretty-printed JSON document always contains newlines; a compact
+            // one does not. Only offer to pretty-print what we can actually parse,
+            // so we never corrupt a file we don't understand.
+            if (raw.IndexOf('\n') >= 0 || raw.IndexOf('\r') >= 0)
+            {
+                return false;
+            }
+            try
+            {
+                Serializer.DeserializeObject(raw);
+            }
+            catch
+            {
+                return false;
+            }
+            return true;
+        }
+
+        // JavaScriptSerializer has no indented output, so we re-emit its compact
+        // JSON with two-space indentation. Keeps ~/.claude/settings.json readable
+        // for users who maintain and swap several hand-edited variants.
+        private static string PrettyPrintJson(string compact)
+        {
+            if (String.IsNullOrWhiteSpace(compact))
+            {
+                return compact;
+            }
+            object root;
+            try
+            {
+                root = Serializer.DeserializeObject(compact);
+            }
+            catch
+            {
+                return compact;
+            }
+            StringBuilder builder = new StringBuilder();
+            WriteJsonValue(builder, root, 0);
+            return builder.ToString();
+        }
+
+        private static void WriteJsonValue(StringBuilder builder, object value,
+            int depth)
+        {
+            if (value == null)
+            {
+                builder.Append("null");
+                return;
+            }
+            Dictionary<string, object> dict =
+                value as Dictionary<string, object>;
+            if (dict != null)
+            {
+                if (dict.Count == 0)
+                {
+                    builder.Append("{}");
+                    return;
+                }
+                builder.Append('{').Append(Environment.NewLine);
+                int index = 0;
+                foreach (KeyValuePair<string, object> pair in dict)
+                {
+                    if (index > 0)
+                    {
+                        builder.Append(',').Append(Environment.NewLine);
+                    }
+                    index++;
+                    WriteIndent(builder, depth + 1);
+                    WriteJsonString(builder, pair.Key);
+                    builder.Append(": ");
+                    WriteJsonValue(builder, pair.Value, depth + 1);
+                }
+                builder.Append(Environment.NewLine);
+                WriteIndent(builder, depth);
+                builder.Append('}');
+                return;
+            }
+            object[] array = value as object[];
+            if (array != null)
+            {
+                if (array.Length == 0)
+                {
+                    builder.Append("[]");
+                    return;
+                }
+                builder.Append('[').Append(Environment.NewLine);
+                for (int i = 0; i < array.Length; i++)
+                {
+                    if (i > 0)
+                    {
+                        builder.Append(',').Append(Environment.NewLine);
+                    }
+                    WriteIndent(builder, depth + 1);
+                    WriteJsonValue(builder, array[i], depth + 1);
+                }
+                builder.Append(Environment.NewLine);
+                WriteIndent(builder, depth);
+                builder.Append(']');
+                return;
+            }
+            if (value is bool)
+            {
+                builder.Append((bool)value ? "true" : "false");
+                return;
+            }
+            if (value is string)
+            {
+                WriteJsonString(builder, (string)value);
+                return;
+            }
+            // Numbers and anything else: defer to the serializer so int/long/decimal
+            // and exotic types are formatted correctly without re-implementing them.
+            builder.Append(Serializer.Serialize(value));
+        }
+
+        private static void WriteJsonString(StringBuilder builder, string value)
+        {
+            builder.Append('"');
+            foreach (char c in value ?? String.Empty)
+            {
+                switch (c)
+                {
+                    case '"': builder.Append("\\\""); break;
+                    case '\\': builder.Append("\\\\"); break;
+                    case '\b': builder.Append("\\b"); break;
+                    case '\f': builder.Append("\\f"); break;
+                    case '\n': builder.Append("\\n"); break;
+                    case '\r': builder.Append("\\r"); break;
+                    case '\t': builder.Append("\\t"); break;
+                    default:
+                        if (c < 0x20)
+                        {
+                            builder.Append("\\u")
+                                .Append(((int)c).ToString("x4",
+                                    CultureInfo.InvariantCulture));
+                        }
+                        else
+                        {
+                            builder.Append(c);
+                        }
+                        break;
+                }
+            }
+            builder.Append('"');
+        }
+
+        private static void WriteIndent(StringBuilder builder, int depth)
+        {
+            for (int i = 0; i < depth; i++)
+            {
+                builder.Append("  ");
+            }
         }
 
         private static void RemoveLegacyHookHelper(string home)
@@ -1721,12 +1896,6 @@ public static class ClaudeLiveSessionReader
                 Dictionary<string, object> json = Serializer.DeserializeObject(
                     File.ReadAllText(path, Encoding.UTF8)) as Dictionary<string, object>;
                 if (json == null)
-                {
-                    return false;
-                }
-                string status = StringValue(json, "status");
-                if (!String.Equals(status, "waiting", StringComparison.OrdinalIgnoreCase) &&
-                    !String.Equals(status, "idle", StringComparison.OrdinalIgnoreCase))
                 {
                     return false;
                 }

@@ -97,7 +97,7 @@ public sealed class HaloVisual : FrameworkElement
             transitionStartSeconds = -10;
             transitionDuration = 1;
             renderedVisual.Color = transitionFromColor;
-            label = "READY";
+            label = CodexSessionMonitor.StateLabel(HaloState.Idle);
             energy = TargetEnergy(HaloState.Idle);
             outerPhase = 97;
             gapSeparation = GeneratedHaloSpec.MaximumGapSeparation;
@@ -1340,11 +1340,6 @@ public sealed class HaloVisual : FrameworkElement
         public static MediaColor StateColor(HaloState state)
         {
             SharedStateParameters parameters = GeneratedHaloSpec.State(state);
-            if (state == HaloState.Working)
-            {
-                // Windows keeps execution blue as saturated as the completed green.
-                return MediaColor.FromRgb(39, 161, 211);
-            }
             return MediaColor.FromRgb(parameters.Red, parameters.Green, parameters.Blue);
         }
 

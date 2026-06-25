@@ -822,8 +822,8 @@ public sealed class CodexSessionMonitor : IDisposable
                 if (sessions.Count == 0)
                 {
                     result.State = HaloState.Idle;
-                    result.Label = "READY";
-                    result.Detail = "Codex is standing by";
+                    result.Label = StateLabel(HaloState.Idle);
+                    result.Detail = "Codex is not running";
                     return result;
                 }
 
@@ -1036,8 +1036,15 @@ public sealed class CodexRealtimeActivityReader
                 if (eventType == "response.output_text.delta")
                 {
                     state = HaloState.Working;
-                    action = "Writing answer";
-                    answerStreaming = true;
+                    if (IsContextCompressionEvent(body))
+                    {
+                        action = "Compressing context";
+                    }
+                    else
+                    {
+                        action = "Writing answer";
+                    }
+                    answerStreaming = false;
                     return true;
                 }
                 if (eventType == "response.completed" ||
@@ -1178,6 +1185,23 @@ public sealed class CodexRealtimeActivityReader
                  value.IndexOf("justification", StringComparison.OrdinalIgnoreCase) >= 0);
         }
 
+        private static bool IsContextCompressionEvent(string value)
+        {
+            if (String.IsNullOrEmpty(value))
+            {
+                return false;
+            }
+            return value.IndexOf("compressing context", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                value.IndexOf("compress context", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                value.IndexOf("compacting context", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                value.IndexOf("compact context", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                value.IndexOf("context compaction", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                value.IndexOf("summarizing conversation", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                value.IndexOf("summarizing context", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                value.IndexOf("压缩上下文", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                value.IndexOf("正在压缩", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
         private static string ReadString(Dictionary<string, object> dictionary,
             string key)
         {
@@ -1238,6 +1262,71 @@ public sealed class CodexRealtimeActivityReader
         [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
         private static extern int sqlite3_busy_timeout(IntPtr database,
             int milliseconds);
+    }
+
+public static class CodexRuntimeReader
+    {
+        public static bool IsRunning()
+        {
+            try
+            {
+                if (Process.GetProcessesByName("Codex").Length > 0 ||
+                    Process.GetProcessesByName("codex").Length > 0)
+                {
+                    return true;
+                }
+                foreach (Process process in Process.GetProcesses())
+                {
+                    try
+                    {
+                        string name = process.ProcessName;
+                        if (!String.IsNullOrEmpty(name) &&
+                            name.IndexOf("codex", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            return true;
+                        }
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return HasRecentLocalActivity();
+        }
+
+        private static bool HasRecentLocalActivity()
+        {
+            try
+            {
+                string root = Path.Combine(Environment.GetFolderPath(
+                    Environment.SpecialFolder.UserProfile), ".codex");
+                string logs = Path.Combine(root, "logs_2.sqlite");
+                if (File.Exists(logs) &&
+                    File.GetLastWriteTimeUtc(logs) >= DateTime.UtcNow.AddMinutes(-20))
+                {
+                    return true;
+                }
+                string sessions = Path.Combine(root, "sessions");
+                if (Directory.Exists(sessions))
+                {
+                    foreach (string path in Directory.GetFiles(sessions, "*.jsonl",
+                        SearchOption.AllDirectories))
+                    {
+                        if (File.GetLastWriteTimeUtc(path) >= DateTime.UtcNow.AddMinutes(-20))
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return false;
+        }
     }
 
 public static class CodexFailureReader
