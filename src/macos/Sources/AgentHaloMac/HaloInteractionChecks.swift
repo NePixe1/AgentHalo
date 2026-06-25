@@ -1247,7 +1247,7 @@ private func testIdleAnimationUsesLowPowerCadence() {
     }
 
     expect(source.contains("lowPowerAnimationInterval"), "HaloView should define a low-power animation interval")
-    expect(source.contains("normalAnimationInterval = 1.0 / 30.0"), "HaloView should keep active animation at 30fps to preserve orbit smoothness (cheap once the ring is GPU-rasterized via CAShapeLayer)")
+    expect(source.contains("normalAnimationInterval = 1.0 / 60.0"), "HaloView should run active animation at 60fps for smooth orbit motion (cheap once the ring is GPU-rasterized via CAShapeLayer)")
     expect(source.contains("preferredAnimationInterval"), "HaloView should choose animation cadence by visual state")
     expect(source.contains("steadyDone"), "steady standby state should be eligible for low-power animation")
 }

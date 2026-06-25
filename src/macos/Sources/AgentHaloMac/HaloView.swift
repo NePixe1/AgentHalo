@@ -5,14 +5,14 @@ import QuartzCore
 @MainActor
 final class HaloView: NSView {
     private static let dragActivationDistance = 3.0
-    // Active cadence stays at 30fps to preserve the original orbit smoothness.
-    // This is now cheap because the ring is rendered as CAShapeLayer sublayers,
-    // so Core Animation rasterizes on the render server (GPU) each frame instead
-    // of the app rasterizing a backing store via draw(_:). The per-frame CPU cost
-    // is just the path/width/color property sets in applyRingLayers, so 30fps no
-    // longer carries the ripc_DrawPath cost that previously justified lowering it.
-    private static let normalAnimationInterval = 1.0 / 30.0
-    private static let lowPowerAnimationInterval = 1.0 / 15.0
+    // Active cadence runs at 60fps for smoother orbit motion. This is cheap
+    // because the ring is rendered as CAShapeLayer sublayers, so Core Animation
+    // rasterizes on the render server (GPU) each frame instead of the app
+    // rasterizing a backing store via draw(_:). The per-frame CPU cost is just
+    // the path/width/color property sets in applyRingLayers, so 60fps no longer
+    // carries the ripc_DrawPath cost that previously justified lowering it.
+    private static let normalAnimationInterval = 1.0 / 60.0
+    private static let lowPowerAnimationInterval = 1.0 / 30.0
 
     var aggregate = AggregateSnapshot(
         state: .idle,
