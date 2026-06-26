@@ -40,6 +40,7 @@ public sealed class HaloSettings
         public string AcknowledgedErrorAt { get; set; }
         public int HaloScalePercent { get; set; }
         public string FocusedAgent { get; set; }
+        public string Language { get; set; }  // null = follow system
 
         public HaloSettings()
         {
@@ -48,6 +49,7 @@ public sealed class HaloSettings
             FocusedAgent = "codex";
             InstalledAt = DateTime.UtcNow.ToString("o");
             Acknowledged = new Dictionary<string, string>();
+            Language = null;  // follow system by default
         }
 
         public AgentKind GetFocusedAgent()

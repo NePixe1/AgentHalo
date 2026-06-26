@@ -67,6 +67,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Copy-Item -LiteralPath "$root\README.md" -Destination "$output\README.md" -Force
+Copy-Item -LiteralPath "$windows\locales" -Destination "$output\locales" -Recurse -Force
 Remove-Item -LiteralPath (Join-Path $output "AgentHalo.pdb") -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $output "sqlite3.exe") -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $output "AgentHaloHook.exe") -ErrorAction SilentlyContinue
