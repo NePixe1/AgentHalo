@@ -34,8 +34,11 @@ public final class L10n: @unchecked Sendable {
     }
 
     public func format(_ key: String, _ args: CVarArg...) -> String {
-        let template = self[key]
-        return String(format: template, arguments: args)
+        var template = self[key]
+        for (index, arg) in args.enumerated() {
+            template = template.replacingOccurrences(of: "{\(index)}", with: "\(arg)")
+        }
+        return template
     }
 
     // MARK: - System language detection
