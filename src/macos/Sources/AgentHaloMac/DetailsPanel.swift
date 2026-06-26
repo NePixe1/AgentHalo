@@ -22,7 +22,7 @@ final class DetailsPanel: NSPanel {
     private let projectModelSeparator = SeparatorView()
     private let modelTokenSeparator = SeparatorView()
     private let tokenRow = MetadataRowView(
-        title: "Token",
+        title: "输入输出",
         valueFont: .systemFont(ofSize: 11.5, weight: .medium)
     )
     var onMouseEntered: (() -> Void)?
