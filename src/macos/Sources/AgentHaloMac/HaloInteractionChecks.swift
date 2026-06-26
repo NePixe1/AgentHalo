@@ -1096,16 +1096,22 @@ private func testCodexSQLiteReadersUseRecentRowWindows() {
     }
 
     expect(
-        !failureSource.contains("where ts >="),
-        "failure reader should not scan the logs table with a timestamp predicate"
-    )
-    expect(
         !realtimeSource.contains("where ts >="),
         "realtime reader should not scan the logs table with a timestamp predicate"
     )
+    // The failure reader pushes the 120s cutoff into SQL as `ts >= ?` and orders
+    // by the idx_logs_ts key so SQLite SEEKS the index (ts>?) and scans only the
+    // recent window. The previous `order by id desc` plus the non-indexable
+    // `lower(level)` predicate forced a full backward btree scan of the entire
+    // logs table on every 2s poll; errors are rare enough that the PK-ordered
+    // scan touched most of the table before collecting 256 error rows.
     expect(
-        failureSource.contains("order by id desc limit 256"),
-        "failure reader should inspect a bounded recent row window"
+        failureSource.contains("and ts>="),
+        "failure reader should bound its scan to the recent window via idx_logs_ts (ts>=?) instead of a full backward btree scan"
+    )
+    expect(
+        failureSource.contains("order by ts desc, ts_nanos desc, id desc limit 256"),
+        "failure reader should order by the idx_logs_ts key so SQLite seeks the index"
     )
     expect(
         realtimeSource.contains("order by id desc limit 512"),

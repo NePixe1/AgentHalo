@@ -16,14 +16,21 @@ public struct CodexFailureReader: Sendable {
         // Filter `level='error'` server-side so only error rows (and their
         // feedback_log_body) are materialized and transferred, instead of
         // reading 256 arbitrary rows of every level and discarding the rest in
-        // Swift. The timestamp cutoff stays in Swift (no `ts >=` predicate) so
-        // the bounded `order by id desc limit` window — not a timestamp scan —
-        // drives the query plan.
+        // Swift. The 120s cutoff is pushed into SQL as `ts >= ?` so SQLite seeks
+        // `idx_logs_ts (ts>?)` and scans only the last 120s of rows. Without it,
+        // `order by id desc` plus the non-indexable `lower(level)` predicate
+        // forced a full backward btree scan of the entire `logs` table (~95k
+        // rows) on every 2s poll. `order by ts desc, ts_nanos desc, id desc`
+        // matches idx_logs_ts exactly, so no temp btree is needed and the
+        // most-recent error still comes first. The Swift `seconds >= cutoff`
+        // check below is kept as a no-op safety filter (rows are already within
+        // the window).
+        let cutoffSeconds = Int(cutoff)
         let query = """
         select ts || char(9) || coalesce(level,'') || char(9) || coalesce(target,'') || char(9) || \
         replace(replace(coalesce(feedback_log_body,''),char(10),' '),char(13),' ') from logs \
-        where lower(level)='error' \
-        order by id desc limit 256;
+        where lower(level)='error' and ts>=\(cutoffSeconds) \
+        order by ts desc, ts_nanos desc, id desc limit 256;
         """
         let rows: [String]
         do {

@@ -37,24 +37,14 @@ public final class CodexSessionMonitor {
 
     private func discover(now: Date) -> Bool {
         lastDiscoveryAt = now
-        guard let enumerator = fileManager.enumerator(
-            at: sessionsRoot,
-            includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
-            options: [.skipsHiddenFiles]
-        ) else {
-            return false
-        }
+        let cutoff = now.addingTimeInterval(-172_800)
 
-        var files: [(url: URL, modifiedAt: Date)] = []
-        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
-            guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]),
-                  values.isRegularFile == true,
-                  let modifiedAt = values.contentModificationDate,
-                  modifiedAt >= now.addingTimeInterval(-172_800) else {
-                continue
-            }
-            files.append((url, modifiedAt))
-        }
+        // Walk the sessions tree with POSIX opendir/readdir (names + d_type,
+        // no per-entry stat during enumeration) and a single stat() per jsonl
+        // file, instead of FileManager.enumerator(at:)/subpaths(atPath:), both
+        // of which allocate a Foundation object and stat/lstat every entry.
+        // Mirrors the Windows FindFirstFile approach.
+        let files = FastFileMetadata.discoverJsonlFiles(root: sessionsRoot, cutoff: cutoff, skipSubagents: false)
 
         let recent = Set(files.sorted { $0.modifiedAt > $1.modifiedAt }.prefix(16).map(\.url))
         var changed = false
