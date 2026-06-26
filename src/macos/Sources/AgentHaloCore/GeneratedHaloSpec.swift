@@ -234,10 +234,10 @@ public enum GeneratedHaloSpec {
 
     public static func classifyFailure(_ text: String) -> String? {
         let value = text.lowercased()
-        if containsAny(value, ["authentication failed", "unauthorized", "invalid token", "sign in again"]) { return "认证已失效" }
-        if containsAny(value, ["rate limit reached", "usage limit", "quota exceeded", "rate_limit_reached"]) { return "额度已用尽" }
-        if containsAny(value, ["service unavailable", "server overloaded", "overloaded", "bad gateway"]) { return "服务暂时不可用" }
-        if containsAny(value, ["connection failed", "network error", "connection aborted", "request timed out", "connect timeout"]) { return "连接 Codex 失败" }
+        if containsAny(value, ["authentication failed", "unauthorized", "invalid token", "sign in again"]) { return "failure.auth_expired" }
+        if containsAny(value, ["rate limit reached", "usage limit", "quota exceeded", "rate_limit_reached"]) { return "failure.quota_exhausted" }
+        if containsAny(value, ["service unavailable", "server overloaded", "overloaded", "bad gateway"]) { return "failure.service_unavailable" }
+        if containsAny(value, ["connection failed", "network error", "connection aborted", "request timed out", "connect timeout"]) { return "failure.connection_failed" }
         return nil
     }
 

@@ -55,7 +55,8 @@ public struct CodexFailureReader: Sendable {
     }
 
     public static func classify(_ text: String) -> String? {
-        GeneratedHaloSpec.classifyFailure(text)
+        guard let key = GeneratedHaloSpec.classifyFailure(text) else { return nil }
+        return L10n.shared[key]
     }
 
     private static func isRelevantTarget(_ target: String) -> Bool {
