@@ -18,6 +18,10 @@ let package = Package(
     targets: [
         .target(
             name: "AgentHaloCore",
+            dependencies: [],
+            resources: [
+                .copy("locales")
+            ],
             linkerSettings: [
                 .linkedLibrary("sqlite3")
             ]
