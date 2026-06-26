@@ -123,6 +123,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cachedStartupEnabled = false
     private var cachedStartupExpiresAt = Date.distantPast
     private let startupCheckInterval: TimeInterval = 2
+    private var currentLanguage: String = "zh"
+    private var languageObserver: NSObjectProtocol?
     private var currentHaloSize: CGFloat {
         CGFloat(settings.haloSize)
     }
@@ -165,6 +167,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         claudeActivityMonitor.start { [weak self] snapshot in
             Task { @MainActor in
                 self?.claudeActivityDidChange(snapshot)
+            }
+        }
+        // Initialize L10n with user's saved preference
+        L10n.shared.setLanguage(settings.language)
+        currentLanguage = L10n.shared.currentLanguage
+
+        // Observe language changes
+        languageObserver = NotificationCenter.default.addObserver(
+            forName: L10n.languageDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.currentLanguage = L10n.shared.currentLanguage
+                // Persist preference
+                self?.settings.language = L10n.shared.currentLanguage == L10n.detectSystemLanguage() ? nil : L10n.shared.currentLanguage
+                self?.settingsStore.save(self!.settings)
+                // Rebuild menu so all items show new language
+                self?.lastStatusMenuSignature = nil
+                self?.tick()
             }
         }
         tick()
@@ -448,32 +470,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func makeControlMenu() -> NSMenu {
         let menu = NSMenu()
-        addCheckItem("始终置顶", checked: settings.alwaysOnTop, action: #selector(toggleAlwaysOnTop), to: menu)
-        addCheckItem("开机自动启动", checked: currentStartupEnabled(), action: #selector(toggleStartup), to: menu)
-        addCheckItem("暂停状态监听", checked: settings.paused, action: #selector(togglePause), to: menu)
+        addCheckItem(L10n.shared["menu.always_on_top"], checked: settings.alwaysOnTop, action: #selector(toggleAlwaysOnTop), to: menu)
+        addCheckItem(L10n.shared["menu.launch_at_startup"], checked: currentStartupEnabled(), action: #selector(toggleStartup), to: menu)
+        addCheckItem(L10n.shared["menu.pause_monitor"], checked: settings.paused, action: #selector(togglePause), to: menu)
         addHaloSizeItem(to: menu)
-        let focus = NSMenuItem(title: "监控对象", action: nil, keyEquivalent: "")
+        let focus = NSMenuItem(title: L10n.shared["menu.focus_target"], action: nil, keyEquivalent: "")
         let focusMenu = NSMenu()
         addFocusedAgentItem(.codex, to: focusMenu)
         addFocusedAgentItem(.claudeCode, to: focusMenu)
         focus.submenu = focusMenu
         menu.addItem(focus)
-        addMenuItem("脱离卡死（移到主屏右上角）", #selector(escapeOffscreen), enabled: true, to: menu)
-        let preview = NSMenuItem(title: "预览状态", action: nil, keyEquivalent: "")
+
+        // Language submenu
+        let languageItem = NSMenuItem(title: L10n.shared["menu.language"], action: nil, keyEquivalent: "")
+        let languageMenu = NSMenu()
+        addLanguageItem(nil, to: languageMenu)           // Follow System
+        addLanguageItem("zh", to: languageMenu)           // 中文
+        addLanguageItem("en", to: languageMenu)           // English
+        languageItem.submenu = languageMenu
+        menu.addItem(languageItem)
+
+        addMenuItem(L10n.shared["menu.escape_offscreen"], #selector(escapeOffscreen), enabled: true, to: menu)
+        let preview = NSMenuItem(title: L10n.shared["menu.preview_status"], action: nil, keyEquivalent: "")
         let submenu = NSMenu()
-        addPreviewItem("实时状态", state: nil, presentation: nil, to: submenu)
-        addPreviewItem("思考中", state: .thinking, presentation: nil, to: submenu)
-        addPreviewItem("执行中", state: .working, presentation: nil, to: submenu)
-        addPreviewItem("已完成", state: .done, presentation: nil, to: submenu)
-        addPreviewItem("等待授权（双脉冲）", state: .attention, presentation: nil, to: submenu)
-        addPreviewItem("故障（爆闪）", state: .error, presentation: .flashing, to: submenu)
-        addPreviewItem("故障（常亮）", state: .error, presentation: .bright, to: submenu)
-        addPreviewItem("故障（暗红）", state: .error, presentation: .dim, to: submenu)
-        addPreviewItem("待机", state: .idle, presentation: nil, to: submenu)
+        addPreviewItem(L10n.shared["halo.live_status"], state: nil, presentation: nil, to: submenu)
+        addPreviewItem(L10n.shared["halo.thinking_preview"], state: .thinking, presentation: nil, to: submenu)
+        addPreviewItem(L10n.shared["halo.working_preview"], state: .working, presentation: nil, to: submenu)
+        addPreviewItem(L10n.shared["halo.done_preview"], state: .done, presentation: nil, to: submenu)
+        addPreviewItem(L10n.shared["halo.attention_preview"], state: .attention, presentation: nil, to: submenu)
+        addPreviewItem(L10n.shared["halo.error_flash_preview"], state: .error, presentation: .flashing, to: submenu)
+        addPreviewItem(L10n.shared["halo.error_bright_preview"], state: .error, presentation: .bright, to: submenu)
+        addPreviewItem(L10n.shared["halo.error_dim_preview"], state: .error, presentation: .dim, to: submenu)
+        addPreviewItem(L10n.shared["halo.idle_preview"], state: .idle, presentation: nil, to: submenu)
         preview.submenu = submenu
         menu.addItem(preview)
         menu.addItem(.separator())
-        addMenuItem("退出", #selector(quit), enabled: true, to: menu)
+        addMenuItem(L10n.shared["menu.quit"], #selector(quit), enabled: true, to: menu)
         return menu
     }
 
@@ -944,9 +976,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func addHaloSizeItem(to menu: NSMenu) {
-        let item = NSMenuItem(title: "圆环大小", action: nil, keyEquivalent: "")
+        let item = NSMenuItem(title: L10n.shared["halo.size"], action: nil, keyEquivalent: "")
         let container = NSView(frame: NSRect(x: 0, y: 0, width: haloSizeMenuWidth, height: haloSizeMenuHeight))
-        let label = NSTextField(labelWithString: "圆环大小")
+        let label = NSTextField(labelWithString: L10n.shared["halo.size"])
         label.font = .systemFont(ofSize: 12, weight: .medium)
         label.textColor = .labelColor
         label.translatesAutoresizingMaskIntoConstraints = false
@@ -1009,6 +1041,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         setFocusedAgent(agent)
+    }
+
+    private func addLanguageItem(_ lang: String?, to menu: NSMenu) {
+        let title: String
+        if let lang {
+            // lang is a language code like "zh" or "en"
+            title = L10n.shared["menu.language.\(lang)"]
+        } else {
+            title = L10n.shared["menu.language.auto"]
+        }
+        let item = NSMenuItem(title: title, action: #selector(selectLanguage(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = lang as NSString?
+        // Checkmark: nil = follow system
+        let effectiveLanguage = settings.language ?? L10n.detectSystemLanguage()
+        item.state = (lang == effectiveLanguage) ? .on : .off
+        menu.addItem(item)
+    }
+
+    @objc private func selectLanguage(_ sender: NSMenuItem) {
+        let lang = sender.representedObject as? String  // nil = follow system
+        settings.language = lang
+        settingsStore.save(settings)
+        L10n.shared.setLanguage(lang)
     }
 
     @objc private func previewState(_ sender: NSMenuItem) {
