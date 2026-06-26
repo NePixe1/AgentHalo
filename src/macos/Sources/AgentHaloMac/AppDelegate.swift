@@ -691,7 +691,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ) -> AggregateSnapshot {
         guard hasLiveSession,
               aggregate.state == .idle,
-              aggregate.label == "READY" else {
+              aggregate.label == "OFFLINE" else {
             return aggregate
         }
         return AggregateSnapshot(

@@ -31,6 +31,20 @@ public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
         case .claudeCode: return "Claude Code 正在待命"
         }
     }
+
+    public var offlineDetail: String {
+        switch self {
+        case .codex: return "Codex is not running"
+        case .claudeCode: return "Claude Code is not running"
+        }
+    }
+
+    public var localizedOfflineDetail: String {
+        switch self {
+        case .codex: return "Codex 未运行"
+        case .claudeCode: return "Claude Code 未运行"
+        }
+    }
 }
 
 public struct SessionSnapshot: Equatable, Sendable {
@@ -144,20 +158,34 @@ public struct RateLimitSnapshot: Equatable, Sendable {
     public var primaryResetAt: Date?
     public var secondaryResetAt: Date?
     public var contextUsedPercent: Double?
+    public var hasPrimary: Bool
+    public var hasSecondary: Bool
+    public var monthlyUsedPercent: Double?
+    public var monthlyResetAt: Date?
 
     public init(
         primaryUsedPercent: Double,
         secondaryUsedPercent: Double,
         primaryResetAt: Date? = nil,
         secondaryResetAt: Date? = nil,
-        contextUsedPercent: Double? = nil
+        contextUsedPercent: Double? = nil,
+        hasPrimary: Bool = true,
+        hasSecondary: Bool = true,
+        monthlyUsedPercent: Double? = nil,
+        monthlyResetAt: Date? = nil
     ) {
         self.primaryUsedPercent = primaryUsedPercent
         self.secondaryUsedPercent = secondaryUsedPercent
         self.primaryResetAt = primaryResetAt
         self.secondaryResetAt = secondaryResetAt
         self.contextUsedPercent = contextUsedPercent
+        self.hasPrimary = hasPrimary
+        self.hasSecondary = hasSecondary
+        self.monthlyUsedPercent = monthlyUsedPercent
+        self.monthlyResetAt = monthlyResetAt
     }
+
+    public var hasMonthly: Bool { monthlyUsedPercent != nil }
 }
 
 public struct CodexFailure: Equatable, Sendable {

@@ -160,7 +160,7 @@ public struct SessionReducer: Sendable {
         if type == "function_call" || type == "custom_tool_call" {
             let name = payload.string("name")
             snapshot.active = true
-            if name == "request_user_input" || Self.requiresApproval(name: name, payload: payload) {
+            if Self.isAttentionFunctionCall(name: name, payload: payload) {
                 snapshot.state = .attention
                 snapshot.action = "Needs you"
             } else {
@@ -286,6 +286,43 @@ public struct SessionReducer: Sendable {
             return array.contains(where: containsProposedPlan)
         }
         return false
+    }
+
+    private static func isAttentionFunctionCall(name: String, payload: [String: Any]) -> Bool {
+        if name.caseInsensitiveCompare("request_user_input") == .orderedSame {
+            return true
+        }
+        let lower = name.lowercased()
+        if lower.contains("approval")
+            || lower.contains("permission")
+            || lower.contains("request_user")
+            || lower.contains("needs_input") {
+            return true
+        }
+        if requiresApproval(name: name, payload: payload) {
+            return true
+        }
+        // Argument string heuristics — for shells that emit raw JSON strings or
+        // tool names we don't recognize, fall back to scanning the arguments
+        // for the escalation markers Codex includes when it wants a confirm.
+        let raw: String
+        if let dictionary = payload["arguments"] as? [String: Any],
+           let data = try? JSONSerialization.data(withJSONObject: dictionary),
+           let text = String(data: data, encoding: .utf8) {
+            raw = text
+        } else {
+            raw = payload.string("arguments")
+        }
+        return isEscalatedArgumentsFragment(raw)
+    }
+
+    private static func isEscalatedArgumentsFragment(_ value: String) -> Bool {
+        guard !value.isEmpty,
+              value.range(of: "require_escalated", options: .caseInsensitive) != nil else {
+            return false
+        }
+        return value.range(of: "sandbox_permissions", options: .caseInsensitive) != nil
+            || value.range(of: "justification", options: .caseInsensitive) != nil
     }
 
     private static func requiresApproval(name: String, payload: [String: Any]) -> Bool {

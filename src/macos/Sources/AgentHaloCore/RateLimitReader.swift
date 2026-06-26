@@ -16,60 +16,173 @@ public struct RateLimitReader: @unchecked Sendable {
     }
 
     public func read() -> RateLimitSnapshot? {
-        var primaryUsedPercent: Double?
-        var secondaryUsedPercent: Double?
-        var primaryResetAt: Date?
-        var secondaryResetAt: Date?
-        var contextUsedPercent: Double?
-
+        var metrics = UsageMetrics()
         for file in recentJSONLFiles().prefix(GeneratedHaloSpec.rateLimitRecentFileCount) {
             for line in tailLines(file).suffix(GeneratedHaloSpec.rateLimitRecentLineCount)
                 .reversed() where line.contains(GeneratedHaloSpec.rateLimitMarker)
                     || line.contains("\"last_token_usage\"") {
-                guard let data = line.data(using: .utf8),
-                      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let payload = root[GeneratedHaloSpec.ratePayloadKey] as? [String: Any] else {
-                    continue
-                }
-                let info = payload[GeneratedHaloSpec.rateInfoKey] as? [String: Any]
-                let limits = (payload[GeneratedHaloSpec.rateLimitsKey] as? [String: Any])
-                    ?? (info?[GeneratedHaloSpec.rateLimitsKey] as? [String: Any])
-                if primaryUsedPercent == nil,
-                   let primary = limits?[GeneratedHaloSpec.ratePrimaryKey] as? [String: Any],
-                   let used = Self.number(primary[GeneratedHaloSpec.rateUsedPercentKey]) {
-                    primaryUsedPercent = used
-                    primaryResetAt = Self.unixTime(primary["resets_at"])
-                }
-                if secondaryUsedPercent == nil,
-                   let secondary = limits?[GeneratedHaloSpec.rateSecondaryKey] as? [String: Any],
-                   let used = Self.number(secondary[GeneratedHaloSpec.rateUsedPercentKey]) {
-                    secondaryUsedPercent = used
-                    secondaryResetAt = Self.unixTime(secondary["resets_at"])
-                }
-                if contextUsedPercent == nil {
-                    contextUsedPercent = Self.contextUsedPercent(info: info)
-                }
-                if let primaryUsedPercent, let secondaryUsedPercent, contextUsedPercent != nil {
-                    return RateLimitSnapshot(
-                        primaryUsedPercent: primaryUsedPercent,
-                        secondaryUsedPercent: secondaryUsedPercent,
-                        primaryResetAt: primaryResetAt,
-                        secondaryResetAt: secondaryResetAt,
-                        contextUsedPercent: contextUsedPercent
-                    )
+                applyLine(line, into: &metrics)
+                if hasCompleteMetrics(metrics) {
+                    return metrics.toSnapshot()
                 }
             }
         }
-        guard let primaryUsedPercent, let secondaryUsedPercent else {
-            return nil
+        return metrics.toSnapshot()
+    }
+
+    private func applyLine(_ line: String, into metrics: inout UsageMetrics) {
+        guard let data = line.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let payload = root[GeneratedHaloSpec.ratePayloadKey] as? [String: Any] else {
+            return
         }
-        return RateLimitSnapshot(
-            primaryUsedPercent: primaryUsedPercent,
-            secondaryUsedPercent: secondaryUsedPercent,
-            primaryResetAt: primaryResetAt,
-            secondaryResetAt: secondaryResetAt,
-            contextUsedPercent: contextUsedPercent
-        )
+        let info = payload[GeneratedHaloSpec.rateInfoKey] as? [String: Any]
+        let limits = (payload[GeneratedHaloSpec.rateLimitsKey] as? [String: Any])
+            ?? (info?[GeneratedHaloSpec.rateLimitsKey] as? [String: Any])
+
+        if metrics.contextUsedPercent == nil {
+            metrics.contextUsedPercent = Self.contextUsedPercent(info: info)
+        }
+
+        guard let limits else { return }
+
+        let primary = limits[GeneratedHaloSpec.ratePrimaryKey] as? [String: Any]
+        let secondary = limits[GeneratedHaloSpec.rateSecondaryKey] as? [String: Any]
+
+        // Monthly quota: explicit `monthly`-style buckets first, then the
+        // "credits" container free / basic plans expose.
+        if metrics.monthlyUsedPercent == nil,
+           let monthly = Self.findMonthlyLimit(limits),
+           let used = Self.usedPercentOrNil(monthly) {
+            metrics.monthlyUsedPercent = used
+            metrics.monthlyResetAt = Self.unixTime(monthly["resets_at"])
+        }
+
+        // A solo primary entry with a 30-day window or a `monthly`-flavored
+        // plan name is the Codex free-plan shape — treat it as monthly instead
+        // of the Plus 5-hour bucket so the panel shows the right title.
+        let primaryLooksMonthly = primary != nil
+            && secondary == nil
+            && Self.looksLikeMonthlyLimit(primary, in: limits)
+
+        if metrics.monthlyUsedPercent == nil, primaryLooksMonthly, let primary,
+           let used = Self.usedPercentOrNil(primary) {
+            metrics.monthlyUsedPercent = used
+            metrics.monthlyResetAt = Self.unixTime(primary["resets_at"])
+        }
+
+        if metrics.primaryUsedPercent == nil, !primaryLooksMonthly,
+           let primary,
+           let used = Self.usedPercentOrNil(primary) {
+            metrics.primaryUsedPercent = used
+            metrics.primaryResetAt = Self.unixTime(primary["resets_at"])
+        }
+        if metrics.secondaryUsedPercent == nil,
+           let secondary,
+           let used = Self.usedPercentOrNil(secondary) {
+            metrics.secondaryUsedPercent = used
+            metrics.secondaryResetAt = Self.unixTime(secondary["resets_at"])
+        }
+    }
+
+    // Plus tier needs both 5h + week buckets together with context to be
+    // considered complete; monthly tiers only need the monthly bucket plus
+    // context. Without the `hasContext` gate the reader would freeze on an
+    // info-only snapshot before it ever sees the rate-limit one.
+    private func hasCompleteMetrics(_ metrics: UsageMetrics) -> Bool {
+        guard metrics.contextUsedPercent != nil else { return false }
+        if metrics.primaryUsedPercent != nil && metrics.secondaryUsedPercent != nil {
+            return true
+        }
+        return metrics.monthlyUsedPercent != nil
+    }
+
+    private struct UsageMetrics {
+        var primaryUsedPercent: Double?
+        var secondaryUsedPercent: Double?
+        var primaryResetAt: Date?
+        var secondaryResetAt: Date?
+        var monthlyUsedPercent: Double?
+        var monthlyResetAt: Date?
+        var contextUsedPercent: Double?
+
+        var hasAny: Bool {
+            primaryUsedPercent != nil
+                || secondaryUsedPercent != nil
+                || monthlyUsedPercent != nil
+                || contextUsedPercent != nil
+        }
+
+        func toSnapshot() -> RateLimitSnapshot? {
+            guard hasAny else { return nil }
+            return RateLimitSnapshot(
+                primaryUsedPercent: primaryUsedPercent ?? 0,
+                secondaryUsedPercent: secondaryUsedPercent ?? 0,
+                primaryResetAt: primaryResetAt,
+                secondaryResetAt: secondaryResetAt,
+                contextUsedPercent: contextUsedPercent,
+                hasPrimary: primaryUsedPercent != nil,
+                hasSecondary: secondaryUsedPercent != nil,
+                monthlyUsedPercent: monthlyUsedPercent,
+                monthlyResetAt: monthlyResetAt
+            )
+        }
+    }
+
+    private static func findMonthlyLimit(_ limits: [String: Any]) -> [String: Any]? {
+        let keys = ["monthly", "month", "monthly_usage", "monthly_quota"]
+        for key in keys {
+            if let child = limits[key] as? [String: Any] {
+                return child
+            }
+        }
+        if let credits = limits["credits"] as? [String: Any],
+           hasAnyNumber(credits, keys: ["used_percent", "remaining_percent", "resets_at"]) {
+            return credits
+        }
+        return nil
+    }
+
+    private static func looksLikeMonthlyLimit(_ limit: [String: Any]?, in limits: [String: Any]) -> Bool {
+        guard let limit else { return false }
+        if let window = number(limit["window_minutes"]),
+           window >= Double(28 * 24 * 60) {
+            return true
+        }
+        // Fall back to an exact plan_type/limit_name token. Substring matching
+        // here risks misclassifying a Plus plan whose name happens to embed one
+        // of these words (e.g. "plus_basic", "month_end_reset") as monthly,
+        // which would hide the 5h/week buckets behind a single "月额度" row.
+        // Explicit `monthly`-keyed buckets are already caught by
+        // findMonthlyLimit before this runs, so the token match only needs to
+        // recognise a solo `primary` bucket on a free/basic/monthly plan.
+        let plan = (limits["plan_type"] as? String)?.lowercased() ?? ""
+        let name = (limits["limit_name"] as? String)?.lowercased() ?? ""
+        let monthlyTokens: Set<String> = ["monthly", "month", "free", "basic"]
+        return monthlyTokens.contains(plan) || monthlyTokens.contains(name)
+    }
+
+    /// Used-percent for a quota bucket, preferring `used_percent` and falling
+    /// back to `100 - remaining_percent`. Returns nil when neither field is
+    /// present so an empty bucket doesn't masquerade as a real 0% — the
+    /// hasPrimary/hasSecondary/hasMonthly flags rely on that distinction.
+    private static func usedPercentOrNil(_ source: [String: Any]) -> Double? {
+        if let used = number(source[GeneratedHaloSpec.rateUsedPercentKey]) {
+            return used
+        }
+        if let remaining = number(source["remaining_percent"]) {
+            return 100 - remaining
+        }
+        return nil
+    }
+
+    private static func hasAnyNumber(_ source: [String: Any], keys: [String]) -> Bool {
+        for key in keys {
+            if number(source[key]) != nil {
+                return true
+            }
+        }
+        return false
     }
 
     private func recentJSONLFiles() -> [URL] {
@@ -139,5 +252,22 @@ public struct RateLimitReader: @unchecked Sendable {
 
     private func modificationDate(_ url: URL) -> Date {
         (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+    }
+}
+
+extension RateLimitReader {
+    /// Test seam: feed pre-collected JSONL lines (newest first) into the parser
+    /// without touching the disk. Mirrors the Windows
+    /// `TryReadFromNewestLinesForTest` entry point so the self-test fixtures
+    /// can stay platform-agnostic.
+    public func parseForTest(lines: [String]) -> RateLimitSnapshot? {
+        var metrics = UsageMetrics()
+        for line in lines {
+            applyLine(line, into: &metrics)
+            if hasCompleteMetrics(metrics) {
+                return metrics.toSnapshot()
+            }
+        }
+        return metrics.toSnapshot()
     }
 }

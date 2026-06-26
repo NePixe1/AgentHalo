@@ -123,7 +123,7 @@ public enum ClaudeHookConfigurator {
             changed = true
         }
 
-        guard changed else {
+        guard changed || settingsJSONNeedsPrettyPrint(at: claudeSettings) else {
             AgentHaloLogger.log("ClaudeHookConfigurator: hooks already configured — nothing to do")
             return
         }
@@ -149,6 +149,26 @@ public enum ClaudeHookConfigurator {
     }
 
     // MARK: - Private helpers
+
+    /// Detects a valid `settings.json` that's been written as a single compact
+    /// line (e.g. by an older build or a hand-rolled config the user dropped
+    /// in). Returning true lets the configurator re-emit it pretty even when
+    /// none of our hook entries changed — so swapping configs in/out never
+    /// leaves the user with an unreadable one-liner. Already-pretty files
+    /// return false so we don't bump the mtime on every launch.
+    private static func settingsJSONNeedsPrettyPrint(at url: URL) -> Bool {
+        guard let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .utf8),
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+        if text.contains("\n") || text.contains("\r") {
+            return false
+        }
+        // Only offer to pretty-print what we can actually parse, so we never
+        // corrupt a file we don't understand.
+        return (try? JSONSerialization.jsonObject(with: data)) != nil
+    }
 
     private static func bundledHookBinary() -> URL? {
         guard let resourcePath = Bundle.main.resourcePath else {

@@ -5,8 +5,8 @@ import AgentHaloCore
 final class DetailsPanel: NSPanel {
     private let stack = NSStackView()
     private let contextValue = NSTextField(labelWithString: "上下文 --")
-    private let titleField = NSTextField(labelWithString: "READY")
-    private let detailField = NSTextField(labelWithString: "Codex 正在待命")
+    private let titleField = NSTextField(labelWithString: "OFFLINE")
+    private let detailField = NSTextField(labelWithString: "Codex 未运行")
     private let primaryQuota = QuotaRowView(title: "5 小时额度")
     private let secondaryQuota = QuotaRowView(title: "周额度")
     private let agentToggle = AgentToggleView()
@@ -169,6 +169,36 @@ final class DetailsPanel: NSPanel {
             return
         }
 
+        applyQuotaLayout(quota, contextUsedPercent: contextUsedPercent)
+    }
+
+    /// Mirrors the Windows `ApplyQuotaMetrics` switch: Plus accounts get the
+    /// 5h + week pair, monthly plans collapse to a single "月额度" row, and a
+    /// monthly account that hasn't surfaced a snapshot yet shows the pending
+    /// placeholder so the panel doesn't look empty while Codex is starting up.
+    private func applyQuotaLayout(_ quota: RateLimitSnapshot?, contextUsedPercent: Double?) {
+        if let quota, quota.hasPrimary, quota.hasSecondary {
+            applyPlusQuota(quota)
+            return
+        }
+        if let quota, quota.hasMonthly {
+            applyMonthlyQuota(quota, hasMonthlyData: true)
+            return
+        }
+        // Context-only: we know there's a session but haven't seen rate limits
+        // yet. Show a monthly placeholder rather than wiping the panel.
+        if contextUsedPercent != nil {
+            applyMonthlyQuota(quota, hasMonthlyData: false)
+            return
+        }
+        applyPlusQuota(nil)
+    }
+
+    private func applyPlusQuota(_ quota: RateLimitSnapshot?) {
+        primaryQuota.setTitle("5 小时额度")
+        secondaryQuota.setTitle("周额度")
+        primaryQuota.isHidden = false
+        secondaryQuota.isHidden = false
         if let quota {
             primaryQuota.update(
                 usedPercent: quota.primaryUsedPercent,
@@ -179,10 +209,21 @@ final class DetailsPanel: NSPanel {
                 resetAt: quota.secondaryResetAt
             )
         } else {
-            contextValue.stringValue = "上下文 --"
             primaryQuota.updateUnavailable()
             secondaryQuota.updateUnavailable()
         }
+    }
+
+    private func applyMonthlyQuota(_ quota: RateLimitSnapshot?, hasMonthlyData: Bool) {
+        primaryQuota.setTitle("月额度")
+        primaryQuota.isHidden = false
+        secondaryQuota.isHidden = true
+        if hasMonthlyData, let quota, let used = quota.monthlyUsedPercent {
+            primaryQuota.update(usedPercent: used, resetAt: quota.monthlyResetAt)
+        } else {
+            primaryQuota.updatePending()
+        }
+        secondaryQuota.updateUnavailable()
     }
 
     func updateStatus(aggregate: AggregateSnapshot) {
@@ -258,8 +299,18 @@ final class DetailsPanel: NSPanel {
     }
 
     static func localizedDetail(for aggregate: AggregateSnapshot) -> String {
+        if aggregate.state == .idle {
+            if aggregate.label == "PAUSED" {
+                return "状态监听已暂停"
+            }
+            return aggregate.focusedAgent.localizedOfflineDetail
+        }
+        if aggregate.label == "STANDBY",
+           !aggregate.detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return aggregate.detail
+        }
         let action = aggregate.sessions.first?.action ?? aggregate.detail
-        if aggregate.answerStreaming || action.localizedCaseInsensitiveContains("Writing answer") {
+        if action.localizedCaseInsensitiveContains("Writing answer") {
             return "正在输出答案"
         }
         if action.localizedCaseInsensitiveContains("command") { return "正在执行命令" }
@@ -276,7 +327,7 @@ final class DetailsPanel: NSPanel {
         case .done: return "任务已完成"
         case .attention: return "等待你的授权或输入"
         case .error: return aggregate.detail.isEmpty ? "任务已中断" : aggregate.detail
-        case .idle: return aggregate.focusedAgent.localizedStandbyDetail
+        case .idle: return aggregate.focusedAgent.localizedOfflineDetail
         }
     }
 
@@ -537,6 +588,20 @@ private final class QuotaRowView: NSView {
         resetField.stringValue = ""
         resetField.isHidden = true
         meter.value = 0
+    }
+
+    /// Placeholder for the monthly bucket when we know the plan is monthly
+    /// but Codex hasn't surfaced a rate-limit snapshot yet. Mirrors the
+    /// Windows "等待 Codex 刷新" pending row.
+    func updatePending() {
+        valueField.stringValue = "等待 Codex 刷新"
+        resetField.stringValue = ""
+        resetField.isHidden = true
+        meter.value = 0
+    }
+
+    func setTitle(_ title: String) {
+        nameField.stringValue = title
     }
 
     var valueForTesting: String {

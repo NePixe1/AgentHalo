@@ -683,7 +683,7 @@ func testAggregatorHidesAcknowledgedErrorsAndShowsStandbyInput() {
     let settings = HaloSettings(installedAt: now.addingTimeInterval(-600), acknowledgedErrorAt: now.addingTimeInterval(1))
     let aggregate = SessionAggregator.aggregate(snapshots: [error], settings: settings, now: now)
     expect(aggregate.state, .idle, "acknowledged error should hide")
-    expect(aggregate.label, "READY", "hidden error should return ready")
+    expect(aggregate.label, "OFFLINE", "hidden error should return offline")
 }
 
 func testFailureClassification() {
@@ -743,6 +743,42 @@ func testRateLimitReaderCombinesSplitQuotaAndContextSnapshots() throws {
     expect(snapshot?.primaryUsedPercent, 25, "split snapshot primary quota")
     expect(snapshot?.secondaryUsedPercent, 40, "split snapshot secondary quota")
     expect(snapshot?.contextUsedPercent, 50, "split snapshot context usage")
+}
+
+func testRateLimitReaderReadsExplicitMonthlyQuota() {
+    let reader = RateLimitReader()
+    let line = #"{"payload":{"info":{"rate_limits":{"monthly":{"used_percent":37,"resets_at":4102444800}},"last_token_usage":{"input_tokens":25},"model_context_window":100}}}"#
+    let snapshot = reader.parseForTest(lines: [line])
+    expect(snapshot?.hasMonthly ?? false, true, "monthly quota should be detected")
+    expect(snapshot?.hasPrimary, false, "monthly quota stays separate from Plus primary")
+    expect(snapshot?.hasSecondary, false, "monthly quota stays separate from Plus secondary")
+    expect(snapshot?.monthlyUsedPercent, 37, "monthly used percent")
+    expect(snapshot?.primaryUsedPercent, 0, "Plus primary should be zero when absent")
+}
+
+func testRateLimitReaderReadsLongWindowPrimaryAsMonthly() {
+    let reader = RateLimitReader()
+    // A solo primary with a 30-day window is the free-plan shape — the reader
+    // should reclassify it as monthly so the panel shows "月额度" not "5 小时额度".
+    let line = #"{"payload":{"info":{"rate_limits":{"primary":{"used_percent":41,"window_minutes":43200,"resets_at":4102444800}}}}}"#
+    let snapshot = reader.parseForTest(lines: [line])
+    expect(snapshot?.hasMonthly ?? false, true, "long-window primary becomes monthly")
+    expect(snapshot?.monthlyUsedPercent, 41, "long-window primary used as monthly")
+    expect(snapshot?.hasPrimary, false, "long-window primary should not also fill Plus primary")
+}
+
+func testRateLimitReaderDoesNotReturnEarlyOnContextOnlySnapshot() {
+    let reader = RateLimitReader()
+    // Newest-first: a context-only snapshot followed by the real rate-limit
+    // snapshot. The reader must keep scanning past the context-only line
+    // instead of bailing with nil quota.
+    let contextOnly = #"{"payload":{"info":{"last_token_usage":{"input_tokens":50},"model_context_window":100}}}"#
+    let quota = #"{"payload":{"info":{"rate_limits":{"primary":{"used_percent":25,"resets_at":1781765880},"secondary":{"used_percent":40,"resets_at":1781938560}}}}}"#
+    let snapshot = reader.parseForTest(lines: [contextOnly, quota])
+    expect(snapshot?.hasPrimary, true, "Plus primary should be found after context-only snapshot")
+    expect(snapshot?.primaryUsedPercent, 25, "Plus primary used percent")
+    expect(snapshot?.secondaryUsedPercent, 40, "Plus secondary used percent")
+    expect(snapshot?.contextUsedPercent, 50, "context usage carried over from earlier snapshot")
 }
 
 func testClaudeStatusLineUsageParserReadsAuthoritativeContextPercent() {
@@ -957,7 +993,38 @@ func testCodexRealtimeActivityReaderDetectsAnswerStreaming() {
 
     expect(activity?.state, .working, "answer text delta state")
     expect(activity?.action, "Writing answer", "answer text delta action")
-    expect(activity?.answerStreaming, true, "answer text delta should mark streaming")
+    // Streaming text used to flip the ring into the green "done" presentation
+    // mid-answer (via `answerStreaming = true`). PR #10 keeps it blue working
+    // so users can't confuse mid-stream with completion.
+    expect(activity?.answerStreaming, false, "answer text delta should stay blue working, not flip to done")
+}
+
+func testCodexRealtimeActivityReaderDetectsContextCompactionStream() {
+    let reader = CodexRealtimeActivityReader()
+    let delta = #"SSE event: {"type":"response.output_text.delta","delta":"Compressing context"}"#
+    let activity = reader.findActive(in: [delta])
+
+    expect(activity?.state, .working, "context compaction state")
+    expect(activity?.action, "Compressing context", "context compaction action")
+    expect(activity?.answerStreaming, false, "compaction stream should not mark answer streaming")
+}
+
+func testCodexRealtimeActivityReaderDetectsArgumentStream() {
+    let reader = CodexRealtimeActivityReader()
+    let argsDelta = #"SSE event: {"type":"response.function_call_arguments.delta","item_id":"fc-1","delta":"{\"cmd\":\"git"}"#
+    let activity = reader.findActive(in: [argsDelta])
+
+    expect(activity?.state, .working, "argument stream keeps Codex active")
+    expect(activity?.action, "Preparing command", "argument stream action")
+}
+
+func testCodexRealtimeActivityReaderEscalatedArgumentsAttention() {
+    let reader = CodexRealtimeActivityReader()
+    let escalated = #"SSE event: {"type":"response.function_call_arguments.delta","item_id":"fc-2","delta":"require_escalated sandbox_permissions justification"}"#
+    let activity = reader.findActive(in: [escalated])
+
+    expect(activity?.state, .attention, "escalated argument stream state")
+    expect(activity?.action, "Needs you", "escalated argument stream action")
 }
 
 func testCodexRealtimeActivityReaderDetectsRequestUserInput() {
@@ -976,8 +1043,8 @@ func testCodexRealtimeActivityReaderClearsAnswerStreamingWhenDone() {
     let textDone = #"SSE event: {"type":"response.output_text.done"}"#
     let completed = #"SSE event: {"type":"response.completed","response":{"id":"resp-test"}}"#
 
-    expect(reader.findActive(in: [textDone, delta]) == nil, "text done should clear answer streaming")
-    expect(reader.findActive(in: [completed, delta]) == nil, "response completed should clear answer streaming")
+    expect(reader.findActive(in: [textDone, delta]) == nil, "text done should clear realtime working")
+    expect(reader.findActive(in: [completed, delta]) == nil, "response completed should clear realtime working")
 }
 
 func testSessionReducerMapsCustomToolRequestUserInputToAttention() {
@@ -1001,6 +1068,30 @@ func testSessionReducerMapsEscalatedExecCommandToAttention() {
     expect(reducer.snapshot.state, .attention, "escalated exec_command state")
     expect(reducer.snapshot.action, "Needs you", "escalated exec_command action")
     expect(reducer.snapshot.active, "escalated exec_command should keep session active")
+}
+
+func testSessionReducerMapsApprovalNamedToolToAttention() {
+    var reducer = SessionReducer(filePath: "/tmp/approval-tool.jsonl")
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-19T01:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#)
+    // PR #10: tool names containing approval/permission/request_user/needs_input
+    // are attention signals even without a sandbox_permissions escalation.
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-19T01:00:01Z","type":"response_item","payload":{"type":"function_call","name":"request_permission","arguments":"{}"}}"#)
+
+    expect(reducer.snapshot.state, .attention, "approval-named tool state")
+    expect(reducer.snapshot.action, "Needs you", "approval-named tool action")
+    expect(reducer.snapshot.active, "approval-named tool should keep session active")
+}
+
+func testSessionReducerMapsEscalatedArgumentsStringToAttention() {
+    var reducer = SessionReducer(filePath: "/tmp/escalated-args.jsonl")
+    let arguments = #"{"sandbox_permissions":"require_escalated","justification":"Allow build?"}"#
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-19T01:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#)
+    // An unrecognized tool name whose arguments carry the escalation markers
+    // should still surface as attention via the argument-string fallback.
+    reducer.consume(jsonLine: #"{"timestamp":"2026-06-19T01:00:01Z","type":"response_item","payload":{"type":"function_call","name":"custom_shell","arguments":"\#(arguments.replacingOccurrences(of: "\"", with: "\\\""))"}}"#)
+
+    expect(reducer.snapshot.state, .attention, "escalated arguments state")
+    expect(reducer.snapshot.action, "Needs you", "escalated arguments action")
 }
 
 func testAggregatorInjectsUnacknowledgedCodexFailureWhenIdle() {
@@ -1095,8 +1186,10 @@ func testAggregatorIdleDetailUsesFocusedAgent() {
         now: now
     )
 
-    expect(codexAggregate.detail, "Codex is standing by", "Codex standby detail")
-    expect(claudeAggregate.detail, "Claude Code is standing by", "Claude standby detail")
+    expect(codexAggregate.label, "OFFLINE", "Codex idle label is offline")
+    expect(codexAggregate.detail, "Codex is not running", "Codex offline detail")
+    expect(claudeAggregate.label, "OFFLINE", "Claude idle label is offline")
+    expect(claudeAggregate.detail, "Claude Code is not running", "Claude offline detail")
 }
 
 func testAggregatorDoesNotInjectCodexFailureForClaudeFocus() {
@@ -1112,7 +1205,7 @@ func testAggregatorDoesNotInjectCodexFailureForClaudeFocus() {
     )
 
     expect(aggregate.state, .idle, "Claude focus should ignore Codex synthetic failure")
-    expect(aggregate.detail, "Claude Code is standing by", "Claude focus should keep Claude standby")
+    expect(aggregate.detail, "Claude Code is not running", "Claude focus should keep Claude offline")
     expect(aggregate.sessions.isEmpty, "Claude focus should not include synthetic Codex session")
 }
 
@@ -1354,8 +1447,8 @@ func testClaudeHookIdlePromptDoesNotDriveThinkingAggregate() {
         now: now.addingTimeInterval(66)
     )
     expect(aggregate.state, .idle, "idle_prompt should not surface as Thinking")
-    expect(aggregate.label, "READY", "idle_prompt aggregate label")
-    expect(aggregate.detail, "Claude Code is standing by", "idle_prompt aggregate detail")
+    expect(aggregate.label, "OFFLINE", "idle_prompt aggregate label")
+    expect(aggregate.detail, "Claude Code is not running", "idle_prompt aggregate detail")
 }
 
 func testClaudeHookReducerStopFailureMapsToError() {
@@ -1431,8 +1524,8 @@ func testClaudeHookReducerManualCompactShowsDoneThenReady() {
         focusedAgent: .claudeCode,
         now: now.addingTimeInterval(12)
     )
-    expect(settled.state, .idle, "manual compact should settle to gray Ready")
-    expect(settled.label, "READY", "manual compact settled label")
+    expect(settled.state, .idle, "manual compact should settle to gray Offline")
+    expect(settled.label, "OFFLINE", "manual compact settled label")
 }
 
 func testClaudeHookReducerActiveCompactRestoresThinking() {
@@ -1714,23 +1807,25 @@ func testClaudeLiveSessionReaderRequiresLiveWaitingProcess() throws {
         true,
         "a live busy Claude session should be available for metadata retention"
     )
+    // PR #10: Claude Code keeps `status` at "busy" mid-turn, so standby
+    // detection no longer filters on waiting/idle — a live pid is enough.
     expect(
         ClaudeLiveSessionReader.standbySessions(homeDirectory: home).contains { $0.sessionId == "busy" },
-        false,
-        "a live busy Claude session must not be classified as standby"
+        true,
+        "a live busy Claude session should be classified as standby"
     )
 
     let newerFile = sessions.appendingPathComponent("newer.json")
     let newer = #"{"status":"waiting","pid":\#(ProcessInfo.processInfo.processIdentifier),"sessionId":"newer","cwd":"/tmp/newer-project","updatedAt":3000}"#
     try Data(newer.utf8).write(to: newerFile)
     let standbySessions = ClaudeLiveSessionReader.standbySessions(homeDirectory: home)
-    expect(standbySessions.count, 2, "all live idle Claude sessions should be returned")
+    expect(standbySessions.count, 3, "all live Claude sessions should be returned as standby")
     expect(
         ClaudeLiveSessionReader.preferredStandbySession(
             sessions: standbySessions,
             hookSnapshots: []
         )?.sessionId,
-        "newer",
+        "busy",
         "most recently updated live session should win without hook evidence"
     )
 
@@ -1928,9 +2023,9 @@ func testClaudeHookStopShowsDoneThenReadyWhileWaitingForInput() {
         focusedAgent: .claudeCode,
         now: start.addingTimeInterval(11)
     )
-    expect(settled.state, .idle, "Claude waiting for user input should settle to Ready")
-    expect(settled.label, "READY", "Claude settled label")
-    expect(settled.detail, "Claude Code is standing by", "Claude waiting-for-input detail")
+    expect(settled.state, .idle, "Claude waiting for user input should settle to Offline")
+    expect(settled.label, "OFFLINE", "Claude settled label")
+    expect(settled.detail, "Claude Code is not running", "Claude waiting-for-input detail")
 }
 
 func testStartupExecutablePathUsesAppBundleRoot() {
@@ -2166,6 +2261,9 @@ do {
 } catch {
     fatalError("\(error)")
 }
+testRateLimitReaderReadsExplicitMonthlyQuota()
+testRateLimitReaderReadsLongWindowPrimaryAsMonthly()
+testRateLimitReaderDoesNotReturnEarlyOnContextOnlySnapshot()
 testClaudeStatusLineUsageParserReadsAuthoritativeContextPercent()
 do {
     try testClaudeContextUsageReaderKeepsLastKnownUsageForMatchingSession()
@@ -2191,9 +2289,14 @@ do {
     fatalError("\(error)")
 }
 testCodexRealtimeActivityReaderDetectsAnswerStreaming()
+testCodexRealtimeActivityReaderDetectsContextCompactionStream()
+testCodexRealtimeActivityReaderDetectsArgumentStream()
+testCodexRealtimeActivityReaderEscalatedArgumentsAttention()
 testCodexRealtimeActivityReaderClearsAnswerStreamingWhenDone()
 testSessionReducerMapsCustomToolRequestUserInputToAttention()
 testSessionReducerMapsEscalatedExecCommandToAttention()
+testSessionReducerMapsApprovalNamedToolToAttention()
+testSessionReducerMapsEscalatedArgumentsStringToAttention()
 testCodexRealtimeActivityReaderDetectsRequestUserInput()
 testAggregatorInjectsUnacknowledgedCodexFailureWhenIdle()
 testAggregatorFiltersByFocusedAgent()

@@ -157,11 +157,15 @@ final class ClaudeActivityMonitor: @unchecked Sendable {
             lastLiveSessionsPollAt = now
             cachedLiveSessions = ClaudeLiveSessionReader.liveSessions()
         }
-        let standbySessions = cachedLiveSessions.filter {
-            $0.status == "waiting" || $0.status == "idle"
-        }
+        // A live Claude Code session is a standby candidate regardless of its
+        // `status` field — Claude keeps `status` at "busy" while a turn is in
+        // flight and only briefly visits "waiting"/"idle" between turns. The
+        // old `waiting`/`idle` filter here cancelled standby during long
+        // answers, so the idle→STANDBY projection dropped out and the ring
+        // flickered to gray mid-turn. `cachedLiveSessions` already carries
+        // only live-pid sessions, which is the real liveness gate.
         let preferred = ClaudeLiveSessionReader.preferredStandbySession(
-            sessions: standbySessions,
+            sessions: cachedLiveSessions,
             hookSnapshots: hookSnapshots
         )
         let nextSnapshot = ClaudeActivitySnapshot(

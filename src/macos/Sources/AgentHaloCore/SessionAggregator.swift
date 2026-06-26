@@ -105,8 +105,8 @@ public enum SessionAggregator {
             }
             return AggregateSnapshot(
                 state: .idle,
-                label: "READY",
-                detail: focusedAgent.standbyDetail,
+                label: label(for: .idle),
+                detail: focusedAgent.offlineDetail,
                 sessions: [],
                 focusedAgent: focusedAgent
             )

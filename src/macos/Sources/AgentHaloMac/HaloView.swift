@@ -16,8 +16,8 @@ final class HaloView: NSView {
 
     var aggregate = AggregateSnapshot(
         state: .idle,
-        label: "READY",
-        detail: AgentKind.codex.standbyDetail,
+        label: "OFFLINE",
+        detail: AgentKind.codex.offlineDetail,
         sessions: [],
         focusedAgent: .codex
     ) {

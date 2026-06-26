@@ -48,16 +48,26 @@ public struct CodexRealtimeActivityReader: Sendable {
 
     public func findActive(in newestFirst: [String]) -> CodexRealtimeActivity? {
         var completedItemIds = Set<String>()
+        var hasArgumentActivity = false
+        var hasAttentionArgumentActivity = false
         for body in newestFirst {
             guard let event = Self.parseEvent(from: body) else {
                 continue
             }
             let eventType = event.type
             if eventType == "response.output_text.delta" {
+                // Streaming the final answer no longer flips the ring into the
+                // green "done" presentation — that fired during mid-stream and
+                // confused users with the actual completion tone. Stay blue
+                // working; only the action label distinguishes a normal answer
+                // from a context compaction so the details panel can localize.
+                let action = Self.isContextCompressionDelta(event.delta)
+                    ? "Compressing context"
+                    : "Writing answer"
                 return CodexRealtimeActivity(
                     state: .working,
-                    action: "Writing answer",
-                    answerStreaming: true
+                    action: action,
+                    answerStreaming: false
                 )
             }
             if eventType == "response.completed"
@@ -71,9 +81,21 @@ public struct CodexRealtimeActivityReader: Sendable {
                 }
                 continue
             }
+            if eventType == "response.function_call_arguments.delta"
+                || eventType == "response.function_call_arguments.done" {
+                if !event.itemId.isEmpty,
+                   completedItemIds.contains(event.itemId) {
+                    continue
+                }
+                hasArgumentActivity = true
+                if event.attentionHint {
+                    hasAttentionArgumentActivity = true
+                }
+                continue
+            }
             if eventType == "response.output_item.added",
                !completedItemIds.contains(event.itemId) {
-                if event.name.caseInsensitiveCompare("request_user_input") == .orderedSame {
+                if Self.isAttentionToolName(event.name) {
                     return CodexRealtimeActivity(state: .attention, action: "Needs you")
                 }
                 if event.itemType == "function_call"
@@ -85,10 +107,16 @@ public struct CodexRealtimeActivityReader: Sendable {
                         action: event.itemType == "message"
                             ? "Writing answer"
                             : GeneratedHaloSpec.friendlyAction(event.name.isEmpty ? event.itemType : event.name),
-                        answerStreaming: event.itemType == "message"
+                        answerStreaming: false
                     )
                 }
             }
+        }
+        if hasAttentionArgumentActivity {
+            return CodexRealtimeActivity(state: .attention, action: "Needs you")
+        }
+        if hasArgumentActivity {
+            return CodexRealtimeActivity(state: .working, action: "Preparing command")
         }
         return nil
     }
@@ -98,6 +126,8 @@ public struct CodexRealtimeActivityReader: Sendable {
         var itemId: String
         var itemType: String
         var name: String
+        var attentionHint: Bool
+        var delta: String
     }
 
     private static func parseEvent(from body: String) -> RealtimeEvent? {
@@ -113,13 +143,80 @@ public struct CodexRealtimeActivityReader: Sendable {
             return nil
         }
         let eventType = (root["type"] as? String) ?? ""
+        if eventType == "response.function_call_arguments.delta"
+            || eventType == "response.function_call_arguments.done" {
+            let itemId = (root["item_id"] as? String) ?? ""
+            let delta = (root["delta"] as? String) ?? ""
+            let hint = isEscalatedArgumentsFragment(delta)
+                || isEscalatedArgumentsFragment(body)
+            guard !itemId.isEmpty else { return nil }
+            return RealtimeEvent(
+                type: eventType,
+                itemId: itemId,
+                itemType: "",
+                name: "",
+                attentionHint: hint,
+                delta: delta
+            )
+        }
         let item = root["item"] as? [String: Any]
         return RealtimeEvent(
             type: eventType,
             itemId: (item?["id"] as? String) ?? "",
             itemType: ((item?["type"] as? String) ?? "").lowercased(),
-            name: (item?["name"] as? String) ?? ""
+            name: (item?["name"] as? String) ?? "",
+            attentionHint: false,
+            delta: (root["delta"] as? String) ?? ""
         )
+    }
+
+    private static func isAttentionToolName(_ name: String) -> Bool {
+        let lower = name.lowercased()
+        if lower == "request_user_input" {
+            return true
+        }
+        return lower.contains("approval")
+            || lower.contains("permission")
+            || lower.contains("request_user")
+            || lower.contains("needs_input")
+    }
+
+    private static func isEscalatedArgumentsFragment(_ value: String) -> Bool {
+        guard !value.isEmpty,
+              value.range(of: "require_escalated", options: .caseInsensitive) != nil else {
+            return false
+        }
+        return value.range(of: "sandbox_permissions", options: .caseInsensitive) != nil
+            || value.range(of: "justification", options: .caseInsensitive) != nil
+    }
+
+    /// True only when a streamed text delta *is* a context-compaction label
+    /// (e.g. Codex emitting "Compressing context" / "压缩上下文" as the delta
+    /// content), not when a normal answer merely mentions those words. We
+    /// match the trimmed delta against the full label after stripping trailing
+    /// punctuation/ellipsis, so "Let me try summarizing conversation history…"
+    /// — a real answer fragment — no longer flips the action to compaction.
+    private static func isContextCompressionDelta(_ delta: String) -> Bool {
+        var trimmed = delta.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        while let last = trimmed.last,
+              "….:：，,、".contains(last) {
+            trimmed.removeLast()
+            trimmed = trimmed.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard !trimmed.isEmpty else { return false }
+        let labels: Set<String> = [
+            "compressing context",
+            "compress context",
+            "compacting context",
+            "compact context",
+            "context compaction",
+            "summarizing conversation",
+            "summarizing context",
+            "压缩上下文",
+            "正在压缩",
+            "正在压缩上下文"
+        ]
+        return labels.contains(trimmed)
     }
 
 }

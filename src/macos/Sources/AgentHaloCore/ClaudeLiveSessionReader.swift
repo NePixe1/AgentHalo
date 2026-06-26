@@ -48,9 +48,12 @@ public enum ClaudeLiveSessionReader {
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         fileManager: FileManager = .default
     ) -> [ClaudeLiveSessionSnapshot] {
-        liveSessions(homeDirectory: homeDirectory, fileManager: fileManager).filter {
-            $0.status == "waiting" || $0.status == "idle"
-        }
+        // Claude Code keeps `status` at "busy" while a turn is in flight and
+        // only briefly visits "waiting"/"idle" between turns — gating standby
+        // detection on those two values caused the ring to flicker off during
+        // long answers. The on-disk file existing + the pid being alive is
+        // enough; the actual CLI state is reflected by the hook stream.
+        liveSessions(homeDirectory: homeDirectory, fileManager: fileManager)
     }
 
     public static func liveSessions(

@@ -50,6 +50,7 @@ func runHaloInteractionChecks() {
     testPausedAgentDoesNotUseStableGreenStandby()
     testLiveCodexErrorCyclesThroughBrightAndDimPresentations()
     testDetailsPanelShowsCodexQuotaAndIdleCopy()
+    testDetailsPanelShowsCodexStandbyCopy()
     testDetailsPanelShowsSessionMetadataForCodexAndClaudeCode()
     testDetailsPanelUsesCompactMetadataLayout()
     testVisibleDetailsPanelStatusRefreshIsWiredToTick()
@@ -636,8 +637,8 @@ private func testSingleClickDoesNotActivateCodexWhenClaudeCodeFocused() {
 private func testClaudeLiveStandbyUsesStableGreenAggregate() {
     let idle = AggregateSnapshot(
         state: .idle,
-        label: "READY",
-        detail: AgentKind.claudeCode.standbyDetail,
+        label: "OFFLINE",
+        detail: AgentKind.claudeCode.offlineDetail,
         sessions: [],
         focusedAgent: .claudeCode
     )
@@ -655,8 +656,8 @@ private func testClaudeLiveStandbyUsesStableGreenAggregate() {
 private func testCodexRunningIdleUsesStableGreenAggregate() {
     let idle = AggregateSnapshot(
         state: .idle,
-        label: "READY",
-        detail: AgentKind.codex.standbyDetail,
+        label: "OFFLINE",
+        detail: AgentKind.codex.offlineDetail,
         sessions: [],
         focusedAgent: .codex
     )
@@ -785,8 +786,8 @@ private func testDetailsPanelShowsCodexQuotaAndIdleCopy() {
     let panel = DetailsPanel()
     let aggregate = AggregateSnapshot(
         state: .idle,
-        label: "READY",
-        detail: AgentKind.codex.standbyDetail,
+        label: "OFFLINE",
+        detail: AgentKind.codex.offlineDetail,
         sessions: [],
         focusedAgent: .codex
     )
@@ -798,10 +799,28 @@ private func testDetailsPanelShowsCodexQuotaAndIdleCopy() {
     )
 
     expect(panel.focusedAgentForTesting == .codex, "details panel should select Codex")
-    expect(panel.detailTextForTesting == "Codex 正在待命", "Codex idle copy should be localized")
+    expect(panel.detailTextForTesting == "Codex 未运行", "Codex offline copy should be localized")
     expect(panel.contextPillHiddenForTesting == false, "Codex context pill should be visible")
     expect(panel.primaryQuotaHiddenForTesting == false, "Codex primary quota should be visible")
     expect(panel.secondaryQuotaHiddenForTesting == false, "Codex secondary quota should be visible")
+}
+
+@MainActor
+private func testDetailsPanelShowsCodexStandbyCopy() {
+    let panel = DetailsPanel()
+    // AppDelegate projects a running-but-idle Codex to STANDBY; the panel must
+    // surface the standby copy rather than the offline one in that case.
+    let aggregate = AggregateSnapshot(
+        state: .done,
+        label: "STANDBY",
+        detail: AgentKind.codex.localizedStandbyDetail,
+        sessions: [],
+        focusedAgent: .codex
+    )
+
+    panel.update(aggregate: aggregate, quota: nil, contextUsedPercent: nil)
+
+    expect(panel.detailTextForTesting == "Codex 正在待命", "Codex standby copy should be localized")
 }
 
 @MainActor
@@ -872,7 +891,7 @@ private func testDetailsPanelUsesCompactMetadataLayout() {
                     .compactMap { $0 as? NSTextField }
                     .map(\.stringValue)
             } ?? []
-            return labels.contains("项目") && labels.contains("模型") && labels.contains("Token")
+            return labels.contains("项目") && labels.contains("模型") && labels.contains("输入输出")
                 && firstLabels.contains("项目")
         }
 
@@ -923,8 +942,8 @@ private func testDetailsPanelShowsExpiredQuotaAsWaitingForRefresh() {
     let panel = DetailsPanel()
     let aggregate = AggregateSnapshot(
         state: .idle,
-        label: "READY",
-        detail: AgentKind.codex.standbyDetail,
+        label: "OFFLINE",
+        detail: AgentKind.codex.offlineDetail,
         sessions: [],
         focusedAgent: .codex
     )
@@ -1383,8 +1402,8 @@ private func testDetailsPanelShowsContextAndHidesQuotaForClaudeCode() {
     let panel = DetailsPanel()
     let aggregate = AggregateSnapshot(
         state: .idle,
-        label: "READY",
-        detail: AgentKind.claudeCode.standbyDetail,
+        label: "OFFLINE",
+        detail: AgentKind.claudeCode.offlineDetail,
         sessions: [],
         focusedAgent: .claudeCode
     )
@@ -1392,7 +1411,7 @@ private func testDetailsPanelShowsContextAndHidesQuotaForClaudeCode() {
     panel.update(aggregate: aggregate, quota: nil, contextUsedPercent: 58.4)
 
     expect(panel.focusedAgentForTesting == .claudeCode, "details panel should select Claude Code")
-    expect(panel.detailTextForTesting == "Claude Code 正在待命", "Claude Code idle copy should be localized")
+    expect(panel.detailTextForTesting == "Claude Code 未运行", "Claude Code offline copy should be localized")
     expect(panel.contextPillHiddenForTesting == false, "Claude Code context pill should be visible")
     expect(panel.contextValueForTesting == "上下文 58%", "Claude Code context percent should be shown")
     expect(panel.primaryQuotaHiddenForTesting == true, "Claude Code primary quota should be hidden")
@@ -1604,8 +1623,8 @@ private func testDetailsPanelSwitchCallbackSelectsClaudeCode() {
     panel.update(
         aggregate: AggregateSnapshot(
             state: .idle,
-            label: "READY",
-            detail: AgentKind.codex.standbyDetail,
+            label: "OFFLINE",
+            detail: AgentKind.codex.offlineDetail,
             sessions: [],
             focusedAgent: .codex
         ),
