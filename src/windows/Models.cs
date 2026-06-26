@@ -61,10 +61,13 @@ public sealed class UsageMetrics
     {
         public bool HasPrimary;
         public bool HasSecondary;
+        public bool HasMonthly;
         public double PrimaryUsedPercent;
         public double SecondaryUsedPercent;
+        public double MonthlyUsedPercent;
         public DateTime PrimaryResetUtc;
         public DateTime SecondaryResetUtc;
+        public DateTime MonthlyResetUtc;
         public long ContextInputTokens;
         public long ContextWindowTokens;
 
