@@ -27,8 +27,8 @@ public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
 
     public var localizedStandbyDetail: String {
         switch self {
-        case .codex: return "Codex 正在待命"
-        case .claudeCode: return "Claude Code 正在待命"
+        case .codex: return L10n.shared["status.standby_codex"]
+        case .claudeCode: return L10n.shared["status.standby_claude"]
         }
     }
 
@@ -41,8 +41,8 @@ public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
 
     public var localizedOfflineDetail: String {
         switch self {
-        case .codex: return "Codex 未运行"
-        case .claudeCode: return "Claude Code 未运行"
+        case .codex: return L10n.shared["status.offline_codex"]
+        case .claudeCode: return L10n.shared["status.offline_claude"]
         }
     }
 }
