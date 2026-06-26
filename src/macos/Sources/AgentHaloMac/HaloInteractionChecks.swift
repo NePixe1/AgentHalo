@@ -15,6 +15,7 @@ private func expect<T: Equatable>(_ actual: T, _ expected: T, _ message: String)
 
 @MainActor
 func runHaloInteractionChecks() {
+    L10n.shared.setLanguage("zh")
     testRightClickInvokesContextMenuCallback()
     testSingleClickDoesNotActivateCodex()
     testHaloContextMenuContainsCurrentControls()
@@ -262,12 +263,12 @@ private func testHaloContextMenuContainsCurrentControls() {
     let titles = menu.items.map(\.title)
 
     expect(menu.items.count >= 7, "halo context menu should expose the control menu")
-    expect(!titles.contains("确认已完成任务"), "halo context menu should not include completion acknowledgement")
-    expect(!titles.contains("确认当前错误"), "halo context menu should not include error acknowledgement")
-    expect(titles.contains("始终置顶"), "halo context menu should include always-on-top")
-    expect(titles.contains("暂停状态监听"), "halo context menu should include pause")
-    expect(titles.contains("圆环大小"), "halo context menu should include size slider")
-    guard let sizeItem = menu.items.first(where: { $0.title == "圆环大小" }) else {
+    expect(!titles.contains(L10n.shared["status.done"]), "halo context menu should not include completion acknowledgement")
+    expect(!titles.contains(L10n.shared["status.error"]), "halo context menu should not include error acknowledgement")
+    expect(titles.contains(L10n.shared["menu.always_on_top"]), "halo context menu should include always-on-top")
+    expect(titles.contains(L10n.shared["menu.pause_monitor"]), "halo context menu should include pause")
+    expect(titles.contains(L10n.shared["halo.size"]), "halo context menu should include size slider")
+    guard let sizeItem = menu.items.first(where: { $0.title == L10n.shared["halo.size"] }) else {
         fatalError("halo context menu should expose size slider item")
     }
     let sliders = sizeItem.view?.subviews.compactMap { $0 as? NSSlider } ?? []
@@ -276,14 +277,14 @@ private func testHaloContextMenuContainsCurrentControls() {
     expect(sliders[0].maxValue >= 180, "halo size slider should allow larger halo")
     sizeItem.view?.layoutSubtreeIfNeeded()
     let sizeLabels = sizeItem.view?.subviews.compactMap { $0 as? NSTextField }
-        .filter { $0.stringValue == "圆环大小" } ?? []
+        .filter { $0.stringValue == L10n.shared["halo.size"] } ?? []
     expect(sizeLabels.count == 1, "halo size menu item should contain one title label")
     expect(sizeLabels[0].frame.minX >= 19, "halo size row label should align with regular menu text")
     expect(sizeLabels[0].frame.minX <= 23, "halo size row label should not drift past regular menu text")
-    expect(titles.contains("预览状态"), "halo context menu should include preview submenu")
-    expect(!titles.contains("切换到 Codex"), "halo context menu should not include Codex activation")
-    expect(!titles.contains("退出 Agent Halo"), "halo context menu should not include old quit title")
-    expect(titles.contains("退出"), "halo context menu should include quit")
+    expect(titles.contains(L10n.shared["menu.preview_status"]), "halo context menu should include preview submenu")
+    expect(!titles.contains("Switch to Codex"), "halo context menu should not include Codex activation")
+    expect(!titles.contains("Quit Agent Halo"), "halo context menu should not include old quit title")
+    expect(titles.contains(L10n.shared["menu.quit"]), "halo context menu should include quit")
 }
 
 @MainActor
@@ -463,21 +464,21 @@ private func testPreviewSubmenuMarksLiveStateInitially() {
     let submenu = previewSubmenu(in: delegate.makeHaloContextMenu())
     let checkedTitles = submenu.items.filter { $0.state == .on }.map(\.title)
 
-    expect(checkedTitles == ["实时状态"], "live preview item should be checked initially")
+    expect(checkedTitles == [L10n.shared["halo.live_status"]], "live preview item should be checked initially")
 }
 
 @MainActor
 private func testPreviewSubmenuMovesCheckmarkAfterSelection() {
     let delegate = AppDelegate()
     let submenu = previewSubmenu(in: delegate.makeHaloContextMenu())
-    let workingItem = menuItem(titled: "执行中", in: submenu)
+    let workingItem = menuItem(titled: L10n.shared["halo.working_preview"], in: submenu)
 
     NSApplication.shared.sendAction(workingItem.action!, to: workingItem.target, from: workingItem)
 
     let refreshedSubmenu = previewSubmenu(in: delegate.makeHaloContextMenu())
     let checkedTitles = refreshedSubmenu.items.filter { $0.state == .on }.map(\.title)
 
-    expect(checkedTitles == ["执行中"], "selected preview item should be checked after selection")
+    expect(checkedTitles == [L10n.shared["halo.working_preview"]], "selected preview item should be checked after selection")
 }
 
 @MainActor
@@ -755,14 +756,14 @@ private func testLiveCodexErrorCyclesThroughBrightAndDimPresentations() {
 }
 
 private func previewSubmenu(in menu: NSMenu) -> NSMenu {
-    guard let preview = menu.items.first(where: { $0.title == "预览状态" })?.submenu else {
+    guard let preview = menu.items.first(where: { $0.title == L10n.shared["menu.preview_status"] })?.submenu else {
         fatalError("preview submenu should exist")
     }
     return preview
 }
 
 private func focusedAgentSubmenu(in menu: NSMenu) -> NSMenu {
-    guard let focus = menu.items.first(where: { $0.title == "监控对象" })?.submenu else {
+    guard let focus = menu.items.first(where: { $0.title == L10n.shared["menu.focus_target"] })?.submenu else {
         fatalError("focused-agent submenu should exist")
     }
     return focus
@@ -799,7 +800,7 @@ private func testDetailsPanelShowsCodexQuotaAndIdleCopy() {
     )
 
     expect(panel.focusedAgentForTesting == .codex, "details panel should select Codex")
-    expect(panel.detailTextForTesting == "Codex 未运行", "Codex offline copy should be localized")
+    expect(panel.detailTextForTesting == L10n.shared["status.offline_codex"], "Codex offline copy should be localized")
     expect(panel.contextPillHiddenForTesting == false, "Codex context pill should be visible")
     expect(panel.primaryQuotaHiddenForTesting == false, "Codex primary quota should be visible")
     expect(panel.secondaryQuotaHiddenForTesting == false, "Codex secondary quota should be visible")
@@ -820,7 +821,7 @@ private func testDetailsPanelShowsCodexStandbyCopy() {
 
     panel.update(aggregate: aggregate, quota: nil, contextUsedPercent: nil)
 
-    expect(panel.detailTextForTesting == "Codex 正在待命", "Codex standby copy should be localized")
+    expect(panel.detailTextForTesting == L10n.shared["status.standby_codex"], "Codex standby copy should be localized")
 }
 
 @MainActor
@@ -891,8 +892,8 @@ private func testDetailsPanelUsesCompactMetadataLayout() {
                     .compactMap { $0 as? NSTextField }
                     .map(\.stringValue)
             } ?? []
-            return labels.contains("项目") && labels.contains("模型") && labels.contains("输入输出")
-                && firstLabels.contains("项目")
+            return labels.contains(L10n.shared["metadata.project"]) && labels.contains(L10n.shared["metadata.model"]) && labels.contains(L10n.shared["metadata.tokens"])
+                && firstLabels.contains(L10n.shared["metadata.project"])
         }
 
     guard let metadataGroup else {
@@ -960,8 +961,8 @@ private func testDetailsPanelShowsExpiredQuotaAsWaitingForRefresh() {
         contextUsedPercent: 42
     )
 
-    expect(panel.primaryQuotaValueForTesting == "等待 Codex 刷新", "expired primary quota should wait for Codex refresh")
-    expect(panel.secondaryQuotaValueForTesting == "剩余 40%", "valid secondary quota should keep remaining percent")
+    expect(panel.primaryQuotaValueForTesting == L10n.shared["quota.waiting_refresh"], "expired primary quota should wait for Codex refresh")
+    expect(panel.secondaryQuotaValueForTesting == L10n.shared.format("quota.remaining", 40), "valid secondary quota should keep remaining percent")
 }
 
 @MainActor
@@ -978,7 +979,7 @@ private func testDetailsPanelShowsAnswerStreamingCopy() {
 
     panel.update(aggregate: aggregate, quota: nil, contextUsedPercent: nil)
 
-    expect(panel.detailTextForTesting == "正在输出答案", "answer streaming should use localized copy")
+    expect(panel.detailTextForTesting == L10n.shared["status.writing_answer"], "answer streaming should use localized copy")
 }
 
 @MainActor
@@ -1005,8 +1006,8 @@ private func testDetailsPanelRefreshesStatusFromLatestAggregate() {
     ))
 
     expect(panel.titleTextForTesting == "EXECUTING", "visible details should use the latest status label")
-    expect(panel.detailTextForTesting == "正在执行命令", "visible details should use the latest activity detail")
-    expect(panel.contextValueForTesting == "上下文 27%", "status refresh should preserve existing metadata")
+    expect(panel.detailTextForTesting == L10n.shared["status.running_command"], "visible details should use the latest activity detail")
+    expect(panel.contextValueForTesting == L10n.shared.format("context.label", 27), "status refresh should preserve existing metadata")
 }
 
 private func testVisibleDetailsPanelStatusRefreshIsWiredToTick() {
@@ -1361,11 +1362,11 @@ private func testClaudeUsageFreshnessTracksExactLiveSession() {
 @MainActor
 private func testDetailsPanelLocalizesClaudeActivityDetails() {
     let cases: [(action: String, expected: String)] = [
-        ("Compressing context", "正在压缩上下文"),
-        ("Context compacted", "上下文压缩完成"),
-        ("Awaiting permission", "等待你的授权"),
-        ("Permission denied", "授权已拒绝"),
-        ("Reviewing result", "正在分析结果"),
+        ("Compressing context", L10n.shared["status.compressing_context"]),
+        ("Context compacted", L10n.shared["status.context_compacted"]),
+        ("Awaiting permission", L10n.shared["status.awaiting_permission"]),
+        ("Permission denied", L10n.shared["status.permission_denied"]),
+        ("Reviewing result", L10n.shared["status.reviewing_result"]),
     ]
 
     for item in cases {
@@ -1411,9 +1412,9 @@ private func testDetailsPanelShowsContextAndHidesQuotaForClaudeCode() {
     panel.update(aggregate: aggregate, quota: nil, contextUsedPercent: 58.4)
 
     expect(panel.focusedAgentForTesting == .claudeCode, "details panel should select Claude Code")
-    expect(panel.detailTextForTesting == "Claude Code 未运行", "Claude Code offline copy should be localized")
+    expect(panel.detailTextForTesting == L10n.shared["status.offline_claude"], "Claude Code offline copy should be localized")
     expect(panel.contextPillHiddenForTesting == false, "Claude Code context pill should be visible")
-    expect(panel.contextValueForTesting == "上下文 58%", "Claude Code context percent should be shown")
+    expect(panel.contextValueForTesting == L10n.shared.format("context.label", 58), "Claude Code context percent should be shown")
     expect(panel.primaryQuotaHiddenForTesting == true, "Claude Code primary quota should be hidden")
     expect(panel.secondaryQuotaHiddenForTesting == true, "Claude Code secondary quota should be hidden")
 }
