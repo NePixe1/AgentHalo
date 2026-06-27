@@ -53,7 +53,7 @@ src/
 | `menu.*` | 菜单栏和右键菜单项 | 无 |
 | `status.*` | 状态详情文本 | 无 |
 | `quota.*` | 额度标签和数值 | `{0}` = 百分比数值 |
-| `context.*` | 上下文窗口显示 | `{0}` = 百分比 |
+| `context.*` | 上下文窗口显示 | `{0}` = 百分比（label），title 无参数 |
 | `metadata.*` | 元数据行标题（项目、模型等） | 无 |
 | `failure.*` | 错误分类文本 | 无 |
 | `halo.*` | 光环预览子菜单项 | 无 |
@@ -93,6 +93,7 @@ status.context_compacted
 status.awaiting_permission
 status.permission_denied
 status.reviewing_result
+status.unknown
 
 quota.5h
 quota.weekly
@@ -101,6 +102,7 @@ quota.remaining
 quota.no_data
 quota.waiting_refresh
 
+context.title
 context.label
 context.empty
 
@@ -165,6 +167,7 @@ date.refresh_suffix
   "status.awaiting_permission": "Awaiting Permission",
   "status.permission_denied": "Permission Denied",
   "status.reviewing_result": "Reviewing Result",
+  "status.unknown": "Unknown Status",
 
   "quota.5h": "5-Hour Quota",
   "quota.weekly": "Weekly Quota",
@@ -173,6 +176,7 @@ date.refresh_suffix
   "quota.no_data": "No Data",
   "quota.waiting_refresh": "Waiting for Codex",
 
+  "context.title": "Context",
   "context.label": "Context {0}%",
   "context.empty": "Context --",
 
