@@ -142,25 +142,45 @@ final class DetailsPanel: NSPanel {
 
         updateStatus(aggregate: aggregate)
 
+        // OFFLINE: no live session — drop any stale context-usage pill and
+        // reset metadata rows to the placeholder so the panel doesn't show
+        // numbers from a prior session.
+        let isOffline = aggregate.state == .idle && aggregate.label == "OFFLINE"
+
         let showsCodexQuota = showsQuota ?? (aggregate.focusedAgent == .codex)
         stack.setCustomSpacing(showsCodexQuota ? 13 : 4, after: detailField)
-        contextPill.isHidden = contextUsedPercent == nil
+        contextPill.isHidden = isOffline || contextUsedPercent == nil
         contextValue.stringValue = contextUsedPercent.map {
             L10n.shared.format("context.label", Int($0.rounded()))
         } ?? L10n.shared["context.empty"]
+        // Hide both groups first to avoid a transient state where both
+        // are visible at the same time, which spikes the stack height
+        // and makes the panel visually "grow" for a frame.
+        quotaGroup.isHidden = true
+        metadataGroup.isHidden = true
+        // Now reveal only the relevant group
         quotaGroup.isHidden = !showsCodexQuota
         primaryQuota.isHidden = !showsCodexQuota
         secondaryQuota.isHidden = !showsCodexQuota
         metadataGroup.isHidden = showsCodexQuota
-        projectRow.value = Self.displayValue(sessionDetails?.projectName)
-        modelRow.value = Self.displayValue(sessionDetails?.modelName)
-        if sessionDetails?.inputTokens != nil || sessionDetails?.outputTokens != nil {
-            tokenRow.attributedStringValue = Self.formatTokenAttributedString(
-                input: sessionDetails?.inputTokens,
-                output: sessionDetails?.outputTokens
-            )
-        } else {
+        projectRow.setTitle(L10n.shared["metadata.project"])
+        modelRow.setTitle(L10n.shared["metadata.model"])
+        tokenRow.setTitle(L10n.shared["metadata.tokens"])
+        if isOffline {
+            projectRow.value = "--"
+            modelRow.value = "--"
             tokenRow.value = "--"
+        } else {
+            projectRow.value = Self.displayValue(sessionDetails?.projectName)
+            modelRow.value = Self.displayValue(sessionDetails?.modelName)
+            if sessionDetails?.inputTokens != nil || sessionDetails?.outputTokens != nil {
+                tokenRow.attributedStringValue = Self.formatTokenAttributedString(
+                    input: sessionDetails?.inputTokens,
+                    output: sessionDetails?.outputTokens
+                )
+            } else {
+                tokenRow.value = "--"
+            }
         }
 
         guard showsCodexQuota else {
@@ -477,6 +497,10 @@ private final class MetadataRowView: NSView {
         set { valueField.attributedStringValue = newValue }
     }
 
+    func setTitle(_ title: String) {
+        nameField.stringValue = title
+    }
+
     init(title: String, isTagStyle: Bool = false, valueFont: NSFont = .systemFont(ofSize: 12, weight: .semibold)) {
         nameField = NSTextField(labelWithString: title)
         super.init(frame: .zero)
@@ -615,11 +639,18 @@ private final class QuotaRowView: NSView {
     private func setup() {
         nameField.font = .systemFont(ofSize: 12, weight: .regular)
         nameField.textColor = NSColor(calibratedRed: 0.37, green: 0.44, blue: 0.48, alpha: 1)
+        nameField.lineBreakMode = .byTruncatingTail
+        nameField.setContentCompressionResistancePriority(.required, for: .horizontal)
+        nameField.setContentHuggingPriority(.required, for: .horizontal)
         resetField.font = .systemFont(ofSize: 11, weight: .regular)
         resetField.textColor = NSColor(calibratedRed: 0.49, green: 0.56, blue: 0.60, alpha: 1)
+        resetField.lineBreakMode = .byTruncatingTail
+        resetField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         valueField.font = .systemFont(ofSize: 12, weight: .semibold)
         valueField.textColor = NSColor(calibratedRed: 0.18, green: 0.24, blue: 0.29, alpha: 1)
         valueField.alignment = .right
+        valueField.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        valueField.setContentHuggingPriority(.required, for: .horizontal)
 
         [nameField, resetField, valueField, meter].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false

@@ -88,6 +88,7 @@ public sealed class DetailsWindow : Window
         private readonly TextBlock contextOnesDigit;
         private readonly TextBlock contextPercentMark;
         private readonly TextBlock contextUnavailableValue;
+        private readonly Border contextPill;
         private readonly Border codexSwitch;
         private readonly Border claudeSwitch;
         private readonly Border switchThumb;
@@ -102,6 +103,9 @@ public sealed class DetailsWindow : Window
         private readonly Grid claudeTokenRow;
         private readonly Border claudeProjectSeparator;
         private readonly Border claudeModelSeparator;
+        private readonly TextBlock claudeProjectTitle;
+        private readonly TextBlock claudeModelTitle;
+        private readonly TextBlock claudeTokenTitle;
         private readonly TextBlock claudeProjectValue;
         private readonly TextBlock claudeModelValue;
         private readonly TextBlock claudeTokenValue;
@@ -161,7 +165,7 @@ public sealed class DetailsWindow : Window
             switcher.HorizontalAlignment = HorizontalAlignment.Left;
             switcher.VerticalAlignment = VerticalAlignment.Center;
             top.Children.Add(switcher);
-            Border contextPill = new Border
+            Border contextPillBorder = new Border
             {
                 Width = 90,
                 Height = 26,
@@ -173,6 +177,7 @@ public sealed class DetailsWindow : Window
                 BorderBrush = new SolidColorBrush(MediaColor.FromArgb(70, 83, 174, 197)),
                 BorderThickness = new Thickness(1)
             };
+            contextPill = contextPillBorder;
             Grid contextGrid = new Grid();
             contextGrid.Width = 78;
             contextGrid.HorizontalAlignment = HorizontalAlignment.Center;
@@ -190,9 +195,9 @@ public sealed class DetailsWindow : Window
                 out contextUnavailableValue);
             Grid.SetColumn(contextValueGrid, 2);
             contextGrid.Children.Add(contextValueGrid);
-            contextPill.Child = contextGrid;
-            Grid.SetColumn(contextPill, 2);
-            top.Children.Add(contextPill);
+            contextPillBorder.Child = contextGrid;
+            Grid.SetColumn(contextPillBorder, 2);
+            top.Children.Add(contextPillBorder);
             top.Margin = new Thickness(0, 0, 0, 7);
             content.Children.Add(top);
 
@@ -214,15 +219,15 @@ public sealed class DetailsWindow : Window
             quotaGroup.Children.Add(weekRow);
 
             claudeGroup = new StackPanel();
-            claudeProjectRow = CreateInfoRow(L10n.Instance["metadata.project"], out claudeProjectValue);
+            claudeProjectRow = CreateInfoRow(L10n.Instance["metadata.project"], out claudeProjectTitle, out claudeProjectValue);
             claudeGroup.Children.Add(claudeProjectRow);
             claudeProjectSeparator = CreateInfoSeparator();
             claudeGroup.Children.Add(claudeProjectSeparator);
-            claudeModelRow = CreateInfoRow(L10n.Instance["metadata.model"], out claudeModelValue);
+            claudeModelRow = CreateInfoRow(L10n.Instance["metadata.model"], out claudeModelTitle, out claudeModelValue);
             claudeGroup.Children.Add(claudeModelRow);
             claudeModelSeparator = CreateInfoSeparator();
             claudeGroup.Children.Add(claudeModelSeparator);
-            claudeTokenRow = CreateInfoRow(L10n.Instance["metadata.tokens"], out claudeTokenValue);
+            claudeTokenRow = CreateInfoRow(L10n.Instance["metadata.tokens"], out claudeTokenTitle, out claudeTokenValue);
             claudeTokenValue.FontSize = 11.5;
             claudeTokenValue.FontWeight = FontWeights.Medium;
             claudeGroup.Children.Add(claudeTokenRow);
@@ -353,6 +358,12 @@ public sealed class DetailsWindow : Window
 
         private void RefreshSupplementalData()
         {
+            if (IsOfflineAggregate(currentAggregate))
+            {
+                ApplyOfflinePlaceholders();
+                return;
+            }
+            contextPill.Visibility = Visibility.Visible;
             if (currentAgent == AgentKind.ClaudeCode)
             {
                 RefreshClaudeDetails();
@@ -361,6 +372,43 @@ public sealed class DetailsWindow : Window
             {
                 RefreshQuota();
             }
+        }
+
+        private static bool IsOfflineAggregate(AggregateSnapshot aggregate)
+        {
+            // Mirrors the macOS check: an idle ring labeled OFFLINE means we
+            // have no live session, so any project/model/token/context values
+            // would be stale carry-over from the previous run.
+            return aggregate != null
+                && aggregate.State == HaloState.Idle
+                && String.Equals(aggregate.Label, "OFFLINE",
+                    StringComparison.OrdinalIgnoreCase);
+        }
+
+        private void ApplyOfflinePlaceholders()
+        {
+            if (currentAgent == AgentKind.ClaudeCode)
+            {
+                claudeProjectRow.Visibility = Visibility.Visible;
+                claudeProjectSeparator.Visibility = Visibility.Visible;
+                claudeModelSeparator.Visibility = Visibility.Visible;
+                claudeModelRow.Margin = new Thickness(0);
+                claudeTokenRow.Margin = new Thickness(0);
+                claudeProjectValue.Text = "--";
+                claudeModelValue.Text = "--";
+                claudeTokenValue.Text = "--";
+            }
+            else
+            {
+                // Codex offline still surfaces the quota rows (rendered as
+                // "quota.no_data"); only the context pill should drop out
+                // since there's no live session to source a percentage from.
+                RefreshQuota();
+            }
+            // Drop the context pill rather than echoing a percentage from the
+            // session that just went offline. Done after RefreshQuota since
+            // that path resets context-pill visibility.
+            contextPill.Visibility = Visibility.Collapsed;
         }
 
         private void RefreshClaudeDetails()
@@ -741,14 +789,14 @@ public sealed class DetailsWindow : Window
             };
         }
 
-        private static Grid CreateInfoRow(string title, out TextBlock value)
+        private static Grid CreateInfoRow(string title, out TextBlock titleBlock, out TextBlock value)
         {
             Grid grid = new Grid();
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             grid.ColumnDefinitions.Add(new ColumnDefinition());
-            TextBlock name = NewText(title, 12, MediaColor.FromRgb(99, 112, 120),
+            titleBlock = NewText(title, 12, MediaColor.FromRgb(99, 112, 120),
                 FontWeights.Normal, true);
-            grid.Children.Add(name);
+            grid.Children.Add(titleBlock);
             value = NewText(L10n.Instance["quota.no_data"], 12, MediaColor.FromRgb(48, 60, 68),
                 FontWeights.SemiBold, true);
             value.HorizontalAlignment = HorizontalAlignment.Right;
@@ -1054,6 +1102,9 @@ public sealed class DetailsWindow : Window
                 ? L10n.Instance["quota.monthly"]
                 : L10n.Instance["quota.5h"];
             weekLabel.Text = L10n.Instance["quota.weekly"];
+            claudeProjectTitle.Text = L10n.Instance["metadata.project"];
+            claudeModelTitle.Text = L10n.Instance["metadata.model"];
+            claudeTokenTitle.Text = L10n.Instance["metadata.tokens"];
             if (currentAggregate != null)
                 UpdateContent(currentAggregate, currentSessions);
         }

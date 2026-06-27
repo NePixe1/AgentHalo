@@ -157,6 +157,17 @@ final class ClaudeActivityMonitor: @unchecked Sendable {
             lastLiveSessionsPollAt = now
             cachedLiveSessions = ClaudeLiveSessionReader.liveSessions()
         }
+
+        // Post-process the merged snapshots to ensure we only report active = true
+        // for sessions that actually have an active background process (i.e. present in cachedLiveSessions).
+        var verifiedSnapshots = merged
+        let liveSessionIds = Set(cachedLiveSessions.map(\.sessionId))
+        for i in 0..<verifiedSnapshots.count {
+            if verifiedSnapshots[i].active && !liveSessionIds.contains(verifiedSnapshots[i].threadId) {
+                verifiedSnapshots[i].active = false
+            }
+        }
+
         // A live Claude Code session is a standby candidate regardless of its
         // `status` field — Claude keeps `status` at "busy" while a turn is in
         // flight and only briefly visits "waiting"/"idle" between turns. The
@@ -169,7 +180,7 @@ final class ClaudeActivityMonitor: @unchecked Sendable {
             hookSnapshots: hookSnapshots
         )
         let nextSnapshot = ClaudeActivitySnapshot(
-            mergedClaudeSnapshots: merged,
+            mergedClaudeSnapshots: verifiedSnapshots,
             transcriptSnapshots: transcriptSnapshots,
             liveSessions: cachedLiveSessions,
             preferredStandbySession: preferred

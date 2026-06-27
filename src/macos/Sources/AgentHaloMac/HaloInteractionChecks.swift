@@ -802,7 +802,9 @@ private func testDetailsPanelShowsCodexQuotaAndIdleCopy() {
 
     expect(panel.focusedAgentForTesting == .codex, "details panel should select Codex")
     expect(panel.detailTextForTesting == L10n.shared["status.offline_codex"], "Codex offline copy should be localized")
-    expect(panel.contextPillHiddenForTesting == false, "Codex context pill should be visible")
+    // OFFLINE has no live session, so the context pill should drop out
+    // entirely rather than echo a stale percentage from a prior session.
+    expect(panel.contextPillHiddenForTesting == true, "Codex context pill should be hidden when OFFLINE")
     expect(panel.primaryQuotaHiddenForTesting == false, "Codex primary quota should be visible")
     expect(panel.secondaryQuotaHiddenForTesting == false, "Codex secondary quota should be visible")
 }
@@ -1414,8 +1416,12 @@ private func testDetailsPanelShowsContextAndHidesQuotaForClaudeCode() {
 
     expect(panel.focusedAgentForTesting == .claudeCode, "details panel should select Claude Code")
     expect(panel.detailTextForTesting == L10n.shared["status.offline_claude"], "Claude Code offline copy should be localized")
-    expect(panel.contextPillHiddenForTesting == false, "Claude Code context pill should be visible")
-    expect(panel.contextValueForTesting == L10n.shared.format("context.label", 58), "Claude Code context percent should be shown")
+    // OFFLINE drops the context pill so the panel doesn't carry over a
+    // percentage from a session that's no longer live.
+    expect(panel.contextPillHiddenForTesting == true, "Claude Code context pill should be hidden when OFFLINE")
+    expect(panel.projectValueForTesting == "--", "Claude Code project should be placeholder when OFFLINE")
+    expect(panel.modelValueForTesting == "--", "Claude Code model should be placeholder when OFFLINE")
+    expect(panel.tokenValueForTesting == "--", "Claude Code tokens should be placeholder when OFFLINE")
     expect(panel.primaryQuotaHiddenForTesting == true, "Claude Code primary quota should be hidden")
     expect(panel.secondaryQuotaHiddenForTesting == true, "Claude Code secondary quota should be hidden")
 }
