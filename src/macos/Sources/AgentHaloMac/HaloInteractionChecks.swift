@@ -16,6 +16,7 @@ private func expect<T: Equatable>(_ actual: T, _ expected: T, _ message: String)
 @MainActor
 func runHaloInteractionChecks() {
     L10n.shared.setLanguage("zh")
+    testL10nEnglishSwitchProducesEnglishStrings()
     testRightClickInvokesContextMenuCallback()
     testSingleClickDoesNotActivateCodex()
     testHaloContextMenuContainsCurrentControls()
@@ -1636,4 +1637,54 @@ private func testDetailsPanelSwitchCallbackSelectsClaudeCode() {
     panel.selectAgentForTesting(.claudeCode)
 
     expect(selected == .claudeCode, "details panel switch should emit selected agent")
+}
+
+/// Switch the L10n singleton to English and verify the translations actually
+/// come from the en.json bundle rather than echoing the lookup key. Restores
+/// zh afterwards so subsequent zh-anchored assertions in this run still pass.
+@MainActor
+private func testL10nEnglishSwitchProducesEnglishStrings() {
+    L10n.shared.setLanguage("en")
+    defer { L10n.shared.setLanguage("zh") }
+
+    expect(L10n.shared.currentLanguage, "en", "explicit en language should be honored")
+    expect(L10n.shared["menu.quit"], "Quit", "menu.quit should be English after switch")
+    expect(L10n.shared["status.offline_codex"], "Codex Not Running", "Codex offline copy should be English after switch")
+    expect(L10n.shared.format("quota.remaining", 42), "42% Remaining", "quota.remaining English formatting")
+    expect(L10n.shared.format("context.label", 58), "Context 58%", "context.label English formatting")
+    expect(L10n.shared["date.culture"], "en-US", "date.culture should switch alongside language")
+
+    // localizedDetail must reflect the active language too — covers the
+    // status.* switch path end-to-end without spinning up a panel.
+    let aggregate = AggregateSnapshot(
+        state: .idle,
+        label: "OFFLINE",
+        detail: AgentKind.codex.offlineDetail,
+        sessions: [],
+        focusedAgent: .codex
+    )
+    expect(
+        DetailsPanel.localizedDetail(for: aggregate),
+        L10n.shared["status.offline_codex"],
+        "DetailsPanel.localizedDetail should follow the active language"
+    )
+
+    // formatResetTime must honor date.culture (en-US) rather than zh-CN.
+    // Pin to a known instant — Jan 5, 14:30 local — so the English locale
+    // produces "Jan 5, 14:30 refresh", not the Chinese "1月5日 14:30 刷新".
+    var components = DateComponents()
+    components.year = 2026
+    components.month = 1
+    components.day = 5
+    components.hour = 14
+    components.minute = 30
+    let calendar = Calendar.current
+    guard let reset = calendar.date(from: components) else {
+        fatalError("test date should be constructible")
+    }
+    let formatted = DetailsPanel.formatResetTime(reset)
+    expect(
+        formatted.contains("Jan") && formatted.contains("14:30") && formatted.contains("refresh"),
+        "formatResetTime should render English month + 'refresh' suffix when language=en (got: \(formatted))"
+    )
 }
