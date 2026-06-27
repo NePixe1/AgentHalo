@@ -11,7 +11,7 @@ namespace CodexHalo
     public sealed class L10n
     {
         private static readonly L10n _instance = new L10n();
-        public static L10n Instance => _instance;
+        public static L10n Instance { get { return _instance; } }
 
         private static readonly string[] SupportedLanguages = { "zh", "en" };
         private const string FallbackLanguage = "zh";

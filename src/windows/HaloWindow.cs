@@ -998,7 +998,7 @@ public sealed class HaloWindow : Window
         private void OnLanguageSelected(object sender, EventArgs e)
         {
             var item = sender as Forms.ToolStripMenuItem;
-            string lang = item?.Tag as string;
+            string lang = (item != null ? item.Tag : null) as string;
             settings.Language = lang;
             SettingsStorage.Save(settings);
             L10n.Instance.SetLanguage(lang);
