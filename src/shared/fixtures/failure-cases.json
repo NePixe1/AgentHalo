@@ -1,9 +1,9 @@
 [
-  {"input": "authentication failed for account", "detail": "认证已失效"},
-  {"input": "HTTP 401 unauthorized", "detail": "认证已失效"},
-  {"input": "rate_limit_reached", "detail": "额度已用尽"},
-  {"input": "server overloaded", "detail": "服务暂时不可用"},
-  {"input": "connect timeout", "detail": "连接 Codex 失败"},
+  {"input": "authentication failed for account", "detail": "failure.auth_expired"},
+  {"input": "HTTP 401 unauthorized", "detail": "failure.auth_expired"},
+  {"input": "rate_limit_reached", "detail": "failure.quota_exhausted"},
+  {"input": "server overloaded", "detail": "failure.service_unavailable"},
+  {"input": "connect timeout", "detail": "failure.connection_failed"},
   {"input": "tool command returned exit code 1", "detail": null},
   {"input": "plain info", "detail": null}
 ]

@@ -117,10 +117,10 @@
     {"containsAny": ["plan"], "label": "Updating plan"}
   ],
   "failureRules": [
-    {"kind": "authentication", "detail": "认证已失效", "containsAny": ["authentication failed", "unauthorized", "invalid token", "sign in again"]},
-    {"kind": "quota", "detail": "额度已用尽", "containsAny": ["rate limit reached", "usage limit", "quota exceeded", "rate_limit_reached"]},
-    {"kind": "service", "detail": "服务暂时不可用", "containsAny": ["service unavailable", "server overloaded", "overloaded", "bad gateway"]},
-    {"kind": "network", "detail": "连接 Codex 失败", "containsAny": ["connection failed", "network error", "connection aborted", "request timed out", "connect timeout"]}
+    {"kind": "authentication", "detail": "failure.auth_expired", "containsAny": ["authentication failed", "unauthorized", "invalid token", "sign in again"]},
+    {"kind": "quota", "detail": "failure.quota_exhausted", "containsAny": ["rate limit reached", "usage limit", "quota exceeded", "rate_limit_reached"]},
+    {"kind": "service", "detail": "failure.service_unavailable", "containsAny": ["service unavailable", "server overloaded", "overloaded", "bad gateway"]},
+    {"kind": "network", "detail": "failure.connection_failed", "containsAny": ["connection failed", "network error", "connection aborted", "request timed out", "connect timeout"]}
   ],
   "rateLimit": {
     "marker": "\"rate_limits\"",
