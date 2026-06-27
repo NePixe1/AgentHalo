@@ -395,7 +395,7 @@ public static class Diagnostics
                 Assert(GeneratedHaloSpec.FriendlyAction("apply_patch") == "Editing files",
                     "generated action rules");
                 Assert(GeneratedHaloSpec.ClassifyFailure("server overloaded") ==
-                    "服务暂时不可用", "generated failure rules");
+                    "failure.service_unavailable", "generated failure rules");
                 Assert(Math.Abs(HaloVisual.DiagnosticGapSeparation(0) - 40) < 0.001,
                     "magnetic repulsion starts at minimum separation");
                 Assert(Math.Abs(HaloVisual.DiagnosticGapSeparation(1) - 150) < 0.001,

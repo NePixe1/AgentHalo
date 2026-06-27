@@ -240,10 +240,10 @@ namespace CodexHalo
         public static string ClassifyFailure(string text)
         {
             string value = (text ?? String.Empty).ToLowerInvariant();
-            if (ContainsAny(value, new string[] { "authentication failed", "unauthorized", "invalid token", "sign in again" })) return "认证已失效";
-            if (ContainsAny(value, new string[] { "rate limit reached", "usage limit", "quota exceeded", "rate_limit_reached" })) return "额度已用尽";
-            if (ContainsAny(value, new string[] { "service unavailable", "server overloaded", "overloaded", "bad gateway" })) return "服务暂时不可用";
-            if (ContainsAny(value, new string[] { "connection failed", "network error", "connection aborted", "request timed out", "connect timeout" })) return "连接 Codex 失败";
+            if (ContainsAny(value, new string[] { "authentication failed", "unauthorized", "invalid token", "sign in again" })) return "failure.auth_expired";
+            if (ContainsAny(value, new string[] { "rate limit reached", "usage limit", "quota exceeded", "rate_limit_reached" })) return "failure.quota_exhausted";
+            if (ContainsAny(value, new string[] { "service unavailable", "server overloaded", "overloaded", "bad gateway" })) return "failure.service_unavailable";
+            if (ContainsAny(value, new string[] { "connection failed", "network error", "connection aborted", "request timed out", "connect timeout" })) return "failure.connection_failed";
             return null;
         }
 
