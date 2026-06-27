@@ -20,6 +20,9 @@ let package = Package(
             name: "AgentHaloCore",
             dependencies: [],
             resources: [
+                // Real JSON files (synced from src/shared/locales by
+                // scripts/build-macos.sh before each release build). Plain
+                // `.copy` keeps the bundle layout predictable.
                 .copy("locales")
             ],
             linkerSettings: [

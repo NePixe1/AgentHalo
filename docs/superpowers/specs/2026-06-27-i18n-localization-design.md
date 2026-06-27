@@ -57,7 +57,7 @@ src/
 | `metadata.*` | 元数据行标题（项目、模型等） | 无 |
 | `failure.*` | 错误分类文本 | 无 |
 | `halo.*` | 光环预览子菜单项 | 无 |
-| `date.*` | 日期格式化模板 | 无 |
+| `date.*` | 日期格式化模板 + culture 标识 | 无 |
 
 ### JSON Key 完整清单
 
@@ -93,7 +93,7 @@ status.context_compacted
 status.awaiting_permission
 status.permission_denied
 status.reviewing_result
-status.unknown
+status.unknown            # Windows DetailsWindow 兜底用（macOS 端 switch 全枚举，不需要）
 
 quota.5h
 quota.weekly
@@ -102,14 +102,14 @@ quota.remaining
 quota.no_data
 quota.waiting_refresh
 
-context.title
+context.title             # Windows DetailsWindow 上下文 pill 的标题文字（macOS 端无独立标题元素）
 context.label
 context.empty
 
 metadata.project
 metadata.model
 metadata.tokens
-metadata.separator
+metadata.separator        # 输入/输出 token 之间的分隔点 "·"（当前两端均硬编码为 "  ·  "，预留 key 便于未来集中调整）
 
 failure.auth_expired
 failure.quota_exhausted
@@ -127,9 +127,9 @@ halo.error_bright_preview
 halo.error_dim_preview
 halo.idle_preview
 
+date.culture              # NSLocale / CultureInfo 标识符（如 "zh-CN" / "en-US"）
 date.today_format
 date.other_format
-date.refresh_suffix
 ```
 
 ### 英文翻译
@@ -201,9 +201,9 @@ date.refresh_suffix
   "halo.error_dim_preview": "Error (Dim Red)",
   "halo.idle_preview": "Idle",
 
+  "date.culture": "en-US",
   "date.today_format": "HH:mm 'refresh'",
-  "date.other_format": "MMM d, HH:mm 'refresh'",
-  "date.refresh_suffix": "refresh"
+  "date.other_format": "MMM d, HH:mm 'refresh'"
 }
 ```
 
@@ -255,8 +255,9 @@ public sealed class L10n
 
 ### 日期格式化适配
 
-- `DetailsPanel.formatResetTime`（macOS）/ `DetailsWindow`（Windows）中的硬编码 `Locale("zh_CN")` 和 `"M月d日 HH:mm '刷新'"` 格式串 → 改为从 L10n 取 `date.today_format` / `date.other_format` 模板，locale 由当前语言决定
-- 格式串中的 `'刷新'` 部分变为 `date.refresh_suffix` 占位替换
+- `DetailsPanel.formatResetTime`（macOS）/ `DetailsWindow`（Windows）中的硬编码 `Locale("zh_CN")` 和 `"M月d日 HH:mm '刷新'"` 格式串 → 改为从 L10n 取 `date.today_format` / `date.other_format` 模板
+- culture（NSLocale / CultureInfo 的 identifier）也从 L10n 取 `date.culture`，避免代码里硬编码 `zh ? "zh-CN" : "en-US"` 的二分判断，新增第三种语言时只动 JSON
+- 格式串中的 `'刷新'` / `'refresh'` 部分直接用单引号字面量内联（Swift `DateFormatter` 和 .NET 自定义格式串都把单引号当字面量转义符），无需单独的占位 key
 
 ### UI 刷新机制
 

@@ -46,6 +46,7 @@
   "metadata.project": "项目",
   "metadata.model": "模型",
   "metadata.tokens": "输入输出",
+  "metadata.separator": "  ·  ",
 
   "failure.auth_expired": "认证已失效",
   "failure.quota_exhausted": "额度已用尽",
@@ -63,7 +64,7 @@
   "halo.error_dim_preview": "故障（暗红）",
   "halo.idle_preview": "待机",
 
+  "date.culture": "zh-CN",
   "date.today_format": "HH:mm '刷新'",
-  "date.other_format": "M月d日 HH:mm '刷新'",
-  "date.refresh_suffix": "刷新"
+  "date.other_format": "M月d日 HH:mm '刷新'"
 }

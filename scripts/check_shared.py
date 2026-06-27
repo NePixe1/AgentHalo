@@ -167,6 +167,28 @@ def main() -> int:
         if abs(powered - sample["powered"]) > tolerance:
             raise AssertionError(f"powered sample mismatch: {state}@{time} -> {powered}")
 
+    # Locale JSON is the single source of truth under src/shared/locales and
+    # is mirrored into the macOS and Windows targets as real files (symlinks
+    # would survive into the SwiftPM bundle as dangling links). Fail if either
+    # mirror drifts, so `scripts/build-macos.sh` / `build-windows.ps1` always
+    # ship the latest translations.
+    shared_locales = ROOT / "src" / "shared" / "locales"
+    mirrors = [
+        ROOT / "src" / "macos" / "Sources" / "AgentHaloCore" / "locales",
+        ROOT / "src" / "windows" / "locales",
+    ]
+    for lang in ("zh.json", "en.json"):
+        canonical = (shared_locales / lang).read_text(encoding="utf-8")
+        for mirror in mirrors:
+            target = mirror / lang
+            if not target.exists():
+                raise AssertionError(f"locale mirror missing: {target}")
+            if target.read_text(encoding="utf-8") != canonical:
+                raise AssertionError(
+                    f"locale mirror drifted from shared source: {target} "
+                    f"(re-run scripts/build-macos.sh and build-windows.ps1 to sync)"
+                )
+
     print("PASS shared contract, fixtures, and animation samples")
     return 0
 

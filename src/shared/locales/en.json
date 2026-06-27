@@ -46,6 +46,7 @@
   "metadata.project": "Project",
   "metadata.model": "Model",
   "metadata.tokens": "Input/Output",
+  "metadata.separator": "  ·  ",
 
   "failure.auth_expired": "Authentication Expired",
   "failure.quota_exhausted": "Quota Exhausted",
@@ -63,7 +64,7 @@
   "halo.error_dim_preview": "Error (Dim Red)",
   "halo.idle_preview": "Idle",
 
+  "date.culture": "en-US",
   "date.today_format": "HH:mm 'refresh'",
-  "date.other_format": "MMM d, HH:mm 'refresh'",
-  "date.refresh_suffix": "refresh"
+  "date.other_format": "MMM d, HH:mm 'refresh'"
 }
