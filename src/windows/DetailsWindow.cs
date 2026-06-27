@@ -688,8 +688,7 @@ public sealed class DetailsWindow : Window
                 return String.Empty;
             }
             DateTime local = resetUtc.ToLocalTime();
-            var culture = L10n.Instance.CurrentLanguage == "zh"
-                ? new CultureInfo("zh-CN") : new CultureInfo("en-US");
+            var culture = new CultureInfo(L10n.Instance["date.culture"]);
             var format = local.Date == DateTime.Now.Date
                 ? L10n.Instance["date.today_format"]
                 : L10n.Instance["date.other_format"];

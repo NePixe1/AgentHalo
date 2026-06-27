@@ -240,7 +240,7 @@ final class DetailsPanel: NSPanel {
         }
         let calendar = Calendar.current
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: L10n.shared.currentLanguage == "zh" ? "zh_CN" : "en_US")
+        formatter.locale = Locale(identifier: L10n.shared["date.culture"])
         if calendar.isDateInToday(date) {
             formatter.dateFormat = L10n.shared["date.today_format"]
         } else {

@@ -13,7 +13,12 @@ public final class L10n: @unchecked Sendable {
 
     public var currentLanguage: String { _currentLanguage }
 
-    private init() {}
+    private init() {
+        // Load fallback translations eagerly so call sites work even before
+        // someone explicitly calls setLanguage() (e.g. command-line tools that
+        // never wire up settings).
+        loadTranslations()
+    }
 
     // MARK: - Configuration
 
@@ -30,15 +35,49 @@ public final class L10n: @unchecked Sendable {
     // MARK: - Public API
 
     public subscript(_ key: String) -> String {
-        translations[key] ?? key
+        if let value = translations[key] {
+            return value
+        }
+        #if DEBUG
+        NSLog("[L10n] missing translation for key: %@", key)
+        #endif
+        return key
     }
 
+    /// Replace `{0}`, `{1}`, ... placeholders in the looked-up template with
+    /// the supplied arguments. Uses a single pass over the template so an
+    /// argument value containing `{1}` cannot be re-rewritten by a later
+    /// substitution.
     public func format(_ key: String, _ args: CVarArg...) -> String {
-        var template = self[key]
-        for (index, arg) in args.enumerated() {
-            template = template.replacingOccurrences(of: "{\(index)}", with: "\(arg)")
+        let template = self[key]
+        guard !args.isEmpty else { return template }
+        let stringArgs = args.map { "\($0)" }
+        var result = ""
+        result.reserveCapacity(template.count)
+        var index = template.startIndex
+        while index < template.endIndex {
+            let ch = template[index]
+            if ch == "{" {
+                // Look ahead for `{digits}` — emit replacement if it matches and
+                // the index is in range, otherwise pass the brace through verbatim.
+                var cursor = template.index(after: index)
+                var digits = ""
+                while cursor < template.endIndex, let scalar = template[cursor].asciiValue,
+                      scalar >= 0x30 && scalar <= 0x39 {
+                    digits.append(template[cursor])
+                    cursor = template.index(after: cursor)
+                }
+                if !digits.isEmpty, cursor < template.endIndex, template[cursor] == "}",
+                   let position = Int(digits), position >= 0, position < stringArgs.count {
+                    result.append(stringArgs[position])
+                    index = template.index(after: cursor)
+                    continue
+                }
+            }
+            result.append(ch)
+            index = template.index(after: index)
         }
-        return template
+        return result
     }
 
     // MARK: - System language detection
