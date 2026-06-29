@@ -94,6 +94,7 @@ public sealed class ClaudeCodeMetrics
     {
         public bool IsCustomApi;
         public string Model;
+        public string SessionTitle;
         public long InputTokens;
         public long OutputTokens;
         public long ContextTokens;
@@ -102,6 +103,11 @@ public sealed class ClaudeCodeMetrics
         public bool HasModel
         {
             get { return !String.IsNullOrWhiteSpace(Model); }
+        }
+
+        public bool HasSessionTitle
+        {
+            get { return !String.IsNullOrWhiteSpace(SessionTitle); }
         }
 
         public bool HasTokenUsage

@@ -1473,6 +1473,28 @@ public static class RateLimitReader
             return result && metrics.HasMonthly;
         }
 
+        // Why we only read sessions/*.jsonl and ignore logs_2.sqlite for quota:
+        //
+        // Codex persists rate_limits to disk ONLY as a by-product of a conversation
+        // turn — the server attaches them to the response that Codex writes into the
+        // session jsonl. Agent Halo is purely passive here; it does not call any
+        // Codex/OpenAI API, so it can only see what Codex chose to write down.
+        //
+        // logs_2.sqlite (the codex_client::transport / sse logs) was investigated as
+        // an additional, possibly conversation-independent source and rejected:
+        //   - The rows matching "rate_limits" are false positives — they are
+        //     conversation bodies that happen to quote Agent Halo's own source/spec
+        //     text, not structured quota payloads. There are zero rows with a real
+        //     top-level "rate_limits": { ... } JSON object.
+        //   - The few genuine-looking fragments (e.g. `primary = {"used_percent":...}`)
+        //     are embedded inside chat content and are themselves conversation-triggered,
+        //     so they do not solve the "no quota until you talk to Codex" case anyway.
+        //
+        // Consequence (intended, not a bug): if Codex has not held a conversation
+        // since the last window reset, the halo shows "等待 Codex 刷新" until the next
+        // turn writes fresh rate_limits. Reading Codex's real-time quota without a
+        // conversation would require using the OAuth token in ~/.codex/auth.json to call
+        // Codex's private usage endpoint — that path is intentionally NOT taken here.
         public static bool TryRead(out UsageMetrics metrics)
         {
             metrics = new UsageMetrics

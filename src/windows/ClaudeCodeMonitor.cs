@@ -2006,6 +2006,16 @@ public static class ClaudeCodeMetricsReader
                     .Take(16);
                 foreach (string path in files)
                 {
+                    // aiTitle records (type=ai-title) sit near the head of the
+                    // transcript and are re-written as the session progresses, so
+                    // the last one is the current title. We scan the head for it
+                    // separately from usage (which lives at the tail) — the usage
+                    // scan below returns as soon as it hits a usage line and would
+                    // never reach the earlier ai-title lines.
+                    if (!metrics.HasSessionTitle)
+                    {
+                        ReadSessionTitle(path, metrics);
+                    }
                     string[] lines = ReadTailLines(path);
                     for (int i = lines.Length - 1; i >= 0; i--)
                     {
@@ -2013,6 +2023,11 @@ public static class ClaudeCodeMetricsReader
                         {
                             return;
                         }
+                    }
+                    if (metrics.HasSessionTitle && metrics.HasModel &&
+                        metrics.HasTokenUsage)
+                    {
+                        return;
                     }
                 }
             }
@@ -2062,6 +2077,47 @@ public static class ClaudeCodeMetricsReader
             catch
             {
                 return false;
+            }
+        }
+
+        // Claude Code writes type=ai-title records into the transcript with an
+        // aiTitle field — a short, AI-generated label for the session (e.g.
+        // "Build Claude code status monitor", "整理归档 2026q3 测试"). It is a
+        // far better "what is this session about" signal than the cwd leaf name,
+        // and it covers document-only sessions that have no project root. CC
+        // re-emits these records as the session evolves, so the newest one (the
+        // last in the file) is the current title — we scan the tail and keep the
+        // first ai-title seen, mirroring how usage is read from the same tail.
+        private static void ReadSessionTitle(string path,
+            ClaudeCodeMetrics metrics)
+        {
+            try
+            {
+                string[] lines = ReadTailLines(path);
+                for (int i = lines.Length - 1; i >= 0; i--)
+                {
+                    Dictionary<string, object> root =
+                        Serializer.DeserializeObject(lines[i])
+                        as Dictionary<string, object>;
+                    if (root == null)
+                    {
+                        continue;
+                    }
+                    if (!String.Equals(StringValue(root, "type"), "ai-title",
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                    string title = StringValue(root, "aiTitle");
+                    if (!String.IsNullOrWhiteSpace(title))
+                    {
+                        metrics.SessionTitle = title.Trim();
+                        return;
+                    }
+                }
+            }
+            catch
+            {
             }
         }
 

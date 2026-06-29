@@ -63,9 +63,76 @@ public sealed class RoundedMeter : FrameworkElement
             if (fill > 0)
             {
                 drawingContext.DrawRoundedRectangle(
-                    new SolidColorBrush(MediaColor.FromRgb(73, 174, 201)), null,
+                    new SolidColorBrush(MediaColor.FromRgb(64, 105, 132)), null,
                     new Rect(0, 0, Math.Max(height, fill), height), radius, radius);
             }
+        }
+    }
+
+public sealed class ContextBatteryMeter : FrameworkElement
+    {
+        public static readonly DependencyProperty ValueProperty =
+            DependencyProperty.Register("Value", typeof(double),
+                typeof(ContextBatteryMeter),
+                new FrameworkPropertyMetadata(0.0,
+                    FrameworkPropertyMetadataOptions.AffectsRender));
+
+        public static readonly DependencyProperty IsAvailableProperty =
+            DependencyProperty.Register("IsAvailable", typeof(bool),
+                typeof(ContextBatteryMeter),
+                new FrameworkPropertyMetadata(false,
+                    FrameworkPropertyMetadataOptions.AffectsRender));
+
+        public double Value
+        {
+            get { return (double)GetValue(ValueProperty); }
+            set { SetValue(ValueProperty, value); }
+        }
+
+        public bool IsAvailable
+        {
+            get { return (bool)GetValue(IsAvailableProperty); }
+            set { SetValue(IsAvailableProperty, value); }
+        }
+
+        protected override System.Windows.Size MeasureOverride(
+            System.Windows.Size availableSize)
+        {
+            return new System.Windows.Size(
+                Double.IsInfinity(availableSize.Width) ? 46 : availableSize.Width,
+                Double.IsInfinity(availableSize.Height) ? 24 : availableSize.Height);
+        }
+
+        protected override void OnRender(DrawingContext dc)
+        {
+            base.OnRender(dc);
+            double width = Math.Max(1, ActualWidth);
+            double height = Math.Max(1, ActualHeight);
+            double radius = Math.Min(8, height * 0.34);
+            Rect rect = new Rect(0.5, 0.5, width - 1, height - 1);
+            double value = Math.Max(0, Math.Min(100, Value));
+            MediaColor fillColor = MediaColor.FromRgb(224, 240, 252);
+
+            dc.DrawRoundedRectangle(new SolidColorBrush(fillColor),
+                new MediaPen(new SolidColorBrush(
+                    MediaColor.FromArgb(72, 174, 205, 224)), 1),
+                rect, radius, radius);
+
+            string text = IsAvailable
+                ? Math.Min(99, (int)Math.Round(value)).ToString(
+                    CultureInfo.InvariantCulture) + "%"
+                : "--";
+            double fontSize = 15.2;
+            FormattedText formatted = new FormattedText(text,
+                CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
+                new Typeface(new System.Windows.Media.FontFamily(
+                    "Segoe UI Variable Display, Segoe UI"),
+                    FontStyles.Normal, FontWeights.Bold, FontStretches.Normal),
+                fontSize, new SolidColorBrush(MediaColor.FromRgb(64, 105, 132)),
+                VisualTreeHelper.GetDpi(this).PixelsPerDip);
+            formatted.TextAlignment = TextAlignment.Center;
+            dc.DrawText(formatted, new MediaPoint(width / 2,
+                (height - formatted.Height) / 2 - 0.5));
         }
     }
 
@@ -82,12 +149,7 @@ public sealed class DetailsWindow : Window
         private readonly TextBlock weekReset;
         private readonly Grid fiveHourRow;
         private readonly Grid weekRow;
-        private readonly TextBlock contextLabel;
-        private readonly TextBlock contextHundredsDigit;
-        private readonly TextBlock contextTensDigit;
-        private readonly TextBlock contextOnesDigit;
-        private readonly TextBlock contextPercentMark;
-        private readonly TextBlock contextUnavailableValue;
+        private readonly ContextBatteryMeter contextMeter;
         private readonly Border codexSwitch;
         private readonly Border claudeSwitch;
         private readonly Border switchThumb;
@@ -160,38 +222,15 @@ public sealed class DetailsWindow : Window
             switcher.HorizontalAlignment = HorizontalAlignment.Left;
             switcher.VerticalAlignment = VerticalAlignment.Center;
             top.Children.Add(switcher);
-            Border contextPill = new Border
+            contextMeter = new ContextBatteryMeter
             {
-                Width = 90,
-                Height = 26,
-                CornerRadius = new CornerRadius(9),
-                Padding = new Thickness(0),
+                Width = 46,
+                Height = 24,
                 HorizontalAlignment = HorizontalAlignment.Right,
-                VerticalAlignment = VerticalAlignment.Center,
-                Background = new SolidColorBrush(MediaColor.FromArgb(68, 100, 194, 216)),
-                BorderBrush = new SolidColorBrush(MediaColor.FromArgb(70, 83, 174, 197)),
-                BorderThickness = new Thickness(1)
+                VerticalAlignment = VerticalAlignment.Center
             };
-            Grid contextGrid = new Grid();
-            contextGrid.Width = 78;
-            contextGrid.HorizontalAlignment = HorizontalAlignment.Center;
-            contextGrid.Margin = new Thickness(6, 0, 6, 0);
-            contextGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(40) });
-            contextGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(2) });
-            contextGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(36) });
-            contextLabel = NewText("上下文", 12.2, MediaColor.FromRgb(53, 125, 145),
-                FontWeights.Normal, true);
-            contextLabel.HorizontalAlignment = HorizontalAlignment.Right;
-            contextLabel.VerticalAlignment = VerticalAlignment.Center;
-            contextGrid.Children.Add(contextLabel);
-            Grid contextValueGrid = CreateContextValueGrid(out contextHundredsDigit,
-                out contextTensDigit, out contextOnesDigit, out contextPercentMark,
-                out contextUnavailableValue);
-            Grid.SetColumn(contextValueGrid, 2);
-            contextGrid.Children.Add(contextValueGrid);
-            contextPill.Child = contextGrid;
-            Grid.SetColumn(contextPill, 2);
-            top.Children.Add(contextPill);
+            Grid.SetColumn(contextMeter, 2);
+            top.Children.Add(contextMeter);
             top.Margin = new Thickness(0, 0, 0, 7);
             content.Children.Add(top);
 
@@ -223,7 +262,7 @@ public sealed class DetailsWindow : Window
             claudeGroup.Children.Add(claudeModelSeparator);
             claudeTokenRow = CreateInfoRow("输入输出", out claudeTokenValue);
             claudeTokenValue.FontSize = 11.5;
-            claudeTokenValue.FontWeight = FontWeights.Medium;
+            claudeTokenValue.FontWeight = FontWeights.SemiBold;
             claudeGroup.Children.Add(claudeTokenRow);
 
             dataLayer = new Grid();
@@ -370,11 +409,13 @@ public sealed class DetailsWindow : Window
             claudeModelSeparator.Visibility = Visibility.Visible;
             claudeModelRow.Margin = new Thickness(0);
             claudeTokenRow.Margin = new Thickness(0);
-            claudeProjectValue.Text = DisplayProjectName(primary);
+            claudeProjectValue.Text = metrics.HasSessionTitle
+                ? metrics.SessionTitle
+                : DisplayProjectName(primary);
             claudeModelValue.Text = metrics.HasModel ? metrics.Model : "暂无数据";
             claudeTokenValue.Text = metrics.HasTokenUsage
-                ? "↑" + FormatCompactNumber(metrics.InputTokens) +
-                  " · ↓" + FormatCompactNumber(metrics.OutputTokens)
+                ? "↑ " + FormatCompactNumber(metrics.InputTokens) +
+                  "  ·  ↓ " + FormatCompactNumber(metrics.OutputTokens)
                 : "暂无数据";
             SetContextPercent(metrics.HasContext, metrics.ContextUsedPercent);
         }
@@ -472,36 +513,9 @@ public sealed class DetailsWindow : Window
 
         private void SetContextPercent(bool available, double value)
         {
-            contextHundredsDigit.Text = String.Empty;
-            contextTensDigit.Text = String.Empty;
-            contextOnesDigit.Text = String.Empty;
-            contextPercentMark.Text = String.Empty;
-            contextUnavailableValue.Visibility = Visibility.Collapsed;
-            if (!available)
-            {
-                contextUnavailableValue.Visibility = Visibility.Visible;
-                return;
-            }
-
-            int rounded = (int)Math.Round(value);
-            rounded = Math.Max(0, Math.Min(100, rounded));
-            string digits = rounded.ToString(CultureInfo.InvariantCulture);
-            if (digits.Length == 3)
-            {
-                contextHundredsDigit.Text = digits.Substring(0, 1);
-                contextTensDigit.Text = digits.Substring(1, 1);
-                contextOnesDigit.Text = digits.Substring(2, 1);
-            }
-            else if (digits.Length == 2)
-            {
-                contextTensDigit.Text = digits.Substring(0, 1);
-                contextOnesDigit.Text = digits.Substring(1, 1);
-            }
-            else
-            {
-                contextOnesDigit.Text = digits;
-            }
-            contextPercentMark.Text = "%";
+            contextMeter.IsAvailable = available;
+            contextMeter.Value = available
+                ? Math.Max(0, Math.Min(100, Math.Round(value))) : 0;
         }
 
         public void SetPreviewMetrics(UsageMetrics metrics)
@@ -746,58 +760,6 @@ public sealed class DetailsWindow : Window
             Grid.SetColumn(value, 1);
             grid.Children.Add(value);
             return grid;
-        }
-
-        private static Grid CreateContextValueGrid(out TextBlock hundreds,
-            out TextBlock tens, out TextBlock ones, out TextBlock percent,
-            out TextBlock unavailable)
-        {
-            Grid layer = new Grid
-            {
-                Width = 36,
-                HorizontalAlignment = HorizontalAlignment.Left,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            Grid digits = new Grid();
-            digits.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(7.5) });
-            digits.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(7.5) });
-            digits.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(7.5) });
-            digits.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(13.5) });
-            hundreds = NewContextDigitText();
-            tens = NewContextDigitText();
-            ones = NewContextDigitText();
-            percent = NewContextDigitText();
-            digits.Children.Add(hundreds);
-            Grid.SetColumn(tens, 1);
-            digits.Children.Add(tens);
-            Grid.SetColumn(ones, 2);
-            digits.Children.Add(ones);
-            Grid.SetColumn(percent, 3);
-            percent.HorizontalAlignment = HorizontalAlignment.Left;
-            digits.Children.Add(percent);
-            layer.Children.Add(digits);
-
-            unavailable = NewText("--", 13.2, MediaColor.FromRgb(45, 118, 139),
-                FontWeights.SemiBold, false);
-            unavailable.HorizontalAlignment = HorizontalAlignment.Center;
-            unavailable.VerticalAlignment = VerticalAlignment.Center;
-            unavailable.Visibility = Visibility.Collapsed;
-            layer.Children.Add(unavailable);
-            return layer;
-        }
-
-        private static TextBlock NewContextDigitText()
-        {
-            TextBlock block = NewText(String.Empty, 13.2,
-                MediaColor.FromRgb(45, 118, 139), FontWeights.SemiBold, false);
-            block.HorizontalAlignment = HorizontalAlignment.Center;
-            block.VerticalAlignment = VerticalAlignment.Center;
-            block.TextAlignment = TextAlignment.Center;
-            block.TextTrimming = TextTrimming.None;
-            block.FontFamily = new System.Windows.Media.FontFamily(
-                "Segoe UI Variable Text, Segoe UI");
-            Typography.SetNumeralAlignment(block, FontNumeralAlignment.Tabular);
-            return block;
         }
 
         private const string CodexIconPath =
