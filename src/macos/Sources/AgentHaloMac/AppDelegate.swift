@@ -934,7 +934,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             x = panel.frame.maxX + gap
         }
         let y = max(area.minY + 8, min(panel.frame.midY - detailsPanel.frame.height / 2, area.maxY - detailsPanel.frame.height - 8))
-        detailsPanel.setFrameOrigin(CGPoint(x: max(area.minX + 8, min(x, area.maxX - detailsPanel.frame.width - 8)), y: y))
+        let clampedOrigin = CGPoint(
+            x: max(area.minX + 8, min(x, area.maxX - detailsPanel.frame.width - 8)),
+            y: y
+        )
+        let scale = screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+        detailsPanel.setFrameOrigin(Self.pixelAlignedOrigin(clampedOrigin, backingScaleFactor: scale))
+        detailsPanel.contentView?.layoutSubtreeIfNeeded()
+        detailsPanel.contentView?.displayIfNeeded()
+    }
+
+    static func pixelAlignedOrigin(_ origin: CGPoint, backingScaleFactor: CGFloat) -> CGPoint {
+        let scale = backingScaleFactor > 0 ? backingScaleFactor : 1
+        return CGPoint(
+            x: (origin.x * scale).rounded() / scale,
+            y: (origin.y * scale).rounded() / scale
+        )
     }
 
     private func displayAggregate() -> AggregateSnapshot {

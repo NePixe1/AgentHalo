@@ -16,6 +16,9 @@ private func expect<T: Equatable>(_ actual: T, _ expected: T, _ message: String)
 @MainActor
 func runHaloInteractionChecks() {
     L10n.shared.setLanguage("zh")
+    testDetailsPanelUsesEvenPointHeight()
+    testDetailsPanelPixelAlignmentUsesBackingScale()
+    testDetailsPanelPositioningSnapsToBackingPixels()
     testL10nEnglishSwitchProducesEnglishStrings()
     testRightClickInvokesContextMenuCallback()
     testSingleClickDoesNotActivateCodex()
@@ -939,6 +942,50 @@ private func testDetailsPanelUsesTightBottomInset() {
     }
 
     expect(contentStack.edgeInsets.bottom, 4, "details panel bottom inset")
+}
+
+@MainActor
+private func testDetailsPanelUsesEvenPointHeight() {
+    let panel = DetailsPanel()
+    expect(Int(panel.frame.height) % 2 == 0, "details panel height should avoid half-point vertical centering")
+}
+
+@MainActor
+private func testDetailsPanelPixelAlignmentUsesBackingScale() {
+    expect(
+        AppDelegate.pixelAlignedOrigin(CGPoint(x: 20.25, y: 40.5), backingScaleFactor: 1),
+        CGPoint(x: 20, y: 41),
+        "1x displays should snap details panel origins to whole points"
+    )
+    expect(
+        AppDelegate.pixelAlignedOrigin(CGPoint(x: 20.25, y: 40.5), backingScaleFactor: 2),
+        CGPoint(x: 20.5, y: 40.5),
+        "Retina displays should preserve half-point origins that land on physical pixels"
+    )
+}
+
+private func testDetailsPanelPositioningSnapsToBackingPixels() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let appDelegateURL = sourceDirectory.appendingPathComponent("AppDelegate.swift")
+    guard let source = try? String(contentsOf: appDelegateURL, encoding: .utf8),
+          let positionStart = source.range(of: "    private func positionDetailsPanel() {")?.lowerBound,
+          let positionEnd = source.range(of: "    private func displayAggregate()", range: positionStart..<source.endIndex)?.lowerBound else {
+        fatalError("AppDelegate positionDetailsPanel source should be readable")
+    }
+
+    let positionSource = source[positionStart..<positionEnd]
+    expect(
+        !positionSource.contains("detailsPanel.setFrameOrigin(CGPoint(x: max(area.minX + 8, min(x, area.maxX - detailsPanel.frame.width - 8)), y: y))"),
+        "details panel should not set a raw unsnapped origin"
+    )
+    expect(
+        positionSource.contains("backingScaleFactor") && positionSource.contains(".rounded()"),
+        "details panel origin should be snapped to physical pixels before first display"
+    )
+    expect(
+        positionSource.contains("layoutSubtreeIfNeeded()") && positionSource.contains("displayIfNeeded()"),
+        "details panel should flush layout and drawing before orderFront"
+    )
 }
 
 @MainActor

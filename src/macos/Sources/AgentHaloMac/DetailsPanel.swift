@@ -31,7 +31,7 @@ final class DetailsPanel: NSPanel {
 
     init() {
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 268, height: 191),
+            contentRect: NSRect(x: 0, y: 0, width: 268, height: 192),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
