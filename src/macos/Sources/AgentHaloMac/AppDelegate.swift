@@ -279,7 +279,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             aggregate,
             errorPresentation: errorUpdate.presentation
         )
-        refreshVisibleDetailsPanel()
+        refreshVisibleDetailsStatus()
         if !systemOverlaySuspended {
             haloView?.redrawRing()
         }
@@ -856,6 +856,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         updateDetailsPanelContent()
+    }
+
+    private func refreshVisibleDetailsStatus() {
+        guard detailsPanel.isVisible else {
+            return
+        }
+        detailsPanel.updateStatus(aggregate: displayAggregate())
     }
 
     private func scheduleHideDetails() {

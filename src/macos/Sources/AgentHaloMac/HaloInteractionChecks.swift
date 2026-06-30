@@ -1020,12 +1020,20 @@ private func testVisibleDetailsPanelStatusRefreshIsWiredToTick() {
 
     let tickSource = source[tickStart..<tickEnd]
     expect(
-        tickSource.contains("refreshVisibleDetailsPanel()"),
-        "tick should refresh visible status and metadata"
+        tickSource.contains("refreshVisibleDetailsStatus()"),
+        "tick should refresh visible status without rebuilding details metadata"
     )
     expect(
-        !tickSource.contains("refreshVisibleDetailsStatus()"),
-        "status-only refresh must not leave Claude metadata stale"
+        !tickSource.contains("refreshVisibleDetailsPanel()"),
+        "tick must not run full details refresh because it reads metadata and quota on the main thread"
+    )
+    expect(
+        source.contains("private func refreshVisibleDetailsStatus()"),
+        "AppDelegate should keep a status-only visible details refresh path"
+    )
+    expect(
+        source.contains("detailsPanel.updateStatus(aggregate: displayAggregate())"),
+        "status-only refresh should preserve existing details metadata and layout"
     )
 }
 
