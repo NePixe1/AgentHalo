@@ -8,7 +8,7 @@ The current release supports Codex and macOS Claude Code via lifecycle hooks and
 
 Version: `0.13.0`
 
-English | [简体中文](README.zh-CN.md)
+English | [Simplified Chinese](README.zh-CN.md)
 
 Cross-platform behavior is generated from
 [`src/shared/spec/agent-halo.v2.json`](src/shared/spec/agent-halo.v2.json), while
@@ -67,7 +67,7 @@ OpenAI API key.
 - Completed green breathes until Codex returns to the foreground, then settles
   into a non-glowing standby green.
 - Right-click for state previews, pause, startup, and exit controls.
-- Use the `光环大小` submenu to select `75% / 100% / 125%`;
+- Use the `Halo Size` submenu to select `75% / 100% / 125%`;
   the selected size persists across restarts.
 - On macOS, Agent Halo remembers the halo's display and relative position. If
   that display disconnects, the halo temporarily moves to the primary display's
@@ -75,7 +75,7 @@ OpenAI API key.
   temporarily recovered makes the new position preferred instead.
 - Windows keeps its existing off-screen recovery behavior: after launch or a
   display change, a fully off-screen halo returns to the primary display.
-- On either platform, select `脱离卡死` from the context menu to explicitly
+- On either platform, select `Reset Position` from the context menu to explicitly
   reset the halo to the primary display's upper-right corner.
 - Click the halo to bring the Codex window forward.
 
