@@ -88,6 +88,7 @@ public sealed class DetailsWindow : Window
         private readonly TextBlock contextOnesDigit;
         private readonly TextBlock contextPercentMark;
         private readonly TextBlock contextUnavailableValue;
+        private readonly Border contextPill;
         private readonly Border codexSwitch;
         private readonly Border claudeSwitch;
         private readonly Border switchThumb;
@@ -102,6 +103,9 @@ public sealed class DetailsWindow : Window
         private readonly Grid claudeTokenRow;
         private readonly Border claudeProjectSeparator;
         private readonly Border claudeModelSeparator;
+        private readonly TextBlock claudeProjectTitle;
+        private readonly TextBlock claudeModelTitle;
+        private readonly TextBlock claudeTokenTitle;
         private readonly TextBlock claudeProjectValue;
         private readonly TextBlock claudeModelValue;
         private readonly TextBlock claudeTokenValue;
@@ -110,6 +114,7 @@ public sealed class DetailsWindow : Window
         private readonly DispatcherTimer quotaTimer;
         private UsageMetrics previewMetrics;
         private ClaudeCodeMetrics previewClaudeMetrics;
+        private bool showsMonthly;
         private AgentKind currentAgent;
         private AggregateSnapshot currentAggregate;
         private List<SessionSnapshot> currentSessions;
@@ -160,7 +165,7 @@ public sealed class DetailsWindow : Window
             switcher.HorizontalAlignment = HorizontalAlignment.Left;
             switcher.VerticalAlignment = VerticalAlignment.Center;
             top.Children.Add(switcher);
-            Border contextPill = new Border
+            Border contextPillBorder = new Border
             {
                 Width = 90,
                 Height = 26,
@@ -172,6 +177,7 @@ public sealed class DetailsWindow : Window
                 BorderBrush = new SolidColorBrush(MediaColor.FromArgb(70, 83, 174, 197)),
                 BorderThickness = new Thickness(1)
             };
+            contextPill = contextPillBorder;
             Grid contextGrid = new Grid();
             contextGrid.Width = 78;
             contextGrid.HorizontalAlignment = HorizontalAlignment.Center;
@@ -179,7 +185,7 @@ public sealed class DetailsWindow : Window
             contextGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(40) });
             contextGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(2) });
             contextGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(36) });
-            contextLabel = NewText("上下文", 12.2, MediaColor.FromRgb(53, 125, 145),
+            contextLabel = NewText(L10n.Instance["context.title"], 12.2, MediaColor.FromRgb(53, 125, 145),
                 FontWeights.Normal, true);
             contextLabel.HorizontalAlignment = HorizontalAlignment.Right;
             contextLabel.VerticalAlignment = VerticalAlignment.Center;
@@ -189,39 +195,39 @@ public sealed class DetailsWindow : Window
                 out contextUnavailableValue);
             Grid.SetColumn(contextValueGrid, 2);
             contextGrid.Children.Add(contextValueGrid);
-            contextPill.Child = contextGrid;
-            Grid.SetColumn(contextPill, 2);
-            top.Children.Add(contextPill);
+            contextPillBorder.Child = contextGrid;
+            Grid.SetColumn(contextPillBorder, 2);
+            top.Children.Add(contextPillBorder);
             top.Margin = new Thickness(0, 0, 0, 7);
             content.Children.Add(top);
 
             headline = NewText("OFFLINE", 20, MediaColor.FromRgb(40, 52, 60),
                 FontWeights.Bold);
             content.Children.Add(headline);
-            subtitle = NewText("Codex 未运行", 13,
+            subtitle = NewText(L10n.Instance["status.offline_codex"], 13,
                 MediaColor.FromRgb(103, 117, 126), FontWeights.Normal, true);
             subtitle.Margin = new Thickness(0, 1, 0, 13);
             content.Children.Add(subtitle);
 
             quotaGroup = new StackPanel();
-            fiveHourRow = CreateQuotaRow("5 小时额度", out fiveHourLabel,
+            fiveHourRow = CreateQuotaRow(L10n.Instance["quota.5h"], out fiveHourLabel,
                 out fiveHourReset, out fiveHourValue, out fiveHourBar);
             quotaGroup.Children.Add(fiveHourRow);
-            weekRow = CreateQuotaRow("周额度", out weekLabel, out weekReset,
+            weekRow = CreateQuotaRow(L10n.Instance["quota.weekly"], out weekLabel, out weekReset,
                 out weekValue, out weekBar);
             weekRow.Margin = new Thickness(0, 8, 0, 0);
             quotaGroup.Children.Add(weekRow);
 
             claudeGroup = new StackPanel();
-            claudeProjectRow = CreateInfoRow("项目", out claudeProjectValue);
+            claudeProjectRow = CreateInfoRow(L10n.Instance["metadata.project"], out claudeProjectTitle, out claudeProjectValue);
             claudeGroup.Children.Add(claudeProjectRow);
             claudeProjectSeparator = CreateInfoSeparator();
             claudeGroup.Children.Add(claudeProjectSeparator);
-            claudeModelRow = CreateInfoRow("模型", out claudeModelValue);
+            claudeModelRow = CreateInfoRow(L10n.Instance["metadata.model"], out claudeModelTitle, out claudeModelValue);
             claudeGroup.Children.Add(claudeModelRow);
             claudeModelSeparator = CreateInfoSeparator();
             claudeGroup.Children.Add(claudeModelSeparator);
-            claudeTokenRow = CreateInfoRow("输入输出", out claudeTokenValue);
+            claudeTokenRow = CreateInfoRow(L10n.Instance["metadata.tokens"], out claudeTokenTitle, out claudeTokenValue);
             claudeTokenValue.FontSize = 11.5;
             claudeTokenValue.FontWeight = FontWeights.Medium;
             claudeGroup.Children.Add(claudeTokenRow);
@@ -248,6 +254,11 @@ public sealed class DetailsWindow : Window
                 }
             };
             quotaTimer.Start();
+
+            L10n.Instance.LanguageChanged += (s, ev) =>
+            {
+                Dispatcher.Invoke(() => RefreshAllText());
+            };
         }
 
         private void OnSourceInitialized(object sender, EventArgs e)
@@ -282,10 +293,10 @@ public sealed class DetailsWindow : Window
                 if (String.Equals(aggregate.Label, "PAUSED",
                     StringComparison.OrdinalIgnoreCase))
                 {
-                    return "状态监听已暂停";
+                    return L10n.Instance["status.paused"];
                 }
                 return aggregate.FocusedAgent == AgentKind.ClaudeCode
-                    ? "Claude Code 未运行" : "Codex 未运行";
+                    ? L10n.Instance["status.offline_claude"] : L10n.Instance["status.offline_codex"];
             }
             if (String.Equals(aggregate.Label, "STANDBY",
                 StringComparison.OrdinalIgnoreCase) &&
@@ -300,53 +311,59 @@ public sealed class DetailsWindow : Window
             string action = active == null ? String.Empty : active.Action;
             if (action.IndexOf("Writing answer", StringComparison.OrdinalIgnoreCase) >= 0)
             {
-                return "正在输出答案";
+                return L10n.Instance["status.writing_answer"];
             }
             if (action.IndexOf("command", StringComparison.OrdinalIgnoreCase) >= 0)
             {
-                return "正在执行命令";
+                return L10n.Instance["status.running_command"];
             }
             if (action.IndexOf("Editing", StringComparison.OrdinalIgnoreCase) >= 0)
             {
-                return "正在编辑文件";
+                return L10n.Instance["status.editing_files"];
             }
             if (action.IndexOf("Search", StringComparison.OrdinalIgnoreCase) >= 0)
             {
-                return "正在搜索信息";
+                return L10n.Instance["status.searching"];
             }
             if (action.IndexOf("Compressing context", StringComparison.OrdinalIgnoreCase) >= 0)
             {
-                return "正在自动压缩上下文";
+                return L10n.Instance["status.compressing_context"];
             }
             if (action.IndexOf("Context compacted", StringComparison.OrdinalIgnoreCase) >= 0)
             {
-                return "上下文压缩完成";
+                return L10n.Instance["status.context_compacted"];
             }
             if (action.IndexOf("Awaiting permission", StringComparison.OrdinalIgnoreCase) >= 0)
             {
-                return "等待你的授权";
+                return L10n.Instance["status.awaiting_permission"];
             }
             if (action.IndexOf("Reviewing result", StringComparison.OrdinalIgnoreCase) >= 0)
             {
-                return "正在分析结果";
+                return L10n.Instance["status.reviewing_result"];
             }
             switch (aggregate.State)
             {
-                case HaloState.Thinking: return "正在思考与规划";
-                case HaloState.Working: return "正在执行任务";
-                case HaloState.Done: return "任务已完成";
-                case HaloState.Attention: return "等待你的授权或输入";
+                case HaloState.Thinking: return L10n.Instance["status.thinking"];
+                case HaloState.Working: return L10n.Instance["status.working"];
+                case HaloState.Done: return L10n.Instance["status.done"];
+                case HaloState.Attention: return L10n.Instance["status.attention"];
                 case HaloState.Error:
                     return String.IsNullOrEmpty(aggregate.Detail)
-                        ? "任务已中断" : aggregate.Detail;
+                        ? L10n.Instance["status.error"] : aggregate.Detail;
                 default:
                     return String.IsNullOrEmpty(aggregate.Detail)
-                        ? "状态未知" : aggregate.Detail;
+                        ? L10n.Instance["status.unknown"] : aggregate.Detail;
             }
         }
 
         private void RefreshSupplementalData()
         {
+            if (IsOfflineAggregate(currentAggregate))
+            {
+                ApplyOfflinePlaceholders();
+                return;
+            }
+            contextPill.Visibility = Visibility.Visible;
             if (currentAgent == AgentKind.ClaudeCode)
             {
                 RefreshClaudeDetails();
@@ -355,6 +372,43 @@ public sealed class DetailsWindow : Window
             {
                 RefreshQuota();
             }
+        }
+
+        private static bool IsOfflineAggregate(AggregateSnapshot aggregate)
+        {
+            // Mirrors the macOS check: an idle ring labeled OFFLINE means we
+            // have no live session, so any project/model/token/context values
+            // would be stale carry-over from the previous run.
+            return aggregate != null
+                && aggregate.State == HaloState.Idle
+                && String.Equals(aggregate.Label, "OFFLINE",
+                    StringComparison.OrdinalIgnoreCase);
+        }
+
+        private void ApplyOfflinePlaceholders()
+        {
+            if (currentAgent == AgentKind.ClaudeCode)
+            {
+                claudeProjectRow.Visibility = Visibility.Visible;
+                claudeProjectSeparator.Visibility = Visibility.Visible;
+                claudeModelSeparator.Visibility = Visibility.Visible;
+                claudeModelRow.Margin = new Thickness(0);
+                claudeTokenRow.Margin = new Thickness(0);
+                claudeProjectValue.Text = "--";
+                claudeModelValue.Text = "--";
+                claudeTokenValue.Text = "--";
+            }
+            else
+            {
+                // Codex offline still surfaces the quota rows (rendered as
+                // "quota.no_data"); only the context pill should drop out
+                // since there's no live session to source a percentage from.
+                RefreshQuota();
+            }
+            // Drop the context pill rather than echoing a percentage from the
+            // session that just went offline. Done after RefreshQuota since
+            // that path resets context-pill visibility.
+            contextPill.Visibility = Visibility.Collapsed;
         }
 
         private void RefreshClaudeDetails()
@@ -371,11 +425,11 @@ public sealed class DetailsWindow : Window
             claudeModelRow.Margin = new Thickness(0);
             claudeTokenRow.Margin = new Thickness(0);
             claudeProjectValue.Text = DisplayProjectName(primary);
-            claudeModelValue.Text = metrics.HasModel ? metrics.Model : "暂无数据";
+            claudeModelValue.Text = metrics.HasModel ? metrics.Model : L10n.Instance["quota.no_data"];
             claudeTokenValue.Text = metrics.HasTokenUsage
                 ? "↑" + FormatCompactNumber(metrics.InputTokens) +
                   " · ↓" + FormatCompactNumber(metrics.OutputTokens)
-                : "暂无数据";
+                : L10n.Instance["quota.no_data"];
             SetContextPercent(metrics.HasContext, metrics.ContextUsedPercent);
         }
 
@@ -601,9 +655,10 @@ public sealed class DetailsWindow : Window
 
         private void ApplyPlusQuota(UsageMetrics metrics)
         {
+            showsMonthly = false;
             quotaGroup.VerticalAlignment = VerticalAlignment.Center;
-            fiveHourLabel.Text = "5 小时额度";
-            weekLabel.Text = "周额度";
+            fiveHourLabel.Text = L10n.Instance["quota.5h"];
+            weekLabel.Text = L10n.Instance["quota.weekly"];
             fiveHourRow.Visibility = Visibility.Visible;
             weekRow.Visibility = Visibility.Visible;
             fiveHourRow.Margin = new Thickness(0);
@@ -616,8 +671,9 @@ public sealed class DetailsWindow : Window
 
         private void ApplyMonthlyQuota(UsageMetrics metrics, bool hasMonthlyData)
         {
+            showsMonthly = true;
             quotaGroup.VerticalAlignment = VerticalAlignment.Center;
-            fiveHourLabel.Text = "月额度";
+            fiveHourLabel.Text = L10n.Instance["quota.monthly"];
             fiveHourRow.Visibility = Visibility.Visible;
             weekRow.Visibility = Visibility.Collapsed;
             fiveHourRow.Margin = new Thickness(0);
@@ -637,7 +693,7 @@ public sealed class DetailsWindow : Window
         {
             if (!available)
             {
-                value.Text = "暂无数据";
+                value.Text = L10n.Instance["quota.no_data"];
                 reset.Text = String.Empty;
                 reset.Visibility = Visibility.Collapsed;
                 bar.Value = 0;
@@ -645,15 +701,14 @@ public sealed class DetailsWindow : Window
             }
             if (IsQuotaExpired(resetUtc, DateTime.UtcNow))
             {
-                value.Text = "等待 Codex 刷新";
+                value.Text = L10n.Instance["quota.waiting_refresh"];
                 reset.Text = String.Empty;
                 reset.Visibility = Visibility.Collapsed;
                 bar.Value = 0;
                 return;
             }
             double remaining = Math.Max(0, Math.Min(100, 100 - usedPercent));
-            value.Text = String.Format(CultureInfo.InvariantCulture,
-                "剩余 {0:0}%", remaining);
+            value.Text = L10n.Instance.Format("quota.remaining", (int)Math.Round(remaining));
             reset.Text = FormatResetTime(resetUtc);
             reset.Visibility = String.IsNullOrEmpty(reset.Text)
                 ? Visibility.Collapsed : Visibility.Visible;
@@ -663,7 +718,7 @@ public sealed class DetailsWindow : Window
         private static void ApplyQuotaPending(TextBlock value, TextBlock reset,
             RoundedMeter bar)
         {
-            value.Text = "等待 Codex 刷新";
+            value.Text = L10n.Instance["quota.waiting_refresh"];
             reset.Text = String.Empty;
             reset.Visibility = Visibility.Collapsed;
             bar.Value = 0;
@@ -681,9 +736,11 @@ public sealed class DetailsWindow : Window
                 return String.Empty;
             }
             DateTime local = resetUtc.ToLocalTime();
-            return local.Date == DateTime.Now.Date
-                ? local.ToString("HH:mm '刷新'", CultureInfo.CurrentCulture)
-                : local.ToString("M月d日 HH:mm '刷新'", CultureInfo.CurrentCulture);
+            var culture = new CultureInfo(L10n.Instance["date.culture"]);
+            var format = local.Date == DateTime.Now.Date
+                ? L10n.Instance["date.today_format"]
+                : L10n.Instance["date.other_format"];
+            return local.ToString(format, culture);
         }
 
         private static Grid CreateQuotaRow(string title, out TextBlock name,
@@ -706,7 +763,7 @@ public sealed class DetailsWindow : Window
             reset.Visibility = Visibility.Collapsed;
             Grid.SetColumn(reset, 1);
             labels.Children.Add(reset);
-            value = NewText("暂无数据", 12, MediaColor.FromRgb(48, 60, 68),
+            value = NewText(L10n.Instance["quota.no_data"], 12, MediaColor.FromRgb(48, 60, 68),
                 FontWeights.SemiBold, true);
             value.HorizontalAlignment = HorizontalAlignment.Right;
             Grid.SetColumn(value, 2);
@@ -732,15 +789,15 @@ public sealed class DetailsWindow : Window
             };
         }
 
-        private static Grid CreateInfoRow(string title, out TextBlock value)
+        private static Grid CreateInfoRow(string title, out TextBlock titleBlock, out TextBlock value)
         {
             Grid grid = new Grid();
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             grid.ColumnDefinitions.Add(new ColumnDefinition());
-            TextBlock name = NewText(title, 12, MediaColor.FromRgb(99, 112, 120),
+            titleBlock = NewText(title, 12, MediaColor.FromRgb(99, 112, 120),
                 FontWeights.Normal, true);
-            grid.Children.Add(name);
-            value = NewText("暂无数据", 12, MediaColor.FromRgb(48, 60, 68),
+            grid.Children.Add(titleBlock);
+            value = NewText(L10n.Instance["quota.no_data"], 12, MediaColor.FromRgb(48, 60, 68),
                 FontWeights.SemiBold, true);
             value.HorizontalAlignment = HorizontalAlignment.Right;
             Grid.SetColumn(value, 1);
@@ -1037,5 +1094,19 @@ public sealed class DetailsWindow : Window
 
         [DllImport("user32.dll")]
         private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+        private void RefreshAllText()
+        {
+            contextLabel.Text = L10n.Instance["context.title"];
+            fiveHourLabel.Text = showsMonthly
+                ? L10n.Instance["quota.monthly"]
+                : L10n.Instance["quota.5h"];
+            weekLabel.Text = L10n.Instance["quota.weekly"];
+            claudeProjectTitle.Text = L10n.Instance["metadata.project"];
+            claudeModelTitle.Text = L10n.Instance["metadata.model"];
+            claudeTokenTitle.Text = L10n.Instance["metadata.tokens"];
+            if (currentAggregate != null)
+                UpdateContent(currentAggregate, currentSessions);
+        }
     }
 }

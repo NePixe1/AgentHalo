@@ -6,6 +6,14 @@ $windows = Join-Path $root "src\windows"
 $output = Join-Path $root "outputs\AgentHalo"
 $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 
+# Sync shared locale JSON into the Windows target so the build copies real
+# file contents rather than relying on cross-platform symlink semantics.
+$sharedLocales = Join-Path $root "src\shared\locales"
+$windowsLocales = Join-Path $windows "locales"
+New-Item -ItemType Directory -Force -Path $windowsLocales | Out-Null
+Copy-Item -LiteralPath (Join-Path $sharedLocales "zh.json") -Destination (Join-Path $windowsLocales "zh.json") -Force
+Copy-Item -LiteralPath (Join-Path $sharedLocales "en.json") -Destination (Join-Path $windowsLocales "en.json") -Force
+
 if (-not (Test-Path -LiteralPath $csc)) {
     throw "The Windows C# compiler was not found at $csc"
 }
@@ -67,6 +75,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Copy-Item -LiteralPath "$root\README.md" -Destination "$output\README.md" -Force
+Copy-Item -LiteralPath "$windows\locales" -Destination "$output\locales" -Recurse -Force
 Remove-Item -LiteralPath (Join-Path $output "AgentHalo.pdb") -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $output "sqlite3.exe") -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $output "AgentHaloHook.exe") -ErrorAction SilentlyContinue

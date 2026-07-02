@@ -4,25 +4,25 @@ import AgentHaloCore
 @MainActor
 final class DetailsPanel: NSPanel {
     private let stack = NSStackView()
-    private let contextValue = NSTextField(labelWithString: "上下文 --")
+    private let contextValue = NSTextField(labelWithString: L10n.shared["context.empty"])
     private let titleField = NSTextField(labelWithString: "OFFLINE")
-    private let detailField = NSTextField(labelWithString: "Codex 未运行")
-    private let primaryQuota = QuotaRowView(title: "5 小时额度")
-    private let secondaryQuota = QuotaRowView(title: "周额度")
+    private let detailField = NSTextField(labelWithString: L10n.shared["status.offline_codex"])
+    private let primaryQuota = QuotaRowView(title: L10n.shared["quota.5h"])
+    private let secondaryQuota = QuotaRowView(title: L10n.shared["quota.weekly"])
     private let agentToggle = AgentToggleView()
     private let contextPill = NSView()
     private let quotaGroup = NSStackView()
     private let metadataGroup = NSStackView()
     private let projectRow = MetadataRowView(
-        title: "项目"
+        title: L10n.shared["metadata.project"]
     )
     private let modelRow = MetadataRowView(
-        title: "模型"
+        title: L10n.shared["metadata.model"]
     )
     private let projectModelSeparator = SeparatorView()
     private let modelTokenSeparator = SeparatorView()
     private let tokenRow = MetadataRowView(
-        title: "输入输出",
+        title: L10n.shared["metadata.tokens"],
         valueFont: .systemFont(ofSize: 11.5, weight: .medium)
     )
     var onMouseEntered: (() -> Void)?
@@ -31,7 +31,7 @@ final class DetailsPanel: NSPanel {
 
     init() {
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 268, height: 191),
+            contentRect: NSRect(x: 0, y: 0, width: 268, height: 192),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -142,25 +142,45 @@ final class DetailsPanel: NSPanel {
 
         updateStatus(aggregate: aggregate)
 
+        // OFFLINE: no live session — drop any stale context-usage pill and
+        // reset metadata rows to the placeholder so the panel doesn't show
+        // numbers from a prior session.
+        let isOffline = aggregate.state == .idle && aggregate.label == "OFFLINE"
+
         let showsCodexQuota = showsQuota ?? (aggregate.focusedAgent == .codex)
         stack.setCustomSpacing(showsCodexQuota ? 13 : 4, after: detailField)
-        contextPill.isHidden = contextUsedPercent == nil
+        contextPill.isHidden = isOffline || contextUsedPercent == nil
         contextValue.stringValue = contextUsedPercent.map {
-            "上下文 \(Int($0.rounded()))%"
-        } ?? "上下文 --"
+            L10n.shared.format("context.label", Int($0.rounded()))
+        } ?? L10n.shared["context.empty"]
+        // Hide both groups first to avoid a transient state where both
+        // are visible at the same time, which spikes the stack height
+        // and makes the panel visually "grow" for a frame.
+        quotaGroup.isHidden = true
+        metadataGroup.isHidden = true
+        // Now reveal only the relevant group
         quotaGroup.isHidden = !showsCodexQuota
         primaryQuota.isHidden = !showsCodexQuota
         secondaryQuota.isHidden = !showsCodexQuota
         metadataGroup.isHidden = showsCodexQuota
-        projectRow.value = Self.displayValue(sessionDetails?.projectName)
-        modelRow.value = Self.displayValue(sessionDetails?.modelName)
-        if sessionDetails?.inputTokens != nil || sessionDetails?.outputTokens != nil {
-            tokenRow.attributedStringValue = Self.formatTokenAttributedString(
-                input: sessionDetails?.inputTokens,
-                output: sessionDetails?.outputTokens
-            )
-        } else {
+        projectRow.setTitle(L10n.shared["metadata.project"])
+        modelRow.setTitle(L10n.shared["metadata.model"])
+        tokenRow.setTitle(L10n.shared["metadata.tokens"])
+        if isOffline {
+            projectRow.value = "--"
+            modelRow.value = "--"
             tokenRow.value = "--"
+        } else {
+            projectRow.value = Self.displayValue(sessionDetails?.projectName)
+            modelRow.value = Self.displayValue(sessionDetails?.modelName)
+            if sessionDetails?.inputTokens != nil || sessionDetails?.outputTokens != nil {
+                tokenRow.attributedStringValue = Self.formatTokenAttributedString(
+                    input: sessionDetails?.inputTokens,
+                    output: sessionDetails?.outputTokens
+                )
+            } else {
+                tokenRow.value = "--"
+            }
         }
 
         guard showsCodexQuota else {
@@ -195,8 +215,8 @@ final class DetailsPanel: NSPanel {
     }
 
     private func applyPlusQuota(_ quota: RateLimitSnapshot?) {
-        primaryQuota.setTitle("5 小时额度")
-        secondaryQuota.setTitle("周额度")
+        primaryQuota.setTitle(L10n.shared["quota.5h"])
+        secondaryQuota.setTitle(L10n.shared["quota.weekly"])
         primaryQuota.isHidden = false
         secondaryQuota.isHidden = false
         if let quota {
@@ -215,7 +235,7 @@ final class DetailsPanel: NSPanel {
     }
 
     private func applyMonthlyQuota(_ quota: RateLimitSnapshot?, hasMonthlyData: Bool) {
-        primaryQuota.setTitle("月额度")
+        primaryQuota.setTitle(L10n.shared["quota.monthly"])
         primaryQuota.isHidden = false
         secondaryQuota.isHidden = true
         if hasMonthlyData, let quota, let used = quota.monthlyUsedPercent {
@@ -240,8 +260,12 @@ final class DetailsPanel: NSPanel {
         }
         let calendar = Calendar.current
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.dateFormat = calendar.isDateInToday(date) ? "HH:mm '刷新'" : "M月d日 HH:mm '刷新'"
+        formatter.locale = Locale(identifier: L10n.shared["date.culture"])
+        if calendar.isDateInToday(date) {
+            formatter.dateFormat = L10n.shared["date.today_format"]
+        } else {
+            formatter.dateFormat = L10n.shared["date.other_format"]
+        }
         return formatter.string(from: date)
     }
 
@@ -301,7 +325,7 @@ final class DetailsPanel: NSPanel {
     static func localizedDetail(for aggregate: AggregateSnapshot) -> String {
         if aggregate.state == .idle {
             if aggregate.label == "PAUSED" {
-                return "状态监听已暂停"
+                return L10n.shared["status.paused"]
             }
             return aggregate.focusedAgent.localizedOfflineDetail
         }
@@ -311,22 +335,22 @@ final class DetailsPanel: NSPanel {
         }
         let action = aggregate.sessions.first?.action ?? aggregate.detail
         if action.localizedCaseInsensitiveContains("Writing answer") {
-            return "正在输出答案"
+            return L10n.shared["status.writing_answer"]
         }
-        if action.localizedCaseInsensitiveContains("command") { return "正在执行命令" }
-        if action.localizedCaseInsensitiveContains("Editing") { return "正在编辑文件" }
-        if action.localizedCaseInsensitiveContains("Search") { return "正在搜索信息" }
-        if action.localizedCaseInsensitiveContains("Compressing context") { return "正在压缩上下文" }
-        if action.localizedCaseInsensitiveContains("Context compacted") { return "上下文压缩完成" }
-        if action.localizedCaseInsensitiveContains("Awaiting permission") { return "等待你的授权" }
-        if action.localizedCaseInsensitiveContains("Permission denied") { return "授权已拒绝" }
-        if action.localizedCaseInsensitiveContains("Reviewing result") { return "正在分析结果" }
+        if action.localizedCaseInsensitiveContains("command") { return L10n.shared["status.running_command"] }
+        if action.localizedCaseInsensitiveContains("Editing") { return L10n.shared["status.editing_files"] }
+        if action.localizedCaseInsensitiveContains("Search") { return L10n.shared["status.searching"] }
+        if action.localizedCaseInsensitiveContains("Compressing context") { return L10n.shared["status.compressing_context"] }
+        if action.localizedCaseInsensitiveContains("Context compacted") { return L10n.shared["status.context_compacted"] }
+        if action.localizedCaseInsensitiveContains("Awaiting permission") { return L10n.shared["status.awaiting_permission"] }
+        if action.localizedCaseInsensitiveContains("Permission denied") { return L10n.shared["status.permission_denied"] }
+        if action.localizedCaseInsensitiveContains("Reviewing result") { return L10n.shared["status.reviewing_result"] }
         switch aggregate.state {
-        case .thinking: return "正在思考与规划"
-        case .working: return "正在执行任务"
-        case .done: return "任务已完成"
-        case .attention: return "等待你的授权或输入"
-        case .error: return aggregate.detail.isEmpty ? "任务已中断" : aggregate.detail
+        case .thinking: return L10n.shared["status.thinking"]
+        case .working: return L10n.shared["status.working"]
+        case .done: return L10n.shared["status.done"]
+        case .attention: return L10n.shared["status.attention"]
+        case .error: return aggregate.detail.isEmpty ? L10n.shared["status.error"] : aggregate.detail
         case .idle: return aggregate.focusedAgent.localizedOfflineDetail
         }
     }
@@ -473,6 +497,10 @@ private final class MetadataRowView: NSView {
         set { valueField.attributedStringValue = newValue }
     }
 
+    func setTitle(_ title: String) {
+        nameField.stringValue = title
+    }
+
     init(title: String, isTagStyle: Bool = false, valueFont: NSFont = .systemFont(ofSize: 12, weight: .semibold)) {
         nameField = NSTextField(labelWithString: title)
         super.init(frame: .zero)
@@ -552,7 +580,7 @@ private final class TrackingDetailsContentView: NSView {
 private final class QuotaRowView: NSView {
     private let nameField: NSTextField
     private let resetField = NSTextField(labelWithString: "")
-    private let valueField = NSTextField(labelWithString: "暂无数据")
+    private let valueField = NSTextField(labelWithString: L10n.shared["quota.no_data"])
     private let meter = RoundedMeterView()
 
     init(title: String) {
@@ -569,14 +597,14 @@ private final class QuotaRowView: NSView {
 
     func update(usedPercent: Double, resetAt: Date?) {
         if let resetAt, resetAt <= Date() {
-            valueField.stringValue = "等待 Codex 刷新"
+            valueField.stringValue = L10n.shared["quota.waiting_refresh"]
             resetField.stringValue = ""
             resetField.isHidden = true
             meter.value = 0
             return
         }
         let remaining = min(100, max(0, 100 - usedPercent))
-        valueField.stringValue = "剩余 \(Int(remaining.rounded()))%"
+        valueField.stringValue = L10n.shared.format("quota.remaining", Int(remaining.rounded()))
         meter.value = remaining
         let resetText = DetailsPanel.formatResetTime(resetAt)
         resetField.stringValue = resetText
@@ -584,7 +612,7 @@ private final class QuotaRowView: NSView {
     }
 
     func updateUnavailable() {
-        valueField.stringValue = "暂无数据"
+        valueField.stringValue = L10n.shared["quota.no_data"]
         resetField.stringValue = ""
         resetField.isHidden = true
         meter.value = 0
@@ -594,7 +622,7 @@ private final class QuotaRowView: NSView {
     /// but Codex hasn't surfaced a rate-limit snapshot yet. Mirrors the
     /// Windows "等待 Codex 刷新" pending row.
     func updatePending() {
-        valueField.stringValue = "等待 Codex 刷新"
+        valueField.stringValue = L10n.shared["quota.waiting_refresh"]
         resetField.stringValue = ""
         resetField.isHidden = true
         meter.value = 0
@@ -611,11 +639,18 @@ private final class QuotaRowView: NSView {
     private func setup() {
         nameField.font = .systemFont(ofSize: 12, weight: .regular)
         nameField.textColor = NSColor(calibratedRed: 0.37, green: 0.44, blue: 0.48, alpha: 1)
+        nameField.lineBreakMode = .byTruncatingTail
+        nameField.setContentCompressionResistancePriority(.required, for: .horizontal)
+        nameField.setContentHuggingPriority(.required, for: .horizontal)
         resetField.font = .systemFont(ofSize: 11, weight: .regular)
         resetField.textColor = NSColor(calibratedRed: 0.49, green: 0.56, blue: 0.60, alpha: 1)
+        resetField.lineBreakMode = .byTruncatingTail
+        resetField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         valueField.font = .systemFont(ofSize: 12, weight: .semibold)
         valueField.textColor = NSColor(calibratedRed: 0.18, green: 0.24, blue: 0.29, alpha: 1)
         valueField.alignment = .right
+        valueField.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        valueField.setContentHuggingPriority(.required, for: .horizontal)
 
         [nameField, resetField, valueField, meter].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
