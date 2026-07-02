@@ -20,6 +20,8 @@ func runHaloInteractionChecks() {
     testDetailsPanelPixelAlignmentUsesBackingScale()
     testDetailsPanelPositioningSnapsToBackingPixels()
     testL10nEnglishSwitchProducesEnglishStrings()
+    testLanguageMenuStateSeparatesAutoFromResolvedLanguage()
+    testManualLanguagePreferenceSurvivesMatchingSystemLanguage()
     testRightClickInvokesContextMenuCallback()
     testSingleClickDoesNotActivateCodex()
     testHaloContextMenuContainsCurrentControls()
@@ -1723,8 +1725,8 @@ private func testL10nEnglishSwitchProducesEnglishStrings() {
     )
 
     // formatResetTime must honor date.culture (en-US) rather than zh-CN.
-    // Pin to a known instant — Jan 5, 14:30 local — so the English locale
-    // produces "Jan 5, 14:30 refresh", not the Chinese "1月5日 14:30 刷新".
+    // Pin to a known instant so the English locale produces "Jan 5",
+    // not the Chinese "1月5日".
     var components = DateComponents()
     components.year = 2026
     components.month = 1
@@ -1737,7 +1739,45 @@ private func testL10nEnglishSwitchProducesEnglishStrings() {
     }
     let formatted = DetailsPanel.formatResetTime(reset)
     expect(
-        formatted.contains("Jan") && formatted.contains("14:30") && formatted.contains("refresh"),
-        "formatResetTime should render English month + 'refresh' suffix when language=en (got: \(formatted))"
+        formatted.contains("Jan") && !formatted.contains("刷新") && !formatted.contains("refresh"),
+        "formatResetTime should render English date without refresh suffix when language=en (got: \(formatted))"
+    )
+}
+
+private func testLanguageMenuStateSeparatesAutoFromResolvedLanguage() {
+    expect(
+        AppDelegate.languageMenuItemState(itemLanguage: nil, savedLanguage: nil),
+        .on,
+        "auto language item should be checked when preference is follow-system"
+    )
+    expect(
+        AppDelegate.languageMenuItemState(itemLanguage: "en", savedLanguage: nil),
+        .off,
+        "resolved system language should not make explicit English look manually selected"
+    )
+    expect(
+        AppDelegate.languageMenuItemState(itemLanguage: "en", savedLanguage: "en"),
+        .on,
+        "explicit English item should be checked when preference is English"
+    )
+}
+
+private func testManualLanguagePreferenceSurvivesMatchingSystemLanguage() {
+    expect(
+        AppDelegate.languagePreferenceAfterResolvedLanguageChange(
+            savedLanguage: "en",
+            currentLanguage: "en",
+            systemLanguage: "en"
+        ),
+        "en",
+        "manual language selection should remain explicit even when it matches the system language"
+    )
+    expect(
+        AppDelegate.languagePreferenceAfterResolvedLanguageChange(
+            savedLanguage: nil,
+            currentLanguage: "en",
+            systemLanguage: "en"
+        ) == nil,
+        "follow-system language selection should remain nil"
     )
 }

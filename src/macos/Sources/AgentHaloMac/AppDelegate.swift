@@ -180,13 +180,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.currentLanguage = L10n.shared.currentLanguage
-                // Persist preference
-                self?.settings.language = L10n.shared.currentLanguage == L10n.detectSystemLanguage() ? nil : L10n.shared.currentLanguage
-                self?.settingsStore.save(self!.settings)
+                guard let self else { return }
+                self.currentLanguage = L10n.shared.currentLanguage
+                self.settings.language = Self.languagePreferenceAfterResolvedLanguageChange(
+                    savedLanguage: self.settings.language,
+                    currentLanguage: L10n.shared.currentLanguage,
+                    systemLanguage: L10n.detectSystemLanguage()
+                )
                 // Rebuild menu so all items show new language
-                self?.lastStatusMenuSignature = nil
-                self?.tick()
+                self.lastStatusMenuSignature = nil
+                self.tick()
             }
         }
         tick()
@@ -1069,10 +1072,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSMenuItem(title: title, action: #selector(selectLanguage(_:)), keyEquivalent: "")
         item.target = self
         item.representedObject = lang as NSString?
-        // Checkmark: nil = follow system
-        let effectiveLanguage = settings.language ?? L10n.detectSystemLanguage()
-        item.state = (lang == effectiveLanguage) ? .on : .off
+        item.state = Self.languageMenuItemState(
+            itemLanguage: lang,
+            savedLanguage: settings.language
+        )
         menu.addItem(item)
+    }
+
+    nonisolated static func languageMenuItemState(
+        itemLanguage: String?,
+        savedLanguage: String?
+    ) -> NSControl.StateValue {
+        itemLanguage == savedLanguage ? .on : .off
+    }
+
+    nonisolated static func languagePreferenceAfterResolvedLanguageChange(
+        savedLanguage: String?,
+        currentLanguage: String,
+        systemLanguage: String
+    ) -> String? {
+        savedLanguage
     }
 
     @objc private func selectLanguage(_ sender: NSMenuItem) {

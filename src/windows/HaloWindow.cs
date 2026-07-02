@@ -60,6 +60,7 @@ public sealed class HaloWindow : Window
         public HaloWindow(HaloSettings appSettings)
         {
             settings = appSettings;
+            ConfigureLocalization(settings);
             double initialSize = SizeForScale(settings.HaloScalePercent);
             Width = initialSize;
             Height = initialSize;
@@ -990,9 +991,20 @@ public sealed class HaloWindow : Window
                 : L10n.Instance["menu.language.auto"];
             var item = new Forms.ToolStripMenuItem(title, null, OnLanguageSelected);
             item.Tag = lang;
-            string effective = settings.Language ?? L10n.DetectSystemLanguage();
-            item.Checked = (lang == effective);
+            item.Checked = IsLanguageMenuItemChecked(lang, settings.Language);
             return item;
+        }
+
+        internal static void ConfigureLocalization(HaloSettings appSettings)
+        {
+            L10n.Instance.SetLanguage(appSettings == null ? null : appSettings.Language);
+        }
+
+        internal static bool IsLanguageMenuItemChecked(string itemLanguage,
+            string savedLanguage)
+        {
+            return String.Equals(itemLanguage, savedLanguage,
+                StringComparison.Ordinal);
         }
 
         private void OnLanguageSelected(object sender, EventArgs e)
