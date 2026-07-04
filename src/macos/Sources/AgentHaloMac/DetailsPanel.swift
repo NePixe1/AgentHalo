@@ -3,7 +3,8 @@ import AgentHaloCore
 
 @MainActor
 final class DetailsPanel: NSPanel {
-    private static let contextPillWidth: CGFloat = 47
+    private static let contextPillWidth: CGFloat = 42
+    private static let contextPillHorizontalPadding: CGFloat = 3
 
     private let stack = NSStackView()
     private let contextValue = NSTextField(labelWithString: L10n.shared["context.empty"])
@@ -405,8 +406,8 @@ final class DetailsPanel: NSPanel {
             contextPill.centerYAnchor.constraint(equalTo: row.centerYAnchor),
             contextPill.widthAnchor.constraint(equalToConstant: Self.contextPillWidth),
             contextPill.leadingAnchor.constraint(greaterThanOrEqualTo: agentToggle.trailingAnchor, constant: 10),
-            contextValue.leadingAnchor.constraint(equalTo: contextPill.leadingAnchor, constant: 9),
-            contextValue.trailingAnchor.constraint(equalTo: contextPill.trailingAnchor, constant: -9),
+            contextValue.leadingAnchor.constraint(equalTo: contextPill.leadingAnchor, constant: Self.contextPillHorizontalPadding),
+            contextValue.trailingAnchor.constraint(equalTo: contextPill.trailingAnchor, constant: -Self.contextPillHorizontalPadding),
             contextValue.topAnchor.constraint(equalTo: contextPill.topAnchor, constant: 3),
             contextValue.bottomAnchor.constraint(equalTo: contextPill.bottomAnchor, constant: -3)
         ])
@@ -443,6 +444,10 @@ final class DetailsPanel: NSPanel {
 
     var contextValueIntrinsicWidthForTesting: CGFloat {
         contextValue.intrinsicContentSize.width
+    }
+
+    var contextValueExpansionFrameForTesting: CGRect {
+        contextValue.cell?.expansionFrame(withFrame: contextValue.bounds, in: contextValue) ?? .zero
     }
 
     var primaryQuotaHiddenForTesting: Bool {

@@ -1066,7 +1066,11 @@ private func testDetailsPanelKeepsContextPillWidthStable() {
     let doubleDigitWidth = panel.contextPillWidthForTesting
 
     expect(abs(singleDigitWidth - doubleDigitWidth) < 0.5, "context pill width should stay stable as the percent changes")
-    expect(abs(doubleDigitWidth - 47) < 0.5, "context pill should use the tighter fixed width")
+    expect(abs(doubleDigitWidth - 42) < 0.5, "context pill should use the tighter fixed width")
+    expect(
+        panel.contextValueExpansionFrameForTesting.isEmpty,
+        "context pill should not ask AppKit for an expansion frame, which means the percent would be truncated"
+    )
     expect(
         panel.contextValueIntrinsicWidthForTesting <= panel.contextValueWidthForTesting + 0.5,
         "context pill should still fit a two-digit percent without truncation"
