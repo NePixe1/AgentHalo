@@ -395,7 +395,18 @@ public static class Diagnostics
                 Assert(GeneratedHaloSpec.FriendlyAction("apply_patch") == "Editing files",
                     "generated action rules");
                 Assert(GeneratedHaloSpec.ClassifyFailure("server overloaded") ==
-                    "服务暂时不可用", "generated failure rules");
+                    "failure.service_unavailable", "generated failure rules");
+                L10n.Instance.SetLanguage("zh");
+                HaloWindow.ConfigureLocalization(new HaloSettings { Language = "en" });
+                Assert(L10n.Instance.CurrentLanguage == "en",
+                    "saved Windows language initializes L10n before UI text is built");
+                Assert(HaloWindow.IsLanguageMenuItemChecked(null, null),
+                    "auto language item is checked when preference follows system");
+                Assert(!HaloWindow.IsLanguageMenuItemChecked("en", null),
+                    "resolved system language does not check explicit English item");
+                Assert(HaloWindow.IsLanguageMenuItemChecked("en", "en"),
+                    "explicit English language item is checked when preference is English");
+                L10n.Instance.SetLanguage("zh");
                 Assert(Math.Abs(HaloVisual.DiagnosticGapSeparation(0) - 40) < 0.001,
                     "magnetic repulsion starts at minimum separation");
                 Assert(Math.Abs(HaloVisual.DiagnosticGapSeparation(1) - 150) < 0.001,

@@ -31,6 +31,7 @@ public enum ClaudeMainSessionDetailsResolver {
         return ClaudeMainSessionDetails(
             sessionDetails: SessionDetailsSnapshot(
                 projectName: projectName,
+                sessionTitle: mainSession?.sessionTitle,
                 modelName: exactUsage?.modelName,
                 inputTokens: exactUsage?.inputTokens,
                 outputTokens: exactUsage?.outputTokens

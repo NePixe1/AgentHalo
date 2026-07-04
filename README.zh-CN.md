@@ -1,22 +1,43 @@
-# Agent Halo
+<a id="readme-top"></a>
 
-![Agent Halo READY 状态横幅](assets/agent-halo-readme-banner.png)
+<div align="center">
+  <img src="assets/agent-halo-readme-banner.png" alt="Agent Halo Banner" width="760"/>
+</div>
 
-编码 Agent 的本地常驻状态光环。
+<h1 align="center">Agent Halo</h1>
 
-当前版本支持 Codex，并在 macOS 上通过生命周期 hooks 和 status line proxy 支持 Claude Code（CC）。
+<div align="center">
+  <p>
+    <a href="https://github.com/NePixe1/AgentHalo/releases/latest">
+      <img src="https://img.shields.io/github/downloads/NePixe1/AgentHalo/latest/total?style=flat&label=下载%20%40latest&labelColor=444&logo=github&logoColor=white&cacheSeconds=600" alt="最新下载">
+    </a>
+    <a href="https://github.com/NePixe1/AgentHalo/releases">
+      <img src="https://img.shields.io/github/downloads/NePixe1/AgentHalo/total?label=总下载量" alt="总下载量">
+    </a>
+  </p>
+  <p>
+    <img src="https://img.shields.io/badge/版本-0.13.0-14B8A6?style=for-the-badge" alt="Version"/>
+    <img src="https://img.shields.io/badge/仅本地运行-0F172A?style=for-the-badge" alt="Local Only"/>
+    <img src="https://img.shields.io/badge/Swift-FA7343?style=for-the-badge&logo=swift&logoColor=white" alt="Swift"/>
+    <img src="https://img.shields.io/badge/Xcode-007ACC?style=for-the-badge&logo=xcode&logoColor=white" alt="Xcode"/>
+    <img src="https://img.shields.io/badge/C%23-512BD4?style=for-the-badge&logo=csharp&logoColor=white" alt="C#"/>
+    <img src="https://img.shields.io/badge/.NET-512BD4?style=for-the-badge&logo=dotnet&logoColor=white" alt=".NET"/>
+    <img src="https://img.shields.io/badge/macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="macOS"/>
+    <img src="https://img.shields.io/badge/Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Windows"/>
+    <img src="https://img.shields.io/badge/Git-E44C30?style=for-the-badge&logo=git&logoColor=white" alt="Git"/>
+  </p>
+  <p>Agent 的本地常驻状态光环。在桌面上原生呈现各种 Agent 的执行与规划状态。</p>
+  <p><a href="README.md">English</a> | 简体中文</p>
+</div>
 
-版本：`0.13.0`
 
-[English](README.md) | 简体中文
+---
 
 跨平台行为以
 [`src/shared/spec/agent-halo.v2.json`](src/shared/spec/agent-halo.v2.json)
 为唯一参数来源，并生成 C# 与 Swift 常量；Windows 和 macOS 继续使用各自的原生渲染。
-详见 [共享契约说明](src/shared/README.md)与
+详见 [共享契约说明](src/shared/README.md) 与
 [跨平台架构说明](docs/CROSS_PLATFORM_SHARED_CONTRACT.md)。
-
----
 
 ## 系统要求
 

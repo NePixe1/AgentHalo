@@ -1,22 +1,43 @@
-# Agent Halo
+<a id="readme-top"></a>
 
-![Agent Halo READY status banner](assets/agent-halo-readme-banner.png)
+<div align="center">
+  <img src="assets/agent-halo-readme-banner.png" alt="Agent Halo Banner" width="760"/>
+</div>
 
-A local, always-on-top status halo for coding agents.
+<h1 align="center">Agent Halo</h1>
 
-The current release supports Codex and macOS Claude Code via lifecycle hooks and status line proxy.
+<div align="center">
+  <p>
+    <a href="https://github.com/NePixe1/AgentHalo/releases/latest">
+      <img src="https://img.shields.io/github/downloads/NePixe1/AgentHalo/latest/total?style=flat&label=Downloads%20%40latest&labelColor=444&logo=github&logoColor=white&cacheSeconds=600" alt="Latest downloads">
+    </a>
+    <a href="https://github.com/NePixe1/AgentHalo/releases">
+      <img src="https://img.shields.io/github/downloads/NePixe1/AgentHalo/total?label=Total%20Downloads" alt="Total downloads">
+    </a>
+  </p>
+  <p>
+    <img src="https://img.shields.io/badge/version-0.13.0-14B8A6?style=for-the-badge" alt="Version"/>
+    <img src="https://img.shields.io/badge/local--only-0F172A?style=for-the-badge" alt="Local Only"/>
+    <img src="https://img.shields.io/badge/Swift-FA7343?style=for-the-badge&logo=swift&logoColor=white" alt="Swift"/>
+    <img src="https://img.shields.io/badge/Xcode-007ACC?style=for-the-badge&logo=xcode&logoColor=white" alt="Xcode"/>
+    <img src="https://img.shields.io/badge/C%23-512BD4?style=for-the-badge&logo=csharp&logoColor=white" alt="C#"/>
+    <img src="https://img.shields.io/badge/.NET-512BD4?style=for-the-badge&logo=dotnet&logoColor=white" alt=".NET"/>
+    <img src="https://img.shields.io/badge/macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="macOS"/>
+    <img src="https://img.shields.io/badge/Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Windows"/>
+    <img src="https://img.shields.io/badge/Git-E44C30?style=for-the-badge&logo=git&logoColor=white" alt="Git"/>
+  </p>
+  <p>A local, always-on-top status halo for agents, rendering execution and planning states natively on your desktop.</p>
+  <p>English | <a href="README.zh-CN.md">Simplified Chinese</a></p>
+</div>
 
-Version: `0.13.0`
 
-English | [简体中文](README.zh-CN.md)
+---
 
 Cross-platform behavior is generated from
 [`src/shared/spec/agent-halo.v2.json`](src/shared/spec/agent-halo.v2.json), while
 platform-specific rendering remains native. See the
 [shared contract guide](src/shared/README.md) and
 [architecture notes](docs/CROSS_PLATFORM_SHARED_CONTRACT.md).
-
----
 
 ## Requirements
 
@@ -67,7 +88,7 @@ OpenAI API key.
 - Completed green breathes until Codex returns to the foreground, then settles
   into a non-glowing standby green.
 - Right-click for state previews, pause, startup, and exit controls.
-- Use the `光环大小` submenu to select `75% / 100% / 125%`;
+- Use the `Halo Size` submenu to select `75% / 100% / 125%`;
   the selected size persists across restarts.
 - On macOS, Agent Halo remembers the halo's display and relative position. If
   that display disconnects, the halo temporarily moves to the primary display's
@@ -75,7 +96,7 @@ OpenAI API key.
   temporarily recovered makes the new position preferred instead.
 - Windows keeps its existing off-screen recovery behavior: after launch or a
   display change, a fully off-screen halo returns to the primary display.
-- On either platform, select `脱离卡死` from the context menu to explicitly
+- On either platform, select `Reset Position` from the context menu to explicitly
   reset the halo to the primary display's upper-right corner.
 - Click the halo to bring the Codex window forward.
 

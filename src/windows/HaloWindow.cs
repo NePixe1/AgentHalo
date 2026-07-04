@@ -60,6 +60,7 @@ public sealed class HaloWindow : Window
         public HaloWindow(HaloSettings appSettings)
         {
             settings = appSettings;
+            ConfigureLocalization(settings);
             double initialSize = SizeForScale(settings.HaloScalePercent);
             Width = initialSize;
             Height = initialSize;
@@ -164,6 +165,11 @@ public sealed class HaloWindow : Window
                 Dispatcher.BeginInvoke(new Action(ToggleDetails));
             };
             BuildTrayMenu();
+
+            L10n.Instance.LanguageChanged += (s, ev) =>
+            {
+                Dispatcher.Invoke(new Action(BuildTrayMenu));
+            };
         }
 
         public static bool IsValidScalePercent(int value)
@@ -324,7 +330,7 @@ public sealed class HaloWindow : Window
                     {
                         State = HaloState.Done,
                         Label = "STANDBY",
-                        Detail = "Claude Code 正在待命",
+                        Detail = L10n.Instance["status.standby_claude"],
                         Sessions = aggregate.Sessions,
                         AnswerStreaming = false,
                         FocusedAgent = AgentKind.ClaudeCode
@@ -420,7 +426,7 @@ public sealed class HaloWindow : Window
                 {
                     State = HaloState.Done,
                     Label = "STANDBY",
-                    Detail = "Codex 正在待命",
+                    Detail = L10n.Instance["status.standby_codex"],
                     Sessions = aggregate.Sessions,
                     AnswerStreaming = false,
                     FocusedAgent = AgentKind.Codex
@@ -802,7 +808,7 @@ public sealed class HaloWindow : Window
         private void BuildTrayMenu()
         {
             Forms.ContextMenuStrip menu = new Forms.ContextMenuStrip();
-            Forms.ToolStripMenuItem topmost = new Forms.ToolStripMenuItem("始终置顶");
+            Forms.ToolStripMenuItem topmost = new Forms.ToolStripMenuItem(L10n.Instance["menu.always_on_top"]);
             topmost.Checked = settings.AlwaysOnTop;
             topmost.CheckOnClick = true;
             topmost.CheckedChanged += delegate
@@ -817,7 +823,7 @@ public sealed class HaloWindow : Window
             };
             menu.Items.Add(topmost);
 
-            Forms.ToolStripMenuItem startup = new Forms.ToolStripMenuItem("开机自动启动");
+            Forms.ToolStripMenuItem startup = new Forms.ToolStripMenuItem(L10n.Instance["menu.launch_at_startup"]);
             startup.Checked = StartupManager.IsEnabled();
             startup.CheckOnClick = true;
             startup.CheckedChanged += delegate
@@ -829,7 +835,7 @@ public sealed class HaloWindow : Window
             };
             menu.Items.Add(startup);
 
-            Forms.ToolStripMenuItem pause = new Forms.ToolStripMenuItem("暂停状态监听");
+            Forms.ToolStripMenuItem pause = new Forms.ToolStripMenuItem(L10n.Instance["menu.pause_monitor"]);
             pause.Checked = settings.Paused;
             pause.CheckOnClick = true;
             pause.CheckedChanged += delegate
@@ -843,7 +849,7 @@ public sealed class HaloWindow : Window
             menu.Items.Add(pause);
 
             Forms.ToolStripMenuItem agentMenu =
-                new Forms.ToolStripMenuItem("监控对象");
+                new Forms.ToolStripMenuItem(L10n.Instance["menu.focus_target"]);
             codexAgentItem = new Forms.ToolStripMenuItem("Codex");
             claudeAgentItem = new Forms.ToolStripMenuItem("Claude Code");
             codexAgentItem.Click += delegate
@@ -864,13 +870,20 @@ public sealed class HaloWindow : Window
             agentMenu.DropDownItems.Add(claudeAgentItem);
             menu.Items.Add(agentMenu);
 
-            menu.Items.Add("脱离卡死（移到主屏右上角）", null, delegate
+            // Language submenu
+            var languageItem = new Forms.ToolStripMenuItem(L10n.Instance["menu.language"]);
+            languageItem.DropDownItems.Add(CreateLanguageItem(null));  // Follow System
+            languageItem.DropDownItems.Add(CreateLanguageItem("zh"));   // 中文
+            languageItem.DropDownItems.Add(CreateLanguageItem("en"));   // English
+            menu.Items.Add(languageItem);
+
+            menu.Items.Add(L10n.Instance["menu.escape_offscreen"], null, delegate
             {
                 Dispatcher.BeginInvoke(new Action(EscapeOffscreen));
             });
 
             Forms.ToolStripMenuItem sizeMenu =
-                new Forms.ToolStripMenuItem("光环大小");
+                new Forms.ToolStripMenuItem(L10n.Instance["halo.size"]);
             foreach (int percent in HaloScalePresets)
             {
                 int selectedPercent = percent;
@@ -897,23 +910,23 @@ public sealed class HaloWindow : Window
             }
             menu.Items.Add(sizeMenu);
 
-            Forms.ToolStripMenuItem preview = new Forms.ToolStripMenuItem("预览状态");
-            AddPreviewItem(preview, "实时状态", null);
-            AddPreviewItem(preview, "思考中", HaloState.Thinking);
-            AddPreviewItem(preview, "执行中", HaloState.Working);
-            AddPreviewItem(preview, "已完成", HaloState.Done);
-            AddPreviewItem(preview, "等待授权（双脉冲）", HaloState.Attention);
-            AddPreviewItem(preview, "故障（爆闪）", HaloState.Error,
+            Forms.ToolStripMenuItem preview = new Forms.ToolStripMenuItem(L10n.Instance["menu.preview_status"]);
+            AddPreviewItem(preview, L10n.Instance["halo.live_status"], null);
+            AddPreviewItem(preview, L10n.Instance["halo.thinking_preview"], HaloState.Thinking);
+            AddPreviewItem(preview, L10n.Instance["halo.working_preview"], HaloState.Working);
+            AddPreviewItem(preview, L10n.Instance["halo.done_preview"], HaloState.Done);
+            AddPreviewItem(preview, L10n.Instance["halo.attention_preview"], HaloState.Attention);
+            AddPreviewItem(preview, L10n.Instance["halo.error_flash_preview"], HaloState.Error,
                 ErrorPresentation.Flashing);
-            AddPreviewItem(preview, "故障（常亮）", HaloState.Error,
+            AddPreviewItem(preview, L10n.Instance["halo.error_bright_preview"], HaloState.Error,
                 ErrorPresentation.Bright);
-            AddPreviewItem(preview, "故障（暗红）", HaloState.Error,
+            AddPreviewItem(preview, L10n.Instance["halo.error_dim_preview"], HaloState.Error,
                 ErrorPresentation.Dim);
-            AddPreviewItem(preview, "待机", HaloState.Idle);
+            AddPreviewItem(preview, L10n.Instance["halo.idle_preview"], HaloState.Idle);
             menu.Items.Add(preview);
 
             menu.Items.Add(new Forms.ToolStripSeparator());
-            menu.Items.Add("退出", null, delegate
+            menu.Items.Add(L10n.Instance["menu.quit"], null, delegate
             {
                 Dispatcher.BeginInvoke(new Action(Close));
             });
@@ -969,6 +982,38 @@ public sealed class HaloWindow : Window
                 }));
             };
             parent.DropDownItems.Add(item);
+        }
+
+        private Forms.ToolStripMenuItem CreateLanguageItem(string lang)
+        {
+            string title = lang != null
+                ? L10n.Instance["menu.language." + lang]
+                : L10n.Instance["menu.language.auto"];
+            var item = new Forms.ToolStripMenuItem(title, null, OnLanguageSelected);
+            item.Tag = lang;
+            item.Checked = IsLanguageMenuItemChecked(lang, settings.Language);
+            return item;
+        }
+
+        internal static void ConfigureLocalization(HaloSettings appSettings)
+        {
+            L10n.Instance.SetLanguage(appSettings == null ? null : appSettings.Language);
+        }
+
+        internal static bool IsLanguageMenuItemChecked(string itemLanguage,
+            string savedLanguage)
+        {
+            return String.Equals(itemLanguage, savedLanguage,
+                StringComparison.Ordinal);
+        }
+
+        private void OnLanguageSelected(object sender, EventArgs e)
+        {
+            var item = sender as Forms.ToolStripMenuItem;
+            string lang = (item != null ? item.Tag : null) as string;
+            settings.Language = lang;
+            SettingsStorage.Save(settings);
+            L10n.Instance.SetLanguage(lang);
         }
 
         private void BringCodexForward()

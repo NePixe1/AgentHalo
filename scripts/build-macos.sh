@@ -8,6 +8,16 @@ output_root="$repo_root/outputs/AgentHalo-macOS"
 app_dir="$output_root/AgentHalo.app"
 binary="$mac_root/.build/release/AgentHaloMac"
 agent_icon_assets="$repo_root/src/shared/assets/agent-switch"
+shared_locales="$repo_root/src/shared/locales"
+mac_locales="$mac_root/Sources/AgentHaloCore/locales"
+
+# Sync shared locale JSON into the AgentHaloCore target so SwiftPM bundles
+# real file contents (resource declarations are scoped per-target and can't
+# reach across into src/shared/, so we mirror at build time rather than
+# rely on symlinks — symlinks survive into the bundle and become dangling).
+mkdir -p "$mac_locales"
+cp "$shared_locales/zh.json" "$mac_locales/zh.json"
+cp "$shared_locales/en.json" "$mac_locales/en.json"
 
 cd "$mac_root"
 swift run AgentHaloCoreChecks

@@ -1380,7 +1380,7 @@ public static class CodexFailureReader
                     string matched = GeneratedHaloSpec.ClassifyFailure(
                         line.Substring(tab + 1));
                     if (matched == null) continue;
-                    detail = matched;
+                    detail = L10n.Instance[matched];
                     eventUtc = DateTimeOffset.FromUnixTimeSeconds(seconds).UtcDateTime;
                     return true;
                 }

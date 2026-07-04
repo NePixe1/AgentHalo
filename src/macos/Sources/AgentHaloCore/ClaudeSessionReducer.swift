@@ -38,6 +38,8 @@ public struct ClaudeSessionReducer: Sendable {
             reduceAssistant(root, now: now)
         case "system":
             reduceSystem(root, eventAt: eventAt)
+        case "ai-title":
+            updateSessionTitle(from: root)
         default:
             break
         }
@@ -69,6 +71,13 @@ public struct ClaudeSessionReducer: Sendable {
             snapshot.workingDirectory = cwd
             let projectName = URL(fileURLWithPath: cwd).lastPathComponent
             snapshot.projectName = projectName.isEmpty ? "Claude Code" : projectName
+        }
+    }
+
+    private mutating func updateSessionTitle(from root: [String: Any]) {
+        let title = Self.string(root["aiTitle"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if !title.isEmpty {
+            snapshot.sessionTitle = title
         }
     }
 

@@ -27,8 +27,8 @@ public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
 
     public var localizedStandbyDetail: String {
         switch self {
-        case .codex: return "Codex 正在待命"
-        case .claudeCode: return "Claude Code 正在待命"
+        case .codex: return L10n.shared["status.standby_codex"]
+        case .claudeCode: return L10n.shared["status.standby_claude"]
         }
     }
 
@@ -41,8 +41,8 @@ public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
 
     public var localizedOfflineDetail: String {
         switch self {
-        case .codex: return "Codex 未运行"
-        case .claudeCode: return "Claude Code 未运行"
+        case .codex: return L10n.shared["status.offline_codex"]
+        case .claudeCode: return L10n.shared["status.offline_claude"]
         }
     }
 }
@@ -62,6 +62,7 @@ public struct SessionSnapshot: Equatable, Sendable {
     public var outputTokens: Int64?
     public var hasRateLimits: Bool?
     public var contextUsedPercent: Double?
+    public var sessionTitle: String?
 
     public init(
         threadId: String,
@@ -77,7 +78,8 @@ public struct SessionSnapshot: Equatable, Sendable {
         inputTokens: Int64? = nil,
         outputTokens: Int64? = nil,
         hasRateLimits: Bool? = nil,
-        contextUsedPercent: Double? = nil
+        contextUsedPercent: Double? = nil,
+        sessionTitle: String? = nil
     ) {
         self.threadId = threadId
         self.projectName = projectName
@@ -93,6 +95,7 @@ public struct SessionSnapshot: Equatable, Sendable {
         self.outputTokens = outputTokens
         self.hasRateLimits = hasRateLimits
         self.contextUsedPercent = contextUsedPercent
+        self.sessionTitle = sessionTitle
     }
 }
 
@@ -123,17 +126,20 @@ public struct AggregateSnapshot: Equatable, Sendable {
 
 public struct SessionDetailsSnapshot: Equatable, Sendable {
     public var projectName: String?
+    public var sessionTitle: String?
     public var modelName: String?
     public var inputTokens: Int64?
     public var outputTokens: Int64?
 
     public init(
         projectName: String? = nil,
+        sessionTitle: String? = nil,
         modelName: String? = nil,
         inputTokens: Int64? = nil,
         outputTokens: Int64? = nil
     ) {
         self.projectName = projectName
+        self.sessionTitle = sessionTitle
         self.modelName = modelName
         self.inputTokens = inputTokens
         self.outputTokens = outputTokens
@@ -160,6 +166,7 @@ public struct RateLimitSnapshot: Equatable, Sendable {
     public var contextUsedPercent: Double?
     public var hasPrimary: Bool
     public var hasSecondary: Bool
+    public var hasMonthlyPlan: Bool
     public var monthlyUsedPercent: Double?
     public var monthlyResetAt: Date?
 
@@ -171,6 +178,7 @@ public struct RateLimitSnapshot: Equatable, Sendable {
         contextUsedPercent: Double? = nil,
         hasPrimary: Bool = true,
         hasSecondary: Bool = true,
+        hasMonthlyPlan: Bool = false,
         monthlyUsedPercent: Double? = nil,
         monthlyResetAt: Date? = nil
     ) {
@@ -181,6 +189,7 @@ public struct RateLimitSnapshot: Equatable, Sendable {
         self.contextUsedPercent = contextUsedPercent
         self.hasPrimary = hasPrimary
         self.hasSecondary = hasSecondary
+        self.hasMonthlyPlan = hasMonthlyPlan || monthlyUsedPercent != nil
         self.monthlyUsedPercent = monthlyUsedPercent
         self.monthlyResetAt = monthlyResetAt
     }

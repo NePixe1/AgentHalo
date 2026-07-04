@@ -20,6 +20,7 @@ public struct HaloSettings: Codable, Equatable, Sendable {
     public var installedAt: Date
     public var acknowledged: [String: Date]
     public var acknowledgedErrorAt: Date?
+    public var language: String?
 
     private enum CodingKeys: String, CodingKey {
         case hasPosition
@@ -36,6 +37,7 @@ public struct HaloSettings: Codable, Equatable, Sendable {
         case installedAt
         case acknowledged
         case acknowledgedErrorAt
+        case language
     }
 
     public init(
@@ -52,7 +54,8 @@ public struct HaloSettings: Codable, Equatable, Sendable {
         focusedAgent: AgentKind = .codex,
         installedAt: Date = Date(),
         acknowledged: [String: Date] = [:],
-        acknowledgedErrorAt: Date? = nil
+        acknowledgedErrorAt: Date? = nil,
+        language: String? = nil
     ) {
         self.hasPosition = hasPosition
         self.left = left
@@ -68,6 +71,7 @@ public struct HaloSettings: Codable, Equatable, Sendable {
         self.installedAt = installedAt
         self.acknowledged = acknowledged
         self.acknowledgedErrorAt = acknowledgedErrorAt
+        self.language = language
     }
 
     public init(from decoder: Decoder) throws {
@@ -91,6 +95,7 @@ public struct HaloSettings: Codable, Equatable, Sendable {
         self.installedAt = try container.decodeIfPresent(Date.self, forKey: .installedAt) ?? Date()
         self.acknowledged = try container.decodeIfPresent([String: Date].self, forKey: .acknowledged) ?? [:]
         self.acknowledgedErrorAt = try container.decodeIfPresent(Date.self, forKey: .acknowledgedErrorAt)
+        self.language = try container.decodeIfPresent(String.self, forKey: .language)
     }
 
     public func acknowledgingCompletedSessions(_ sessions: [SessionSnapshot]) -> HaloSettings {
