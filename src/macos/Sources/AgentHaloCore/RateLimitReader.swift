@@ -179,29 +179,7 @@ public struct RateLimitReader: @unchecked Sendable {
         if monthlyTokens.contains(plan) || monthlyTokens.contains(name) {
             return true
         }
-        let limitId = (limits["limit_id"] as? String)?.lowercased() ?? ""
-        return plan == "plus"
-            && name.isEmpty
-            && limitId == "codex"
-            && isEmptyCreditsObject(limits["credits"])
-            && isNullOrMissing(limits["individual_limit"])
-    }
-
-    private static func isEmptyCreditsObject(_ value: Any?) -> Bool {
-        guard let credits = value as? [String: Any],
-              let hasCredits = credits["has_credits"] as? Bool,
-              let unlimited = credits["unlimited"] as? Bool else {
-            return false
-        }
-        let balance = number(credits["balance"]) ?? 0
-        return !hasCredits
-            && !unlimited
-            && balance == 0
-            && !hasAnyNumber(credits, keys: ["used_percent", "remaining_percent", "resets_at"])
-    }
-
-    private static func isNullOrMissing(_ value: Any?) -> Bool {
-        value == nil || value is NSNull
+        return false
     }
 
     /// Used-percent for a quota bucket, preferring `used_percent` and falling

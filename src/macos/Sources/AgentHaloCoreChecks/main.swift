@@ -767,16 +767,18 @@ func testRateLimitReaderReadsFreeCreditsRemainingAsMonthlyQuota() {
     expect(snapshot?.hasSecondary, false, "credits monthly quota should not fill Plus secondary")
 }
 
-func testRateLimitReaderContinuesPastMonthlyPlanMarkerForUsage() {
+func testRateLimitReaderKeepsNewestCompletePlusBucketsOverOlderMonthlyUsage() {
     let reader = RateLimitReader()
-    let marker = #"{"payload":{"info":{"last_token_usage":{"input_tokens":25},"model_context_window":100},"rate_limits":{"limit_id":"codex","limit_name":null,"primary":{"used_percent":100,"window_minutes":300,"resets_at":4102441200},"secondary":{"used_percent":60,"window_minutes":10080,"resets_at":4102444800},"credits":{"balance":"0","has_credits":false,"unlimited":false},"individual_limit":null,"plan_type":"plus","rate_limit_reached_type":null}}}"#
+    let plus = #"{"payload":{"info":{"last_token_usage":{"input_tokens":25},"model_context_window":100},"rate_limits":{"limit_id":"codex","limit_name":null,"primary":{"used_percent":100,"window_minutes":300,"resets_at":4102441200},"secondary":{"used_percent":60,"window_minutes":10080,"resets_at":4102444800},"credits":{"balance":"0","has_credits":false,"unlimited":false},"individual_limit":null,"plan_type":"plus","rate_limit_reached_type":null}}}"#
     let monthly = #"{"payload":{"info":{"rate_limits":{"credits":{"remaining_percent":82,"resets_at":1785628800}}}}}"#
-    let snapshot = reader.parseForTest(lines: [marker, monthly])
-    expect(snapshot?.hasMonthly ?? false, true, "monthly usage should be found after marker-only snapshot")
-    expect(snapshot?.monthlyUsedPercent, 18, "monthly usage after marker should drive quota")
-    expect(snapshot?.monthlyResetAt, Date(timeIntervalSince1970: 1_785_628_800), "monthly reset after marker should be preserved")
-    expect(snapshot?.hasPrimary, false, "marker primary should not render as Plus quota")
-    expect(snapshot?.hasSecondary, false, "marker secondary should not render as Plus quota")
+    let snapshot = reader.parseForTest(lines: [plus, monthly])
+    expect(snapshot?.hasMonthly ?? false, false, "older monthly usage should not override a complete newest Plus snapshot")
+    expect(snapshot?.monthlyUsedPercent, nil, "Plus compatibility should require explicit monthly data in the same snapshot")
+    expect(snapshot?.hasMonthlyPlan ?? false, false, "Plus compatibility should not force monthly layout")
+    expect(snapshot?.hasPrimary, true, "newest Plus primary should render as 5-hour quota")
+    expect(snapshot?.primaryUsedPercent, 100, "newest Plus primary used percent")
+    expect(snapshot?.hasSecondary, true, "newest Plus secondary should render as weekly quota")
+    expect(snapshot?.secondaryUsedPercent, 60, "newest Plus secondary used percent")
 }
 
 func testRateLimitReaderLeavesResetOnlyMonthlyQuotaPending() {
@@ -822,15 +824,15 @@ func testRateLimitReaderTreatsNullCreditsCodexCompatibilityAsPlus() {
     expect(snapshot?.hasSecondary, true, "null credits secondary should render as weekly quota")
 }
 
-func testRateLimitReaderTreatsEmptyCodexCreditsAsMonthlyPlan() {
+func testRateLimitReaderTreatsEmptyCodexCreditsCompatibilityAsPlus() {
     let reader = RateLimitReader()
     let line = #"{"payload":{"info":{"last_token_usage":{"input_tokens":25},"model_context_window":100},"rate_limits":{"limit_id":"codex","limit_name":null,"primary":{"used_percent":100,"window_minutes":300,"resets_at":4102441200},"secondary":{"used_percent":60,"window_minutes":10080,"resets_at":4102444800},"credits":{"balance":"0","has_credits":false,"unlimited":false},"individual_limit":null,"plan_type":"plus","rate_limit_reached_type":null}}}"#
     let snapshot = reader.parseForTest(lines: [line])
     expect(snapshot?.hasMonthly ?? false, false, "empty Codex credits should not fabricate monthly usage")
-    expect(snapshot?.monthlyUsedPercent, nil, "empty Codex credits should wait for explicit monthly data")
-    expect(snapshot?.hasMonthlyPlan ?? false, true, "empty Codex credits marker should keep the UI on single monthly quota")
-    expect(snapshot?.hasPrimary, false, "empty Codex credits primary should not render as 5-hour quota")
-    expect(snapshot?.hasSecondary, false, "empty Codex credits secondary should not render as weekly quota")
+    expect(snapshot?.monthlyUsedPercent, nil, "empty Codex credits should require explicit monthly data")
+    expect(snapshot?.hasMonthlyPlan ?? false, false, "empty Codex credits compatibility should keep the Plus two-row quota")
+    expect(snapshot?.hasPrimary, true, "empty Codex credits primary should render as 5-hour quota")
+    expect(snapshot?.hasSecondary, true, "empty Codex credits secondary should render as weekly quota")
 }
 
 func testRateLimitReaderDoesNotTreatEmptyLegacyCreditsSecondaryAsMonthly() {
@@ -2364,12 +2366,12 @@ do {
 }
 testRateLimitReaderReadsExplicitMonthlyQuota()
 testRateLimitReaderReadsFreeCreditsRemainingAsMonthlyQuota()
-testRateLimitReaderContinuesPastMonthlyPlanMarkerForUsage()
+testRateLimitReaderKeepsNewestCompletePlusBucketsOverOlderMonthlyUsage()
 testRateLimitReaderLeavesResetOnlyMonthlyQuotaPending()
 testRateLimitReaderReadsLongWindowPrimaryAsMonthly()
 testRateLimitReaderDoesNotTreatSecondaryBucketAsMonthly()
 testRateLimitReaderTreatsNullCreditsCodexCompatibilityAsPlus()
-testRateLimitReaderTreatsEmptyCodexCreditsAsMonthlyPlan()
+testRateLimitReaderTreatsEmptyCodexCreditsCompatibilityAsPlus()
 testRateLimitReaderDoesNotTreatEmptyLegacyCreditsSecondaryAsMonthly()
 testRateLimitReaderDoesNotReturnEarlyOnContextOnlySnapshot()
 testClaudeStatusLineUsageParserReadsAuthoritativeContextPercent()

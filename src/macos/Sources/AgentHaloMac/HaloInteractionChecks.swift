@@ -60,9 +60,11 @@ func runHaloInteractionChecks() {
     testDetailsPanelPrefersMonthlyQuotaWhenPresent()
     testDetailsPanelShowsPendingMonthlyQuotaForMonthlyPlan()
     testDetailsPanelCentersSingleMonthlyQuotaRow()
+    testDetailsPanelPrefersPlusQuotaWhenPrimaryAndSecondaryArePresent()
     testDetailsPanelShowsCodexStandbyCopy()
     testDetailsPanelShowsSessionMetadataForCodexAndClaudeCode()
     testDetailsPanelUsesCompactContextPercent()
+    testDetailsPanelKeepsContextPillWidthStable()
     testDetailsPanelPrefersClaudeSessionTitle()
     testDetailsPanelUsesCompactMetadataLayout()
     testVisibleDetailsPanelStatusRefreshIsWiredToTick()
@@ -910,6 +912,36 @@ private func testDetailsPanelCentersSingleMonthlyQuotaRow() {
 }
 
 @MainActor
+private func testDetailsPanelPrefersPlusQuotaWhenPrimaryAndSecondaryArePresent() {
+    let panel = DetailsPanel()
+    let aggregate = AggregateSnapshot(
+        state: .done,
+        label: "STANDBY",
+        detail: AgentKind.codex.localizedStandbyDetail,
+        sessions: [],
+        focusedAgent: .codex
+    )
+
+    panel.update(
+        aggregate: aggregate,
+        quota: RateLimitSnapshot(
+            primaryUsedPercent: 30,
+            secondaryUsedPercent: 60,
+            contextUsedPercent: 27,
+            hasPrimary: true,
+            hasSecondary: true,
+            hasMonthlyPlan: true
+        ),
+        contextUsedPercent: 27
+    )
+
+    expect(panel.primaryQuotaHiddenForTesting == false, "Plus primary quota should be visible")
+    expect(panel.secondaryQuotaHiddenForTesting == false, "Plus weekly quota should stay visible when both Plus buckets are present")
+    expect(panel.primaryQuotaValueForTesting == L10n.shared.format("quota.remaining", 70), "Plus primary should drive the 5-hour quota value")
+    expect(panel.secondaryQuotaValueForTesting == L10n.shared.format("quota.remaining", 40), "Plus secondary should drive the weekly quota value")
+}
+
+@MainActor
 private func testDetailsPanelShowsCodexStandbyCopy() {
     let panel = DetailsPanel()
     // AppDelegate projects a running-but-idle Codex to STANDBY; the panel must
@@ -1002,6 +1034,43 @@ private func testDetailsPanelUsesCompactContextPercent() {
         contextUsedPercent: 100
     )
     expect(panel.contextValueForTesting, "99%", "context block should cap the visible percentage at 99%")
+}
+
+@MainActor
+private func testDetailsPanelKeepsContextPillWidthStable() {
+    let panel = DetailsPanel()
+    let aggregate = AggregateSnapshot(
+        state: .working,
+        label: "EXECUTING",
+        detail: "AgentHalo - Running command",
+        sessions: [],
+        focusedAgent: .claudeCode
+    )
+
+    panel.update(
+        aggregate: aggregate,
+        quota: nil,
+        contextUsedPercent: 9,
+        showsQuota: false
+    )
+    panel.contentView?.layoutSubtreeIfNeeded()
+    let singleDigitWidth = panel.contextPillWidthForTesting
+
+    panel.update(
+        aggregate: aggregate,
+        quota: nil,
+        contextUsedPercent: 99,
+        showsQuota: false
+    )
+    panel.contentView?.layoutSubtreeIfNeeded()
+    let doubleDigitWidth = panel.contextPillWidthForTesting
+
+    expect(abs(singleDigitWidth - doubleDigitWidth) < 0.5, "context pill width should stay stable as the percent changes")
+    expect(abs(doubleDigitWidth - 47) < 0.5, "context pill should use the tighter fixed width")
+    expect(
+        panel.contextValueIntrinsicWidthForTesting <= panel.contextValueWidthForTesting + 0.5,
+        "context pill should still fit a two-digit percent without truncation"
+    )
 }
 
 @MainActor

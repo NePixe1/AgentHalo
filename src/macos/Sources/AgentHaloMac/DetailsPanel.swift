@@ -3,6 +3,8 @@ import AgentHaloCore
 
 @MainActor
 final class DetailsPanel: NSPanel {
+    private static let contextPillWidth: CGFloat = 47
+
     private let stack = NSStackView()
     private let contextValue = NSTextField(labelWithString: L10n.shared["context.empty"])
     private let titleField = NSTextField(labelWithString: "OFFLINE")
@@ -197,12 +199,16 @@ final class DetailsPanel: NSPanel {
     /// monthly account that hasn't surfaced a snapshot yet shows the pending
     /// placeholder so the panel doesn't look empty while Codex is starting up.
     private func applyQuotaLayout(_ quota: RateLimitSnapshot?, contextUsedPercent: Double?) {
-        if let quota, quota.hasMonthlyPlan {
-            applyMonthlyQuota(quota, hasMonthlyData: quota.hasMonthly)
+        if let quota, quota.hasMonthly {
+            applyMonthlyQuota(quota, hasMonthlyData: true)
             return
         }
         if let quota, quota.hasPrimary, quota.hasSecondary {
             applyPlusQuota(quota)
+            return
+        }
+        if let quota, quota.hasMonthlyPlan {
+            applyMonthlyQuota(quota, hasMonthlyData: quota.hasMonthly)
             return
         }
         // Context-only: we know there's a session but haven't seen rate limits
@@ -382,6 +388,7 @@ final class DetailsPanel: NSPanel {
 
         contextValue.font = .systemFont(ofSize: 11, weight: .regular)
         contextValue.textColor = NSColor(calibratedRed: 0.22, green: 0.49, blue: 0.57, alpha: 1)
+        contextValue.alignment = .center
         contextValue.lineBreakMode = .byTruncatingTail
         contextValue.translatesAutoresizingMaskIntoConstraints = false
 
@@ -396,6 +403,7 @@ final class DetailsPanel: NSPanel {
             agentToggle.heightAnchor.constraint(equalToConstant: 24),
             contextPill.trailingAnchor.constraint(equalTo: row.trailingAnchor),
             contextPill.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            contextPill.widthAnchor.constraint(equalToConstant: Self.contextPillWidth),
             contextPill.leadingAnchor.constraint(greaterThanOrEqualTo: agentToggle.trailingAnchor, constant: 10),
             contextValue.leadingAnchor.constraint(equalTo: contextPill.leadingAnchor, constant: 9),
             contextValue.trailingAnchor.constraint(equalTo: contextPill.trailingAnchor, constant: -9),
@@ -423,6 +431,18 @@ final class DetailsPanel: NSPanel {
 
     var contextValueForTesting: String {
         contextValue.stringValue
+    }
+
+    var contextPillWidthForTesting: CGFloat {
+        contextPill.frame.width
+    }
+
+    var contextValueWidthForTesting: CGFloat {
+        contextValue.bounds.width
+    }
+
+    var contextValueIntrinsicWidthForTesting: CGFloat {
+        contextValue.intrinsicContentSize.width
     }
 
     var primaryQuotaHiddenForTesting: Bool {
