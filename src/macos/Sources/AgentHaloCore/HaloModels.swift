@@ -160,6 +160,7 @@ public struct RateLimitSnapshot: Equatable, Sendable {
     public var contextUsedPercent: Double?
     public var hasPrimary: Bool
     public var hasSecondary: Bool
+    public var hasMonthlyPlan: Bool
     public var monthlyUsedPercent: Double?
     public var monthlyResetAt: Date?
 
@@ -171,6 +172,7 @@ public struct RateLimitSnapshot: Equatable, Sendable {
         contextUsedPercent: Double? = nil,
         hasPrimary: Bool = true,
         hasSecondary: Bool = true,
+        hasMonthlyPlan: Bool = false,
         monthlyUsedPercent: Double? = nil,
         monthlyResetAt: Date? = nil
     ) {
@@ -181,6 +183,7 @@ public struct RateLimitSnapshot: Equatable, Sendable {
         self.contextUsedPercent = contextUsedPercent
         self.hasPrimary = hasPrimary
         self.hasSecondary = hasSecondary
+        self.hasMonthlyPlan = hasMonthlyPlan || monthlyUsedPercent != nil
         self.monthlyUsedPercent = monthlyUsedPercent
         self.monthlyResetAt = monthlyResetAt
     }

@@ -148,7 +148,7 @@ final class DetailsPanel: NSPanel {
         let isOffline = aggregate.state == .idle && aggregate.label == "OFFLINE"
 
         let showsCodexQuota = showsQuota ?? (aggregate.focusedAgent == .codex)
-        stack.setCustomSpacing(showsCodexQuota ? 13 : 4, after: detailField)
+        stack.setCustomSpacing(showsCodexQuota ? Self.plusQuotaTopSpacing : 4, after: detailField)
         contextPill.isHidden = isOffline || contextUsedPercent == nil
         contextValue.stringValue = contextUsedPercent.map {
             L10n.shared.format("context.label", Int($0.rounded()))
@@ -197,12 +197,12 @@ final class DetailsPanel: NSPanel {
     /// monthly account that hasn't surfaced a snapshot yet shows the pending
     /// placeholder so the panel doesn't look empty while Codex is starting up.
     private func applyQuotaLayout(_ quota: RateLimitSnapshot?, contextUsedPercent: Double?) {
-        if let quota, quota.hasPrimary, quota.hasSecondary {
-            applyPlusQuota(quota)
+        if let quota, quota.hasMonthlyPlan {
+            applyMonthlyQuota(quota, hasMonthlyData: quota.hasMonthly)
             return
         }
-        if let quota, quota.hasMonthly {
-            applyMonthlyQuota(quota, hasMonthlyData: true)
+        if let quota, quota.hasPrimary, quota.hasSecondary {
+            applyPlusQuota(quota)
             return
         }
         // Context-only: we know there's a session but haven't seen rate limits
@@ -215,6 +215,7 @@ final class DetailsPanel: NSPanel {
     }
 
     private func applyPlusQuota(_ quota: RateLimitSnapshot?) {
+        setQuotaTopSpacing(Self.plusQuotaTopSpacing)
         primaryQuota.setTitle(L10n.shared["quota.5h"])
         secondaryQuota.setTitle(L10n.shared["quota.weekly"])
         primaryQuota.isHidden = false
@@ -235,6 +236,7 @@ final class DetailsPanel: NSPanel {
     }
 
     private func applyMonthlyQuota(_ quota: RateLimitSnapshot?, hasMonthlyData: Bool) {
+        setQuotaTopSpacing(Self.monthlyQuotaTopSpacing)
         primaryQuota.setTitle(L10n.shared["quota.monthly"])
         primaryQuota.isHidden = false
         secondaryQuota.isHidden = true
@@ -244,6 +246,10 @@ final class DetailsPanel: NSPanel {
             primaryQuota.updatePending()
         }
         secondaryQuota.updateUnavailable()
+    }
+
+    private func setQuotaTopSpacing(_ spacing: CGFloat) {
+        stack.setCustomSpacing(spacing, after: detailField)
     }
 
     func updateStatus(aggregate: AggregateSnapshot) {
@@ -431,6 +437,10 @@ final class DetailsPanel: NSPanel {
         secondaryQuota.valueForTesting
     }
 
+    var quotaTopSpacingForTesting: CGFloat {
+        stack.customSpacing(after: detailField)
+    }
+
     var metadataGroupHiddenForTesting: Bool {
         metadataGroup.isHidden
     }
@@ -451,6 +461,11 @@ final class DetailsPanel: NSPanel {
         agentToggle.setAgent(agent)
         onAgentSelected?(agent)
     }
+}
+
+private extension DetailsPanel {
+    static let plusQuotaTopSpacing: CGFloat = 13
+    static let monthlyQuotaTopSpacing: CGFloat = 22
 }
 
 @MainActor

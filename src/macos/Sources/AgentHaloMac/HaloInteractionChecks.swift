@@ -57,6 +57,9 @@ func runHaloInteractionChecks() {
     testPausedAgentDoesNotUseStableGreenStandby()
     testLiveCodexErrorCyclesThroughBrightAndDimPresentations()
     testDetailsPanelShowsCodexQuotaAndIdleCopy()
+    testDetailsPanelPrefersMonthlyQuotaWhenPresent()
+    testDetailsPanelShowsPendingMonthlyQuotaForMonthlyPlan()
+    testDetailsPanelCentersSingleMonthlyQuotaRow()
     testDetailsPanelShowsCodexStandbyCopy()
     testDetailsPanelShowsSessionMetadataForCodexAndClaudeCode()
     testDetailsPanelUsesCompactMetadataLayout()
@@ -812,6 +815,96 @@ private func testDetailsPanelShowsCodexQuotaAndIdleCopy() {
     expect(panel.contextPillHiddenForTesting == true, "Codex context pill should be hidden when OFFLINE")
     expect(panel.primaryQuotaHiddenForTesting == false, "Codex primary quota should be visible")
     expect(panel.secondaryQuotaHiddenForTesting == false, "Codex secondary quota should be visible")
+}
+
+@MainActor
+private func testDetailsPanelPrefersMonthlyQuotaWhenPresent() {
+    let panel = DetailsPanel()
+    let aggregate = AggregateSnapshot(
+        state: .done,
+        label: "STANDBY",
+        detail: AgentKind.codex.localizedStandbyDetail,
+        sessions: [],
+        focusedAgent: .codex
+    )
+
+    panel.update(
+        aggregate: aggregate,
+        quota: RateLimitSnapshot(
+            primaryUsedPercent: 30,
+            secondaryUsedPercent: 60,
+            contextUsedPercent: 9,
+            monthlyUsedPercent: 5
+        ),
+        contextUsedPercent: 9
+    )
+
+    expect(panel.primaryQuotaHiddenForTesting == false, "monthly quota should be visible")
+    expect(panel.secondaryQuotaHiddenForTesting == true, "weekly quota should be hidden for monthly accounts")
+    expect(panel.primaryQuotaValueForTesting == L10n.shared.format("quota.remaining", 95), "monthly quota should drive remaining percent")
+}
+
+@MainActor
+private func testDetailsPanelShowsPendingMonthlyQuotaForMonthlyPlan() {
+    let panel = DetailsPanel()
+    let aggregate = AggregateSnapshot(
+        state: .done,
+        label: "STANDBY",
+        detail: AgentKind.codex.localizedStandbyDetail,
+        sessions: [],
+        focusedAgent: .codex
+    )
+
+    panel.update(
+        aggregate: aggregate,
+        quota: RateLimitSnapshot(
+            primaryUsedPercent: 0,
+            secondaryUsedPercent: 0,
+            contextUsedPercent: 9,
+            hasPrimary: false,
+            hasSecondary: false,
+            hasMonthlyPlan: true
+        ),
+        contextUsedPercent: 9
+    )
+
+    expect(panel.primaryQuotaHiddenForTesting == false, "monthly plan pending quota should be visible")
+    expect(panel.secondaryQuotaHiddenForTesting == true, "weekly quota should stay hidden while monthly data is pending")
+    expect(panel.primaryQuotaValueForTesting == L10n.shared["quota.waiting_refresh"], "monthly plan without usage should wait for refresh")
+}
+
+@MainActor
+private func testDetailsPanelCentersSingleMonthlyQuotaRow() {
+    let plusPanel = DetailsPanel()
+    let monthlyPanel = DetailsPanel()
+    let aggregate = AggregateSnapshot(
+        state: .done,
+        label: "STANDBY",
+        detail: AgentKind.codex.localizedStandbyDetail,
+        sessions: [],
+        focusedAgent: .codex
+    )
+
+    plusPanel.update(
+        aggregate: aggregate,
+        quota: RateLimitSnapshot(primaryUsedPercent: 30, secondaryUsedPercent: 60, contextUsedPercent: 9),
+        contextUsedPercent: 9
+    )
+    monthlyPanel.update(
+        aggregate: aggregate,
+        quota: RateLimitSnapshot(
+            primaryUsedPercent: 0,
+            secondaryUsedPercent: 0,
+            contextUsedPercent: 9,
+            monthlyUsedPercent: 5
+        ),
+        contextUsedPercent: 9
+    )
+
+    expect(
+        monthlyPanel.quotaTopSpacingForTesting > plusPanel.quotaTopSpacingForTesting,
+        "single monthly quota row should sit lower than the compact two-row quota layout"
+    )
 }
 
 @MainActor

@@ -48,13 +48,15 @@ public struct RateLimitReader: @unchecked Sendable {
 
         let primary = limits[GeneratedHaloSpec.ratePrimaryKey] as? [String: Any]
         let secondary = limits[GeneratedHaloSpec.rateSecondaryKey] as? [String: Any]
+        let secondaryLooksMonthlyPlan = secondary != nil
+            && Self.looksLikeMonthlyPlanWithoutExplicitUsage(in: limits)
 
         // Monthly quota: explicit `monthly`-style buckets first, then the
         // "credits" container free / basic plans expose.
         if metrics.monthlyUsedPercent == nil,
-           let monthly = Self.findMonthlyLimit(limits),
-           let used = Self.usedPercentOrNil(monthly) {
-            metrics.monthlyUsedPercent = used
+           let monthly = Self.findMonthlyLimit(limits) {
+            metrics.hasMonthlyPlan = true
+            metrics.monthlyUsedPercent = Self.usedPercentOrNil(monthly)
             metrics.monthlyResetAt = Self.unixTime(monthly["resets_at"])
         }
 
@@ -67,17 +69,22 @@ public struct RateLimitReader: @unchecked Sendable {
 
         if metrics.monthlyUsedPercent == nil, primaryLooksMonthly, let primary,
            let used = Self.usedPercentOrNil(primary) {
+            metrics.hasMonthlyPlan = true
             metrics.monthlyUsedPercent = used
             metrics.monthlyResetAt = Self.unixTime(primary["resets_at"])
         }
 
-        if metrics.primaryUsedPercent == nil, !primaryLooksMonthly,
+        if metrics.monthlyUsedPercent == nil, secondaryLooksMonthlyPlan {
+            metrics.hasMonthlyPlan = true
+        }
+
+        if metrics.primaryUsedPercent == nil, !primaryLooksMonthly, !secondaryLooksMonthlyPlan,
            let primary,
            let used = Self.usedPercentOrNil(primary) {
             metrics.primaryUsedPercent = used
             metrics.primaryResetAt = Self.unixTime(primary["resets_at"])
         }
-        if metrics.secondaryUsedPercent == nil,
+        if metrics.secondaryUsedPercent == nil, !secondaryLooksMonthlyPlan,
            let secondary,
            let used = Self.usedPercentOrNil(secondary) {
             metrics.secondaryUsedPercent = used
@@ -86,9 +93,9 @@ public struct RateLimitReader: @unchecked Sendable {
     }
 
     // Plus tier needs both 5h + week buckets together with context to be
-    // considered complete; monthly tiers only need the monthly bucket plus
-    // context. Without the `hasContext` gate the reader would freeze on an
-    // info-only snapshot before it ever sees the rate-limit one.
+    // considered complete; monthly tiers only need actual monthly usage
+    // plus context. A plan marker without usage is a fallback shape, not a
+    // terminal snapshot, because older lines may still contain the quota.
     private func hasCompleteMetrics(_ metrics: UsageMetrics) -> Bool {
         guard metrics.contextUsedPercent != nil else { return false }
         if metrics.primaryUsedPercent != nil && metrics.secondaryUsedPercent != nil {
@@ -105,11 +112,13 @@ public struct RateLimitReader: @unchecked Sendable {
         var monthlyUsedPercent: Double?
         var monthlyResetAt: Date?
         var contextUsedPercent: Double?
+        var hasMonthlyPlan = false
 
         var hasAny: Bool {
             primaryUsedPercent != nil
                 || secondaryUsedPercent != nil
                 || monthlyUsedPercent != nil
+                || hasMonthlyPlan
                 || contextUsedPercent != nil
         }
 
@@ -123,6 +132,7 @@ public struct RateLimitReader: @unchecked Sendable {
                 contextUsedPercent: contextUsedPercent,
                 hasPrimary: primaryUsedPercent != nil,
                 hasSecondary: secondaryUsedPercent != nil,
+                hasMonthlyPlan: hasMonthlyPlan,
                 monthlyUsedPercent: monthlyUsedPercent,
                 monthlyResetAt: monthlyResetAt
             )
@@ -160,6 +170,38 @@ public struct RateLimitReader: @unchecked Sendable {
         let name = (limits["limit_name"] as? String)?.lowercased() ?? ""
         let monthlyTokens: Set<String> = ["monthly", "month", "free", "basic"]
         return monthlyTokens.contains(plan) || monthlyTokens.contains(name)
+    }
+
+    private static func looksLikeMonthlyPlanWithoutExplicitUsage(in limits: [String: Any]) -> Bool {
+        let plan = (limits["plan_type"] as? String)?.lowercased() ?? ""
+        let name = (limits["limit_name"] as? String)?.lowercased() ?? ""
+        let monthlyTokens: Set<String> = ["monthly", "month", "free", "basic"]
+        if monthlyTokens.contains(plan) || monthlyTokens.contains(name) {
+            return true
+        }
+        let limitId = (limits["limit_id"] as? String)?.lowercased() ?? ""
+        return plan == "plus"
+            && name.isEmpty
+            && limitId == "codex"
+            && isEmptyCreditsObject(limits["credits"])
+            && isNullOrMissing(limits["individual_limit"])
+    }
+
+    private static func isEmptyCreditsObject(_ value: Any?) -> Bool {
+        guard let credits = value as? [String: Any],
+              let hasCredits = credits["has_credits"] as? Bool,
+              let unlimited = credits["unlimited"] as? Bool else {
+            return false
+        }
+        let balance = number(credits["balance"]) ?? 0
+        return !hasCredits
+            && !unlimited
+            && balance == 0
+            && !hasAnyNumber(credits, keys: ["used_percent", "remaining_percent", "resets_at"])
+    }
+
+    private static func isNullOrMissing(_ value: Any?) -> Bool {
+        value == nil || value is NSNull
     }
 
     /// Used-percent for a quota bucket, preferring `used_percent` and falling
