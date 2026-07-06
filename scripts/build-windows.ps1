@@ -61,6 +61,10 @@ $graphics.Dispose()
 $bitmap.Dispose()
 
 $referenceArgs = $references | ForEach-Object { "/reference:$_" }
+$resourceArgs = @(
+    "/resource:$(Join-Path $windowsLocales "zh.json"),CodexHalo.locales.zh.json",
+    "/resource:$(Join-Path $windowsLocales "en.json"),CodexHalo.locales.en.json"
+)
 $exe = Join-Path $output "AgentHalo.exe"
 $sources = Get-ChildItem -LiteralPath $windows -Filter *.cs |
     Sort-Object Name |
@@ -68,14 +72,14 @@ $sources = Get-ChildItem -LiteralPath $windows -Filter *.cs |
 
 & $csc /nologo /target:exe /platform:anycpu /optimize+ /main:CodexHalo.Program `
     /out:$exe /win32manifest:"$windows\app.manifest" /win32icon:$iconPath `
-    $referenceArgs $sources
+    $referenceArgs $resourceArgs $sources
 
 if ($LASTEXITCODE -ne 0) {
     throw "Compilation failed with exit code $LASTEXITCODE"
 }
 
 Copy-Item -LiteralPath "$root\README.md" -Destination "$output\README.md" -Force
-Copy-Item -LiteralPath "$windows\locales" -Destination "$output\locales" -Recurse -Force
+Remove-Item -LiteralPath "$output\locales" -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $output "AgentHalo.pdb") -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $output "sqlite3.exe") -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $output "AgentHaloHook.exe") -ErrorAction SilentlyContinue

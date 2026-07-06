@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Web.Script.Serialization;
 
 namespace CodexHalo
@@ -79,9 +80,8 @@ namespace CodexHalo
             }
             catch (FormatException ex)
             {
-                #if DEBUG
-                Debug.WriteLine("[L10n] format failed for key=" + key + " template=" + template + ": " + ex.Message);
-                #endif
+                DebugLog("[L10n] format failed for key=" + key +
+                    " template=" + template + ": " + ex.Message);
                 return template;
             }
         }
@@ -108,20 +108,23 @@ namespace CodexHalo
         // Must be called while holding _gate.
         private void LoadTranslationsLocked()
         {
-            string localesDir = Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory, "locales");
-            string filePath = Path.Combine(localesDir, _currentLanguage + ".json");
-
-            if (!File.Exists(filePath) && _currentLanguage != FallbackLanguage)
+            string json = LoadEmbeddedJson(_currentLanguage);
+            if (json == null && _currentLanguage != FallbackLanguage)
             {
-                filePath = Path.Combine(localesDir, FallbackLanguage + ".json");
+                json = LoadEmbeddedJson(FallbackLanguage);
             }
-
-            if (File.Exists(filePath))
+            if (json == null)
+            {
+                json = LoadExternalJson(_currentLanguage);
+            }
+            if (json == null && _currentLanguage != FallbackLanguage)
+            {
+                json = LoadExternalJson(FallbackLanguage);
+            }
+            if (json != null)
             {
                 try
                 {
-                    string json = File.ReadAllText(filePath, System.Text.Encoding.UTF8);
                     var serializer = new JavaScriptSerializer();
                     _translations = serializer.Deserialize<Dictionary<string, string>>(json)
                         ?? new Dictionary<string, string>();
@@ -129,12 +132,60 @@ namespace CodexHalo
                 }
                 catch (Exception ex)
                 {
-                    #if DEBUG
-                    Debug.WriteLine("[L10n] failed to load " + filePath + ": " + ex.Message);
-                    #endif
+                    DebugLog("[L10n] failed to parse translations: " + ex.Message);
                 }
             }
             _translations = new Dictionary<string, string>();
+        }
+
+        private static string LoadEmbeddedJson(string language)
+        {
+            try
+            {
+                string resourceName = "CodexHalo.locales." + language + ".json";
+                using (Stream stream = Assembly.GetExecutingAssembly()
+                    .GetManifestResourceStream(resourceName))
+                {
+                    if (stream == null) return null;
+                    using (StreamReader reader = new StreamReader(stream,
+                        System.Text.Encoding.UTF8))
+                    {
+                        return reader.ReadToEnd();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLog("[L10n] failed to load embedded locale " + language +
+                    ": " + ex.Message);
+                return null;
+            }
+        }
+
+        private static string LoadExternalJson(string language)
+        {
+            string localesDir = Path.Combine(
+                AppDomain.CurrentDomain.BaseDirectory, "locales");
+            string filePath = Path.Combine(localesDir, language + ".json");
+
+            if (File.Exists(filePath))
+            {
+                try
+                {
+                    return File.ReadAllText(filePath, System.Text.Encoding.UTF8);
+                }
+                catch (Exception ex)
+                {
+                    DebugLog("[L10n] failed to load " + filePath + ": " + ex.Message);
+                }
+            }
+            return null;
+        }
+
+        [Conditional("DEBUG")]
+        private static void DebugLog(string message)
+        {
+            Debug.WriteLine(message);
         }
     }
 }
