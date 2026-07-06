@@ -29,8 +29,8 @@ using MediaPoint = System.Windows.Point;
 [assembly: System.Reflection.AssemblyDescription("Ambient desktop status light for coding agents")]
 [assembly: System.Reflection.AssemblyCompany("Agent Halo")]
 [assembly: System.Reflection.AssemblyProduct("Agent Halo")]
-[assembly: System.Reflection.AssemblyVersion("0.13.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.13.0.0")]
+[assembly: System.Reflection.AssemblyVersion("0.14.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.14.0.0")]
 
 namespace CodexHalo
 {
@@ -139,4 +139,3 @@ public static class Program
         private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
     }
 }
-

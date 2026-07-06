@@ -85,7 +85,7 @@ $hashLine = "$hash  AgentHalo.exe"
 Set-Content -LiteralPath (Join-Path $output "SHA256.txt") -Value $hashLine `
     -Encoding ascii -NoNewline
 
-$archive = Join-Path (Split-Path -Parent $output) "AgentHalo-Windows-v0.13.0.zip"
+$archive = Join-Path (Split-Path -Parent $output) "AgentHalo-Windows-v0.14.0.zip"
 Remove-Item -LiteralPath $archive -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $output "*") -DestinationPath $archive `
     -CompressionLevel Optimal
