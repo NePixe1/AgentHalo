@@ -3,6 +3,7 @@ import AgentHaloCore
 
 @MainActor
 final class DetailsPanel: NSPanel {
+    private static let panelWidth: CGFloat = 268
     private static let contextPillWidth: CGFloat = 42
     private static let contextPillHorizontalPadding: CGFloat = 3
 
@@ -34,7 +35,7 @@ final class DetailsPanel: NSPanel {
 
     init() {
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 268, height: 192),
+            contentRect: NSRect(x: 0, y: 0, width: Self.panelWidth, height: 192),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -45,6 +46,8 @@ final class DetailsPanel: NSPanel {
         sharingType = .readOnly
         level = .floating
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        contentMinSize = NSSize(width: Self.panelWidth, height: 0)
+        contentMaxSize = NSSize(width: Self.panelWidth, height: CGFloat.greatestFiniteMagnitude)
 
         let container = NSVisualEffectView(frame: contentView?.bounds ?? .zero)
         container.material = .popover
@@ -106,6 +109,7 @@ final class DetailsPanel: NSPanel {
         contentView?.addSubview(container)
         container.addSubview(stack)
         NSLayoutConstraint.activate([
+            contentView!.widthAnchor.constraint(equalToConstant: Self.panelWidth),
             container.leadingAnchor.constraint(equalTo: contentView!.leadingAnchor),
             container.trailingAnchor.constraint(equalTo: contentView!.trailingAnchor),
             container.topAnchor.constraint(equalTo: contentView!.topAnchor),
@@ -552,16 +556,21 @@ private final class MetadataRowView: NSView {
 
         nameField.font = .systemFont(ofSize: 11.5)
         nameField.textColor = .secondaryLabelColor
+        nameField.setContentCompressionResistancePriority(.required, for: .horizontal)
+        nameField.setContentHuggingPriority(.required, for: .horizontal)
         nameField.translatesAutoresizingMaskIntoConstraints = false
-        
+
         valueField.font = valueFont
         valueField.textColor = .labelColor
         valueField.alignment = .right
         valueField.lineBreakMode = .byTruncatingTail
         valueField.maximumNumberOfLines = 1
+        valueField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        valueField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         valueField.translatesAutoresizingMaskIntoConstraints = false
 
         valueBackground.translatesAutoresizingMaskIntoConstraints = false
+        valueBackground.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         if isTagStyle {
             valueBackground.wantsLayer = true
             valueBackground.layer?.cornerRadius = 5

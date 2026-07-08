@@ -66,6 +66,7 @@ func runHaloInteractionChecks() {
     testDetailsPanelUsesCompactContextPercent()
     testDetailsPanelKeepsContextPillWidthStable()
     testDetailsPanelPrefersClaudeSessionTitle()
+    testDetailsPanelKeepsFixedWidthForLongClaudeSessionTitle()
     testDetailsPanelUsesCompactMetadataLayout()
     testVisibleDetailsPanelStatusRefreshIsWiredToTick()
     testStatusLineConfigurationReconciliationIsWiredToTick()
@@ -1104,6 +1105,40 @@ private func testDetailsPanelPrefersClaudeSessionTitle() {
 
     expect(panel.projectValueForTesting, "整理归档 2026q3 测试", "Claude Code details should prefer the AI-generated session title")
     expect(panel.tokenValueForTesting, "↑ 12k  ·  ↓ 900", "Claude Code token row should keep the compact arrow format")
+}
+
+@MainActor
+private func testDetailsPanelKeepsFixedWidthForLongClaudeSessionTitle() {
+    let panel = DetailsPanel()
+    let initialWidth = panel.frame.width
+    let aggregate = AggregateSnapshot(
+        state: .working,
+        label: "EXECUTING",
+        detail: "AgentHalo - Running command",
+        sessions: [],
+        focusedAgent: .claudeCode
+    )
+
+    panel.update(
+        aggregate: aggregate,
+        quota: nil,
+        contextUsedPercent: 42,
+        sessionDetails: SessionDetailsSnapshot(
+            projectName: "AgentHalo",
+            sessionTitle: String(repeating: "整理归档超长项目标题", count: 12),
+            modelName: "claude-sonnet-4",
+            inputTokens: 12_000,
+            outputTokens: 900
+        ),
+        showsQuota: false
+    )
+    panel.contentView?.layoutSubtreeIfNeeded()
+
+    expect(panel.frame.width, initialWidth, "details panel frame width should stay fixed")
+    expect(
+        (panel.contentView?.fittingSize.width ?? 0) <= initialWidth + 0.5,
+        "details panel content should not request a wider frame for long AI titles"
+    )
 }
 
 @MainActor
