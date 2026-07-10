@@ -13,7 +13,7 @@ right now?"
 2. One organ, many states: a single original light form instead of a dashboard.
 3. Persistent completion: green breathes until the relevant completion is acknowledged.
 4. Honest state: infer lifecycle activity, never claim to expose hidden reasoning.
-5. Local only: read event metadata from local agent JSONL sessions; never send content.
+5. Privacy first: keep lifecycle and session metadata local. Provider usage checks may call official usage APIs with OAuth credentials, but never upload session content.
 
 ## State model
 
@@ -44,7 +44,7 @@ right now?"
 
 Agent Halo monitors Codex and Claude Code concurrently, but renders one focused agent at a time. The focused agent defaults to Codex and can be changed from the hover details segmented switch or the menu item `监控对象`.
 
-Codex-only affordances remain scoped to Codex focus: quota/context rows, synthetic Codex failure surfacing, and click-to-activate Codex. Claude Code focus shows Claude Code session status without Codex quota rows and does not attempt to foreground a Claude Code app.
+The details panel exposes two modes selected from the focused session's endpoint and credentials: official OAuth mode shows usage, while API-key mode shows session details and includes custom or third-party endpoints. Synthetic Codex failure surfacing and click-to-activate Codex remain scoped to Codex focus; Claude Code focus does not attempt to foreground a Claude Code app.
 
 ## Visual language
 
