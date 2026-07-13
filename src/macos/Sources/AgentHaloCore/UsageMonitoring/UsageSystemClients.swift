@@ -105,6 +105,7 @@ public final class FilesystemUsageFiles: UsageFileAccessing, @unchecked Sendable
             )
         }
         let fd = createdFD
+        defer { close(fd) }
         var cleanup = TempCleanup(path: tempPath)
         defer { cleanup.runIfNeeded() }
 
@@ -121,7 +122,8 @@ public final class FilesystemUsageFiles: UsageFileAccessing, @unchecked Sendable
         // Write all bytes.
         try data.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) in
             var remaining = buffer.count
-            var ptr = buffer.baseAddress!
+            guard let base = buffer.baseAddress else { return }
+            var ptr = base
             while remaining > 0 {
                 let written = write(fd, ptr, remaining)
                 if written < 0 {
@@ -147,7 +149,6 @@ public final class FilesystemUsageFiles: UsageFileAccessing, @unchecked Sendable
             )
         }
 
-        close(fd)
         // rename is atomic on the same filesystem.
         if rename(tempPath, path) != 0 {
             let err = errno
