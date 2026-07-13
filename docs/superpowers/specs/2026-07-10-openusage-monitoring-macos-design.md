@@ -3,9 +3,10 @@
 ## 文档状态
 
 - 日期：2026-07-10
-- 状态：设计已确认，等待用户审阅文档
+- 状态：设计已确认，已进入详细实施计划
 - 实现范围：AgentHalo macOS
 - 产品规格：[OpenUsage 风格余额监控产品规格书](../../openusage-balance-monitoring-product-spec.md)
+- 实施计划：[OpenUsage 风格监控 macOS Implementation Plan](../plans/2026-07-13-openusage-monitoring-macos-implementation.md)
 - 参考实现：`/Users/wjs/work/openusage/Sources/OpenUsage/Providers/Codex`、`/Users/wjs/work/openusage/Sources/OpenUsage/Providers/Claude`、`/Users/wjs/work/openusage/Sources/OpenUsage/Stores/ProviderSnapshotCache.swift`、`/Users/wjs/work/openusage/Sources/OpenUsage/Views/ProviderSectionHeader.swift`
 
 ## 目标
