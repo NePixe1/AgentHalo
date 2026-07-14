@@ -102,7 +102,165 @@ func runUsageSnapshotCacheChecks() async throws {
     try await testUsageSnapshotCachePrunesLeastRecentlyUsedPerProvider()
     try await testUsageSnapshotCacheRemovesEntriesOlderThanThirtyDays()
     try await testUsageSnapshotCacheIgnoresCorruptAndUnknownPayloads()
-    try await testUsageSnapshotCacheWritesNewFileWithMode0600()
+    try await testUsageSnapshotCacheRetriesTransientReadFailure()
+    try await testUsageSnapshotCacheCreatesPrivateParentAndFile()
+}
+
+func usageSnapshotPayloadPrivacyViolations(in payload: [String: Any]) -> [String] {
+    var violations: [String] = []
+    let forbiddenKeyNames: Set<String> = [
+        "accesstoken",
+        "refreshtoken",
+        "authorization",
+        "accountid",
+        "project",
+        "projecttitle",
+        "sessionid",
+        "sessiontitle",
+        "rawresponse",
+        "response",
+        "credential",
+        "credentials",
+        "apikey",
+    ]
+
+    func normalizedKey(_ key: String) -> String {
+        key.lowercased().filter { $0.isLetter || $0.isNumber }
+    }
+
+    func scanForbiddenKeys(_ value: Any, path: String) {
+        if let dictionary = value as? [String: Any] {
+            for (key, nestedValue) in dictionary {
+                if forbiddenKeyNames.contains(normalizedKey(key)) {
+                    violations.append("\(path).\(key): forbidden key")
+                }
+                scanForbiddenKeys(nestedValue, path: "\(path).\(key)")
+            }
+        } else if let array = value as? [Any] {
+            for (index, nestedValue) in array.enumerated() {
+                scanForbiddenKeys(nestedValue, path: "\(path)[\(index)]")
+            }
+        }
+    }
+
+    func validateKeys(
+        _ dictionary: [String: Any],
+        required: Set<String>,
+        allowed: Set<String>,
+        path: String
+    ) {
+        let actual = Set(dictionary.keys)
+        let missing = required.subtracting(actual).sorted()
+        let unexpected = actual.subtracting(allowed).sorted()
+        if !missing.isEmpty {
+            violations.append("\(path): missing keys \(missing)")
+        }
+        if !unexpected.isEmpty {
+            violations.append("\(path): unexpected keys \(unexpected)")
+        }
+    }
+
+    scanForbiddenKeys(payload, path: "payload")
+    validateKeys(
+        payload,
+        required: ["version", "entries"],
+        allowed: ["version", "entries"],
+        path: "payload"
+    )
+    if (payload["version"] as? NSNumber)?.intValue != 1 {
+        violations.append("payload.version: expected schema version 1")
+    }
+
+    guard let entries = payload["entries"] as? [Any] else {
+        violations.append("payload.entries: expected array")
+        return violations
+    }
+    for (entryIndex, rawEntry) in entries.enumerated() {
+        let entryPath = "payload.entries[\(entryIndex)]"
+        guard let entry = rawEntry as? [String: Any] else {
+            violations.append("\(entryPath): expected object")
+            continue
+        }
+        validateKeys(
+            entry,
+            required: ["snapshot", "lastAccessedAt"],
+            allowed: ["snapshot", "lastAccessedAt"],
+            path: entryPath
+        )
+        if !(entry["lastAccessedAt"] is NSNumber) {
+            violations.append("\(entryPath).lastAccessedAt: expected encoded date")
+        }
+
+        guard let snapshot = entry["snapshot"] as? [String: Any] else {
+            violations.append("\(entryPath).snapshot: expected object")
+            continue
+        }
+        let snapshotPath = "\(entryPath).snapshot"
+        validateKeys(
+            snapshot,
+            required: ["providerID", "accountKey", "windows", "refreshedAt"],
+            allowed: ["providerID", "accountKey", "planName", "windows", "refreshedAt"],
+            path: snapshotPath
+        )
+        if !(snapshot["providerID"] is String) {
+            violations.append("\(snapshotPath).providerID: expected string")
+        }
+        if let planName = snapshot["planName"], !(planName is String) {
+            violations.append("\(snapshotPath).planName: expected string")
+        }
+        if !(snapshot["refreshedAt"] is NSNumber) {
+            violations.append("\(snapshotPath).refreshedAt: expected encoded date")
+        }
+
+        if let accountKey = snapshot["accountKey"] as? [String: Any] {
+            let accountKeyPath = "\(snapshotPath).accountKey"
+            validateKeys(
+                accountKey,
+                required: ["providerID", "digest"],
+                allowed: ["providerID", "digest"],
+                path: accountKeyPath
+            )
+            if !(accountKey["providerID"] is String) {
+                violations.append("\(accountKeyPath).providerID: expected string")
+            }
+            if !(accountKey["digest"] is String) {
+                violations.append("\(accountKeyPath).digest: expected string")
+            }
+        } else {
+            violations.append("\(snapshotPath).accountKey: expected object")
+        }
+
+        guard let windows = snapshot["windows"] as? [Any] else {
+            violations.append("\(snapshotPath).windows: expected array")
+            continue
+        }
+        for (windowIndex, rawWindow) in windows.enumerated() {
+            let windowPath = "\(snapshotPath).windows[\(windowIndex)]"
+            guard let window = rawWindow as? [String: Any] else {
+                violations.append("\(windowPath): expected object")
+                continue
+            }
+            validateKeys(
+                window,
+                required: ["kind", "usedPercent", "duration"],
+                allowed: ["kind", "usedPercent", "resetsAt", "duration"],
+                path: windowPath
+            )
+            if !(window["kind"] is String) {
+                violations.append("\(windowPath).kind: expected string")
+            }
+            if !(window["usedPercent"] is NSNumber) {
+                violations.append("\(windowPath).usedPercent: expected number")
+            }
+            if !(window["duration"] is NSNumber) {
+                violations.append("\(windowPath).duration: expected number")
+            }
+            if let resetsAt = window["resetsAt"], !(resetsAt is NSNumber) {
+                violations.append("\(windowPath).resetsAt: expected encoded date")
+            }
+        }
+    }
+    return violations
 }
 
 func testUsageSnapshotCacheRoundTripIsolationAndPrivacy() async throws {
@@ -136,22 +294,34 @@ func testUsageSnapshotCacheRoundTripIsolationAndPrivacy() async throws {
         fatalError("snapshot cache should write a payload")
     }
     expect(write.path, cacheURL.path, "snapshot cache should use the configured v1 path")
-    let object = try JSONSerialization.jsonObject(with: write.data) as? [String: Any]
-    expect(object?["version"] as? Int, 1, "snapshot cache payload should use schema version 1")
-    expect((object?["entries"] as? [Any])?.count, 3, "snapshot cache should persist all isolated entries")
-
-    let serialized = String(decoding: write.data, as: UTF8.self)
-    let forbiddenValues = [
-        "synthetic-access-token",
-        "synthetic-refresh-token",
-        "Bearer synthetic-authorization",
-        "synthetic-account-id",
-        "synthetic-project-title",
-        "synthetic-session-title",
-    ]
-    for forbidden in forbiddenValues {
-        expect(!serialized.contains(forbidden), "snapshot cache must not persist sensitive value \(forbidden)")
+    guard let object = try JSONSerialization.jsonObject(with: write.data) as? [String: Any] else {
+        fatalError("snapshot cache payload should be a JSON object")
     }
+    expect(object["version"] as? Int, 1, "snapshot cache payload should use schema version 1")
+    expect((object["entries"] as? [Any])?.count, 3, "snapshot cache should persist all isolated entries")
+    expect(
+        usageSnapshotPayloadPrivacyViolations(in: object),
+        [],
+        "snapshot cache payload must match the recursive privacy field whitelist"
+    )
+
+    // Prove the test gate is not vacuous: adding a credential-shaped field to
+    // an otherwise valid encoded payload must itself trigger a violation.
+    var mutatedObject = object
+    if var entries = mutatedObject["entries"] as? [[String: Any]],
+       var firstEntry = entries.first,
+       var encodedSnapshot = firstEntry["snapshot"] as? [String: Any] {
+        encodedSnapshot["accessToken"] = "synthetic-access-token"
+        firstEntry["snapshot"] = encodedSnapshot
+        entries[0] = firstEntry
+        mutatedObject["entries"] = entries
+    } else {
+        fatalError("snapshot cache payload should expose the expected nested shape")
+    }
+    expect(
+        !usageSnapshotPayloadPrivacyViolations(in: mutatedObject).isEmpty,
+        "privacy whitelist must reject an injected credential field"
+    )
 
     let diskCache = UsageSnapshotCache(cacheURL: cacheURL, files: files, now: { now })
     try await diskCache.loadIfNeeded()
@@ -270,18 +440,71 @@ func testUsageSnapshotCacheIgnoresCorruptAndUnknownPayloads() async throws {
     expect(try await unknownCache.snapshot(for: key) == nil, "unknown schema version should be ignored safely")
 }
 
-func testUsageSnapshotCacheWritesNewFileWithMode0600() async throws {
+func testUsageSnapshotCacheRetriesTransientReadFailure() async throws {
+    let cacheURL = URL(fileURLWithPath: "/tmp/agent-halo-cache-read-retry.json")
+    let now = Date(timeIntervalSince1970: 55_000)
+    let firstKey = AccountCacheKey(providerID: .codex, digest: "existing-codex")
+    let secondKey = AccountCacheKey(providerID: .claude, digest: "existing-claude")
+    let newKey = AccountCacheKey(providerID: .codex, digest: "new-codex")
+
+    let seedFiles = FakeUsageFiles()
+    let seedCache = UsageSnapshotCache(cacheURL: cacheURL, files: seedFiles, now: { now })
+    try await seedCache.store(cacheCheckSnapshot(key: firstKey, refreshedAt: now))
+    try await seedCache.store(cacheCheckSnapshot(key: secondKey, refreshedAt: now))
+    guard let originalPayload = seedFiles.capturedWrites().last?.data else {
+        fatalError("read retry check requires a seeded cache payload")
+    }
+
+    let files = FakeUsageFiles(
+        contents: [cacheURL.path: originalPayload],
+        readFailures: 1
+    )
+    let cache = UsageSnapshotCache(cacheURL: cacheURL, files: files, now: { now })
+    var sawTransientReadFailure = false
+    do {
+        try await cache.loadIfNeeded()
+    } catch FakeUsageFilesError.transientRead {
+        sawTransientReadFailure = true
+    }
+    expect(sawTransientReadFailure, "first cache read should expose the transient error")
+
+    try await cache.loadIfNeeded()
+    expect(
+        try await cache.snapshot(for: firstKey)?.snapshot.accountKey,
+        firstKey,
+        "second load should recover the existing Codex entry"
+    )
+    expect(
+        try await cache.snapshot(for: secondKey)?.snapshot.accountKey,
+        secondKey,
+        "second load should recover the existing Claude entry"
+    )
+
+    try await cache.store(cacheCheckSnapshot(key: newKey, refreshedAt: now))
+    let reloaded = UsageSnapshotCache(cacheURL: cacheURL, files: files, now: { now })
+    try await reloaded.loadIfNeeded()
+    expect(try await reloaded.snapshot(for: firstKey) != nil, "retry must prevent overwriting first old entry")
+    expect(try await reloaded.snapshot(for: secondKey) != nil, "retry must prevent overwriting second old entry")
+    expect(try await reloaded.snapshot(for: newKey) != nil, "new entry should persist after recovered load")
+}
+
+func testUsageSnapshotCacheCreatesPrivateParentAndFile() async throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-snapshot-cache-\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: root) }
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    let cacheURL = root.appendingPathComponent("usage-snapshots-v1.json")
+    let cacheDirectory = root.appendingPathComponent(".agent-halo", isDirectory: true)
+    let cacheURL = cacheDirectory.appendingPathComponent("usage-snapshots-v1.json")
     let now = Date(timeIntervalSince1970: 60_000)
     let key = AccountCacheKey(providerID: .codex, digest: "mode-check")
     let cache = UsageSnapshotCache(cacheURL: cacheURL, files: FilesystemUsageFiles(), now: { now })
 
     try await cache.store(cacheCheckSnapshot(key: key, refreshedAt: now))
 
+    let directoryAttributes = try FileManager.default.attributesOfItem(atPath: cacheDirectory.path)
+    expect(
+        (directoryAttributes[.posixPermissions] as? NSNumber)?.uint16Value == 0o700,
+        "new snapshot cache directory should use mode 0700"
+    )
     let attributes = try FileManager.default.attributesOfItem(atPath: cacheURL.path)
     expect(
         (attributes[.posixPermissions] as? NSNumber)?.uint16Value == 0o600,
@@ -1892,6 +2115,8 @@ final class CodexCheckFailingFiles: UsageFileAccessing, @unchecked Sendable {
     func readDataIfPresent(at path: String) throws -> Data? {
         data.value[path]
     }
+
+    func ensureDirectory(at path: String, mode: mode_t) throws {}
 
     func writeAtomically(_ data: Data, to path: String, preservingModeOf existingPath: String?) throws {
         throw UsageProviderFailure.network

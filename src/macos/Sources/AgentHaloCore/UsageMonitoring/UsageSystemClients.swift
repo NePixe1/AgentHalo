@@ -23,6 +23,7 @@ public protocol UsageEnvironmentReading: Sendable {
 /// (see `FilesystemUsageFiles`); checks use `FakeUsageFiles`.
 public protocol UsageFileAccessing: Sendable {
     func readDataIfPresent(at path: String) throws -> Data?
+    func ensureDirectory(at path: String, mode: mode_t) throws
     func writeAtomically(_ data: Data, to path: String, preservingModeOf existingPath: String?) throws
 }
 
@@ -83,6 +84,42 @@ public final class FilesystemUsageFiles: UsageFileAccessing, @unchecked Sendable
     public func readDataIfPresent(at path: String) throws -> Data? {
         guard fileManager.fileExists(atPath: path) else { return nil }
         return try Data(contentsOf: URL(fileURLWithPath: path))
+    }
+
+    public func ensureDirectory(at path: String, mode: mode_t) throws {
+        var isDirectory = ObjCBool(false)
+        if fileManager.fileExists(atPath: path, isDirectory: &isDirectory) {
+            guard isDirectory.boolValue else {
+                throw NSError(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(ENOTDIR),
+                    userInfo: [NSLocalizedDescriptionKey: "private directory path is not a directory: \(path)"]
+                )
+            }
+        } else {
+            try fileManager.createDirectory(
+                atPath: path,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: NSNumber(value: mode)]
+            )
+        }
+
+        try fileManager.setAttributes(
+            [.posixPermissions: NSNumber(value: mode)],
+            ofItemAtPath: path
+        )
+        let attributes = try fileManager.attributesOfItem(atPath: path)
+        guard
+            attributes[.type] as? FileAttributeType == .typeDirectory,
+            let permissions = attributes[.posixPermissions] as? NSNumber,
+            mode_t(truncating: permissions) == mode
+        else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(EACCES),
+                userInfo: [NSLocalizedDescriptionKey: "private directory permissions could not be enforced: \(path)"]
+            )
+        }
     }
 
     public func writeAtomically(

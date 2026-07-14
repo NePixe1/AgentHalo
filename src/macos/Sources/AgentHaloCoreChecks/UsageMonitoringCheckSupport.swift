@@ -57,6 +57,10 @@ struct FakeUsageFileWrite: Equatable {
     let preservingModeOf: String?
 }
 
+enum FakeUsageFilesError: Error {
+    case transientRead
+}
+
 final class FakeUsageFiles: UsageFileAccessing, @unchecked Sendable {
     /// Existing file contents keyed by path (the "disk").
     private let disk: LockedBox<[String: Data]>
@@ -64,19 +68,33 @@ final class FakeUsageFiles: UsageFileAccessing, @unchecked Sendable {
     private let modes: LockedBox<[String: mode_t]>
     /// Captured writes in order.
     private let writes: LockedBox<[FakeUsageFileWrite]>
+    /// Number of upcoming reads that should fail before normal reads resume.
+    private let remainingReadFailures: LockedBox<Int>
 
     init(
         contents: [String: Data] = [:],
-        modes: [String: mode_t] = [:]
+        modes: [String: mode_t] = [:],
+        readFailures: Int = 0
     ) {
         self.disk = LockedBox(contents)
         self.modes = LockedBox(modes)
         self.writes = LockedBox([])
+        self.remainingReadFailures = LockedBox(readFailures)
     }
 
     func readDataIfPresent(at path: String) throws -> Data? {
-        disk.value[path]
+        let shouldFail = remainingReadFailures.withValue { remaining -> Bool in
+            guard remaining > 0 else { return false }
+            remaining -= 1
+            return true
+        }
+        if shouldFail {
+            throw FakeUsageFilesError.transientRead
+        }
+        return disk.value[path]
     }
+
+    func ensureDirectory(at path: String, mode: mode_t) throws {}
 
     func writeAtomically(_ data: Data, to path: String, preservingModeOf existingPath: String?) throws {
         let resolved = existingPath ?? (disk.value[path] != nil ? path : nil)

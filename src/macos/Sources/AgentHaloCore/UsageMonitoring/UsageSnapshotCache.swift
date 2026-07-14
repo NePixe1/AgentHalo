@@ -34,9 +34,10 @@ public actor UsageSnapshotCache {
 
     public func loadIfNeeded() throws {
         guard !didLoad else { return }
+        let data = try files.readDataIfPresent(at: cacheURL.path)
         didLoad = true
 
-        guard let data = try files.readDataIfPresent(at: cacheURL.path) else { return }
+        guard let data else { return }
         hasPersistedFile = true
 
         guard
@@ -157,6 +158,10 @@ public actor UsageSnapshotCache {
     }
 
     private func persist() throws {
+        try files.ensureDirectory(
+            at: cacheURL.deletingLastPathComponent().path,
+            mode: 0o700
+        )
         let payload = CachePayload(
             version: Self.schemaVersion,
             entries: entries.values.sorted { lhs, rhs in
