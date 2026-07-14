@@ -32,7 +32,7 @@ public struct CodexAuthStore: Sendable {
     public init(
         environment: any UsageEnvironmentReading = ProcessInfoUsageEnvironment(),
         files: any UsageFileAccessing = FilesystemUsageFiles(),
-        keychain: any UsageKeychainAccessing = SecurityUsageKeychain(processRunner: ProcessUsageRunner()),
+        keychain: any UsageKeychainAccessing = SecurityUsageKeychain(),
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         self.environment = environment

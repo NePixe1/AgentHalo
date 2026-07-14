@@ -497,6 +497,8 @@ private actor SequencedCoordinatorProvider: UsageProvider {
     private var refreshContinuations: [Int: CheckedContinuation<Void, Never>] = [:]
     private(set) var resolveCallCount = 0
     private(set) var refreshCallCount = 0
+    private(set) var activeResolveCount = 0
+    private(set) var activeRefreshCount = 0
     private(set) var resolvedAccountKeys: [AccountCacheKey?] = []
 
     init(providerID: UsageProviderID) {
@@ -521,6 +523,8 @@ private actor SequencedCoordinatorProvider: UsageProvider {
 
     func resolveAccess(accountKey: AccountCacheKey?) async -> ResolvedProviderAccess {
         resolveCallCount += 1
+        activeResolveCount += 1
+        defer { activeResolveCount -= 1 }
         resolvedAccountKeys.append(accountKey)
         let call = resolveCallCount
         guard !resolvePlans.isEmpty else {
@@ -537,6 +541,8 @@ private actor SequencedCoordinatorProvider: UsageProvider {
 
     func refresh(using access: ResolvedProviderAccess) async -> UsageRefreshResult {
         refreshCallCount += 1
+        activeRefreshCount += 1
+        defer { activeRefreshCount -= 1 }
         let call = refreshCallCount
         guard !refreshPlans.isEmpty else {
             fatalError("missing refresh plan for call \(call)")
@@ -596,6 +602,10 @@ func runUsageMonitoringCoordinatorChecks() async {
     await testCoordinatorSuccessAndFailureStatePriorities()
     await testCoordinatorRateLimitCooldownsArePerAccount()
     await testCoordinatorMigratesOnlyInternalRotation()
+    await testCoordinatorRecoversRealCodexProviderAfterExternalLogin()
+    await testCoordinatorRecoversRealClaudeProviderAfterExternalLogin()
+    await testCoordinatorCancelAllAwaitsRefreshQuiescence()
+    await testCoordinatorCancelAllAwaitsPrepareQuiescence()
     await testCoordinatorCancellationAndCacheWriteFailure()
 }
 
@@ -1147,6 +1157,189 @@ func testCoordinatorMigratesOnlyInternalRotation() async {
     )
     let external = await externalCoordinator.prepare(.claude)
     expect(external.snapshot == nil, "external account change must not read old account cache")
+}
+
+func testCoordinatorRecoversRealCodexProviderAfterExternalLogin() async {
+    let date = Date(timeIntervalSince1970: 2_100_006_500)
+    let oldToken = codexCheckJWT(exp: date.addingTimeInterval(3_600).timeIntervalSince1970)
+    let fixture = makeCodexProviderFixture(token: oldToken, now: date)
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let http = GatedUsageHTTPClient(
+        outcomes: [
+            .response(codexUsageResponse(#"{"plan_type":"pro"}"#)),
+            .response(codexUsageResponse(#"{"plan_type":"plus"}"#)),
+        ],
+        gatedPath: "/backend-api/wham/usage"
+    )
+    let provider = CodexUsageProvider(
+        authStore: fixture.0,
+        usageClient: CodexUsageClient(http: http),
+        now: { date }
+    )
+    let now = LockedBox(date)
+    let cache = coordinatorCache(
+        files: FakeUsageFiles(),
+        path: "/tmp/agent-halo-coordinator-real-codex-external.json",
+        now: now
+    )
+    let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now.value })
+
+    let request = Task { await coordinator.ensureFresh(.codex) }
+    await waitForHTTPRequestCount(http, 1, "real Codex Provider did not enter gated Usage")
+    let externalToken = codexCheckJWT(exp: date.addingTimeInterval(7_200).timeIntervalSince1970)
+    try? files.writeAtomically(
+        codexExternalCredential(accessToken: externalToken, refreshToken: "new-codex-refresh"),
+        to: fixture.3,
+        preservingModeOf: fixture.3
+    )
+    guard case .oauth(let externalAccess) = fixture.0.resolveAccess() else {
+        fatalError("external Codex fixture should resolve")
+    }
+    await http.resume()
+    let recovered = await request.value
+
+    expect(recovered.snapshot?.accountKey, externalAccess.accountKey, "Coordinator should bind the external Codex account")
+    expect(recovered.snapshot?.planName, "Plus", "Coordinator should publish only the external Codex response")
+    expect(recovered.lastFailure == nil, "external Codex recovery should not publish an old-request failure")
+    expect(try! await cache.snapshot(for: fixture.1.accountKey) == nil, "old Codex request must have zero cache side effects")
+    expect(try! await cache.snapshot(for: externalAccess.accountKey)?.snapshot.planName, "Plus", "new Codex account should be cached independently")
+    let requests = await http.capturedRequests
+    expect(requests.count, 2, "Coordinator should re-prepare and refresh Codex in the same ensureFresh")
+    expect(requests[0].headers["authorization"], "Bearer \(oldToken)", "first Codex request uses old access")
+    expect(requests[1].headers["authorization"], "Bearer \(externalToken)", "recovery Codex request uses external access")
+}
+
+func testCoordinatorRecoversRealClaudeProviderAfterExternalLogin() async {
+    let date = Date(timeIntervalSince1970: 2_100_006_600)
+    let fixture = makeClaudeProviderFixture(
+        accessToken: "old-claude-access",
+        expiresAt: date.addingTimeInterval(3_600),
+        now: date
+    )
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let http = GatedUsageHTTPClient(
+        outcomes: [
+            .response(claudeUsageResponse(#"{"five_hour":{"utilization":91}}"#)),
+            .response(claudeUsageResponse(#"{"five_hour":{"utilization":8}}"#)),
+        ],
+        gatedPath: "/api/oauth/usage"
+    )
+    let provider = ClaudeUsageProvider(
+        authStore: fixture.0,
+        usageClient: ClaudeUsageClient(http: http),
+        now: { date }
+    )
+    let now = LockedBox(date)
+    let cache = coordinatorCache(
+        files: FakeUsageFiles(),
+        path: "/tmp/agent-halo-coordinator-real-claude-external.json",
+        now: now
+    )
+    let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now.value })
+
+    let request = Task { await coordinator.ensureFresh(.claude) }
+    await waitForHTTPRequestCount(http, 1, "real Claude Provider did not enter gated Usage")
+    try? files.writeAtomically(
+        claudeCheckCredential(
+            accessToken: "external-claude-access",
+            refreshToken: "external-claude-refresh",
+            expiresAtMilliseconds: date.addingTimeInterval(7_200).timeIntervalSince1970 * 1_000,
+            subscriptionType: "max",
+            rateLimitTier: "default_claude_max_5x"
+        ),
+        to: fixture.3,
+        preservingModeOf: fixture.3
+    )
+    guard case .oauth(let externalAccess) = fixture.0.resolveAccess() else {
+        fatalError("external Claude fixture should resolve")
+    }
+    await http.resume()
+    let recovered = await request.value
+
+    expect(recovered.snapshot?.accountKey, externalAccess.accountKey, "Coordinator should bind the external Claude account")
+    expect(recovered.snapshot?.planName, "Max 5x", "Coordinator should publish the external Claude plan")
+    expect(recovered.snapshot?.windows.first?.usedPercent, 8, "Coordinator must reject the old Claude response")
+    expect(recovered.lastFailure == nil, "external Claude recovery should not publish an old-request failure")
+    expect(try! await cache.snapshot(for: fixture.1.accountKey) == nil, "old Claude request must have zero cache side effects")
+    expect(try! await cache.snapshot(for: externalAccess.accountKey)?.snapshot.windows.first?.usedPercent, 8, "new Claude account should be cached independently")
+    let requests = await http.capturedRequests
+    expect(requests.count, 2, "Coordinator should re-prepare and refresh Claude in the same ensureFresh")
+    expect(requests[0].headers["authorization"], "Bearer old-claude-access", "first Claude request uses old access")
+    expect(requests[1].headers["authorization"], "Bearer external-claude-access", "recovery Claude request uses external access")
+}
+
+func testCoordinatorCancelAllAwaitsRefreshQuiescence() async {
+    let date = Date(timeIntervalSince1970: 2_100_006_700)
+    let now = LockedBox(date)
+    let key = AccountCacheKey(providerID: .codex, digest: "quiescent-refresh")
+    let provider = SequencedCoordinatorProvider(providerID: .codex)
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(key)))
+    await provider.enqueueRefresh(
+        UsageRefreshResult(
+            providerID: .codex,
+            snapshot: coordinatorSnapshot(key, at: date),
+            failure: nil
+        ),
+        gated: true
+    )
+    let cache = coordinatorCache(
+        files: FakeUsageFiles(),
+        path: "/tmp/agent-halo-coordinator-quiescent-refresh.json",
+        now: now
+    )
+    let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now.value })
+    let request = Task { await coordinator.ensureFresh(.codex) }
+    await waitForRefreshCount(provider, 1, "quiescent refresh did not enter Provider")
+    expect(await provider.activeRefreshCount, 1, "gated refresh should be active before cancellation")
+
+    let didReturn = LockedBox(false)
+    let cancellation = Task {
+        await coordinator.cancelAll()
+        didReturn.withValue { $0 = true }
+    }
+    for _ in 0..<100 { await Task.yield() }
+    expect(!didReturn.value, "cancelAll must not return while tracked refresh work is still active")
+
+    await provider.resumeRefresh(call: 1)
+    await cancellation.value
+    _ = await request.value
+    expect(await provider.activeRefreshCount, 0, "cancelAll must return only after refresh exits")
+    expect(try! await cache.snapshot(for: key) == nil, "cancelled refresh must have zero cache side effects")
+}
+
+func testCoordinatorCancelAllAwaitsPrepareQuiescence() async {
+    let date = Date(timeIntervalSince1970: 2_100_006_800)
+    let now = LockedBox(date)
+    let key = AccountCacheKey(providerID: .claude, digest: "quiescent-prepare")
+    let provider = SequencedCoordinatorProvider(providerID: .claude)
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(key)), gated: true)
+    let coordinator = UsageMonitoringCoordinator(
+        providers: [provider],
+        cache: coordinatorCache(
+            files: FakeUsageFiles(),
+            path: "/tmp/agent-halo-coordinator-quiescent-prepare.json",
+            now: now
+        ),
+        now: { now.value }
+    )
+    let request = Task { await coordinator.ensureFresh(.claude) }
+    await waitForResolveCount(provider, 1, "quiescent prepare did not enter Provider")
+    expect(await provider.activeResolveCount, 1, "gated prepare should be active before cancellation")
+    request.cancel()
+
+    let didReturn = LockedBox(false)
+    let cancellation = Task {
+        await coordinator.cancelAll()
+        didReturn.withValue { $0 = true }
+    }
+    for _ in 0..<100 { await Task.yield() }
+    expect(!didReturn.value, "cancelAll must not return while tracked prepare work is still active")
+
+    await provider.resumeResolve(call: 1)
+    await cancellation.value
+    _ = await request.value
+    expect(await provider.activeResolveCount, 0, "cancelAll must return only after prepare exits")
+    expect(await provider.refreshCallCount, 0, "cancelled prepare must not start Provider refresh")
 }
 
 func testCoordinatorCancellationAndCacheWriteFailure() async {
@@ -2200,8 +2393,10 @@ func claudeCheckPath(home: String) -> String {
 }
 
 func runClaudeAuthChecks() {
-    testSecurityUsageKeychainResolvesLegacyAccountBeforeReadingValue()
-    testSecurityUsageKeychainRejectsMissingOrUnparseableLegacyMetadata()
+    testSecurityUsageKeychainUsesAttributeOnlyMetadataThenExactDataRead()
+    testSecurityUsageKeychainWritesSecretBytesInProcess()
+    testSecurityUsageKeychainMapsNotFoundAndFrameworkErrors()
+    testSecurityUsageKeychainSourceContainsNoSecretCLIPath()
     testClaudeDiscoveryIsKeychainFirst()
     testClaudeConfigDirChangesPathAndKeychainService()
     testClaudeConfigDirServiceHashNormalizesUnicode()
@@ -2219,74 +2414,114 @@ func runClaudeAuthChecks() {
     testClaudeRejectsNonProductionOAuthOverrides()
 }
 
-func testSecurityUsageKeychainResolvesLegacyAccountBeforeReadingValue() {
+func testSecurityUsageKeychainUsesAttributeOnlyMetadataThenExactDataRead() {
     let service = "Claude Code-credentials"
-    let legacyAccount = " legacy-account "
-    let metadata = #""acct"<blob>=" legacy-account ""#
-    let runner = RecordingUsageProcessRunner(results: [
-        UsageProcessResult(
-            exitCode: 0,
-            standardOutput: Data(),
-            standardError: Data(metadata.utf8)
-        ),
-        UsageProcessResult(
-            exitCode: 0,
-            standardOutput: Data("credential-json\n".utf8),
-            standardError: Data()
-        ),
-    ])
-    let keychain = SecurityUsageKeychain(processRunner: runner)
-    let item: UsageKeychainItem?
-    do {
-        item = try keychain.readFirstMatching(service: service)
-    } catch {
-        fatalError("legacy keychain lookup should not throw: \(error)")
-    }
-    expect(item?.account, legacyAccount, "legacy lookup returns the exact matched account")
-    expect(item?.value, "credential-json", "legacy lookup returns value from explicit-account read")
+    let account = "legacy-account"
+    let items = FakeUsageSecurityItems()
+    items.enqueueCopy(
+        SecurityUsageKeychainResult(
+            status: UsageSecurityStatus.success,
+            account: account,
+            data: nil
+        )
+    )
+    items.enqueueCopy(
+        SecurityUsageKeychainResult(
+            status: UsageSecurityStatus.success,
+            account: nil,
+            data: Data("credential-json".utf8)
+        )
+    )
+    let keychain = SecurityUsageKeychain(items: items)
+    let matched = try? keychain.readFirstMatching(service: service)
 
-    let calls = runner.capturedCalls()
-    expect(calls.count, 2, "legacy lookup performs metadata then explicit-account read")
-    expect(calls[0].executable, "/usr/bin/security", "legacy metadata executable")
-    expect(
-        calls[0].arguments,
-        ["find-generic-password", "-s", service, "-g"],
-        "legacy metadata query uses only service-scoped metadata arguments"
-    )
-    expect(
-        calls[1].arguments,
-        ["find-generic-password", "-s", service, "-a", legacyAccount, "-w"],
-        "legacy value query must use the parsed explicit account"
-    )
+    expect(matched?.account, account, "metadata lookup should preserve the exact discovered account")
+    expect(matched?.value, "credential-json", "exact-account read should decode the credential in memory")
+    let queries = items.snapshot().copyQueries
+    expect(queries.count, 2, "legacy resolution should perform metadata then exact data lookup")
+    expect(queries[0].service, service, "metadata query service")
+    expect(queries[0].account == nil, "metadata query should search the service")
+    expect(queries[0].returnAttributes, true, "metadata query must request attributes")
+    expect(queries[0].returnData, false, "metadata query must never request secret data")
+    expect(queries[1].account, account, "data query should use the discovered exact account")
+    expect(queries[1].returnAttributes, false, "data query does not need attributes")
+    expect(queries[1].returnData, true, "data query requests secret bytes only into memory")
 }
 
-func testSecurityUsageKeychainRejectsMissingOrUnparseableLegacyMetadata() {
-    let service = "Claude Code-credentials"
-    let notFoundRunner = RecordingUsageProcessRunner(results: [
-        UsageProcessResult(exitCode: 44, standardOutput: Data(), standardError: Data()),
-    ])
-    let notFound = SecurityUsageKeychain(processRunner: notFoundRunner)
-    expect(
-        try? notFound.readFirstMatching(service: service),
-        nil,
-        "not-found legacy keychain lookup returns no candidate"
-    )
-    expect(notFoundRunner.capturedCalls().count, 1, "not-found lookup stops after metadata query")
+func testSecurityUsageKeychainWritesSecretBytesInProcess() {
+    let service = "Codex Auth"
+    let account = "exact-account"
+    let secret = "synthetic-credential-json"
 
-    let malformedRunner = RecordingUsageProcessRunner(results: [
-        UsageProcessResult(
-            exitCode: 0,
-            standardOutput: Data(),
-            standardError: Data(#""svce"<blob>="Claude Code-credentials""#.utf8)
-        ),
-    ])
-    let malformed = SecurityUsageKeychain(processRunner: malformedRunner)
-    expect(
-        try? malformed.readFirstMatching(service: service),
-        nil,
-        "metadata without acct returns no legacy candidate"
+    let updateItems = FakeUsageSecurityItems()
+    updateItems.enqueueUpdate(status: UsageSecurityStatus.success)
+    let updating = SecurityUsageKeychain(items: updateItems)
+    try? updating.write(service: service, account: account, value: secret)
+    let updateState = updateItems.snapshot()
+    expect(updateState.updates.count, 1, "existing keychain item should use SecItemUpdate seam")
+    expect(updateState.updates.first?.0.account, account, "update keeps exact source account")
+    expect(updateState.updates.first?.1, Data(secret.utf8), "update passes secret bytes in process")
+    expect(updateState.additions.count, 0, "successful update should not add a duplicate")
+
+    let addItems = FakeUsageSecurityItems()
+    addItems.enqueueUpdate(status: UsageSecurityStatus.itemNotFound)
+    addItems.enqueueAdd(status: UsageSecurityStatus.success)
+    let adding = SecurityUsageKeychain(items: addItems)
+    try? adding.write(service: service, account: account, value: secret)
+    let addState = addItems.snapshot()
+    expect(addState.updates.count, 1, "write should first attempt exact update")
+    expect(addState.additions.count, 1, "missing keychain item should use SecItemAdd seam")
+    expect(addState.additions.first?.service, service, "add keeps exact service")
+    expect(addState.additions.first?.account, account, "add keeps exact account")
+    expect(addState.additions.first?.value, Data(secret.utf8), "add passes secret bytes in process")
+}
+
+func testSecurityUsageKeychainMapsNotFoundAndFrameworkErrors() {
+    let missingItems = FakeUsageSecurityItems()
+    missingItems.enqueueCopy(
+        SecurityUsageKeychainResult(
+            status: UsageSecurityStatus.itemNotFound,
+            account: nil,
+            data: nil
+        )
     )
-    expect(malformedRunner.capturedCalls().count, 1, "unparseable metadata must not read or write a value")
+    let missing = SecurityUsageKeychain(items: missingItems)
+    expect(try? missing.read(service: "missing", account: nil), nil, "SecItem not-found should remain nil")
+
+    let failureStatus: Int32 = -50
+    let failingItems = FakeUsageSecurityItems()
+    failingItems.enqueueCopy(
+        SecurityUsageKeychainResult(status: failureStatus, account: nil, data: nil)
+    )
+    let failing = SecurityUsageKeychain(items: failingItems)
+    do {
+        _ = try failing.read(service: "broken", account: nil)
+        fatalError("unexpected Security.framework status should throw")
+    } catch let error as UsageKeychainError {
+        expect(error, .unexpectedExitCode(Int(failureStatus)), "framework error mapping stays classified")
+    } catch {
+        fatalError("unexpected keychain error type")
+    }
+}
+
+func testSecurityUsageKeychainSourceContainsNoSecretCLIPath() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("AgentHaloCore/UsageMonitoring/UsageSystemClients.swift")
+    guard let source = try? String(contentsOf: sourceDirectory, encoding: .utf8),
+          let start = source.range(of: "public final class SecurityUsageKeychain")?.lowerBound,
+          let end = source.range(of: "public enum UsageKeychainError", range: start..<source.endIndex)?.lowerBound
+    else {
+        fatalError("SecurityUsageKeychain source should be readable")
+    }
+    let keychainSource = source[start..<end]
+    expect(!keychainSource.contains("/usr/bin/security"), "Keychain implementation must not launch security CLI")
+    expect(!keychainSource.contains("\"-g\""), "metadata lookup must not request CLI secret output")
+    expect(!keychainSource.contains("\"-w\""), "credential JSON must not enter process argv")
+    expect(source.contains("SecItemCopyMatching"), "production read should use Security.framework")
+    expect(source.contains("SecItemUpdate"), "production update should use Security.framework")
+    expect(source.contains("SecItemAdd"), "production add should use Security.framework")
 }
 
 func testClaudeDiscoveryIsKeychainFirst() {
@@ -2711,23 +2946,32 @@ func testClaudeLegacyRotationWritesToDiscoveredAccount() {
     let storedValue = claudeCheckString(
         claudeCheckCredential(accessToken: "old-legacy-token")
     )
-    let metadata = #""acct"<blob>="legacy-account""#
-    let runner = RecordingUsageProcessRunner(results: [
-        UsageProcessResult(exitCode: 44, standardOutput: Data(), standardError: Data()),
-        UsageProcessResult(exitCode: 0, standardOutput: Data(), standardError: Data(metadata.utf8)),
-        UsageProcessResult(
-            exitCode: 0,
-            standardOutput: Data("\(storedValue)\n".utf8),
-            standardError: Data()
-        ),
-        UsageProcessResult(
-            exitCode: 0,
-            standardOutput: Data("\(storedValue)\n".utf8),
-            standardError: Data()
-        ),
-        UsageProcessResult(exitCode: 0, standardOutput: Data(), standardError: Data()),
-    ])
-    let keychain = SecurityUsageKeychain(processRunner: runner)
+    let items = FakeUsageSecurityItems()
+    items.enqueueCopy(
+        SecurityUsageKeychainResult(
+            status: UsageSecurityStatus.itemNotFound,
+            account: nil,
+            data: nil
+        )
+    )
+    items.enqueueCopy(
+        SecurityUsageKeychainResult(
+            status: UsageSecurityStatus.success,
+            account: legacyAccount,
+            data: nil
+        )
+    )
+    for _ in 0..<2 {
+        items.enqueueCopy(
+            SecurityUsageKeychainResult(
+                status: UsageSecurityStatus.success,
+                account: nil,
+                data: Data(storedValue.utf8)
+            )
+        )
+    }
+    items.enqueueUpdate(status: UsageSecurityStatus.success)
+    let keychain = SecurityUsageKeychain(items: items)
     let store = ClaudeAuthStore(
         environment: FakeUsageEnvironment(["USER": "different-current-user"]),
         files: FakeUsageFiles(),
@@ -2758,26 +3002,18 @@ func testClaudeLegacyRotationWritesToDiscoveredAccount() {
     expect(rotated?.source, access.source, "legacy rotation keeps exact service/account")
     expect(rotated?.accessToken, "new-legacy-token", "legacy account receives rotation")
 
-    let calls = runner.capturedCalls()
-    expect(calls.count, 5, "resolve and persist use the expected production keychain calls")
-    expect(
-        calls[3].arguments,
-        ["find-generic-password", "-s", service, "-a", legacyAccount, "-w"],
-        "persist reloads the exact discovered account"
-    )
-    let writeArguments = calls[4].arguments
-    expect(writeArguments.first, "add-generic-password", "persist uses keychain update command")
-    guard let accountIndex = writeArguments.firstIndex(of: "-a"),
-          writeArguments.indices.contains(accountIndex + 1)
+    let state = items.snapshot()
+    expect(state.copyQueries.count, 4, "resolve and persist use metadata plus exact-account reads")
+    expect(state.copyQueries[3].account, legacyAccount, "persist reloads the exact discovered account")
+    expect(state.updates.count, 1, "persist updates the discovered legacy item")
+    expect(state.updates.first?.0.account, legacyAccount, "persist keeps the discovered legacy account")
+    guard let updatedData = state.updates.first?.1,
+          let updatedObject = try? JSONSerialization.jsonObject(with: updatedData) as? [String: Any],
+          let updatedOAuth = updatedObject["claudeAiOauth"] as? [String: Any]
     else {
-        fatalError("legacy production write must include an explicit account")
+        fatalError("legacy Security.framework update should carry merged JSON bytes")
     }
-    expect(writeArguments[accountIndex + 1], legacyAccount, "persist writes the discovered legacy account")
-    expect(
-        writeArguments.contains("different-current-user"),
-        false,
-        "persist must not migrate legacy credentials to the current user"
-    )
+    expect(updatedOAuth["accessToken"] as? String, "new-legacy-token", "legacy update carries rotated access")
 }
 
 func testClaudePersistRefusesServiceOnlySourceWithoutAccount() {
@@ -2902,11 +3138,39 @@ func runCodexUsageChecks() async {
     testCodexUsageMapperPlansWindowsAndRestrictedFields()
     testCodexUsageMapperClassifiesInvalidResponses()
     await testCodexProviderAdoptsExternalSourceWithoutMigration()
+    await testCodexProviderDetectsExternalSourceDuringRefresh()
+    await testCodexProviderDetectsExternalSourceAfterRefreshFailure()
+    await testCodexProviderDetectsExternalSourceDuringUsageSuccess()
+    await testCodexProviderDetectsExternalSourceDuringUsageFailure()
+    await testCodexProviderDetectsExternalSourceOnFirstUnauthorized()
+    await testCodexProviderDetectsExternalSourceDuringUnauthorizedRetry()
+    await testCodexProviderDetectsExternalSourceDuringUnauthorizedRetryFailure()
     await testCodexProviderRefreshesProactively()
     await testCodexProviderRetriesOneUnauthorizedAndMigratesCache()
     await testCodexProviderStopsAfterSecondUnauthorized()
     await testCodexProviderRefreshCodesRequireSignIn()
     await testCodexProviderUsesRotatedTokenWhenWritebackFails()
+}
+
+func expectExternalAccessChange(_ result: UsageRefreshResult, _ message: String) {
+    guard case .externalAccessChanged = result.outcome else {
+        fatalError(message)
+    }
+    expect(result.snapshot == nil, "external access change must not carry a snapshot")
+    expect(result.failure == nil, "external access change must not masquerade as a failure")
+    expect(result.migrateCacheFrom == nil, "external access change must not masquerade as cache migration")
+}
+
+func waitForHTTPRequestCount(
+    _ client: GatedUsageHTTPClient,
+    _ expectedCount: Int,
+    _ message: String
+) async {
+    for _ in 0..<10_000 {
+        if await client.capturedRequests.count >= expectedCount { return }
+        await Task.yield()
+    }
+    fatalError(message)
 }
 
 func testCodexUsageClientBuildsOnlyOfficialRequests() async {
@@ -3121,10 +3385,220 @@ func testCodexProviderAdoptsExternalSourceWithoutMigration() async {
 
     let result = await provider.refresh(using: .oauth(fixture.1))
     let requests = await http.capturedRequests
-    expect(result.failure == nil, "external source adoption should succeed")
-    expect(result.migrateCacheFrom == nil, "external source adoption must not migrate cache")
-    expect(requests.count, 1, "fresh external token must avoid refresh")
-    expect(requests.first?.headers["authorization"], "Bearer \(externalJWT)", "usage must use external token")
+    expectExternalAccessChange(result, "external source adoption must be a typed Coordinator outcome")
+    expect(requests.count, 0, "Provider must not continue under an externally replaced source")
+}
+
+func codexExternalCredential(
+    accessToken: String,
+    refreshToken: String = "external-refresh"
+) -> Data {
+    codexCheckJSON([
+        "tokens": [
+            "access_token": accessToken,
+            "refresh_token": refreshToken,
+        ],
+    ])
+}
+
+func testCodexProviderDetectsExternalSourceDuringRefresh() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeCodexProviderFixture(
+        token: codexCheckJWT(exp: now.addingTimeInterval(60).timeIntervalSince1970),
+        now: now
+    )
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let http = GatedUsageHTTPClient(
+        outcomes: [.response(codexUsageResponse(#"{"access_token":"stale-rotation"}"#))],
+        gatedPath: "/oauth/token"
+    )
+    let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+
+    let request = Task { await provider.refresh(using: .oauth(fixture.1)) }
+    await waitForHTTPRequestCount(http, 1, "Codex refresh request did not enter gate")
+    try? files.writeAtomically(
+        codexExternalCredential(accessToken: "external-during-refresh"),
+        to: fixture.3,
+        preservingModeOf: fixture.3
+    )
+    await http.resume()
+    expectExternalAccessChange(
+        await request.value,
+        "external login during Codex refresh must discard the old refresh result"
+    )
+}
+
+func testCodexProviderDetectsExternalSourceAfterRefreshFailure() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeCodexProviderFixture(
+        token: codexCheckJWT(exp: now.addingTimeInterval(60).timeIntervalSince1970),
+        now: now
+    )
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let http = GatedUsageHTTPClient(
+        outcomes: [.failure(.network)],
+        gatedPath: "/oauth/token"
+    )
+    let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+
+    let request = Task { await provider.refresh(using: .oauth(fixture.1)) }
+    await waitForHTTPRequestCount(http, 1, "failing Codex refresh request did not enter gate")
+    try? files.writeAtomically(
+        codexExternalCredential(accessToken: "external-after-refresh-failure"),
+        to: fixture.3,
+        preservingModeOf: fixture.3
+    )
+    await http.resume()
+    expectExternalAccessChange(
+        await request.value,
+        "external login during Codex refresh failure must supersede the old error"
+    )
+}
+
+func testCodexProviderDetectsExternalSourceDuringUsageSuccess() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeCodexProviderFixture(
+        token: codexCheckJWT(exp: now.addingTimeInterval(3_600).timeIntervalSince1970),
+        now: now
+    )
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let http = GatedUsageHTTPClient(
+        outcomes: [.response(codexUsageResponse(#"{"plan_type":"pro"}"#))],
+        gatedPath: "/backend-api/wham/usage"
+    )
+    let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+
+    let request = Task { await provider.refresh(using: .oauth(fixture.1)) }
+    await waitForHTTPRequestCount(http, 1, "Codex Usage request did not enter gate")
+    try? files.writeAtomically(
+        codexExternalCredential(accessToken: "external-during-usage"),
+        to: fixture.3,
+        preservingModeOf: fixture.3
+    )
+    await http.resume()
+    expectExternalAccessChange(
+        await request.value,
+        "external login during Codex Usage success must discard the old snapshot"
+    )
+}
+
+func testCodexProviderDetectsExternalSourceDuringUsageFailure() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeCodexProviderFixture(
+        token: codexCheckJWT(exp: now.addingTimeInterval(3_600).timeIntervalSince1970),
+        now: now
+    )
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let http = GatedUsageHTTPClient(
+        outcomes: [.failure(.network)],
+        gatedPath: "/backend-api/wham/usage"
+    )
+    let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+
+    let request = Task { await provider.refresh(using: .oauth(fixture.1)) }
+    await waitForHTTPRequestCount(http, 1, "Codex failing Usage request did not enter gate")
+    try? files.writeAtomically(
+        codexExternalCredential(accessToken: "external-after-network"),
+        to: fixture.3,
+        preservingModeOf: fixture.3
+    )
+    await http.resume()
+    expectExternalAccessChange(
+        await request.value,
+        "external login during Codex transport failure must supersede the old error"
+    )
+}
+
+func testCodexProviderDetectsExternalSourceOnFirstUnauthorized() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeCodexProviderFixture(
+        token: codexCheckJWT(exp: now.addingTimeInterval(3_600).timeIntervalSince1970),
+        now: now
+    )
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let http = GatedUsageHTTPClient(
+        outcomes: [.response(codexUsageResponse(statusCode: 401, "{}"))],
+        gatedPath: "/backend-api/wham/usage"
+    )
+    let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+
+    let request = Task { await provider.refresh(using: .oauth(fixture.1)) }
+    await waitForHTTPRequestCount(http, 1, "Codex first 401 request did not enter gate")
+    try? files.writeAtomically(
+        codexExternalCredential(accessToken: "external-on-first-401"),
+        to: fixture.3,
+        preservingModeOf: fixture.3
+    )
+    await http.resume()
+    expectExternalAccessChange(
+        await request.value,
+        "external login at first Codex 401 must prevent old-token refresh"
+    )
+    expect(await http.capturedRequests.count, 1, "first-401 access change must stop before refresh")
+}
+
+func testCodexProviderDetectsExternalSourceDuringUnauthorizedRetry() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeCodexProviderFixture(
+        token: codexCheckJWT(exp: now.addingTimeInterval(3_600).timeIntervalSince1970),
+        now: now
+    )
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let http = GatedUsageHTTPClient(
+        outcomes: [
+            .response(codexUsageResponse(statusCode: 401, "{}")),
+            .response(codexUsageResponse(#"{"access_token":"internal-retry"}"#)),
+            .response(codexUsageResponse(statusCode: 401, "{}")),
+        ],
+        gatedPath: "/backend-api/wham/usage",
+        gatedMatchNumber: 2
+    )
+    let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+
+    let request = Task { await provider.refresh(using: .oauth(fixture.1)) }
+    await waitForHTTPRequestCount(http, 3, "Codex retry Usage request did not enter gate")
+    try? files.writeAtomically(
+        codexExternalCredential(accessToken: "external-during-retry"),
+        to: fixture.3,
+        preservingModeOf: fixture.3
+    )
+    await http.resume()
+    expectExternalAccessChange(
+        await request.value,
+        "external login during Codex 401 retry must supersede sign-in failure"
+    )
+}
+
+func testCodexProviderDetectsExternalSourceDuringUnauthorizedRetryFailure() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeCodexProviderFixture(
+        token: codexCheckJWT(exp: now.addingTimeInterval(3_600).timeIntervalSince1970),
+        now: now
+    )
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let http = GatedUsageHTTPClient(
+        outcomes: [
+            .response(codexUsageResponse(statusCode: 401, "{}")),
+            .response(codexUsageResponse(#"{"access_token":"internal-retry"}"#)),
+            .failure(.network),
+        ],
+        gatedPath: "/backend-api/wham/usage",
+        gatedMatchNumber: 2
+    )
+    let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+
+    let request = Task { await provider.refresh(using: .oauth(fixture.1)) }
+    await waitForHTTPRequestCount(http, 3, "failing Codex retry request did not enter gate")
+    try? files.writeAtomically(
+        codexExternalCredential(accessToken: "external-during-retry-failure"),
+        to: fixture.3,
+        preservingModeOf: fixture.3
+    )
+    await http.resume()
+    expectExternalAccessChange(
+        await request.value,
+        "external login during Codex retry failure must supersede the old error"
+    )
 }
 
 func testCodexProviderRefreshesProactively() async {
@@ -3466,8 +3940,7 @@ func testClaudeProviderRejectsUnderScopedInitialReload() async {
     let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
 
     let result = await provider.refresh(using: .oauth(fixture.1))
-    expect(result.failure, .signInAgain, "under-scoped exact-source reload must require sign in")
-    expect(result.migrateCacheFrom == nil, "under-scoped exact-source reload must not migrate cache")
+    expectExternalAccessChange(result, "under-scoped exact-source replacement must re-enter Coordinator prepare")
     expect(await http.capturedRequests.count, 0, "under-scoped exact-source reload must skip HTTP")
 }
 
@@ -3492,11 +3965,8 @@ func testClaudeProviderAdoptsExternalSourceWithoutMigration() async {
 
     let result = await provider.refresh(using: .oauth(fixture.1))
     let requests = await http.capturedRequests
-    expect(result.failure == nil, "external Claude source adoption should succeed")
-    expect(result.migrateCacheFrom == nil, "external Claude login change must not migrate cache")
-    expect(result.snapshot?.planName, "Max 5x", "external Claude plan hint should be adopted")
-    expect(requests.count, 1, "fresh external Claude token avoids refresh")
-    expect(requests.first?.headers["authorization"], "Bearer external-access", "Claude usage uses exact-source reread")
+    expectExternalAccessChange(result, "external Claude source adoption must be a typed Coordinator outcome")
+    expect(requests.count, 0, "Claude Provider must not continue under an externally replaced source")
 }
 
 actor ClaudeCheckMutatingHTTPClient: UsageHTTPClient {
@@ -3591,14 +4061,8 @@ func testClaudeProviderAdoptsExternalSourceChangedDuringRefresh() async {
 
     let result = await provider.refresh(using: .oauth(fixture.1))
     let requests = await http.capturedRequests
-    expect(result.failure == nil, "Claude source change during refresh should adopt the external login")
-    expect(result.migrateCacheFrom == nil, "external Claude login during refresh must not migrate old cache")
-    expect(result.snapshot?.planName, "Max 5x", "external plan hint during refresh should be adopted")
-    expect(
-        requests.last?.headers["authorization"],
-        "Bearer external-during-refresh",
-        "usage after generation mismatch must use the external credential"
-    )
+    expectExternalAccessChange(result, "Claude source change during refresh must escape to Coordinator")
+    expect(requests.count, 1, "Claude Provider must stop after the stale refresh response")
 }
 
 func testClaudeProviderAdoptsExternalSourceAfterRefreshFailure() async {
@@ -3626,14 +4090,8 @@ func testClaudeProviderAdoptsExternalSourceAfterRefreshFailure() async {
 
     let result = await provider.refresh(using: .oauth(fixture.1))
     let requests = await http.capturedRequests
-    expect(result.failure == nil, "external Claude login during invalid_grant refresh should be adopted")
-    expect(result.migrateCacheFrom == nil, "external login after invalid_grant clears migration")
-    expect(result.snapshot?.planName, "Max 5x", "invalid_grant race snapshot uses external plan")
-    expect(
-        requests.last?.headers["authorization"],
-        "Bearer external-after-invalid-grant",
-        "invalid_grant race restarts with external credential"
-    )
+    expectExternalAccessChange(result, "external Claude login must supersede invalid_grant")
+    expect(requests.count, 1, "Claude Provider must not internally restart after invalid_grant")
 }
 
 func testClaudeProviderRejectsUnderScopedRefreshChange() async {
@@ -3659,8 +4117,7 @@ func testClaudeProviderRejectsUnderScopedRefreshChange() async {
 
     let result = await provider.refresh(using: .oauth(fixture.1))
     let requests = await http.capturedRequests
-    expect(result.failure, .signInAgain, "under-scoped refresh generation must require sign in")
-    expect(result.migrateCacheFrom == nil, "under-scoped refresh generation must not migrate cache")
+    expectExternalAccessChange(result, "under-scoped refresh generation must re-enter Coordinator prepare")
     expect(requests.count, 1, "under-scoped refresh generation must stop after refresh response")
     expect(requests.first?.path, "/v1/oauth/token", "under-scoped refresh fixture request")
 }
@@ -3690,16 +4147,8 @@ func testClaudeProviderAdoptsExternalSourceChangedDuringUsage() async {
 
     let result = await provider.refresh(using: .oauth(fixture.1))
     let requests = await http.capturedRequests
-    expect(result.failure == nil, "Claude source change during usage should adopt the external login")
-    expect(result.migrateCacheFrom == nil, "external Claude login during usage must not migrate old cache")
-    expect(result.snapshot?.planName, "Max 5x", "usage-race snapshot must use external plan hint")
-    expect(result.snapshot?.windows.first?.usedPercent, 8, "usage-race snapshot must discard the old account response")
-    expect(requests.count, 2, "usage-race adoption should retry once with the external credential")
-    expect(
-        requests.last?.headers["authorization"],
-        "Bearer external-during-usage",
-        "usage-race retry must use the external credential"
-    )
+    expectExternalAccessChange(result, "Claude source change during Usage must escape to Coordinator")
+    expect(requests.count, 1, "Claude Provider must discard old Usage without internally retrying")
 }
 
 func testClaudeProviderAdoptsExternalSourceAfterUsageTransportFailure() async {
@@ -3727,14 +4176,8 @@ func testClaudeProviderAdoptsExternalSourceAfterUsageTransportFailure() async {
 
     let result = await provider.refresh(using: .oauth(fixture.1))
     let requests = await http.capturedRequests
-    expect(result.failure == nil, "external Claude login during usage transport failure should be adopted")
-    expect(result.migrateCacheFrom == nil, "external login after usage transport failure clears migration")
-    expect(result.snapshot?.planName, "Max 5x", "transport-race snapshot uses external plan")
-    expect(
-        requests.last?.headers["authorization"],
-        "Bearer external-after-network",
-        "transport-race retry uses external credential"
-    )
+    expectExternalAccessChange(result, "external Claude login must supersede Usage transport failure")
+    expect(requests.count, 1, "Claude Provider must not internally retry transport failure")
 
     let unchangedFixture = makeClaudeProviderFixture(
         accessToken: "unchanged-network",
@@ -3773,8 +4216,7 @@ func testClaudeProviderRejectsUnderScopedUsageChange() async {
 
     let result = await provider.refresh(using: .oauth(fixture.1))
     let requests = await http.capturedRequests
-    expect(result.failure, .signInAgain, "under-scoped usage generation must require sign in")
-    expect(result.migrateCacheFrom == nil, "under-scoped usage generation must not migrate cache")
+    expectExternalAccessChange(result, "under-scoped Usage generation must re-enter Coordinator prepare")
     expect(requests.count, 1, "under-scoped usage generation must not retry Usage HTTP")
 }
 
@@ -3806,14 +4248,8 @@ func testClaudeProviderAdoptsExternalSourceChangedDuringUnauthorizedRetry() asyn
 
     let result = await provider.refresh(using: .oauth(fixture.1))
     let requests = await http.capturedRequests
-    expect(result.failure == nil, "external Claude login during second 401 should be adopted")
-    expect(result.migrateCacheFrom == nil, "external login during second 401 clears internal migration")
-    expect(result.snapshot?.planName, "Max 5x", "second-401 race snapshot uses external plan")
-    expect(
-        requests.last?.headers["authorization"],
-        "Bearer external-during-retry",
-        "second-401 race restarts with external credential"
-    )
+    expectExternalAccessChange(result, "external Claude login during second 401 must escape to Coordinator")
+    expect(requests.count, 3, "Claude Provider must stop after the stale second Usage response")
 }
 
 func testClaudeProviderRefreshesProactively() async {

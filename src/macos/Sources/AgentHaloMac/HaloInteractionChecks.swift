@@ -1400,7 +1400,7 @@ private func testUsageTerminationWaitsForCoordinatorCancellation() {
     )
     expect(
         cleanupSource.contains("usageRefreshLoopTask?.cancel()")
-            && cleanupSource.contains("usageRequestTasks.values.forEach { $0.cancel() }"),
+            && cleanupSource.contains("usageRequestTasks.values.forEach { $0.task.cancel() }"),
         "local Usage cleanup should synchronously cancel the loop and wrapper tasks"
     )
 }
@@ -1490,7 +1490,7 @@ private func testUsageMonitoringLifecycleWiring() {
     )
     expect(
         source.contains("private var usageRefreshLoopTask: Task<Void, Never>?")
-            && source.contains("private var usageRequestTasks: [UsageProviderID: Task<Void, Never>] = [:]")
+            && source.contains("private var usageRequestTasks: [UsageProviderID: UsageRequestRecord] = [:]")
             && source.contains("private let usageRefreshInterval: TimeInterval = 5 * 60"),
         "Usage refresh should have a dedicated five-minute Task"
     )
@@ -1530,11 +1530,22 @@ private func testUsageMonitoringLifecycleWiring() {
     )
     expect(
         requestSource.contains("guard usageRequestTasks[providerID] == nil")
-            && requestSource.contains("let prepared = await usageCoordinator.prepare(providerID)")
-            && requestSource.contains("publishUsageState(prepared, for: providerID)")
-            && requestSource.contains("let refreshed = await usageCoordinator.ensureFresh(providerID)")
-            && requestSource.contains("publishUsageState(refreshed, for: providerID)"),
+            && requestSource.contains("let token = UUID()")
+            && requestSource.contains("let coordinator = usageCoordinator")
+            && requestSource.contains("Task { @MainActor [weak self] in")
+            && requestSource.contains("defer { self?.clearUsageRequest(for: providerID, token: token) }")
+            && requestSource.contains("let prepared = await coordinator.prepare(providerID)")
+            && requestSource.contains("self?.publishUsageState(prepared, for: providerID)")
+            && requestSource.contains("let refreshed = await coordinator.ensureFresh(providerID)")
+            && requestSource.contains("self?.publishUsageState(refreshed, for: providerID)")
+            && !requestSource.contains("guard let self")
+            && requestSource.contains("guard usageRequestTasks[providerID]?.token == token else")
+            && requestSource.contains("usageRequestTasks[providerID] = nil"),
         "Usage requests should publish prepare and ensureFresh results in two phases"
+    )
+    expect(
+        requestSource.contains("UsageRequestRecord(token: token, task: task)"),
+        "wrapper cleanup must use token identity so an old task cannot remove its replacement"
     )
     expect(
         publishSource.contains("usageStates[providerID] = state")

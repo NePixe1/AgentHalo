@@ -2,7 +2,7 @@ import Foundation
 
 private enum ClaudeGenerationChecked<Value: Sendable>: Sendable {
     case value(Value)
-    case restarted(UsageRefreshResult)
+    case externalAccessChanged
     case failure(UsageProviderFailure)
 }
 
@@ -24,57 +24,44 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
     }
 
     public func resolveAccess(accountKey: AccountCacheKey?) async -> ResolvedProviderAccess {
-        await Task.detached { [authStore] in
-            authStore.resolveAccess()
-        }.value
+        authStore.resolveAccess()
     }
 
     public func refresh(using access: ResolvedProviderAccess) async -> UsageRefreshResult {
         guard case .oauth(let initialAccess) = access else {
             return failure(.signInAgain)
         }
-        return await refresh(initialAccess: initialAccess, externalReloadsRemaining: 1)
+        return await refresh(initialAccess: initialAccess)
     }
 
-    private func refresh(
-        initialAccess: OAuthAccess,
-        externalReloadsRemaining: Int
-    ) async -> UsageRefreshResult {
+    private func refresh(initialAccess: OAuthAccess) async -> UsageRefreshResult {
         do {
             var current = initialAccess
             var migrateCacheFrom: AccountCacheKey?
-            var adoptedExternalSource = false
-
-            let exactAccess = await Task.detached(operation: { [authStore] in
-                authStore.reloadResolved(source: initialAccess.source)
-            }).value
+            let exactAccess = authStore.reloadResolved(source: initialAccess.source)
             switch exactAccess {
             case .oauth(let live):
-                adoptedExternalSource = live.sourceVersion != initialAccess.sourceVersion
+                guard live.sourceVersion == initialAccess.sourceVersion else {
+                    return externalAccessChanged()
+                }
                 current = live
             case .oauthNeedsSignIn, .apiKey:
-                return failure(.signInAgain)
+                return externalAccessChanged()
             }
 
-            let refreshCandidate = current
-            let needsProactiveRefresh = await Task.detached(operation: { [authStore] in
-                authStore.needsRefresh(refreshCandidate)
-            }).value
-            if needsProactiveRefresh {
+            if authStore.needsRefresh(current) {
                 let requestCandidate = current
-                let allowMigration = !adoptedExternalSource
                 let checked = await generationChecked(
                     candidate: requestCandidate,
-                    externalReloadsRemaining: externalReloadsRemaining,
                     successCandidate: { $0.access },
-                    operation: { try await rotate(requestCandidate, allowMigration: allowMigration) }
+                    operation: { try await rotate(requestCandidate) }
                 )
                 let rotated: (access: OAuthAccess, migrateCacheFrom: AccountCacheKey?)
                 switch checked {
                 case .value(let value):
                     rotated = value
-                case .restarted(let result):
-                    return result
+                case .externalAccessChanged:
+                    return externalAccessChanged()
                 case .failure(let failure):
                     return self.failure(failure)
                 }
@@ -85,7 +72,6 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
             let firstUsageCandidate = current
             let firstUsage = await generationChecked(
                 candidate: firstUsageCandidate,
-                externalReloadsRemaining: externalReloadsRemaining,
                 successCandidate: { _ in firstUsageCandidate },
                 operation: {
                     try await usageClient.fetchUsage(accessToken: firstUsageCandidate.accessToken)
@@ -95,26 +81,24 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
             switch firstUsage {
             case .value(let value):
                 response = value
-            case .restarted(let result):
-                return result
+            case .externalAccessChanged:
+                return externalAccessChanged()
             case .failure(let failure):
                 return self.failure(failure)
             }
             if response.statusCode == 401 {
                 let requestCandidate = current
-                let allowMigration = !adoptedExternalSource
                 let checkedRotation = await generationChecked(
                     candidate: requestCandidate,
-                    externalReloadsRemaining: externalReloadsRemaining,
                     successCandidate: { $0.access },
-                    operation: { try await rotate(requestCandidate, allowMigration: allowMigration) }
+                    operation: { try await rotate(requestCandidate) }
                 )
                 let rotated: (access: OAuthAccess, migrateCacheFrom: AccountCacheKey?)
                 switch checkedRotation {
                 case .value(let value):
                     rotated = value
-                case .restarted(let result):
-                    return result
+                case .externalAccessChanged:
+                    return externalAccessChanged()
                 case .failure(let failure):
                     return self.failure(failure)
                 }
@@ -123,7 +107,6 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
                 let secondUsageCandidate = current
                 let secondUsage = await generationChecked(
                     candidate: secondUsageCandidate,
-                    externalReloadsRemaining: externalReloadsRemaining,
                     successCandidate: { _ in secondUsageCandidate },
                     operation: {
                         try await usageClient.fetchUsage(accessToken: secondUsageCandidate.accessToken)
@@ -132,8 +115,8 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
                 switch secondUsage {
                 case .value(let value):
                     response = value
-                case .restarted(let result):
-                    return result
+                case .externalAccessChanged:
+                    return externalAccessChanged()
                 case .failure(let failure):
                     return self.failure(failure)
                 }
@@ -160,8 +143,7 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
     }
 
     private func rotate(
-        _ expected: OAuthAccess,
-        allowMigration: Bool
+        _ expected: OAuthAccess
     ) async throws -> (access: OAuthAccess, migrateCacheFrom: AccountCacheKey?) {
         guard let refreshToken = expected.refreshToken, !refreshToken.isEmpty else {
             throw UsageProviderFailure.signInAgain
@@ -171,16 +153,14 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
         var inMemory = Self.rotatedAccess(rotation, replacing: expected)
 
         do {
-            if let persisted = try await Task.detached(operation: { [authStore] in
-                try authStore.persist(rotation: rotation, replacing: expected)
-            }).value {
+            if let persisted = try authStore.persist(rotation: rotation, replacing: expected) {
                 inMemory = persisted
             }
         } catch {
             NSLog("[ClaudeUsage] rotated credential writeback failed; continuing in memory")
         }
 
-        let migration = allowMigration && inMemory.accountKey != expected.accountKey
+        let migration = inMemory.accountKey != expected.accountKey
             ? expected.accountKey
             : nil
         return (inMemory, migration)
@@ -188,70 +168,41 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
 
     private func generationChecked<Value: Sendable>(
         candidate: OAuthAccess,
-        externalReloadsRemaining: Int,
         successCandidate: @Sendable (Value) -> OAuthAccess,
         operation: @Sendable () async throws -> Value
     ) async -> ClaudeGenerationChecked<Value> {
         do {
             let value = try await operation()
-            if let restarted = await restartIfGenerationChanged(
-                since: successCandidate(value),
-                externalReloadsRemaining: externalReloadsRemaining
-            ) {
-                return .restarted(restarted)
+            if sourceHasChanged(since: successCandidate(value)) {
+                return .externalAccessChanged
             }
             return .value(value)
         } catch let failure as UsageProviderFailure {
-            if let restarted = await restartIfGenerationChanged(
-                since: candidate,
-                externalReloadsRemaining: externalReloadsRemaining
-            ) {
-                return .restarted(restarted)
+            if sourceHasChanged(since: candidate) {
+                return .externalAccessChanged
             }
             return .failure(failure)
         } catch {
-            if let restarted = await restartIfGenerationChanged(
-                since: candidate,
-                externalReloadsRemaining: externalReloadsRemaining
-            ) {
-                return .restarted(restarted)
+            if sourceHasChanged(since: candidate) {
+                return .externalAccessChanged
             }
             return .failure(.network)
         }
     }
 
-    private func restartIfGenerationChanged(
-        since candidate: OAuthAccess,
-        externalReloadsRemaining: Int
-    ) async -> UsageRefreshResult? {
-        let exactAccess = await Task.detached(operation: { [authStore] in
-            authStore.reloadResolved(source: candidate.source)
-        }).value
-        let live: OAuthAccess
-        switch exactAccess {
-        case .oauth(let access):
-            guard access.sourceVersion != candidate.sourceVersion else { return nil }
-            live = access
-        case .oauthNeedsSignIn, .apiKey:
-            return failure(.signInAgain)
+    private func sourceHasChanged(since candidate: OAuthAccess) -> Bool {
+        guard case .oauth(let live) = authStore.reloadResolved(source: candidate.source) else {
+            return true
         }
-        guard externalReloadsRemaining > 0 else {
-            return failure(.signInAgain)
-        }
-        let restarted = await refresh(
-            initialAccess: live,
-            externalReloadsRemaining: externalReloadsRemaining - 1
-        )
-        return UsageRefreshResult(
-            providerID: providerID,
-            snapshot: restarted.snapshot,
-            failure: restarted.failure,
-            migrateCacheFrom: nil
-        )
+        return live.sourceVersion != candidate.sourceVersion
     }
 
     private func failure(_ failure: UsageProviderFailure) -> UsageRefreshResult {
         UsageRefreshResult(providerID: providerID, snapshot: nil, failure: failure)
+    }
+
+    private func externalAccessChanged() -> UsageRefreshResult {
+        UsageRefreshResult(providerID: providerID, outcome: .externalAccessChanged)
     }
 
     private static func rotation(

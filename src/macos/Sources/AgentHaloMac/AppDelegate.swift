@@ -53,6 +53,11 @@ struct UsageTerminationHandshake {
     }
 }
 
+struct UsageRequestRecord {
+    let token: UUID
+    let task: Task<Void, Never>
+}
+
 struct LiveErrorPresentationState {
     private(set) var presentation: ErrorPresentation = .flashing
     private var activeErrorAt: Date?
@@ -135,7 +140,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let usageCoordinator = UsageMonitoringCoordinator.live()
     private var usageStates: [UsageProviderID: UsageMonitorState] = [:]
     private var usageRefreshLoopTask: Task<Void, Never>?
-    private var usageRequestTasks: [UsageProviderID: Task<Void, Never>] = [:]
+    private var usageRequestTasks: [UsageProviderID: UsageRequestRecord] = [:]
     private let usageRefreshInterval: TimeInterval = 5 * 60
     private var usageTerminationHandshake = UsageTerminationHandshake()
     private let claudeContextUsageReader = ClaudeContextUsageReader()
@@ -262,7 +267,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func cancelLocalUsageTasks() {
         usageRefreshLoopTask?.cancel()
         usageRefreshLoopTask = nil
-        usageRequestTasks.values.forEach { $0.cancel() }
+        usageRequestTasks.values.forEach { $0.task.cancel() }
         usageRequestTasks.removeAll()
     }
 
@@ -958,17 +963,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard usageRequestTasks[providerID] == nil else {
             return
         }
-        usageRequestTasks[providerID] = Task { [weak self] in
-            guard let self else { return }
-            let prepared = await usageCoordinator.prepare(providerID)
+        let token = UUID()
+        let coordinator = usageCoordinator
+        let task = Task { @MainActor [weak self] in
+            defer { self?.clearUsageRequest(for: providerID, token: token) }
+            let prepared = await coordinator.prepare(providerID)
             guard !Task.isCancelled else { return }
-            publishUsageState(prepared, for: providerID)
+            self?.publishUsageState(prepared, for: providerID)
 
-            let refreshed = await usageCoordinator.ensureFresh(providerID)
+            let refreshed = await coordinator.ensureFresh(providerID)
             guard !Task.isCancelled else { return }
-            publishUsageState(refreshed, for: providerID)
-            usageRequestTasks[providerID] = nil
+            self?.publishUsageState(refreshed, for: providerID)
         }
+        usageRequestTasks[providerID] = UsageRequestRecord(token: token, task: task)
+    }
+
+    private func clearUsageRequest(for providerID: UsageProviderID, token: UUID) {
+        guard usageRequestTasks[providerID]?.token == token else {
+            return
+        }
+        usageRequestTasks[providerID] = nil
     }
 
     private func publishUsageState(_ state: UsageMonitorState, for providerID: UsageProviderID) {

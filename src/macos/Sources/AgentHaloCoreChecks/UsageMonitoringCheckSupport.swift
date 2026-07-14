@@ -163,6 +163,67 @@ final class FakeUsageKeychain: UsageKeychainAccessing, @unchecked Sendable {
     }
 }
 
+// MARK: - Fake Security.framework query seam
+
+final class FakeUsageSecurityItems: UsageSecurityItemAccessing, @unchecked Sendable {
+    struct State {
+        var copyResults: [SecurityUsageKeychainResult] = []
+        var updateStatuses: [Int32] = []
+        var addStatuses: [Int32] = []
+        var copyQueries: [SecurityUsageKeychainQuery] = []
+        var updates: [(SecurityUsageKeychainQuery, Data)] = []
+        var additions: [(service: String, account: String?, value: Data)] = []
+    }
+
+    private let state = LockedBox(State())
+
+    func enqueueCopy(_ result: SecurityUsageKeychainResult) {
+        state.withValue { $0.copyResults.append(result) }
+    }
+
+    func enqueueUpdate(status: Int32) {
+        state.withValue { $0.updateStatuses.append(status) }
+    }
+
+    func enqueueAdd(status: Int32) {
+        state.withValue { $0.addStatuses.append(status) }
+    }
+
+    func copyMatching(_ query: SecurityUsageKeychainQuery) -> SecurityUsageKeychainResult {
+        state.withValue { state in
+            state.copyQueries.append(query)
+            guard !state.copyResults.isEmpty else {
+                return SecurityUsageKeychainResult(
+                    status: UsageSecurityStatus.itemNotFound,
+                    account: nil,
+                    data: nil
+                )
+            }
+            return state.copyResults.removeFirst()
+        }
+    }
+
+    func update(_ query: SecurityUsageKeychainQuery, value: Data) -> Int32 {
+        state.withValue { state in
+            state.updates.append((query, value))
+            return state.updateStatuses.isEmpty
+                ? UsageSecurityStatus.success
+                : state.updateStatuses.removeFirst()
+        }
+    }
+
+    func add(service: String, account: String?, value: Data) -> Int32 {
+        state.withValue { state in
+            state.additions.append((service, account, value))
+            return state.addStatuses.isEmpty
+                ? UsageSecurityStatus.success
+                : state.addStatuses.removeFirst()
+        }
+    }
+
+    func snapshot() -> State { state.value }
+}
+
 // MARK: - Recording process runner
 
 struct RecordedUsageProcessCall: Equatable {
@@ -233,6 +294,58 @@ actor RecordingUsageHTTPClient: UsageHTTPClient {
             return UsageHTTPResponse(statusCode: 200, headers: [:], body: Data())
         }
         return queuedResponses.removeFirst()
+    }
+}
+
+enum GatedUsageHTTPOutcome: Sendable {
+    case response(UsageHTTPResponse)
+    case failure(UsageProviderFailure)
+}
+
+/// Deterministic suspension seam for credential-generation checks. The
+/// selected request does not finish until the check explicitly resumes it.
+actor GatedUsageHTTPClient: UsageHTTPClient {
+    private var outcomes: [GatedUsageHTTPOutcome]
+    private let gatedPath: String
+    private let gatedMatchNumber: Int
+    private var matchingRequestCount = 0
+    private var gateContinuation: CheckedContinuation<Void, Never>?
+    private(set) var capturedRequests: [UsageHTTPRequest] = []
+
+    init(
+        outcomes: [GatedUsageHTTPOutcome],
+        gatedPath: String,
+        gatedMatchNumber: Int = 1
+    ) {
+        self.outcomes = outcomes
+        self.gatedPath = gatedPath
+        self.gatedMatchNumber = gatedMatchNumber
+    }
+
+    func send(_ request: UsageHTTPRequest) async throws -> UsageHTTPResponse {
+        capturedRequests.append(request)
+        if request.path == gatedPath {
+            matchingRequestCount += 1
+            if matchingRequestCount == gatedMatchNumber {
+                await withCheckedContinuation { continuation in
+                    gateContinuation = continuation
+                }
+            }
+        }
+        guard !outcomes.isEmpty else {
+            throw UsageProviderFailure.invalidResponse
+        }
+        switch outcomes.removeFirst() {
+        case .response(let response):
+            return response
+        case .failure(let failure):
+            throw failure
+        }
+    }
+
+    func resume() {
+        gateContinuation?.resume()
+        gateContinuation = nil
     }
 }
 

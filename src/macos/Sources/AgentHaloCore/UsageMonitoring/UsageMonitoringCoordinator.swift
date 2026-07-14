@@ -33,6 +33,10 @@ public actor UsageMonitoringCoordinator {
         let task: Task<UsageRefreshResult, Never>
     }
 
+    private struct PrepareTaskRecord {
+        let task: Task<ResolvedProviderAccess, Never>
+    }
+
     private let providers: [UsageProviderID: any UsageProvider]
     private let cache: UsageSnapshotCache
     private let now: @Sendable () -> Date
@@ -40,10 +44,13 @@ public actor UsageMonitoringCoordinator {
     private var states: [UsageProviderID: UsageMonitorState] = [:]
     private var contexts: [UsageProviderID: PrepareContext] = [:]
     private var inFlight: [UsageProviderID: InFlightRecord] = [:]
+    private var prepareTasks: [UUID: PrepareTaskRecord] = [:]
     private var cooldownUntil: [AccountCacheKey: Date] = [:]
     private var currentRunSnapshotKeys: Set<AccountCacheKey> = []
     private var prepareSequences: [UsageProviderID: UInt64] = [:]
     private var generationCounters: [UsageProviderID: UInt64] = [:]
+    private var cancellationGeneration: UInt64 = 0
+    private var isCancelling = false
     private var supersededPrepareWaiters: [
         UsageProviderID: [CheckedContinuation<PrepareContext, Never>]
     ] = [:]
@@ -67,6 +74,18 @@ public actor UsageMonitoringCoordinator {
 
     public func ensureFresh(_ providerID: UsageProviderID) async -> UsageMonitorState {
         let prepared = await prepareContext(providerID)
+        return await ensureFresh(
+            providerID,
+            prepared: prepared,
+            externalRecoveryRemaining: 1
+        )
+    }
+
+    private func ensureFresh(
+        _ providerID: UsageProviderID,
+        prepared: PrepareContext,
+        externalRecoveryRemaining: Int
+    ) async -> UsageMonitorState {
         guard case .oauth(let access) = prepared.access else {
             return prepared.state
         }
@@ -76,7 +95,12 @@ public actor UsageMonitoringCoordinator {
                record.generation == prepared.generation,
                record.signature == prepared.signature {
                 let result = await record.task.value
-                return await finishRefresh(result, providerID: providerID, expected: record)
+                return await finishRefresh(
+                    result,
+                    providerID: providerID,
+                    expected: record,
+                    externalRecoveryRemaining: externalRecoveryRemaining
+                )
             }
             invalidateInFlight(providerID)
         }
@@ -112,7 +136,12 @@ public actor UsageMonitoringCoordinator {
         inFlight[providerID] = record
 
         let result = await task.value
-        return await finishRefresh(result, providerID: providerID, expected: record)
+        return await finishRefresh(
+            result,
+            providerID: providerID,
+            expected: record,
+            externalRecoveryRemaining: externalRecoveryRemaining
+        )
     }
 
     public func state(for providerID: UsageProviderID) -> UsageMonitorState {
@@ -133,9 +162,35 @@ public actor UsageMonitoringCoordinator {
         return state
     }
 
-    public func cancelAll() {
-        for providerID in Array(inFlight.keys) {
-            invalidateInFlight(providerID)
+    public func cancelAll() async {
+        cancellationGeneration &+= 1
+        isCancelling = true
+
+        let refreshTasks = inFlight.values.map(\.task)
+        let accessTasks = prepareTasks.values.map(\.task)
+        for task in refreshTasks { task.cancel() }
+        for task in accessTasks { task.cancel() }
+        inFlight.removeAll()
+        for providerID in Array(states.keys) {
+            states[providerID]?.isRefreshing = false
+            contexts[providerID]?.state.isRefreshing = false
+        }
+        resumeAllPrepareWaitersForCancellation()
+
+        for task in refreshTasks { _ = await task.value }
+        for task in accessTasks { _ = await task.value }
+        prepareTasks.removeAll()
+        isCancelling = false
+    }
+
+    private func resumeAllPrepareWaitersForCancellation() {
+        let pending = supersededPrepareWaiters
+        supersededPrepareWaiters.removeAll()
+        for (providerID, waiters) in pending {
+            let fallback = cancellationContext(for: providerID)
+            for waiter in waiters {
+                waiter.resume(returning: fallback)
+            }
         }
     }
 
@@ -144,8 +199,7 @@ public actor UsageMonitoringCoordinator {
     ) -> UsageMonitoringCoordinator {
         let environment = ProcessInfoUsageEnvironment()
         let files = FilesystemUsageFiles()
-        let processRunner = ProcessUsageRunner()
-        let keychain = SecurityUsageKeychain(processRunner: processRunner)
+        let keychain = SecurityUsageKeychain()
         let http = URLSessionUsageHTTPClient(fixedHost: "official usage endpoints")
 
         let codexAuthStore = CodexAuthStore(
@@ -177,14 +231,31 @@ public actor UsageMonitoringCoordinator {
     }
 
     private func prepareContext(_ providerID: UsageProviderID) async -> PrepareContext {
+        guard !isCancelling else { return cancellationContext(for: providerID) }
+        let lifecycleGeneration = cancellationGeneration
         let sequence = nextPrepareSequence(for: providerID)
         guard let provider = providers[providerID] else {
             return commitResolvedAccess(.apiKey, providerID: providerID, sequence: sequence)
         }
 
-        try? await cache.loadIfNeeded()
         let previousAccount = contexts[providerID]?.signature.accountKey
-        let access = await provider.resolveAccess(accountKey: previousAccount)
+        let token = UUID()
+        let cache = self.cache
+        let task = Task<ResolvedProviderAccess, Never> {
+            try? await cache.loadIfNeeded()
+            guard !Task.isCancelled else { return .apiKey }
+            return await provider.resolveAccess(accountKey: previousAccount)
+        }
+        prepareTasks[token] = PrepareTaskRecord(task: task)
+        let access = await task.value
+        prepareTasks.removeValue(forKey: token)
+
+        guard !isCancelling,
+              cancellationGeneration == lifecycleGeneration,
+              !Task.isCancelled
+        else {
+            return cancellationContext(for: providerID)
+        }
 
         guard prepareSequences[providerID] == sequence else {
             return await latestCommittedContext(for: providerID)
@@ -231,6 +302,21 @@ public actor UsageMonitoringCoordinator {
         }
         commit(completed, for: providerID)
         return completed
+    }
+
+    private func cancellationContext(for providerID: UsageProviderID) -> PrepareContext {
+        if var context = contexts[providerID] {
+            context.state.isRefreshing = false
+            return context
+        }
+        let state = UsageMonitorState(providerID: providerID, accessMode: .apiKey)
+        return PrepareContext(
+            state: state,
+            access: .apiKey,
+            signature: Self.signature(for: .apiKey),
+            generation: generationCounters[providerID] ?? 0,
+            prepareSequence: prepareSequences[providerID] ?? 0
+        )
     }
 
     private func commitResolvedAccess(
@@ -300,7 +386,8 @@ public actor UsageMonitoringCoordinator {
     private func finishRefresh(
         _ result: UsageRefreshResult,
         providerID: UsageProviderID,
-        expected: InFlightRecord
+        expected: InFlightRecord,
+        externalRecoveryRemaining: Int
     ) async -> UsageMonitorState {
         guard isCurrent(expected, providerID: providerID),
               let context = contexts[providerID]
@@ -308,23 +395,55 @@ public actor UsageMonitoringCoordinator {
             return state(for: providerID)
         }
 
-        if let failure = result.failure {
+        switch result.outcome {
+        case .externalAccessChanged:
+            inFlight.removeValue(forKey: providerID)
+            var stopped = context
+            stopped.state.isRefreshing = false
+            commit(stopped, for: providerID)
+            let reprepared = await prepareContext(providerID)
+            guard externalRecoveryRemaining > 0 else {
+                return reprepared.state
+            }
+            return await ensureFresh(
+                providerID,
+                prepared: reprepared,
+                externalRecoveryRemaining: externalRecoveryRemaining - 1
+            )
+        case .failure(let failure):
             return finishFailure(
                 Self.mapFailure(failure),
                 providerID: providerID,
                 context: context,
                 expected: expected
             )
+        case .snapshot(let snapshot, let migrateCacheFrom):
+            return await finishSnapshot(
+                snapshot,
+                migrateCacheFrom: migrateCacheFrom,
+                resultProviderID: result.providerID,
+                providerID: providerID,
+                context: context,
+                expected: expected
+            )
         }
+    }
 
-        guard let snapshot = result.snapshot,
-              result.providerID == providerID,
+    private func finishSnapshot(
+        _ snapshot: UsageSnapshot,
+        migrateCacheFrom: AccountCacheKey?,
+        resultProviderID: UsageProviderID,
+        providerID: UsageProviderID,
+        context: PrepareContext,
+        expected: InFlightRecord
+    ) async -> UsageMonitorState {
+        guard resultProviderID == providerID,
               snapshot.providerID == providerID,
               snapshot.accountKey.providerID == providerID,
-              result.migrateCacheFrom == nil
-                || result.migrateCacheFrom == expected.accountKey,
+              migrateCacheFrom == nil
+                || migrateCacheFrom == expected.accountKey,
               snapshot.accountKey == expected.accountKey
-                || result.migrateCacheFrom == expected.accountKey
+                || migrateCacheFrom == expected.accountKey
         else {
             return finishFailure(
                 .invalidResponse,
@@ -334,7 +453,7 @@ public actor UsageMonitoringCoordinator {
             )
         }
 
-        if let oldKey = result.migrateCacheFrom {
+        if let oldKey = migrateCacheFrom {
             try? await cache.migrate(from: oldKey, to: snapshot.accountKey)
         }
         guard isCurrent(expected, providerID: providerID) else {

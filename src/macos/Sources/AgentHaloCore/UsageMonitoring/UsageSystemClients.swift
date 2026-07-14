@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 /// Result of running an external process via `UsageProcessRunning`.
 public struct UsageProcessResult: Sendable {
@@ -27,8 +28,8 @@ public protocol UsageFileAccessing: Sendable {
     func writeAtomically(_ data: Data, to path: String, preservingModeOf existingPath: String?) throws
 }
 
-/// Injectable keychain access. Production shells out to `/usr/bin/security`;
-/// checks use `FakeUsageKeychain`. Never logs the returned password.
+/// Injectable keychain access. Production uses Security.framework; checks use
+/// in-memory fakes and never touch the user's real Keychain.
 public struct UsageKeychainItem: Equatable, Sendable {
     public var account: String
     public var value: String
@@ -227,107 +228,169 @@ fileprivate struct TempCleanup {
     }
 }
 
-/// Production keychain access via `/usr/bin/security`.
-///
-/// Reads invoke `find-generic-password`; writes invoke `add-generic-password -U`
-/// with the same service/account. Exit code 44 means "not found" (returns nil);
-/// other nonzero exits are classified errors. The returned password or `-w`
-/// value is never logged.
-public final class SecurityUsageKeychain: UsageKeychainAccessing {
-    private let processRunner: UsageProcessRunning
+public enum UsageSecurityStatus {
+    public static let success: Int32 = errSecSuccess
+    public static let itemNotFound: Int32 = errSecItemNotFound
+}
 
-    public init(processRunner: UsageProcessRunning) {
-        self.processRunner = processRunner
+public struct SecurityUsageKeychainQuery: Equatable, Sendable {
+    public var service: String
+    public var account: String?
+    public var returnAttributes: Bool
+    public var returnData: Bool
+
+    public init(
+        service: String,
+        account: String?,
+        returnAttributes: Bool,
+        returnData: Bool
+    ) {
+        self.service = service
+        self.account = account
+        self.returnAttributes = returnAttributes
+        self.returnData = returnData
+    }
+}
+
+public struct SecurityUsageKeychainResult: Sendable {
+    public var status: Int32
+    public var account: String?
+    public var data: Data?
+
+    public init(status: Int32, account: String?, data: Data?) {
+        self.status = status
+        self.account = account
+        self.data = data
+    }
+}
+
+/// Injectable Security.framework boundary. Checks use an in-memory fake and
+/// therefore never read or mutate the developer's real Keychain.
+public protocol UsageSecurityItemAccessing: Sendable {
+    func copyMatching(_ query: SecurityUsageKeychainQuery) -> SecurityUsageKeychainResult
+    func update(_ query: SecurityUsageKeychainQuery, value: Data) -> Int32
+    func add(service: String, account: String?, value: Data) -> Int32
+}
+
+public final class SecurityFrameworkUsageItems: UsageSecurityItemAccessing, @unchecked Sendable {
+    public init() {}
+
+    public func copyMatching(
+        _ query: SecurityUsageKeychainQuery
+    ) -> SecurityUsageKeychainResult {
+        var attributes = baseQuery(service: query.service, account: query.account)
+        attributes[kSecMatchLimit] = kSecMatchLimitOne
+        if query.returnAttributes { attributes[kSecReturnAttributes] = kCFBooleanTrue }
+        if query.returnData { attributes[kSecReturnData] = kCFBooleanTrue }
+
+        var rawResult: CFTypeRef?
+        let status = SecItemCopyMatching(attributes as CFDictionary, &rawResult)
+        guard status == errSecSuccess else {
+            return SecurityUsageKeychainResult(status: status, account: nil, data: nil)
+        }
+
+        let dictionary = rawResult as? NSDictionary
+        let account = dictionary?[kSecAttrAccount] as? String
+        let data = (rawResult as? Data) ?? (dictionary?[kSecValueData] as? Data)
+        return SecurityUsageKeychainResult(status: status, account: account, data: data)
+    }
+
+    public func update(_ query: SecurityUsageKeychainQuery, value: Data) -> Int32 {
+        let matching = baseQuery(service: query.service, account: query.account)
+        let changes: [CFString: Any] = [kSecValueData: value]
+        return SecItemUpdate(matching as CFDictionary, changes as CFDictionary)
+    }
+
+    public func add(service: String, account: String?, value: Data) -> Int32 {
+        var attributes = baseQuery(service: service, account: account)
+        attributes[kSecValueData] = value
+        return SecItemAdd(attributes as CFDictionary, nil)
+    }
+
+    private func baseQuery(service: String, account: String?) -> [CFString: Any] {
+        var query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+        ]
+        if let account { query[kSecAttrAccount] = account }
+        return query
+    }
+}
+
+/// Production keychain access through Security.framework. Metadata lookup
+/// requests attributes only; secret data is requested only by exact reads and
+/// write bytes never leave the process through argv, stdin, stderr or logs.
+public final class SecurityUsageKeychain: UsageKeychainAccessing {
+    private let items: any UsageSecurityItemAccessing
+
+    public init(items: any UsageSecurityItemAccessing = SecurityFrameworkUsageItems()) {
+        self.items = items
     }
 
     public func read(service: String, account: String?) throws -> String? {
-        var arguments = [
-            "find-generic-password",
-            "-s", service,
-        ]
-        if let account = account {
-            arguments += ["-a", account]
-        }
-        arguments.append("-w")
-        let result = try processRunner.run(
-            executable: "/usr/bin/security",
-            arguments: arguments,
-            timeout: 10
+        let result = items.copyMatching(
+            SecurityUsageKeychainQuery(
+                service: service,
+                account: account,
+                returnAttributes: false,
+                returnData: true
+            )
         )
-        switch result.exitCode {
-        case 0:
-            guard let password = String(data: result.standardOutput, encoding: .utf8) else {
-                return nil
-            }
-            // `security` appends a trailing newline; trim it.
-            return password.reversed().drop(while: { $0.isWhitespace }).reversed().map(String.init).joined()
-        case 44:
+        switch result.status {
+        case UsageSecurityStatus.success:
+            guard let data = result.data else { return nil }
+            return String(data: data, encoding: .utf8)
+        case UsageSecurityStatus.itemNotFound:
             return nil
         default:
-            throw UsageKeychainError.unexpectedExitCode(result.exitCode)
+            throw UsageKeychainError.unexpectedExitCode(Int(result.status))
         }
     }
 
     public func readFirstMatching(service: String) throws -> UsageKeychainItem? {
-        let metadataResult = try processRunner.run(
-            executable: "/usr/bin/security",
-            arguments: ["find-generic-password", "-s", service, "-g"],
-            timeout: 10
+        let metadata = items.copyMatching(
+            SecurityUsageKeychainQuery(
+                service: service,
+                account: nil,
+                returnAttributes: true,
+                returnData: false
+            )
         )
-        switch metadataResult.exitCode {
-        case 0:
-            let metadata = [metadataResult.standardOutput, metadataResult.standardError]
-                .compactMap { String(data: $0, encoding: .utf8) }
-                .joined(separator: "\n")
-            guard let account = Self.account(fromSecurityMetadata: metadata),
+        switch metadata.status {
+        case UsageSecurityStatus.success:
+            guard let account = metadata.account, !account.isEmpty,
                   let value = try read(service: service, account: account)
             else {
                 return nil
             }
             return UsageKeychainItem(account: account, value: value)
-        case 44:
+        case UsageSecurityStatus.itemNotFound:
             return nil
         default:
-            throw UsageKeychainError.unexpectedExitCode(metadataResult.exitCode)
+            throw UsageKeychainError.unexpectedExitCode(Int(metadata.status))
         }
     }
 
     public func write(service: String, account: String?, value: String) throws {
-        var arguments = [
-            "add-generic-password",
-            "-U",
-            "-s", service,
-            "-w", value,
-        ]
-        if let account = account {
-            arguments += ["-a", account]
-        }
-        let result = try processRunner.run(
-            executable: "/usr/bin/security",
-            arguments: arguments,
-            timeout: 10
+        let data = Data(value.utf8)
+        let query = SecurityUsageKeychainQuery(
+            service: service,
+            account: account,
+            returnAttributes: false,
+            returnData: false
         )
-        if result.exitCode != 0 {
-            throw UsageKeychainError.unexpectedExitCode(result.exitCode)
-        }
-    }
-
-    private static func account(fromSecurityMetadata metadata: String) -> String? {
-        let prefix = #""acct"<blob>="#
-        for rawLine in metadata.split(whereSeparator: \.isNewline) {
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-            guard line.hasPrefix(prefix) else { continue }
-            let encoded = String(line.dropFirst(prefix.count))
-            guard let data = "[\(encoded)]".data(using: .utf8),
-                  let values = try? JSONSerialization.jsonObject(with: data) as? [String],
-                  let account = values.first,
-                  !account.isEmpty
-            else {
-                return nil
+        let updateStatus = items.update(query, value: data)
+        switch updateStatus {
+        case UsageSecurityStatus.success:
+            return
+        case UsageSecurityStatus.itemNotFound:
+            let addStatus = items.add(service: service, account: account, value: data)
+            guard addStatus == UsageSecurityStatus.success else {
+                throw UsageKeychainError.unexpectedExitCode(Int(addStatus))
             }
-            return account
+        default:
+            throw UsageKeychainError.unexpectedExitCode(Int(updateStatus))
         }
-        return nil
     }
 }
 
