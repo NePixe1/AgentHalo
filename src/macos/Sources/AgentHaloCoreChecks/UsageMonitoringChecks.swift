@@ -26,6 +26,12 @@ func runUsageModelChecks() async {
         fatalError("filesystem usage files checks failed: \(error)")
     }
 
+    do {
+        try await runUsageSnapshotCacheChecks()
+    } catch {
+        fatalError("usage snapshot cache checks failed: \(error)")
+    }
+
     await runCodexAuthChecks()
     runClaudeAuthChecks()
     await runCodexUsageChecks()
@@ -65,6 +71,222 @@ func testFilesystemUsageFilesWritesEmptyAndNonEmptyDataWithMode0600() throws {
         "non-empty write mode should be 0600"
     )
     expect((try Data(contentsOf: dataURL)), payload, "non-empty write should preserve bytes")
+}
+
+// MARK: - Usage snapshot cache checks
+
+func cacheCheckSnapshot(
+    key: AccountCacheKey,
+    refreshedAt: Date,
+    planName: String = "Pro"
+) -> UsageSnapshot {
+    UsageSnapshot(
+        providerID: key.providerID,
+        accountKey: key,
+        planName: planName,
+        windows: [
+            UsageWindow(
+                kind: .session,
+                usedPercent: 12,
+                resetsAt: refreshedAt.addingTimeInterval(18_000),
+                duration: 18_000
+            )
+        ],
+        refreshedAt: refreshedAt
+    )
+}
+
+func runUsageSnapshotCacheChecks() async throws {
+    try await testUsageSnapshotCacheRoundTripIsolationAndPrivacy()
+    try await testUsageSnapshotCacheMigrationMovesOnlyExactKey()
+    try await testUsageSnapshotCachePrunesLeastRecentlyUsedPerProvider()
+    try await testUsageSnapshotCacheRemovesEntriesOlderThanThirtyDays()
+    try await testUsageSnapshotCacheIgnoresCorruptAndUnknownPayloads()
+    try await testUsageSnapshotCacheWritesNewFileWithMode0600()
+}
+
+func testUsageSnapshotCacheRoundTripIsolationAndPrivacy() async throws {
+    let cacheURL = URL(fileURLWithPath: "/tmp/agent-halo-cache-home/.agent-halo/usage-snapshots-v1.json")
+    let files = FakeUsageFiles()
+    let now = Date(timeIntervalSince1970: 10_000)
+    let codexFirst = AccountCacheKey(providerID: .codex, digest: UsageDigest.sha256("codex-first"))
+    let codexSecond = AccountCacheKey(providerID: .codex, digest: UsageDigest.sha256("codex-second"))
+    let claude = AccountCacheKey(providerID: .claude, digest: UsageDigest.sha256("claude-first"))
+    let snapshots = [
+        cacheCheckSnapshot(key: codexFirst, refreshedAt: now, planName: "Plus"),
+        cacheCheckSnapshot(key: codexSecond, refreshedAt: now, planName: "Team"),
+        cacheCheckSnapshot(key: claude, refreshedAt: now, planName: "Max 5x"),
+    ]
+    let cache = UsageSnapshotCache(cacheURL: cacheURL, files: files, now: { now })
+
+    // This compile-time store shape deliberately accepts successful snapshots only;
+    // UsageMonitorState failures and raw provider responses cannot enter the cache API.
+    let storeSuccessfulSnapshotOnly: @Sendable (UsageSnapshot) async throws -> Void = { snapshot in
+        try await cache.store(snapshot)
+    }
+    for snapshot in snapshots {
+        try await storeSuccessfulSnapshotOnly(snapshot)
+    }
+
+    let current = try await cache.snapshot(for: codexFirst)
+    expect(current?.snapshot, snapshots[0], "current-run cache should return the exact stored snapshot")
+    expect(current?.isFromCurrentRun, true, "a successful store should be marked current-run")
+
+    guard let write = files.capturedWrites().last else {
+        fatalError("snapshot cache should write a payload")
+    }
+    expect(write.path, cacheURL.path, "snapshot cache should use the configured v1 path")
+    let object = try JSONSerialization.jsonObject(with: write.data) as? [String: Any]
+    expect(object?["version"] as? Int, 1, "snapshot cache payload should use schema version 1")
+    expect((object?["entries"] as? [Any])?.count, 3, "snapshot cache should persist all isolated entries")
+
+    let serialized = String(decoding: write.data, as: UTF8.self)
+    let forbiddenValues = [
+        "synthetic-access-token",
+        "synthetic-refresh-token",
+        "Bearer synthetic-authorization",
+        "synthetic-account-id",
+        "synthetic-project-title",
+        "synthetic-session-title",
+    ]
+    for forbidden in forbiddenValues {
+        expect(!serialized.contains(forbidden), "snapshot cache must not persist sensitive value \(forbidden)")
+    }
+
+    let diskCache = UsageSnapshotCache(cacheURL: cacheURL, files: files, now: { now })
+    try await diskCache.loadIfNeeded()
+    expect(
+        try await diskCache.snapshot(for: codexFirst)?.snapshot,
+        snapshots[0],
+        "first Codex account should round-trip independently"
+    )
+    expect(
+        try await diskCache.snapshot(for: codexSecond)?.snapshot,
+        snapshots[1],
+        "second Codex account should stay isolated"
+    )
+    let diskClaude = try await diskCache.snapshot(for: claude)
+    expect(diskClaude?.snapshot, snapshots[2], "Claude and Codex keys should stay isolated")
+    expect(diskClaude?.isFromCurrentRun, false, "disk-loaded snapshots should not be marked current-run")
+}
+
+func testUsageSnapshotCacheMigrationMovesOnlyExactKey() async throws {
+    let cacheURL = URL(fileURLWithPath: "/tmp/agent-halo-cache-migration.json")
+    let files = FakeUsageFiles()
+    let now = Date(timeIntervalSince1970: 20_000)
+    let oldKey = AccountCacheKey(providerID: .codex, digest: "old-digest")
+    let newKey = AccountCacheKey(providerID: .codex, digest: "new-digest")
+    let untouchedKey = AccountCacheKey(providerID: .codex, digest: "untouched-digest")
+    let claudeKey = AccountCacheKey(providerID: .claude, digest: "old-digest")
+    let cache = UsageSnapshotCache(cacheURL: cacheURL, files: files, now: { now })
+    let oldSnapshot = cacheCheckSnapshot(key: oldKey, refreshedAt: now)
+    let untouchedSnapshot = cacheCheckSnapshot(key: untouchedKey, refreshedAt: now)
+    let claudeSnapshot = cacheCheckSnapshot(key: claudeKey, refreshedAt: now)
+    try await cache.store(oldSnapshot)
+    try await cache.store(untouchedSnapshot)
+    try await cache.store(claudeSnapshot)
+
+    try await cache.migrate(from: oldKey, to: newKey)
+
+    expect(try await cache.snapshot(for: oldKey) == nil, "migration should remove the exact old key")
+    let migrated = try await cache.snapshot(for: newKey)
+    expect(migrated?.snapshot.accountKey, newKey, "migration should rewrite the snapshot account key")
+    expect(migrated?.snapshot.providerID, .codex, "migration should preserve the provider")
+    expect(migrated?.isFromCurrentRun, true, "migration should preserve current-run membership")
+    expect(
+        try await cache.snapshot(for: untouchedKey)?.snapshot,
+        untouchedSnapshot,
+        "migration should not move a different account key"
+    )
+    expect(
+        try await cache.snapshot(for: claudeKey)?.snapshot,
+        claudeSnapshot,
+        "migration should not move another provider's matching digest"
+    )
+}
+
+func testUsageSnapshotCachePrunesLeastRecentlyUsedPerProvider() async throws {
+    let cacheURL = URL(fileURLWithPath: "/tmp/agent-halo-cache-lru.json")
+    let files = FakeUsageFiles()
+    let clock = LockedBox(Date(timeIntervalSince1970: 30_000))
+    let cache = UsageSnapshotCache(cacheURL: cacheURL, files: files, now: { clock.value })
+    let keys = (0..<4).map { AccountCacheKey(providerID: .codex, digest: "codex-\($0)") }
+    let claudeKey = AccountCacheKey(providerID: .claude, digest: "claude-0")
+
+    for index in 0..<3 {
+        clock.withValue { $0 = Date(timeIntervalSince1970: 30_000 + Double(index)) }
+        try await cache.store(cacheCheckSnapshot(key: keys[index], refreshedAt: clock.value))
+    }
+    try await cache.store(cacheCheckSnapshot(key: claudeKey, refreshedAt: clock.value))
+
+    // Touch the oldest Codex entry. The second entry is now the LRU candidate.
+    clock.withValue { $0 = Date(timeIntervalSince1970: 30_010) }
+    _ = try await cache.snapshot(for: keys[0])
+    clock.withValue { $0 = Date(timeIntervalSince1970: 30_011) }
+    try await cache.store(cacheCheckSnapshot(key: keys[3], refreshedAt: clock.value))
+
+    expect(try await cache.snapshot(for: keys[0]) != nil, "recently accessed account should survive pruning")
+    expect(try await cache.snapshot(for: keys[1]) == nil, "least recently used account should be pruned")
+    expect(try await cache.snapshot(for: keys[2]) != nil, "newer account should survive pruning")
+    expect(try await cache.snapshot(for: keys[3]) != nil, "new account should be retained")
+    expect(
+        try await cache.snapshot(for: claudeKey) != nil,
+        "per-provider limit should not prune another provider"
+    )
+}
+
+func testUsageSnapshotCacheRemovesEntriesOlderThanThirtyDays() async throws {
+    let cacheURL = URL(fileURLWithPath: "/tmp/agent-halo-cache-expiry.json")
+    let files = FakeUsageFiles()
+    let clock = LockedBox(Date(timeIntervalSince1970: 40_000))
+    let oldKey = AccountCacheKey(providerID: .codex, digest: "old")
+    let cache = UsageSnapshotCache(cacheURL: cacheURL, files: files, now: { clock.value })
+    try await cache.store(cacheCheckSnapshot(key: oldKey, refreshedAt: clock.value))
+
+    clock.withValue { $0 = $0.addingTimeInterval(30 * 24 * 60 * 60 + 1) }
+    let reloaded = UsageSnapshotCache(cacheURL: cacheURL, files: files, now: { clock.value })
+    try await reloaded.loadIfNeeded()
+    expect(try await reloaded.snapshot(for: oldKey) == nil, "entries older than 30 days should be removed")
+    expect(files.capturedWrites().count, 2, "expiry pruning should persist the cleaned payload")
+}
+
+func testUsageSnapshotCacheIgnoresCorruptAndUnknownPayloads() async throws {
+    let now = Date(timeIntervalSince1970: 50_000)
+    let key = AccountCacheKey(providerID: .codex, digest: "replacement")
+
+    let corruptURL = URL(fileURLWithPath: "/tmp/agent-halo-cache-corrupt.json")
+    let corruptFiles = FakeUsageFiles(contents: [corruptURL.path: Data("not-json".utf8)])
+    let corruptCache = UsageSnapshotCache(cacheURL: corruptURL, files: corruptFiles, now: { now })
+    try await corruptCache.loadIfNeeded()
+    expect(try await corruptCache.snapshot(for: key) == nil, "corrupt payload should be ignored safely")
+    try await corruptCache.store(cacheCheckSnapshot(key: key, refreshedAt: now))
+    expect(try await corruptCache.snapshot(for: key) != nil, "cache should recover after corrupt payload")
+
+    let unknownURL = URL(fileURLWithPath: "/tmp/agent-halo-cache-unknown.json")
+    let unknownPayload = try JSONSerialization.data(withJSONObject: ["version": 2, "entries": []])
+    let unknownFiles = FakeUsageFiles(contents: [unknownURL.path: unknownPayload])
+    let unknownCache = UsageSnapshotCache(cacheURL: unknownURL, files: unknownFiles, now: { now })
+    try await unknownCache.loadIfNeeded()
+    expect(try await unknownCache.snapshot(for: key) == nil, "unknown schema version should be ignored safely")
+}
+
+func testUsageSnapshotCacheWritesNewFileWithMode0600() async throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-snapshot-cache-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let cacheURL = root.appendingPathComponent("usage-snapshots-v1.json")
+    let now = Date(timeIntervalSince1970: 60_000)
+    let key = AccountCacheKey(providerID: .codex, digest: "mode-check")
+    let cache = UsageSnapshotCache(cacheURL: cacheURL, files: FilesystemUsageFiles(), now: { now })
+
+    try await cache.store(cacheCheckSnapshot(key: key, refreshedAt: now))
+
+    let attributes = try FileManager.default.attributesOfItem(atPath: cacheURL.path)
+    expect(
+        (attributes[.posixPermissions] as? NSNumber)?.uint16Value == 0o600,
+        "new snapshot cache file should use mode 0600"
+    )
 }
 
 // MARK: - Codex auth checks
