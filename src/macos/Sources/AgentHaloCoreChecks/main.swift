@@ -505,11 +505,12 @@ func testWorkingVisibilityLiveCallOutputAndInitialTail() {
 
 func testSessionReducerCapturesCodexSessionDetailsAndRateLimitAvailability() {
     var reducer = SessionReducer(filePath: "/tmp/codex-session-details.jsonl")
-    reducer.consume(jsonLine: #"{"type":"session_meta","payload":{"id":"codex-details","cwd":"/Users/wjs/work/pyproj/AgentHalo"}}"#)
+    reducer.consume(jsonLine: #"{"type":"session_meta","payload":{"id":"codex-details","cwd":"/Users/wjs/work/pyproj/AgentHalo","title":"  Resolve Usage details  "}}"#)
     reducer.consume(jsonLine: #"{"type":"turn_context","payload":{"model":"gpt-5.5"}}"#)
     reducer.consume(jsonLine: #"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":38000,"output_tokens":1200},"last_token_usage":{"input_tokens":20000},"model_context_window":100000}}}"#)
 
     expect(reducer.snapshot.projectName, "AgentHalo", "Codex detail project")
+    expect(reducer.snapshot.sessionTitle, "Resolve Usage details", "Codex detail session title")
     expect(reducer.snapshot.modelName, "gpt-5.5", "Codex detail model")
     expect(reducer.snapshot.inputTokens, 38_000, "Codex detail input tokens")
     expect(reducer.snapshot.outputTokens, 1_200, "Codex detail output tokens")
@@ -521,6 +522,27 @@ func testSessionReducerCapturesCodexSessionDetailsAndRateLimitAvailability() {
     expect(reducer.snapshot.inputTokens, 40_000, "Codex detail input tokens should refresh")
     expect(reducer.snapshot.outputTokens, 1_500, "Codex detail output tokens should refresh")
     expect(reducer.snapshot.hasRateLimits, true, "subscription Codex should report rate limits")
+}
+
+func testSessionReducerCapturesOnlyExplicitCodexSessionTitles() {
+    var legacyTitle = SessionReducer(filePath: "/tmp/codex-legacy-title.jsonl")
+    legacyTitle.consume(
+        jsonLine: #"{"type":"session_meta","payload":{"id":"legacy","cwd":"/tmp/Project","title":"  ","session_title":"  Legacy title  "}}"#
+    )
+    expect(legacyTitle.snapshot.sessionTitle, "Legacy title", "session_title should fill blank title")
+
+    var preferredTitle = SessionReducer(filePath: "/tmp/codex-preferred-title.jsonl")
+    preferredTitle.consume(
+        jsonLine: #"{"type":"session_meta","payload":{"id":"preferred","cwd":"/tmp/Project","title":"Current title","session_title":"Legacy title"}}"#
+    )
+    expect(preferredTitle.snapshot.sessionTitle, "Current title", "title should precede session_title")
+
+    var missingTitle = SessionReducer(filePath: "/tmp/codex-missing-title.jsonl")
+    missingTitle.consume(
+        jsonLine: #"{"type":"session_meta","payload":{"id":"thread-must-not-fallback","cwd":"/tmp/Project"}}"#
+    )
+    expect(missingTitle.snapshot.projectName, "Project", "missing title still preserves project")
+    expect(missingTitle.snapshot.sessionTitle == nil, "missing title must not fall back to project or thread")
 }
 
 func testToolFailedDoesNotBecomeFatalError() {
@@ -2331,6 +2353,7 @@ testSettingsPersistsFocusedAgent()
 testAcknowledgedErrorVisibilityUsesLatestErrorTime()
 testWorkingVisibilityLiveCallOutputAndInitialTail()
 testSessionReducerCapturesCodexSessionDetailsAndRateLimitAvailability()
+testSessionReducerCapturesOnlyExplicitCodexSessionTitles()
 testToolFailedDoesNotBecomeFatalError()
 do {
     try testClaudeHookConfiguratorWritesUserSettingsNotLegacyClaudeJson()

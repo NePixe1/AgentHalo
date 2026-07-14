@@ -56,6 +56,12 @@ public struct SessionReducer: Sendable {
             if !id.isEmpty {
                 snapshot.threadId = id
             }
+            let title = payload.string("title").trimmingCharacters(in: .whitespacesAndNewlines)
+            let sessionTitle = payload.string("session_title")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            snapshot.sessionTitle = !title.isEmpty
+                ? title
+                : (!sessionTitle.isEmpty ? sessionTitle : nil)
             return
         }
 

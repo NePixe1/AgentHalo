@@ -20,6 +20,10 @@ func runUsageModelChecks() async {
     )
     expect(response.header("retry-after"), "120", "headers must be case insensitive")
 
+    testDetailsContentResolverSeparatesOAuthUsageAndAPISessionDetails()
+    testDetailsContentResolverKeepsOfflineAndContextDataIndependent()
+    testDetailsContentResolverWarningPriorityAndRedaction()
+
     do {
         try testFilesystemUsageFilesWritesEmptyAndNonEmptyDataWithMode0600()
     } catch {
@@ -38,6 +42,275 @@ func runUsageModelChecks() async {
     runClaudeAuthChecks()
     await runCodexUsageChecks()
     await runClaudeUsageChecks()
+}
+
+func testDetailsContentResolverSeparatesOAuthUsageAndAPISessionDetails() {
+    let now = Date(timeIntervalSince1970: 2_100_000_000)
+    let codexKey = AccountCacheKey(providerID: .codex, digest: "codex-account")
+    let codexWindow = UsageWindow(
+        kind: .session,
+        usedPercent: 23,
+        resetsAt: now.addingTimeInterval(1_800),
+        duration: 18_000
+    )
+    let codexSnapshot = UsageSnapshot(
+        providerID: .codex,
+        accountKey: codexKey,
+        planName: "Plus",
+        windows: [codexWindow],
+        refreshedAt: now
+    )
+    let exactSession = SessionDetailsSnapshot(
+        projectName: "AgentHalo",
+        sessionTitle: "Resolver work",
+        modelName: "gpt-5.5",
+        inputTokens: 12_345,
+        outputTokens: 678
+    )
+
+    let codexOAuth = DetailsContentResolver.resolve(
+        providerID: .codex,
+        monitorState: UsageMonitorState(
+            providerID: .codex,
+            accessMode: .oauth,
+            snapshot: codexSnapshot,
+            status: .fresh(updatedAt: now)
+        ),
+        isOffline: false,
+        sessionDetails: exactSession,
+        contextUsedPercent: 42,
+        now: now
+    )
+    expect(codexOAuth.providerName, "Codex", "Codex OAuth provider name")
+    expect(codexOAuth.planName, "Plus", "OAuth should preserve plan name")
+    expect(codexOAuth.contextUsedPercent, 42, "OAuth context remains exact-session data")
+    expect(
+        codexOAuth.body,
+        .usage(UsageDetailsModel(windows: [codexWindow], status: .fresh(updatedAt: now))),
+        "Codex OAuth should render usage"
+    )
+
+    let claudeOAuth = DetailsContentResolver.resolve(
+        providerID: .claude,
+        monitorState: UsageMonitorState(
+            providerID: .claude,
+            accessMode: .oauth,
+            status: .noData
+        ),
+        isOffline: false,
+        sessionDetails: exactSession,
+        contextUsedPercent: nil,
+        now: now
+    )
+    expect(claudeOAuth.providerName, "Claude Code", "Claude OAuth provider name")
+    expect(
+        claudeOAuth.body,
+        .usage(UsageDetailsModel(windows: [], status: .noData)),
+        "OAuth without a snapshot should still render usage"
+    )
+
+    for providerID in [UsageProviderID.codex, .claude] {
+        let api = DetailsContentResolver.resolve(
+            providerID: providerID,
+            monitorState: UsageMonitorState(providerID: providerID, accessMode: .apiKey),
+            isOffline: false,
+            sessionDetails: exactSession,
+            contextUsedPercent: 37,
+            now: now
+        )
+        expect(
+            api.providerName,
+            providerID == .codex ? "Codex" : "Claude Code",
+            "API provider name"
+        )
+        expect(api.planName == nil, "API mode must not expose an OAuth plan")
+        expect(api.usageWarning == nil, "API mode must not expose a Usage warning")
+        expect(api.contextUsedPercent, 37, "API mode keeps exact context")
+        expect(api.body, .session(exactSession), "API mode keeps session fields independent")
+    }
+}
+
+func testDetailsContentResolverKeepsOfflineAndContextDataIndependent() {
+    let now = Date(timeIntervalSince1970: 2_100_000_100)
+    let key = AccountCacheKey(providerID: .codex, digest: "same-account")
+    let snapshot = UsageSnapshot(
+        providerID: .codex,
+        accountKey: key,
+        planName: "Team",
+        windows: [UsageWindow(kind: .weekly, usedPercent: 64, resetsAt: nil, duration: 604_800)],
+        refreshedAt: now.addingTimeInterval(-700)
+    )
+    let exactSession = SessionDetailsSnapshot(
+        projectName: "SecretProject",
+        sessionTitle: "SecretTitle",
+        modelName: "SecretModel",
+        inputTokens: 1,
+        outputTokens: 2
+    )
+    let failedOAuthState = UsageMonitorState(
+        providerID: .codex,
+        accessMode: .oauth,
+        snapshot: snapshot,
+        status: .stale(updatedAt: snapshot.refreshedAt),
+        lastFailure: .network
+    )
+
+    let online = DetailsContentResolver.resolve(
+        providerID: .codex,
+        monitorState: failedOAuthState,
+        isOffline: false,
+        sessionDetails: exactSession,
+        contextUsedPercent: 71,
+        now: now
+    )
+    expect(online.contextUsedPercent, 71, "Usage failure must not clear exact context")
+
+    let offlineOAuth = DetailsContentResolver.resolve(
+        providerID: .codex,
+        monitorState: failedOAuthState,
+        isOffline: true,
+        sessionDetails: exactSession,
+        contextUsedPercent: 71,
+        now: now
+    )
+    expect(offlineOAuth.providerName, "Codex", "offline OAuth provider name")
+    expect(offlineOAuth.contextUsedPercent == nil, "offline must clear context")
+    expect(
+        offlineOAuth.body,
+        .usage(
+            UsageDetailsModel(
+                windows: snapshot.windows,
+                status: .stale(updatedAt: snapshot.refreshedAt)
+            )
+        ),
+        "offline OAuth should retain the same-account Usage snapshot"
+    )
+
+    let offlineAPI = DetailsContentResolver.resolve(
+        providerID: .claude,
+        monitorState: UsageMonitorState(providerID: .claude, accessMode: .apiKey),
+        isOffline: true,
+        sessionDetails: exactSession,
+        contextUsedPercent: 71,
+        now: now
+    )
+    expect(offlineAPI.providerName, "Claude Code", "offline API provider name")
+    expect(offlineAPI.contextUsedPercent == nil, "offline API must clear context")
+    expect(
+        offlineAPI.body,
+        .session(SessionDetailsSnapshot()),
+        "offline API must clear all four session values"
+    )
+}
+
+func testDetailsContentResolverWarningPriorityAndRedaction() {
+    let now = Date(timeIntervalSince1970: 2_100_000_200)
+    let updatedAt = now.addingTimeInterval(-900)
+    let syntheticToken = "token-super-secret"
+    let syntheticResponseBody = "response-body-super-secret"
+    let syntheticDigest = "digest-super-secret"
+    let key = AccountCacheKey(providerID: .codex, digest: syntheticDigest)
+    let snapshot = UsageSnapshot(
+        providerID: .codex,
+        accountKey: key,
+        planName: "\(syntheticToken) \(syntheticResponseBody)",
+        windows: [],
+        refreshedAt: updatedAt
+    )
+    let session = SessionDetailsSnapshot(sessionTitle: syntheticResponseBody)
+
+    func warning(
+        status: UsageDataStatus?,
+        failure: UsageFailureReason?
+    ) -> String? {
+        DetailsContentResolver.resolve(
+            providerID: .codex,
+            monitorState: UsageMonitorState(
+                providerID: .codex,
+                accessMode: .oauth,
+                snapshot: snapshot,
+                status: status,
+                lastFailure: failure
+            ),
+            isOffline: false,
+            sessionDetails: session,
+            contextUsedPercent: 55,
+            now: now
+        ).usageWarning
+    }
+
+    let signIn = warning(status: .signInAgain, failure: .rateLimited(retryAt: now))
+    expect(signIn, L10n.shared["usage.warning.sign_in_codex"], "sign-in warning has highest priority")
+
+    let claudeSignIn = DetailsContentResolver.resolve(
+        providerID: .claude,
+        monitorState: UsageMonitorState(
+            providerID: .claude,
+            accessMode: .oauth,
+            status: .signInAgain,
+            lastFailure: .signInAgain
+        ),
+        isOffline: false,
+        sessionDetails: session,
+        contextUsedPercent: nil,
+        now: now
+    ).usageWarning
+    expect(
+        claudeSignIn,
+        L10n.shared["usage.warning.sign_in_claude"],
+        "Claude sign-in warning should name the exact provider"
+    )
+
+    let rateLimited = warning(
+        status: .stale(updatedAt: updatedAt),
+        failure: .rateLimited(retryAt: now)
+    )
+    expect(rateLimited, L10n.shared["usage.warning.rate_limited"], "rate-limit warning precedes stale")
+
+    let stale = warning(status: .stale(updatedAt: updatedAt), failure: .network)
+    expect(
+        stale,
+        L10n.shared.format("usage.warning.stale", detailsResolverUpdateTime(updatedAt, now: now)),
+        "stale warning precedes failure classification"
+    )
+    let network = warning(status: .noData, failure: .network)
+    expect(
+        network,
+        L10n.shared["usage.warning.network"],
+        "failed noData should classify network safely"
+    )
+    let service = warning(status: .noData, failure: .serviceUnavailable)
+    expect(
+        service,
+        L10n.shared["usage.warning.service"],
+        "failed noData should classify service failure safely"
+    )
+    let invalid = warning(status: .noData, failure: .invalidResponse)
+    expect(
+        invalid,
+        L10n.shared["usage.warning.invalid"],
+        "failed noData should classify invalid response safely"
+    )
+    expect(warning(status: .fresh(updatedAt: now), failure: nil) == nil, "fresh Usage has no warning")
+    expect(warning(status: .noData, failure: nil) == nil, "initial noData has no warning")
+
+    for safeWarning in [signIn, claudeSignIn, rateLimited, stale, network, service, invalid]
+        .compactMap({ $0 }) {
+        expect(!safeWarning.contains(syntheticToken), "warning must redact token")
+        expect(!safeWarning.contains(syntheticResponseBody), "warning must redact response body")
+        expect(!safeWarning.contains(syntheticDigest), "warning must redact account digest")
+    }
+}
+
+private func detailsResolverUpdateTime(_ date: Date, now: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: L10n.shared["date.culture"])
+    if Calendar.current.isDate(date, inSameDayAs: now) {
+        formatter.dateFormat = L10n.shared["date.today_format"]
+    } else {
+        formatter.dateFormat = L10n.shared["date.other_format"]
+    }
+    return formatter.string(from: date)
 }
 
 /// Exercises the real `FilesystemUsageFiles.writeAtomically` path: an empty
