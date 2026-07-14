@@ -29,6 +29,7 @@ func runUsageModelChecks() async {
     await runCodexAuthChecks()
     runClaudeAuthChecks()
     await runCodexUsageChecks()
+    await runClaudeUsageChecks()
 }
 
 /// Exercises the real `FilesystemUsageFiles.writeAtomically` path: an empty
@@ -1657,4 +1658,466 @@ func testCodexProviderUsesRotatedTokenWhenWritebackFails() async {
     expect(result.failure == nil, "writeback failure must not fail current usage request")
     expect(requests.last?.headers["authorization"], "Bearer memory-access", "in-memory token must serve current request")
     expect(result.migrateCacheFrom, fixture.1.accountKey, "in-memory internal rotation should still migrate cache")
+}
+
+// MARK: - Claude usage checks
+
+func claudeUsageResponse(
+    statusCode: Int = 200,
+    headers: [String: String] = [:],
+    _ body: String
+) -> UsageHTTPResponse {
+    UsageHTTPResponse(statusCode: statusCode, headers: headers, body: Data(body.utf8))
+}
+
+func runClaudeUsageChecks() async {
+    await testClaudeUsageClientBuildsOnlyOfficialRequests()
+    testClaudeUsageMapperPlansWindowsAndRestrictedFields()
+    testClaudeUsageMapperClassifiesFailuresAndRetryAfter()
+    await testClaudeProviderScopeFailureSkipsHTTP()
+    await testClaudeProviderAdoptsExternalSourceWithoutMigration()
+    await testClaudeProviderAdoptsExternalSourceChangedDuringRefresh()
+    await testClaudeProviderAdoptsExternalSourceChangedDuringUsage()
+    await testClaudeProviderAdoptsExternalSourceChangedDuringUnauthorizedRetry()
+    await testClaudeProviderRefreshesProactively()
+    await testClaudeProviderRetriesOneUnauthorizedAndMigratesCache()
+    await testClaudeProviderClassifiesRefreshFailures()
+    await testClaudeProviderUsesRotatedTokenWhenWritebackFails()
+}
+
+func testClaudeUsageClientBuildsOnlyOfficialRequests() async {
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: claudeUsageResponse(#"{"five_hour":{"utilization":1}}"#))
+    await http.enqueue(response: claudeUsageResponse(#"{"access_token":"new-access"}"#))
+    let client = ClaudeUsageClient(http: http)
+
+    _ = try? await client.fetchUsage(accessToken: " access token ")
+    _ = try? await client.refreshToken("refresh token")
+
+    let requests = await http.capturedRequests
+    expect(requests.count, 2, "Claude client should issue exactly usage and refresh requests")
+    expect(requests[0].method, "GET", "Claude usage method")
+    expect(requests[0].host, "api.anthropic.com", "Claude usage official host")
+    expect(requests[0].path, "/api/oauth/usage", "Claude usage official path")
+    expect(requests[0].timeout, 10, "Claude usage timeout")
+    expect(requests[0].headers["authorization"], "Bearer access token", "Claude usage bearer header")
+    expect(requests[0].headers["accept"], "application/json", "Claude usage accept header")
+    expect(requests[0].headers["content-type"], "application/json", "Claude usage content type")
+    expect(requests[0].headers["anthropic-beta"], "oauth-2025-04-20", "Claude OAuth beta header")
+    expect(requests[0].headers["user-agent"], "claude-code/2.1.69", "Claude Code user agent")
+
+    expect(requests[1].method, "POST", "Claude refresh method")
+    expect(requests[1].host, "platform.claude.com", "Claude refresh official host")
+    expect(requests[1].path, "/v1/oauth/token", "Claude refresh official path")
+    expect(requests[1].timeout, 15, "Claude refresh timeout")
+    expect(requests[1].headers["content-type"], "application/json", "Claude refresh content type")
+    let body = (try? JSONSerialization.jsonObject(with: requests[1].body ?? Data())) as? [String: String]
+    expect(body?["grant_type"], "refresh_token", "Claude refresh grant type")
+    expect(body?["refresh_token"], "refresh token", "Claude refresh token")
+    expect(body?["client_id"], "9d1c250a-e61b-44d9-88ed-5944d1962f5e", "Claude refresh client id")
+    expect(
+        body?["scope"],
+        "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload",
+        "Claude refresh must request the complete official scope set"
+    )
+    expect(
+        requests.allSatisfy { ["api.anthropic.com", "platform.claude.com"].contains($0.host) },
+        "Claude client must call only approved official endpoints"
+    )
+}
+
+func testClaudeUsageMapperPlansWindowsAndRestrictedFields() {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let accountKey = AccountCacheKey(providerID: .claude, digest: "mapper")
+    expect(ClaudeUsageMapper.formatPlan(subscriptionType: "max", rateLimitTier: "default_claude_max_5x"), "Max 5x", "Claude Max plan")
+    expect(ClaudeUsageMapper.formatPlan(subscriptionType: "pro", rateLimitTier: nil), "Pro", "Claude Pro plan")
+    expect(ClaudeUsageMapper.formatPlan(subscriptionType: "  ", rateLimitTier: "default_5x"), nil, "blank Claude plan")
+
+    let response = claudeUsageResponse("""
+    {
+      "five_hour": {"utilization": -5, "resets_at": "2033-05-18T03:35:00Z"},
+      "seven_day": {"utilization": 140, "resets_at": 2000001000},
+      "seven_day_sonnet": {"utilization": 55, "resets_at": 2000002000},
+      "limits": [{"kind":"weekly_scoped","percent":66}],
+      "extra_usage": {"is_enabled":true,"used_credits":500,"monthly_limit":1000},
+      "balance": 999
+    }
+    """)
+    let hint = OAuthPlanHint(subscriptionType: "max", rateLimitTier: "default_claude_max_5x")
+    guard let mapped = try? ClaudeUsageMapper.map(
+        response: response,
+        accountKey: accountKey,
+        planHint: hint,
+        now: now
+    ) else {
+        fatalError("valid Claude usage should map")
+    }
+    expect(mapped.planName, "Max 5x", "Claude plan comes from credential hints")
+    expect(mapped.windows.count, 2, "Claude mapper exposes exactly five-hour and seven-day windows")
+    expect(mapped.windows[0].kind, .session, "Claude five-hour window kind")
+    expect(mapped.windows[0].usedPercent, 0, "Claude utilization lower clamp")
+    expect(mapped.windows[0].duration, 18_000, "Claude five-hour duration")
+    expect(mapped.windows[0].resetsAt, ISO8601DateFormatter().date(from: "2033-05-18T03:35:00Z"), "Claude ISO reset")
+    expect(mapped.windows[1].kind, .weekly, "Claude seven-day window kind")
+    expect(mapped.windows[1].usedPercent, 100, "Claude utilization upper clamp")
+    expect(mapped.windows[1].duration, 604_800, "Claude seven-day duration")
+    expect(mapped.windows[1].resetsAt, Date(timeIntervalSince1970: 2_000_001_000), "Claude epoch-second reset")
+
+    let milliseconds = try? ClaudeUsageMapper.map(
+        response: claudeUsageResponse(#"{"seven_day":{"utilization":3,"resets_at":2000001000000}}"#),
+        accountKey: accountKey,
+        planHint: nil,
+        now: now
+    )
+    expect(milliseconds?.windows.first?.resetsAt, Date(timeIntervalSince1970: 2_000_001_000), "Claude epoch-millisecond reset")
+
+    let microsecondsWithoutZone = try? ClaudeUsageMapper.map(
+        response: claudeUsageResponse(#"{"five_hour":{"utilization":3,"resets_at":"2099-06-01T12:00:00.123456"}}"#),
+        accountKey: accountKey,
+        planHint: nil,
+        now: now
+    )
+    let expectedFormatter = ISO8601DateFormatter()
+    expectedFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    guard let expectedMicroseconds = expectedFormatter.date(from: "2099-06-01T12:00:00.123Z") else {
+        fatalError("Claude microsecond fixture should produce a valid expected date")
+    }
+    expect(
+        microsecondsWithoutZone?.windows.first?.resetsAt,
+        expectedMicroseconds,
+        "Claude microsecond reset without timezone assumes UTC"
+    )
+}
+
+func testClaudeUsageMapperClassifiesFailuresAndRetryAfter() {
+    let key = AccountCacheKey(providerID: .claude, digest: "invalid")
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let limited = claudeUsageResponse(statusCode: 429, headers: ["Retry-After": "120"], "{}")
+    expect(ClaudeUsageMapper.retryAfterDate(limited, now: now), now.addingTimeInterval(120), "Claude Retry-After seconds")
+    let dated = claudeUsageResponse(
+        statusCode: 429,
+        headers: ["Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"],
+        "{}"
+    )
+    expect(ClaudeUsageMapper.retryAfterDate(dated, now: now), Date(timeIntervalSince1970: 1_445_412_480), "Claude Retry-After HTTP date")
+
+    let cases: [(UsageHTTPResponse, UsageProviderFailure)] = [
+        (claudeUsageResponse("{}"), .invalidResponse),
+        (claudeUsageResponse(#"{"seven_day_sonnet":{"utilization":1},"extra_usage":{"used_credits":1}}"#), .invalidResponse),
+        (claudeUsageResponse(statusCode: 401, "{}"), .signInAgain),
+        (limited, .rateLimited(retryAt: now.addingTimeInterval(120))),
+        (claudeUsageResponse(statusCode: 503, "{}"), .serviceUnavailable),
+    ]
+    for (response, expected) in cases {
+        do {
+            _ = try ClaudeUsageMapper.map(response: response, accountKey: key, planHint: nil, now: now)
+            fatalError("invalid Claude response should fail")
+        } catch let failure as UsageProviderFailure {
+            expect(failure, expected, "Claude mapper failure classification")
+        } catch {
+            fatalError("unexpected Claude mapper error")
+        }
+    }
+}
+
+func makeClaudeProviderFixture(
+    accessToken: String,
+    refreshToken: String = "refresh-old",
+    expiresAt: Date,
+    subscriptionType: String? = "pro",
+    rateLimitTier: String? = nil,
+    scopes: [String]? = ["user:profile"],
+    now: Date,
+    files: (any UsageFileAccessing)? = nil
+) -> (ClaudeAuthStore, OAuthAccess, any UsageFileAccessing, String) {
+    let home = "/tmp/agent-halo-claude-provider-\(UUID().uuidString)"
+    let path = claudeCheckPath(home: home)
+    let initial = claudeCheckCredential(
+        accessToken: accessToken,
+        refreshToken: refreshToken,
+        expiresAtMilliseconds: expiresAt.timeIntervalSince1970 * 1000,
+        subscriptionType: subscriptionType,
+        rateLimitTier: rateLimitTier,
+        scopes: scopes
+    )
+    let resolvedFiles: any UsageFileAccessing = files ?? FakeUsageFiles(contents: [path: initial])
+    if let failing = resolvedFiles as? CodexCheckFailingFiles { failing.setData(initial, at: path) }
+    let store = ClaudeAuthStore(
+        environment: FakeUsageEnvironment(["HOME": home]),
+        files: resolvedFiles,
+        keychain: FakeUsageKeychain(),
+        now: { now }
+    )
+    guard let access = store.reload(source: .file(path: path)) else {
+        fatalError("Claude provider fixture should parse the exact credential source")
+    }
+    return (store, access, resolvedFiles, path)
+}
+
+func testClaudeProviderScopeFailureSkipsHTTP() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeClaudeProviderFixture(
+        accessToken: "under-scoped",
+        expiresAt: now.addingTimeInterval(3_600),
+        scopes: ["user:inference"],
+        now: now
+    )
+    let http = RecordingUsageHTTPClient()
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+    let access = await provider.resolveAccess(accountKey: nil)
+    guard case .oauthNeedsSignIn = access else { fatalError("missing user:profile should require sign in") }
+    let result = await provider.refresh(using: access)
+    expect(result.failure, .signInAgain, "under-scoped Claude OAuth requires sign in")
+    expect(await http.capturedRequests.count, 0, "under-scoped Claude OAuth must not reach HTTP")
+}
+
+func testClaudeProviderAdoptsExternalSourceWithoutMigration() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeClaudeProviderFixture(accessToken: "old-access", expiresAt: now.addingTimeInterval(60), now: now)
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    try? files.writeAtomically(
+        claudeCheckCredential(
+            accessToken: "external-access",
+            refreshToken: "external-refresh",
+            expiresAtMilliseconds: now.addingTimeInterval(3_600).timeIntervalSince1970 * 1000,
+            subscriptionType: "max",
+            rateLimitTier: "default_claude_max_5x"
+        ),
+        to: fixture.3,
+        preservingModeOf: fixture.3
+    )
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: claudeUsageResponse(#"{"five_hour":{"utilization":9}}"#))
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expect(result.failure == nil, "external Claude source adoption should succeed")
+    expect(result.migrateCacheFrom == nil, "external Claude login change must not migrate cache")
+    expect(result.snapshot?.planName, "Max 5x", "external Claude plan hint should be adopted")
+    expect(requests.count, 1, "fresh external Claude token avoids refresh")
+    expect(requests.first?.headers["authorization"], "Bearer external-access", "Claude usage uses exact-source reread")
+}
+
+actor ClaudeCheckMutatingHTTPClient: UsageHTTPClient {
+    private var responses: [UsageHTTPResponse]
+    private let mutationPath: String
+    private let mutation: @Sendable () -> Void
+    private let mutationMatchNumber: Int
+    private var matchingRequestCount = 0
+    private(set) var capturedRequests: [UsageHTTPRequest] = []
+
+    init(
+        responses: [UsageHTTPResponse],
+        mutationPath: String,
+        mutationMatchNumber: Int = 1,
+        mutation: @escaping @Sendable () -> Void
+    ) {
+        self.responses = responses
+        self.mutationPath = mutationPath
+        self.mutationMatchNumber = mutationMatchNumber
+        self.mutation = mutation
+    }
+
+    func send(_ request: UsageHTTPRequest) async throws -> UsageHTTPResponse {
+        capturedRequests.append(request)
+        if request.path == mutationPath {
+            matchingRequestCount += 1
+            if matchingRequestCount == mutationMatchNumber { mutation() }
+        }
+        guard !responses.isEmpty else {
+            throw UsageProviderFailure.invalidResponse
+        }
+        return responses.removeFirst()
+    }
+}
+
+func testClaudeProviderAdoptsExternalSourceChangedDuringRefresh() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeClaudeProviderFixture(accessToken: "expiring-old", expiresAt: now.addingTimeInterval(60), now: now)
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let externalData = claudeCheckCredential(
+        accessToken: "external-during-refresh",
+        refreshToken: "external-refresh",
+        expiresAtMilliseconds: now.addingTimeInterval(3_600).timeIntervalSince1970 * 1000,
+        subscriptionType: "max",
+        rateLimitTier: "default_claude_max_5x"
+    )
+    let http = ClaudeCheckMutatingHTTPClient(
+        responses: [
+            claudeUsageResponse(#"{"access_token":"stale-rotation","refresh_token":"stale-refresh","expires_in":3600}"#),
+            claudeUsageResponse(#"{"five_hour":{"utilization":6}}"#),
+        ],
+        mutationPath: "/v1/oauth/token",
+        mutation: {
+            try? files.writeAtomically(externalData, to: fixture.3, preservingModeOf: fixture.3)
+        }
+    )
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expect(result.failure == nil, "Claude source change during refresh should adopt the external login")
+    expect(result.migrateCacheFrom == nil, "external Claude login during refresh must not migrate old cache")
+    expect(result.snapshot?.planName, "Max 5x", "external plan hint during refresh should be adopted")
+    expect(
+        requests.last?.headers["authorization"],
+        "Bearer external-during-refresh",
+        "usage after generation mismatch must use the external credential"
+    )
+}
+
+func testClaudeProviderAdoptsExternalSourceChangedDuringUsage() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeClaudeProviderFixture(accessToken: "old-usage-access", expiresAt: now.addingTimeInterval(3_600), now: now)
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let externalData = claudeCheckCredential(
+        accessToken: "external-during-usage",
+        refreshToken: "external-usage-refresh",
+        expiresAtMilliseconds: now.addingTimeInterval(3_600).timeIntervalSince1970 * 1000,
+        subscriptionType: "max",
+        rateLimitTier: "default_claude_max_5x"
+    )
+    let http = ClaudeCheckMutatingHTTPClient(
+        responses: [
+            claudeUsageResponse(#"{"five_hour":{"utilization":91}}"#),
+            claudeUsageResponse(#"{"five_hour":{"utilization":8}}"#),
+        ],
+        mutationPath: "/api/oauth/usage",
+        mutation: {
+            try? files.writeAtomically(externalData, to: fixture.3, preservingModeOf: fixture.3)
+        }
+    )
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expect(result.failure == nil, "Claude source change during usage should adopt the external login")
+    expect(result.migrateCacheFrom == nil, "external Claude login during usage must not migrate old cache")
+    expect(result.snapshot?.planName, "Max 5x", "usage-race snapshot must use external plan hint")
+    expect(result.snapshot?.windows.first?.usedPercent, 8, "usage-race snapshot must discard the old account response")
+    expect(requests.count, 2, "usage-race adoption should retry once with the external credential")
+    expect(
+        requests.last?.headers["authorization"],
+        "Bearer external-during-usage",
+        "usage-race retry must use the external credential"
+    )
+}
+
+func testClaudeProviderAdoptsExternalSourceChangedDuringUnauthorizedRetry() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeClaudeProviderFixture(accessToken: "old-retry-access", expiresAt: now.addingTimeInterval(3_600), now: now)
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let externalData = claudeCheckCredential(
+        accessToken: "external-during-retry",
+        refreshToken: "external-retry-refresh",
+        expiresAtMilliseconds: now.addingTimeInterval(3_600).timeIntervalSince1970 * 1000,
+        subscriptionType: "max",
+        rateLimitTier: "default_claude_max_5x"
+    )
+    let http = ClaudeCheckMutatingHTTPClient(
+        responses: [
+            claudeUsageResponse(statusCode: 401, "{}"),
+            claudeUsageResponse(#"{"access_token":"internal-retry","refresh_token":"internal-refresh","expires_in":3600}"#),
+            claudeUsageResponse(statusCode: 401, "{}"),
+            claudeUsageResponse(#"{"five_hour":{"utilization":12}}"#),
+        ],
+        mutationPath: "/api/oauth/usage",
+        mutationMatchNumber: 2,
+        mutation: {
+            try? files.writeAtomically(externalData, to: fixture.3, preservingModeOf: fixture.3)
+        }
+    )
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expect(result.failure == nil, "external Claude login during second 401 should be adopted")
+    expect(result.migrateCacheFrom == nil, "external login during second 401 clears internal migration")
+    expect(result.snapshot?.planName, "Max 5x", "second-401 race snapshot uses external plan")
+    expect(
+        requests.last?.headers["authorization"],
+        "Bearer external-during-retry",
+        "second-401 race restarts with external credential"
+    )
+}
+
+func testClaudeProviderRefreshesProactively() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeClaudeProviderFixture(accessToken: "expiring", expiresAt: now.addingTimeInterval(60), now: now)
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: claudeUsageResponse(#"{"access_token":"proactive-access","refresh_token":"proactive-refresh","expires_in":3600}"#))
+    await http.enqueue(response: claudeUsageResponse(#"{"seven_day":{"utilization":7}}"#))
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expect(result.failure == nil, "Claude proactive refresh should succeed")
+    expect(requests.map(\.path), ["/v1/oauth/token", "/api/oauth/usage"], "Claude proactive refresh order")
+    expect(requests.last?.headers["authorization"], "Bearer proactive-access", "Claude proactive token serves usage")
+    expect(result.migrateCacheFrom, fixture.1.accountKey, "Claude internal proactive rotation migrates cache binding")
+}
+
+func testClaudeProviderRetriesOneUnauthorizedAndMigratesCache() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeClaudeProviderFixture(accessToken: "fresh", expiresAt: now.addingTimeInterval(3_600), now: now)
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: claudeUsageResponse(statusCode: 401, "{}"))
+    await http.enqueue(response: claudeUsageResponse(#"{"access_token":"retry-access","refresh_token":"retry-refresh","expires_in":3600}"#))
+    await http.enqueue(response: claudeUsageResponse(#"{"five_hour":{"utilization":4}}"#))
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expect(result.failure == nil, "first Claude 401 refreshes and retries")
+    expect(requests.map(\.path), ["/api/oauth/usage", "/v1/oauth/token", "/api/oauth/usage"], "Claude 401 retry order")
+    expect(requests.last?.headers["authorization"], "Bearer retry-access", "Claude retry uses rotated token")
+    expect(result.migrateCacheFrom, fixture.1.accountKey, "Claude internal 401 rotation migrates cache binding")
+
+    let secondFixture = makeClaudeProviderFixture(accessToken: "fresh-2", expiresAt: now.addingTimeInterval(3_600), now: now)
+    let secondHTTP = RecordingUsageHTTPClient()
+    await secondHTTP.enqueue(response: claudeUsageResponse(statusCode: 401, "{}"))
+    await secondHTTP.enqueue(response: claudeUsageResponse(#"{"access_token":"retry-once","expires_in":3600}"#))
+    await secondHTTP.enqueue(response: claudeUsageResponse(statusCode: 401, "{}"))
+    let secondProvider = ClaudeUsageProvider(authStore: secondFixture.0, usageClient: ClaudeUsageClient(http: secondHTTP), now: { now })
+    let secondResult = await secondProvider.refresh(using: .oauth(secondFixture.1))
+    expect(secondResult.failure, .signInAgain, "second Claude 401 requires sign in")
+    let secondRequests = await secondHTTP.capturedRequests
+    expect(secondRequests.filter { $0.path == "/api/oauth/usage" }.count, 2, "Claude usage retries at most once")
+}
+
+func testClaudeProviderClassifiesRefreshFailures() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    for (body, expected) in [
+        (#"{"error":"invalid_grant"}"#, UsageProviderFailure.signInAgain),
+        (#"{"error":"proxy_failure"}"#, UsageProviderFailure.invalidResponse),
+    ] {
+        let fixture = makeClaudeProviderFixture(accessToken: "refresh-classification", expiresAt: now.addingTimeInterval(60), now: now)
+        let http = RecordingUsageHTTPClient()
+        await http.enqueue(response: claudeUsageResponse(statusCode: 400, body))
+        let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+        let result = await provider.refresh(using: .oauth(fixture.1))
+        expect(result.failure, expected, "Claude refresh failure taxonomy")
+    }
+}
+
+func testClaudeProviderUsesRotatedTokenWhenWritebackFails() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let files = CodexCheckFailingFiles()
+    let fixture = makeClaudeProviderFixture(
+        accessToken: "expiring",
+        expiresAt: now.addingTimeInterval(60),
+        now: now,
+        files: files
+    )
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: claudeUsageResponse(#"{"access_token":"memory-access","refresh_token":"memory-refresh","expires_in":3600}"#))
+    await http.enqueue(response: claudeUsageResponse(#"{"five_hour":{"utilization":2}}"#))
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expect(result.failure == nil, "Claude writeback failure must not fail current request")
+    expect(requests.last?.headers["authorization"], "Bearer memory-access", "Claude in-memory token serves current request")
+    expect(result.migrateCacheFrom, fixture.1.accountKey, "Claude in-memory internal rotation migrates cache")
 }
