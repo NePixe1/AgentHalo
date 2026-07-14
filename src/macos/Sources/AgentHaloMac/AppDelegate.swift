@@ -23,6 +23,36 @@ struct PreviewPayload: Equatable {
     let presentation: ErrorPresentation?
 }
 
+struct UsageTerminationHandshake {
+    private enum Phase {
+        case running
+        case cancelling
+        case completed
+    }
+
+    private var phase = Phase.running
+
+    var hasCompleted: Bool {
+        phase == .completed
+    }
+
+    mutating func beginCancellation() -> Bool {
+        guard phase == .running else {
+            return false
+        }
+        phase = .cancelling
+        return true
+    }
+
+    mutating func finishCancellation() -> Bool {
+        guard phase == .cancelling else {
+            return false
+        }
+        phase = .completed
+        return true
+    }
+}
+
 struct LiveErrorPresentationState {
     private(set) var presentation: ErrorPresentation = .flashing
     private var activeErrorAt: Date?
@@ -107,6 +137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var usageRefreshLoopTask: Task<Void, Never>?
     private var usageRequestTasks: [UsageProviderID: Task<Void, Never>] = [:]
     private let usageRefreshInterval: TimeInterval = 5 * 60
+    private var usageTerminationHandshake = UsageTerminationHandshake()
     private let claudeContextUsageReader = ClaudeContextUsageReader()
     private let contextReaderQueue = DispatchQueue(
         label: "com.agenthalo.context-reader",
@@ -197,12 +228,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         timer = Timer.scheduledTimer(timeInterval: 0.3, target: self, selector: #selector(timerDidFire), userInfo: nil, repeats: true)
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if usageTerminationHandshake.hasCompleted {
+            return .terminateNow
+        }
+        guard usageTerminationHandshake.beginCancellation() else {
+            return .terminateLater
+        }
+        cancelLocalUsageTasks()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.usageCoordinator.cancelAll()
+            guard self.usageTerminationHandshake.finishCancellation() else {
+                return
+            }
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
-        usageRefreshLoopTask?.cancel()
-        usageRefreshLoopTask = nil
-        usageRequestTasks.values.forEach { $0.cancel() }
-        usageRequestTasks.removeAll()
-        Task { await usageCoordinator.cancelAll() }
+        cancelLocalUsageTasks()
         codexActivityMonitor.stop()
         claudeActivityMonitor.stop()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
@@ -211,6 +257,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             commitPreferredPlacement(frame: panel.frame, persist: false)
         }
         settingsStore.save(settings)
+    }
+
+    private func cancelLocalUsageTasks() {
+        usageRefreshLoopTask?.cancel()
+        usageRefreshLoopTask = nil
+        usageRequestTasks.values.forEach { $0.cancel() }
+        usageRequestTasks.removeAll()
     }
 
     func applicationDidChangeScreenParameters(_ notification: Notification) {

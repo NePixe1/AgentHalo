@@ -72,6 +72,8 @@ func runHaloInteractionChecks() {
     testDetailsPanelUsesCompactContextPercent()
     testDetailsPanelKeepsContextPillWidthStable()
     testVisibleDetailsPanelStatusRefreshIsWiredToTick()
+    testUsageTerminationWaitsForCoordinatorCancellation()
+    testUsageTerminationHandshakeRejectsDuplicateWork()
     testUsageMonitoringLifecycleWiring()
     testStatusLineConfigurationReconciliationIsWiredToTick()
     testCodexPollingWorkIsNotPerformedOnMainTick()
@@ -1335,6 +1337,86 @@ private func testVisibleDetailsPanelStatusRefreshIsWiredToTick() {
     )
 }
 
+private func testUsageTerminationWaitsForCoordinatorCancellation() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let appDelegateURL = sourceDirectory.appendingPathComponent("AppDelegate.swift")
+    guard let source = try? String(contentsOf: appDelegateURL, encoding: .utf8),
+          let shouldStart = source.range(of: "    func applicationShouldTerminate")?.lowerBound,
+          let willStart = source.range(
+            of: "    func applicationWillTerminate",
+            range: shouldStart..<source.endIndex
+          )?.lowerBound,
+          let willEnd = source.range(
+            of: "    private func cancelLocalUsageTasks",
+            range: willStart..<source.endIndex
+          )?.lowerBound,
+          let cleanupEnd = source.range(
+            of: "    func applicationDidChangeScreenParameters",
+            range: willEnd..<source.endIndex
+          )?.lowerBound else {
+        fatalError("AppDelegate termination source should be readable")
+    }
+
+    let shouldSource = source[shouldStart..<willStart]
+    let willSource = source[willStart..<willEnd]
+    let cleanupSource = source[willEnd..<cleanupEnd]
+    expect(
+        shouldSource.contains("func applicationShouldTerminate(_ sender: NSApplication)")
+            && shouldSource.contains("if usageTerminationHandshake.hasCompleted")
+            && shouldSource.contains("return .terminateNow")
+            && shouldSource.contains("guard usageTerminationHandshake.beginCancellation() else")
+            && shouldSource[
+                shouldSource.range(
+                    of: "guard usageTerminationHandshake.beginCancellation() else"
+                )!.lowerBound..<shouldSource.range(of: "cancelLocalUsageTasks()")!.lowerBound
+            ].contains("return .terminateLater")
+            && shouldSource.contains("cancelLocalUsageTasks()")
+            && shouldSource.contains("Task { @MainActor [weak self] in")
+            && shouldSource.contains("await self.usageCoordinator.cancelAll()")
+            && shouldSource.contains("usageTerminationHandshake.finishCancellation()")
+            && shouldSource.contains("NSApp.reply(toApplicationShouldTerminate: true)"),
+        "termination should use AppKit's asynchronous termination handshake"
+    )
+    expect(
+        shouldSource.range(of: "usageTerminationHandshake.hasCompleted")!.lowerBound
+            < shouldSource.range(of: "return .terminateNow")!.lowerBound
+            && shouldSource.range(of: "return .terminateNow")!.lowerBound
+                < shouldSource.range(of: "usageTerminationHandshake.beginCancellation()")!.lowerBound
+            && shouldSource.range(of: "usageTerminationHandshake.beginCancellation()")!.lowerBound
+                < shouldSource.range(of: "cancelLocalUsageTasks()")!.lowerBound
+            && shouldSource.range(of: "cancelLocalUsageTasks()")!.lowerBound
+            < shouldSource.range(of: "await self.usageCoordinator.cancelAll()")!.lowerBound
+            && shouldSource.range(of: "await self.usageCoordinator.cancelAll()")!.lowerBound
+                < shouldSource.range(of: "usageTerminationHandshake.finishCancellation()")!.lowerBound
+            && shouldSource.range(of: "usageTerminationHandshake.finishCancellation()")!.lowerBound
+                < shouldSource.range(of: "NSApp.reply(toApplicationShouldTerminate: true)")!.lowerBound,
+        "termination should await coordinator cancellation before its single MainActor reply"
+    )
+    expect(
+        willSource.contains("cancelLocalUsageTasks()")
+            && !willSource.contains("Task {")
+            && !willSource.contains("usageCoordinator.cancelAll"),
+        "applicationWillTerminate should only repeat idempotent local Usage cleanup"
+    )
+    expect(
+        cleanupSource.contains("usageRefreshLoopTask?.cancel()")
+            && cleanupSource.contains("usageRequestTasks.values.forEach { $0.cancel() }"),
+        "local Usage cleanup should synchronously cancel the loop and wrapper tasks"
+    )
+}
+
+private func testUsageTerminationHandshakeRejectsDuplicateWork() {
+    var handshake = UsageTerminationHandshake()
+
+    expect(!handshake.hasCompleted, "termination handshake should start incomplete")
+    expect(handshake.beginCancellation(), "first termination request should start cancellation")
+    expect(!handshake.beginCancellation(), "repeated termination requests must not start another Task")
+    expect(handshake.finishCancellation(), "the in-flight cancellation should complete once")
+    expect(handshake.hasCompleted, "completed cancellation should allow immediate termination")
+    expect(!handshake.finishCancellation(), "completion must not send a second termination reply")
+    expect(!handshake.beginCancellation(), "completed termination must not restart cancellation")
+}
+
 private func testUsageMonitoringLifecycleWiring() {
     let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
     let appDelegateURL = sourceDirectory.appendingPathComponent("AppDelegate.swift")
@@ -1343,12 +1425,16 @@ private func testUsageMonitoringLifecycleWiring() {
             of: "    func applicationDidFinishLaunching"
           )?.lowerBound,
           let launchEnd = source.range(
-            of: "    func applicationWillTerminate",
+            of: "    func applicationShouldTerminate",
             range: launchStart..<source.endIndex
+          )?.lowerBound,
+          let willTerminationStart = source.range(
+            of: "    func applicationWillTerminate",
+            range: launchEnd..<source.endIndex
           )?.lowerBound,
           let terminationEnd = source.range(
             of: "    func applicationDidChangeScreenParameters",
-            range: launchEnd..<source.endIndex
+            range: willTerminationStart..<source.endIndex
           )?.lowerBound,
           let tickStart = source.range(of: "    private func tick() {")?.lowerBound,
           let tickEnd = source.range(
@@ -1389,7 +1475,7 @@ private func testUsageMonitoringLifecycleWiring() {
     }
 
     let launchSource = source[launchStart..<launchEnd]
-    let terminationSource = source[launchEnd..<terminationEnd]
+    let terminationSource = source[willTerminationStart..<terminationEnd]
     let tickSource = source[tickStart..<tickEnd]
     let showSource = source[showStart..<showEnd]
     let updateSource = source[updateStart..<updateEnd]
@@ -1473,10 +1559,10 @@ private func testUsageMonitoringLifecycleWiring() {
         "AgentKind should map totally to its Usage Provider"
     )
     expect(
-        terminationSource.contains("usageRefreshLoopTask?.cancel()")
-            && terminationSource.contains("usageRequestTasks.values.forEach { $0.cancel() }")
-            && terminationSource.contains("Task { await usageCoordinator.cancelAll() }"),
-        "termination should cancel the refresh loop, wrapper tasks and coordinator work"
+        terminationSource.contains("cancelLocalUsageTasks()")
+            && !terminationSource.contains("Task {")
+            && !terminationSource.contains("usageCoordinator.cancelAll"),
+        "applicationWillTerminate should only repeat local Usage cleanup"
     )
     expect(
         updateSource.contains("DetailsContentResolver.resolve(")
