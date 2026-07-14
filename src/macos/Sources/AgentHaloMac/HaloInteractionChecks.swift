@@ -806,9 +806,27 @@ private func testDetailsPanelAlwaysShowsProviderRow() {
     )
 
     expect(panel.providerTextForTesting, "Codex", "provider row should always show the selected provider")
+    expect(
+        Array(panel.contentOrderForTesting.prefix(4)),
+        [.agentSwitcher, .provider, .statusTitle, .statusDetail],
+        "provider row should sit between the Agent switcher and Halo status"
+    )
+    expect(panel.providerRowHeightForTesting, 20, "provider row should use its fixed height")
     let labels = allDescendants(of: panel.contentView!).compactMap { ($0 as? NSTextField)?.stringValue }
     expect(!labels.contains("OAuth") && !labels.contains("API"), "details panel should not show an access-mode label")
     expect(!labels.contains("使用情况/余额") && !labels.contains("会话详情"), "details panel should not show section titles")
+
+    panel.render(
+        aggregate: detailsAggregate(state: .idle, label: "OFFLINE"),
+        model: sessionDetailsModel(provider: "Claude Code")
+    )
+    expect(panel.providerTextForTesting, "Claude Code", "offline details should retain the provider row")
+    expect(
+        Array(panel.contentOrderForTesting.prefix(4)),
+        [.agentSwitcher, .provider, .statusTitle, .statusDetail],
+        "offline provider row should keep the same structural position"
+    )
+    expect(panel.providerRowHeightForTesting, 20, "offline provider row should keep the shared height")
 }
 
 @MainActor
@@ -917,6 +935,21 @@ private func testDetailsPanelShowsFourIndependentSessionRows() {
     expect(panel.projectToolTipForTesting, "AgentHalo", "project tooltip")
     expect(panel.sessionTitleToolTipForTesting, "Redesign details", "session title tooltip")
     expect(panel.modelToolTipForTesting, "gpt-5.5", "model tooltip")
+    expect(
+        panel.sessionBodyOrderForTesting,
+        [.project, .separator, .sessionTitle, .separator, .model, .separator, .tokens],
+        "API rows should keep the required arranged-subview order"
+    )
+    expect(
+        panel.sessionBodyOrderForTesting.filter { $0 == .separator }.count,
+        3,
+        "API rows should contain three separators"
+    )
+    expect(
+        panel.sessionRowHeightsForTesting,
+        [28, 28, 28, 28],
+        "all API metadata rows should use the same 28pt height"
+    )
 }
 
 @MainActor
@@ -999,17 +1032,59 @@ private func testDetailsPanelKeepsFixedWidthForLongProviderContent() {
 
 @MainActor
 private func testDetailsPanelResizesHeightWithoutAnimation() {
-    let panel = DetailsPanel()
+    let panel = RecordingDetailsPanel()
     panel.setFrameOrigin(NSPoint(x: 100, y: 500))
+    panel.resetResizeCalls()
+    let initialTopEdge = panel.frame.maxY
     panel.render(aggregate: detailsAggregate(), model: usageDetailsModel())
-    let usageHeight = panel.frameHeightForTesting
-    let topEdge = panel.frame.maxY
+    guard let usageCall = panel.resizeCalls.last else {
+        fatalError("usage render should apply a resize frame")
+    }
+    let usageExpectedHeight = ceil(
+        panel.stackFittingHeightForTesting * panel.backingScaleForTesting
+    ) / panel.backingScaleForTesting
+    expect(!usageCall.display, "usage resize should not request immediate display")
+    expect(!usageCall.animate, "usage resize should not animate")
+    expect(usageCall.frame.height, usageExpectedHeight, "usage height should be the pixel-ceiled stack fitting height")
+    expect(usageCall.frame.maxY, initialTopEdge, "usage resize should preserve the prior top edge")
+    expect(panel.frame, usageCall.frame, "window should apply the observed usage resize frame")
 
+    let usageHeight = usageCall.frame.height
+    let usageTopEdge = panel.frame.maxY
+    panel.resetResizeCalls()
     panel.render(aggregate: detailsAggregate(), model: sessionDetailsModel())
+    guard let sessionCall = panel.resizeCalls.last else {
+        fatalError("session render should apply a resize frame")
+    }
+    let sessionExpectedHeight = ceil(
+        panel.stackFittingHeightForTesting * panel.backingScaleForTesting
+    ) / panel.backingScaleForTesting
+    expect(!sessionCall.display, "session resize should not request immediate display")
+    expect(!sessionCall.animate, "session resize should not animate")
+    expect(sessionCall.frame.height, sessionExpectedHeight, "session height should be the pixel-ceiled stack fitting height")
+    expect(sessionCall.frame.height != usageHeight, "switching bodies should resize to fitting height")
+    expect(sessionCall.frame.maxY, usageTopEdge, "session resize should preserve the prior top edge")
+    expect(panel.frame, sessionCall.frame, "window should apply the observed session resize frame")
+}
 
-    expect(panel.frameHeightForTesting != usageHeight, "switching bodies should resize to fitting height")
-    expect(panel.frame.maxY, topEdge, "synchronous resizing should preserve the top edge")
-    expect(!panel.lastResizeAnimatedForTesting, "details height should resize without animation")
+@MainActor
+private final class RecordingDetailsPanel: DetailsPanel {
+    struct ResizeCall {
+        var frame: NSRect
+        var display: Bool
+        var animate: Bool
+    }
+
+    private(set) var resizeCalls: [ResizeCall] = []
+
+    override func applyResizeFrame(_ frame: NSRect, display: Bool, animate: Bool) {
+        resizeCalls.append(ResizeCall(frame: frame, display: display, animate: animate))
+        super.applyResizeFrame(frame, display: display, animate: animate)
+    }
+
+    func resetResizeCalls() {
+        resizeCalls.removeAll()
+    }
 }
 
 private func detailsAggregate(

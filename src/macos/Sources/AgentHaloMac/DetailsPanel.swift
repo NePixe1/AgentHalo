@@ -1,8 +1,25 @@
 import AppKit
 import AgentHaloCore
 
+enum DetailsPanelContentRole: Equatable {
+    case agentSwitcher
+    case provider
+    case statusTitle
+    case statusDetail
+    case usageBody
+    case sessionBody
+}
+
+enum DetailsPanelSessionBodyRole: Equatable {
+    case project
+    case separator
+    case sessionTitle
+    case model
+    case tokens
+}
+
 @MainActor
-final class DetailsPanel: NSPanel {
+class DetailsPanel: NSPanel {
     private static let panelWidth: CGFloat = 268
     private static let contextPillWidth: CGFloat = 42
     private static let contextPillHorizontalPadding: CGFloat = 3
@@ -34,10 +51,10 @@ final class DetailsPanel: NSPanel {
         title: L10n.shared["metadata.tokens"],
         valueFont: .systemFont(ofSize: 11.5, weight: .medium)
     )
+    private var topRow: NSView?
     var onMouseEntered: (() -> Void)?
     var onMouseExited: (() -> Void)?
     var onAgentSelected: ((AgentKind) -> Void)?
-    private(set) var lastResizeAnimatedForTesting = false
 
     init() {
         super.init(
@@ -72,6 +89,7 @@ final class DetailsPanel: NSPanel {
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         let topRow = makeTopRow()
+        self.topRow = topRow
         stack.addArrangedSubview(topRow)
         stack.setCustomSpacing(5, after: topRow)
 
@@ -226,7 +244,7 @@ final class DetailsPanel: NSPanel {
 
     private func resizeToFitContent() {
         contentView?.layoutSubtreeIfNeeded()
-        let scale = screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+        let scale = effectiveBackingScale
         let fittingHeight = ceil(stack.fittingSize.height * scale) / scale
         let topEdge = frame.maxY
         let newFrame = NSRect(
@@ -235,8 +253,15 @@ final class DetailsPanel: NSPanel {
             width: Self.panelWidth,
             height: fittingHeight
         )
-        lastResizeAnimatedForTesting = false
-        setFrame(newFrame, display: false, animate: false)
+        applyResizeFrame(newFrame, display: false, animate: false)
+    }
+
+    func applyResizeFrame(_ frame: NSRect, display: Bool, animate: Bool) {
+        setFrame(frame, display: display, animate: animate)
+    }
+
+    private var effectiveBackingScale: CGFloat {
+        screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
     }
 
     // Task 11 replaces the AppDelegate call site with DetailsContentResolver.
@@ -484,6 +509,23 @@ final class DetailsPanel: NSPanel {
         contextValue.cell?.expansionFrame(withFrame: contextValue.bounds, in: contextValue) ?? .zero
     }
 
+    var contentOrderForTesting: [DetailsPanelContentRole] {
+        stack.arrangedSubviews.compactMap { view in
+            if view === topRow { return .agentSwitcher }
+            if view === providerHeader { return .provider }
+            if view === titleField { return .statusTitle }
+            if view === detailField { return .statusDetail }
+            if view === quotaGroup { return .usageBody }
+            if view === metadataGroup { return .sessionBody }
+            return nil
+        }
+    }
+
+    var providerRowHeightForTesting: CGFloat {
+        contentView?.layoutSubtreeIfNeeded()
+        return providerHeader.frame.height
+    }
+
     var providerTextForTesting: String {
         providerHeader.providerText
     }
@@ -518,6 +560,22 @@ final class DetailsPanel: NSPanel {
 
     var sessionGroupHiddenForTesting: Bool {
         metadataGroup.isHidden
+    }
+
+    var sessionBodyOrderForTesting: [DetailsPanelSessionBodyRole] {
+        metadataGroup.arrangedSubviews.compactMap { view in
+            if view === projectRow { return .project }
+            if view === sessionTitleRow { return .sessionTitle }
+            if view === modelRow { return .model }
+            if view === tokenRow { return .tokens }
+            if view is SeparatorView { return .separator }
+            return nil
+        }
+    }
+
+    var sessionRowHeightsForTesting: [CGFloat] {
+        contentView?.layoutSubtreeIfNeeded()
+        return [projectRow, sessionTitleRow, modelRow, tokenRow].map(\.frame.height)
     }
 
     var primaryQuotaTitleForTesting: String {
@@ -586,6 +644,14 @@ final class DetailsPanel: NSPanel {
 
     var frameHeightForTesting: CGFloat {
         frame.height
+    }
+
+    var stackFittingHeightForTesting: CGFloat {
+        stack.fittingSize.height
+    }
+
+    var backingScaleForTesting: CGFloat {
+        effectiveBackingScale
     }
 
     func selectAgentForTesting(_ agent: AgentKind) {
