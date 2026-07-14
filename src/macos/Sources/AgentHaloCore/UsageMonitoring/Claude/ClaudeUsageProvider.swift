@@ -45,11 +45,15 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
             var migrateCacheFrom: AccountCacheKey?
             var adoptedExternalSource = false
 
-            if let live = await Task.detached(operation: { [authStore] in
-                authStore.reload(source: initialAccess.source)
-            }).value {
+            let exactAccess = await Task.detached(operation: { [authStore] in
+                authStore.reloadResolved(source: initialAccess.source)
+            }).value
+            switch exactAccess {
+            case .oauth(let live):
                 adoptedExternalSource = live.sourceVersion != initialAccess.sourceVersion
                 current = live
+            case .oauthNeedsSignIn, .apiKey:
+                return failure(.signInAgain)
             }
 
             let refreshCandidate = current
@@ -220,12 +224,16 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
         since candidate: OAuthAccess,
         externalReloadsRemaining: Int
     ) async -> UsageRefreshResult? {
-        guard let live = await Task.detached(operation: { [authStore] in
-            authStore.reload(source: candidate.source)
-        }).value,
-              live.sourceVersion != candidate.sourceVersion
-        else {
-            return nil
+        let exactAccess = await Task.detached(operation: { [authStore] in
+            authStore.reloadResolved(source: candidate.source)
+        }).value
+        let live: OAuthAccess
+        switch exactAccess {
+        case .oauth(let access):
+            guard access.sourceVersion != candidate.sourceVersion else { return nil }
+            live = access
+        case .oauthNeedsSignIn, .apiKey:
+            return failure(.signInAgain)
         }
         guard externalReloadsRemaining > 0 else {
             return failure(.signInAgain)

@@ -52,14 +52,7 @@ public struct ClaudeAuthStore: Sendable {
         // concern so a stored OAuth token can never be sent to a custom host.
         guard !hasNonProductionOAuthOverride() else { return .apiKey }
 
-        if let candidate = firstStoredCandidate() {
-            if let scopes = candidate.scopes,
-               !scopes.isEmpty,
-               !scopes.contains(Self.usageScope) {
-                return .oauthNeedsSignIn(accountKey: candidate.access.accountKey)
-            }
-            return .oauth(candidate.access)
-        }
+        if let candidate = firstStoredCandidate() { return resolvedAccess(candidate) }
 
         // CLAUDE_CODE_OAUTH_TOKEN is intentionally inference-only. With no
         // stored interactive login it therefore remains the API-key mode.
@@ -73,6 +66,19 @@ public struct ClaudeAuthStore: Sendable {
             return try loadCandidate(from: source)?.access
         } catch {
             return nil
+        }
+    }
+
+    /// Reloads exactly one credential source and reapplies the same scope and
+    /// production-endpoint policy as discovery. Refresh/retry paths use this
+    /// so an external login change cannot bypass the `user:profile` gate.
+    public func reloadResolved(source: CredentialSource) -> ResolvedProviderAccess {
+        guard !hasNonProductionOAuthOverride() else { return .apiKey }
+        do {
+            guard let candidate = try loadCandidate(from: source) else { return .apiKey }
+            return resolvedAccess(candidate)
+        } catch {
+            return .apiKey
         }
     }
 
@@ -131,6 +137,15 @@ public struct ClaudeAuthStore: Sendable {
     private struct Candidate {
         var access: OAuthAccess
         var scopes: [String]?
+    }
+
+    private func resolvedAccess(_ candidate: Candidate) -> ResolvedProviderAccess {
+        if let scopes = candidate.scopes,
+           !scopes.isEmpty,
+           !scopes.contains(Self.usageScope) {
+            return .oauthNeedsSignIn(accountKey: candidate.access.accountKey)
+        }
+        return .oauth(candidate.access)
     }
 
     private func firstStoredCandidate() -> Candidate? {

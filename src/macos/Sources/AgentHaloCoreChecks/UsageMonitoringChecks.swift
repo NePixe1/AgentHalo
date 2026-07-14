@@ -672,6 +672,7 @@ func runClaudeAuthChecks() {
     testClaudeStoredOAuthWinsOverEnvironmentToken()
     testClaudeEnvironmentTokenAloneIsAPIKeyMode()
     testClaudeScopesKeepOAuthModeAndAccountIdentity()
+    testClaudeExactSourceResolvedReloadHonorsScopes()
     testClaudeAccountKeyUsesSourceAndTokenDigest()
     testClaudeExpiresAtUsesEpochMilliseconds()
     testClaudePlanHintsArePreserved()
@@ -963,6 +964,38 @@ func testClaudeScopesKeepOAuthModeAndAccountIdentity() {
         fatalError("stored OAuth missing user:profile should request OAuth sign-in again")
     }
     expect(accountKey, parsed.accountKey, "scope failure keeps the same OAuth account key")
+}
+
+func testClaudeExactSourceResolvedReloadHonorsScopes() {
+    let home = "/tmp/agent-halo-claude-exact-scopes-\(UUID().uuidString)"
+    let path = claudeCheckPath(home: home)
+    let files = FakeUsageFiles()
+    let store = ClaudeAuthStore(
+        environment: FakeUsageEnvironment(["HOME": home]),
+        files: files,
+        keychain: FakeUsageKeychain()
+    )
+
+    for scopes in [Optional<[String]>.none, []] {
+        try? files.writeAtomically(
+            claudeCheckCredential(accessToken: "exact-allowed", scopes: scopes),
+            to: path,
+            preservingModeOf: path
+        )
+        guard case .oauth = store.reloadResolved(source: .file(path: path)) else {
+            fatalError("exact-source reload should allow absent or empty Claude scopes")
+        }
+    }
+
+    try? files.writeAtomically(
+        claudeCheckCredential(accessToken: "exact-under-scoped", scopes: ["user:inference"]),
+        to: path,
+        preservingModeOf: path
+    )
+    guard case .oauthNeedsSignIn(let accountKey) = store.reloadResolved(source: .file(path: path)) else {
+        fatalError("exact-source reload missing user:profile should require sign in")
+    }
+    expect(accountKey?.providerID, .claude, "exact-source scope failure preserves Claude account identity")
 }
 
 func testClaudeAccountKeyUsesSourceAndTokenDigest() {
@@ -1675,11 +1708,14 @@ func runClaudeUsageChecks() async {
     testClaudeUsageMapperPlansWindowsAndRestrictedFields()
     testClaudeUsageMapperClassifiesFailuresAndRetryAfter()
     await testClaudeProviderScopeFailureSkipsHTTP()
+    await testClaudeProviderRejectsUnderScopedInitialReload()
     await testClaudeProviderAdoptsExternalSourceWithoutMigration()
     await testClaudeProviderAdoptsExternalSourceChangedDuringRefresh()
     await testClaudeProviderAdoptsExternalSourceAfterRefreshFailure()
+    await testClaudeProviderRejectsUnderScopedRefreshChange()
     await testClaudeProviderAdoptsExternalSourceChangedDuringUsage()
     await testClaudeProviderAdoptsExternalSourceAfterUsageTransportFailure()
+    await testClaudeProviderRejectsUnderScopedUsageChange()
     await testClaudeProviderAdoptsExternalSourceChangedDuringUnauthorizedRetry()
     await testClaudeProviderRefreshesProactively()
     await testClaudeProviderRetriesOneUnauthorizedAndMigratesCache()
@@ -1873,6 +1909,30 @@ func testClaudeProviderScopeFailureSkipsHTTP() async {
     expect(await http.capturedRequests.count, 0, "under-scoped Claude OAuth must not reach HTTP")
 }
 
+func testClaudeProviderRejectsUnderScopedInitialReload() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeClaudeProviderFixture(accessToken: "initial-allowed", expiresAt: now.addingTimeInterval(3_600), now: now)
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    try? files.writeAtomically(
+        claudeCheckCredential(
+            accessToken: "initial-under-scoped",
+            refreshToken: "initial-under-refresh",
+            expiresAtMilliseconds: now.addingTimeInterval(3_600).timeIntervalSince1970 * 1000,
+            scopes: ["user:inference"]
+        ),
+        to: fixture.3,
+        preservingModeOf: fixture.3
+    )
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: claudeUsageResponse(#"{"five_hour":{"utilization":99}}"#))
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    expect(result.failure, .signInAgain, "under-scoped exact-source reload must require sign in")
+    expect(result.migrateCacheFrom == nil, "under-scoped exact-source reload must not migrate cache")
+    expect(await http.capturedRequests.count, 0, "under-scoped exact-source reload must skip HTTP")
+}
+
 func testClaudeProviderAdoptsExternalSourceWithoutMigration() async {
     let now = Date(timeIntervalSince1970: 2_000_000_000)
     let fixture = makeClaudeProviderFixture(accessToken: "old-access", expiresAt: now.addingTimeInterval(60), now: now)
@@ -2038,6 +2098,35 @@ func testClaudeProviderAdoptsExternalSourceAfterRefreshFailure() async {
     )
 }
 
+func testClaudeProviderRejectsUnderScopedRefreshChange() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeClaudeProviderFixture(accessToken: "refresh-allowed", expiresAt: now.addingTimeInterval(60), now: now)
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let underScoped = claudeCheckCredential(
+        accessToken: "refresh-under-scoped",
+        refreshToken: "refresh-under-refresh",
+        expiresAtMilliseconds: now.addingTimeInterval(3_600).timeIntervalSince1970 * 1000,
+        scopes: ["user:inference"]
+    )
+    let http = ClaudeCheckMutatingHTTPClient(
+        responses: [
+            claudeUsageResponse(#"{"access_token":"old-refresh-result","refresh_token":"old-refresh-next","expires_in":3600}"#),
+        ],
+        mutationPath: "/v1/oauth/token",
+        mutation: {
+            try? files.writeAtomically(underScoped, to: fixture.3, preservingModeOf: fixture.3)
+        }
+    )
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expect(result.failure, .signInAgain, "under-scoped refresh generation must require sign in")
+    expect(result.migrateCacheFrom == nil, "under-scoped refresh generation must not migrate cache")
+    expect(requests.count, 1, "under-scoped refresh generation must stop after refresh response")
+    expect(requests.first?.path, "/v1/oauth/token", "under-scoped refresh fixture request")
+}
+
 func testClaudeProviderAdoptsExternalSourceChangedDuringUsage() async {
     let now = Date(timeIntervalSince1970: 2_000_000_000)
     let fixture = makeClaudeProviderFixture(accessToken: "old-usage-access", expiresAt: now.addingTimeInterval(3_600), now: now)
@@ -2123,6 +2212,32 @@ func testClaudeProviderAdoptsExternalSourceAfterUsageTransportFailure() async {
     )
     let unchangedResult = await unchangedProvider.refresh(using: .oauth(unchangedFixture.1))
     expect(unchangedResult.failure, .network, "unchanged Claude usage transport failure stays network")
+}
+
+func testClaudeProviderRejectsUnderScopedUsageChange() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeClaudeProviderFixture(accessToken: "usage-allowed", expiresAt: now.addingTimeInterval(3_600), now: now)
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let underScoped = claudeCheckCredential(
+        accessToken: "usage-under-scoped",
+        refreshToken: "usage-under-refresh",
+        expiresAtMilliseconds: now.addingTimeInterval(3_600).timeIntervalSince1970 * 1000,
+        scopes: ["user:inference"]
+    )
+    let http = ClaudeCheckMutatingHTTPClient(
+        responses: [claudeUsageResponse(#"{"five_hour":{"utilization":77}}"#)],
+        mutationPath: "/api/oauth/usage",
+        mutation: {
+            try? files.writeAtomically(underScoped, to: fixture.3, preservingModeOf: fixture.3)
+        }
+    )
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expect(result.failure, .signInAgain, "under-scoped usage generation must require sign in")
+    expect(result.migrateCacheFrom == nil, "under-scoped usage generation must not migrate cache")
+    expect(requests.count, 1, "under-scoped usage generation must not retry Usage HTTP")
 }
 
 func testClaudeProviderAdoptsExternalSourceChangedDuringUnauthorizedRetry() async {
