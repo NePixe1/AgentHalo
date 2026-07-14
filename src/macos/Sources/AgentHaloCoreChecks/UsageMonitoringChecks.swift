@@ -663,6 +663,8 @@ func claudeCheckPath(home: String) -> String {
 }
 
 func runClaudeAuthChecks() {
+    testSecurityUsageKeychainResolvesLegacyAccountBeforeReadingValue()
+    testSecurityUsageKeychainRejectsMissingOrUnparseableLegacyMetadata()
     testClaudeDiscoveryIsKeychainFirst()
     testClaudeConfigDirChangesPathAndKeychainService()
     testClaudeConfigDirServiceHashNormalizesUnicode()
@@ -673,8 +675,80 @@ func runClaudeAuthChecks() {
     testClaudeExpiresAtUsesEpochMilliseconds()
     testClaudePlanHintsArePreserved()
     testClaudeFileAndKeychainRotationPreserveUnknownFieldsAndSource()
+    testClaudeLegacyRotationWritesToDiscoveredAccount()
+    testClaudePersistRefusesServiceOnlySourceWithoutAccount()
     testClaudePersistRefusesCredentialGenerationMismatch()
     testClaudeRejectsNonProductionOAuthOverrides()
+}
+
+func testSecurityUsageKeychainResolvesLegacyAccountBeforeReadingValue() {
+    let service = "Claude Code-credentials"
+    let legacyAccount = " legacy-account "
+    let metadata = #""acct"<blob>=" legacy-account ""#
+    let runner = RecordingUsageProcessRunner(results: [
+        UsageProcessResult(
+            exitCode: 0,
+            standardOutput: Data(),
+            standardError: Data(metadata.utf8)
+        ),
+        UsageProcessResult(
+            exitCode: 0,
+            standardOutput: Data("credential-json\n".utf8),
+            standardError: Data()
+        ),
+    ])
+    let keychain = SecurityUsageKeychain(processRunner: runner)
+    let item: UsageKeychainItem?
+    do {
+        item = try keychain.readFirstMatching(service: service)
+    } catch {
+        fatalError("legacy keychain lookup should not throw: \(error)")
+    }
+    expect(item?.account, legacyAccount, "legacy lookup returns the exact matched account")
+    expect(item?.value, "credential-json", "legacy lookup returns value from explicit-account read")
+
+    let calls = runner.capturedCalls()
+    expect(calls.count, 2, "legacy lookup performs metadata then explicit-account read")
+    expect(calls[0].executable, "/usr/bin/security", "legacy metadata executable")
+    expect(
+        calls[0].arguments,
+        ["find-generic-password", "-s", service, "-g"],
+        "legacy metadata query uses only service-scoped metadata arguments"
+    )
+    expect(
+        calls[1].arguments,
+        ["find-generic-password", "-s", service, "-a", legacyAccount, "-w"],
+        "legacy value query must use the parsed explicit account"
+    )
+}
+
+func testSecurityUsageKeychainRejectsMissingOrUnparseableLegacyMetadata() {
+    let service = "Claude Code-credentials"
+    let notFoundRunner = RecordingUsageProcessRunner(results: [
+        UsageProcessResult(exitCode: 44, standardOutput: Data(), standardError: Data()),
+    ])
+    let notFound = SecurityUsageKeychain(processRunner: notFoundRunner)
+    expect(
+        try? notFound.readFirstMatching(service: service),
+        nil,
+        "not-found legacy keychain lookup returns no candidate"
+    )
+    expect(notFoundRunner.capturedCalls().count, 1, "not-found lookup stops after metadata query")
+
+    let malformedRunner = RecordingUsageProcessRunner(results: [
+        UsageProcessResult(
+            exitCode: 0,
+            standardOutput: Data(),
+            standardError: Data(#""svce"<blob>="Claude Code-credentials""#.utf8)
+        ),
+    ])
+    let malformed = SecurityUsageKeychain(processRunner: malformedRunner)
+    expect(
+        try? malformed.readFirstMatching(service: service),
+        nil,
+        "metadata without acct returns no legacy candidate"
+    )
+    expect(malformedRunner.capturedCalls().count, 1, "unparseable metadata must not read or write a value")
 }
 
 func testClaudeDiscoveryIsKeychainFirst() {
@@ -715,7 +789,7 @@ func testClaudeDiscoveryIsKeychainFirst() {
     let legacyOnly = FakeUsageKeychain()
     try? legacyOnly.write(
         service: "Claude Code-credentials",
-        account: nil,
+        account: "legacy-account",
         value: claudeCheckString(claudeCheckCredential(accessToken: "legacy-token"))
     )
     let legacyStore = ClaudeAuthStore(environment: environment, files: files, keychain: legacyOnly)
@@ -723,6 +797,11 @@ func testClaudeDiscoveryIsKeychainFirst() {
         fatalError("legacy Claude keychain credential should resolve to OAuth")
     }
     expect(legacy.accessToken, "legacy-token", "legacy service-only keychain should precede file")
+    expect(
+        legacy.source,
+        .keychain(service: "Claude Code-credentials", account: "legacy-account"),
+        "legacy source keeps the actual discovered account"
+    )
 
     let fileStore = ClaudeAuthStore(
         environment: environment,
@@ -1054,6 +1133,119 @@ func testClaudeFileAndKeychainRotationPreserveUnknownFieldsAndSource() {
     }
     expect(keychainOAuth["keychainCustom"] as? String, "keep", "keychain rotation preserves unknown field")
     expect(keychainOAuth["refreshToken"] as? String, "refresh-token", "nil rotated refresh preserves stored refresh")
+}
+
+func testClaudeLegacyRotationWritesToDiscoveredAccount() {
+    let service = "Claude Code-credentials"
+    let legacyAccount = "legacy-account"
+    let storedValue = claudeCheckString(
+        claudeCheckCredential(accessToken: "old-legacy-token")
+    )
+    let metadata = #""acct"<blob>="legacy-account""#
+    let runner = RecordingUsageProcessRunner(results: [
+        UsageProcessResult(exitCode: 44, standardOutput: Data(), standardError: Data()),
+        UsageProcessResult(exitCode: 0, standardOutput: Data(), standardError: Data(metadata.utf8)),
+        UsageProcessResult(
+            exitCode: 0,
+            standardOutput: Data("\(storedValue)\n".utf8),
+            standardError: Data()
+        ),
+        UsageProcessResult(
+            exitCode: 0,
+            standardOutput: Data("\(storedValue)\n".utf8),
+            standardError: Data()
+        ),
+        UsageProcessResult(exitCode: 0, standardOutput: Data(), standardError: Data()),
+    ])
+    let keychain = SecurityUsageKeychain(processRunner: runner)
+    let store = ClaudeAuthStore(
+        environment: FakeUsageEnvironment(["USER": "different-current-user"]),
+        files: FakeUsageFiles(),
+        keychain: keychain
+    )
+    guard case .oauth(let access) = store.resolveAccess() else {
+        fatalError("legacy service-only fallback should resolve to OAuth")
+    }
+    expect(
+        access.source,
+        .keychain(service: service, account: legacyAccount),
+        "legacy access stores the actual matched account"
+    )
+
+    let rotated: OAuthAccess?
+    do {
+        rotated = try store.persist(
+            rotation: ClaudeTokenRotation(
+                accessToken: "new-legacy-token",
+                refreshToken: "new-legacy-refresh",
+                expiresAt: Date(timeIntervalSince1970: 4_000_000)
+            ),
+            replacing: access
+        )
+    } catch {
+        fatalError("legacy exact-account persist should not throw: \(error)")
+    }
+    expect(rotated?.source, access.source, "legacy rotation keeps exact service/account")
+    expect(rotated?.accessToken, "new-legacy-token", "legacy account receives rotation")
+
+    let calls = runner.capturedCalls()
+    expect(calls.count, 5, "resolve and persist use the expected production keychain calls")
+    expect(
+        calls[3].arguments,
+        ["find-generic-password", "-s", service, "-a", legacyAccount, "-w"],
+        "persist reloads the exact discovered account"
+    )
+    let writeArguments = calls[4].arguments
+    expect(writeArguments.first, "add-generic-password", "persist uses keychain update command")
+    guard let accountIndex = writeArguments.firstIndex(of: "-a"),
+          writeArguments.indices.contains(accountIndex + 1)
+    else {
+        fatalError("legacy production write must include an explicit account")
+    }
+    expect(writeArguments[accountIndex + 1], legacyAccount, "persist writes the discovered legacy account")
+    expect(
+        writeArguments.contains("different-current-user"),
+        false,
+        "persist must not migrate legacy credentials to the current user"
+    )
+}
+
+func testClaudePersistRefusesServiceOnlySourceWithoutAccount() {
+    let service = "Claude Code-credentials"
+    let home = "/tmp/agent-halo-claude-unsafe-source-\(UUID().uuidString)"
+    let path = claudeCheckPath(home: home)
+    let storedData = claudeCheckCredential(accessToken: "old-token")
+    let keychain = FakeUsageKeychain()
+    try? keychain.write(
+        service: service,
+        account: nil,
+        value: claudeCheckString(storedData)
+    )
+    let store = ClaudeAuthStore(
+        environment: FakeUsageEnvironment(["HOME": home]),
+        files: FakeUsageFiles(contents: [path: storedData]),
+        keychain: keychain
+    )
+    guard case .oauth(var ambiguous) = store.resolveAccess() else {
+        fatalError("unsafe-source fixture should start from file OAuth")
+    }
+    ambiguous.source = .keychain(service: service, account: nil)
+
+    let result = try? store.persist(
+        rotation: ClaudeTokenRotation(
+            accessToken: "must-not-write",
+            refreshToken: "must-not-write-refresh",
+            expiresAt: Date(timeIntervalSince1970: 5_000_000)
+        ),
+        replacing: ambiguous
+    )
+    expect(result == nil, true, "Claude persist refuses an ambiguous service-only source")
+    let stored = try? keychain.read(service: service, account: nil)
+    expect(
+        stored,
+        claudeCheckString(storedData),
+        "refused service-only persist leaves the original credential unchanged"
+    )
 }
 
 func testClaudePersistRefusesCredentialGenerationMismatch() {

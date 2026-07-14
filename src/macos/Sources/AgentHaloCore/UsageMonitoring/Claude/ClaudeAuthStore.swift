@@ -52,8 +52,7 @@ public struct ClaudeAuthStore: Sendable {
         // concern so a stored OAuth token can never be sent to a custom host.
         guard !hasNonProductionOAuthOverride() else { return .apiKey }
 
-        for source in storedSources() {
-            guard let candidate = try? loadCandidate(from: source) else { continue }
+        if let candidate = firstStoredCandidate() {
             if let scopes = candidate.scopes,
                !scopes.isEmpty,
                !scopes.contains(Self.usageScope) {
@@ -86,6 +85,9 @@ public struct ClaudeAuthStore: Sendable {
         rotation: ClaudeTokenRotation,
         replacing expected: OAuthAccess
     ) throws -> OAuthAccess? {
+        if case .keychain(_, nil) = expected.source {
+            return nil
+        }
         guard expected.providerID == .claude,
               let currentPayload = try readPayload(from: expected.source),
               let current = makeCandidate(from: currentPayload, source: expected.source),
@@ -131,17 +133,25 @@ public struct ClaudeAuthStore: Sendable {
         var scopes: [String]?
     }
 
-    private func storedSources() -> [CredentialSource] {
+    private func firstStoredCandidate() -> Candidate? {
         let account = currentUserAccount()
-        var sources: [CredentialSource] = []
         for service in keychainServices() {
-            if let account {
-                sources.append(.keychain(service: service, account: account))
+            if let account,
+               let candidate = try? loadCandidate(
+                   from: .keychain(service: service, account: account)
+               ) {
+                return candidate
             }
-            sources.append(.keychain(service: service, account: nil))
+            if let item = try? keychain.readFirstMatching(service: service),
+               let object = try? CredentialJSON.object(from: Data(item.value.utf8)),
+               let candidate = makeCandidate(
+                   from: Payload(data: Data(item.value.utf8), object: object),
+                   source: .keychain(service: service, account: item.account)
+               ) {
+                return candidate
+            }
         }
-        sources.append(.file(path: credentialsPath()))
-        return sources
+        return try? loadCandidate(from: .file(path: credentialsPath()))
     }
 
     private func keychainServices() -> [String] {

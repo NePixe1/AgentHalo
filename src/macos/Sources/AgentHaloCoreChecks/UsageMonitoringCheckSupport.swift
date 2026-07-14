@@ -122,6 +122,18 @@ final class FakeUsageKeychain: UsageKeychainAccessing, @unchecked Sendable {
         store.value[Key(service: service, account: account)]
     }
 
+    func readFirstMatching(service: String) throws -> UsageKeychainItem? {
+        store.value
+            .compactMap { key, value -> UsageKeychainItem? in
+                guard key.service == service, let account = key.account, !account.isEmpty else {
+                    return nil
+                }
+                return UsageKeychainItem(account: account, value: value)
+            }
+            .sorted { $0.account < $1.account }
+            .first
+    }
+
     func write(service: String, account: String?, value: String) throws {
         store.withValue { dict in
             dict[Key(service: service, account: account)] = value
@@ -130,6 +142,47 @@ final class FakeUsageKeychain: UsageKeychainAccessing, @unchecked Sendable {
 
     func contains(service: String, account: String?) -> Bool {
         store.value[Key(service: service, account: account)] != nil
+    }
+}
+
+// MARK: - Recording process runner
+
+struct RecordedUsageProcessCall: Equatable {
+    let executable: String
+    let arguments: [String]
+    let timeout: TimeInterval
+}
+
+final class RecordingUsageProcessRunner: UsageProcessRunning, @unchecked Sendable {
+    private struct State {
+        var results: [UsageProcessResult]
+        var calls: [RecordedUsageProcessCall] = []
+    }
+
+    private let state: LockedBox<State>
+
+    init(results: [UsageProcessResult]) {
+        state = LockedBox(State(results: results))
+    }
+
+    func run(executable: String, arguments: [String], timeout: TimeInterval) throws -> UsageProcessResult {
+        state.withValue { state in
+            state.calls.append(
+                RecordedUsageProcessCall(
+                    executable: executable,
+                    arguments: arguments,
+                    timeout: timeout
+                )
+            )
+            guard !state.results.isEmpty else {
+                return UsageProcessResult(exitCode: 44, standardOutput: Data(), standardError: Data())
+            }
+            return state.results.removeFirst()
+        }
+    }
+
+    func capturedCalls() -> [RecordedUsageProcessCall] {
+        state.value.calls
     }
 }
 

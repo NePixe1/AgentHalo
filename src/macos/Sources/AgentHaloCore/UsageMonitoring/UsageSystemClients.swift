@@ -28,8 +28,19 @@ public protocol UsageFileAccessing: Sendable {
 
 /// Injectable keychain access. Production shells out to `/usr/bin/security`;
 /// checks use `FakeUsageKeychain`. Never logs the returned password.
+public struct UsageKeychainItem: Equatable, Sendable {
+    public var account: String
+    public var value: String
+
+    public init(account: String, value: String) {
+        self.account = account
+        self.value = value
+    }
+}
+
 public protocol UsageKeychainAccessing: Sendable {
     func read(service: String, account: String?) throws -> String?
+    func readFirstMatching(service: String) throws -> UsageKeychainItem?
     func write(service: String, account: String?, value: String) throws
 }
 
@@ -196,12 +207,11 @@ public final class SecurityUsageKeychain: UsageKeychainAccessing {
         var arguments = [
             "find-generic-password",
             "-s", service,
-            "-w",
-            "-g",
         ]
         if let account = account {
             arguments += ["-a", account]
         }
+        arguments.append("-w")
         let result = try processRunner.run(
             executable: "/usr/bin/security",
             arguments: arguments,
@@ -218,6 +228,30 @@ public final class SecurityUsageKeychain: UsageKeychainAccessing {
             return nil
         default:
             throw UsageKeychainError.unexpectedExitCode(result.exitCode)
+        }
+    }
+
+    public func readFirstMatching(service: String) throws -> UsageKeychainItem? {
+        let metadataResult = try processRunner.run(
+            executable: "/usr/bin/security",
+            arguments: ["find-generic-password", "-s", service, "-g"],
+            timeout: 10
+        )
+        switch metadataResult.exitCode {
+        case 0:
+            let metadata = [metadataResult.standardOutput, metadataResult.standardError]
+                .compactMap { String(data: $0, encoding: .utf8) }
+                .joined(separator: "\n")
+            guard let account = Self.account(fromSecurityMetadata: metadata),
+                  let value = try read(service: service, account: account)
+            else {
+                return nil
+            }
+            return UsageKeychainItem(account: account, value: value)
+        case 44:
+            return nil
+        default:
+            throw UsageKeychainError.unexpectedExitCode(metadataResult.exitCode)
         }
     }
 
@@ -239,6 +273,24 @@ public final class SecurityUsageKeychain: UsageKeychainAccessing {
         if result.exitCode != 0 {
             throw UsageKeychainError.unexpectedExitCode(result.exitCode)
         }
+    }
+
+    private static func account(fromSecurityMetadata metadata: String) -> String? {
+        let prefix = #""acct"<blob>="#
+        for rawLine in metadata.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix(prefix) else { continue }
+            let encoded = String(line.dropFirst(prefix.count))
+            guard let data = "[\(encoded)]".data(using: .utf8),
+                  let values = try? JSONSerialization.jsonObject(with: data) as? [String],
+                  let account = values.first,
+                  !account.isEmpty
+            else {
+                return nil
+            }
+            return account
+        }
+        return nil
     }
 }
 
