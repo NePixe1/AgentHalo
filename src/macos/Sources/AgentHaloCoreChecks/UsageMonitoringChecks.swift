@@ -156,6 +156,103 @@ private func waitForRefreshCount(
     fatalError(message)
 }
 
+private actor SequencedCoordinatorProvider: UsageProvider {
+    struct ResolvePlan: Sendable {
+        let result: ResolvedProviderAccess
+        let isGated: Bool
+    }
+
+    struct RefreshPlan: Sendable {
+        let result: UsageRefreshResult
+        let isGated: Bool
+    }
+
+    nonisolated let providerID: UsageProviderID
+
+    private var resolvePlans: [ResolvePlan] = []
+    private var refreshPlans: [RefreshPlan] = []
+    private var resolveContinuations: [Int: CheckedContinuation<Void, Never>] = [:]
+    private var refreshContinuations: [Int: CheckedContinuation<Void, Never>] = [:]
+    private(set) var resolveCallCount = 0
+    private(set) var refreshCallCount = 0
+    private(set) var resolvedAccountKeys: [AccountCacheKey?] = []
+
+    init(providerID: UsageProviderID) {
+        self.providerID = providerID
+    }
+
+    func enqueueResolve(_ result: ResolvedProviderAccess, gated: Bool = false) {
+        resolvePlans.append(ResolvePlan(result: result, isGated: gated))
+    }
+
+    func enqueueRefresh(_ result: UsageRefreshResult, gated: Bool = false) {
+        refreshPlans.append(RefreshPlan(result: result, isGated: gated))
+    }
+
+    func resumeResolve(call: Int) {
+        resolveContinuations.removeValue(forKey: call)?.resume()
+    }
+
+    func resumeRefresh(call: Int) {
+        refreshContinuations.removeValue(forKey: call)?.resume()
+    }
+
+    func resolveAccess(accountKey: AccountCacheKey?) async -> ResolvedProviderAccess {
+        resolveCallCount += 1
+        resolvedAccountKeys.append(accountKey)
+        let call = resolveCallCount
+        guard !resolvePlans.isEmpty else {
+            fatalError("missing resolve plan for call \(call)")
+        }
+        let plan = resolvePlans.removeFirst()
+        if plan.isGated {
+            await withCheckedContinuation { continuation in
+                resolveContinuations[call] = continuation
+            }
+        }
+        return plan.result
+    }
+
+    func refresh(using access: ResolvedProviderAccess) async -> UsageRefreshResult {
+        refreshCallCount += 1
+        let call = refreshCallCount
+        guard !refreshPlans.isEmpty else {
+            fatalError("missing refresh plan for call \(call)")
+        }
+        let plan = refreshPlans.removeFirst()
+        if plan.isGated {
+            await withCheckedContinuation { continuation in
+                refreshContinuations[call] = continuation
+            }
+        }
+        return plan.result
+    }
+}
+
+private func waitForResolveCount(
+    _ provider: SequencedCoordinatorProvider,
+    _ expectedCount: Int,
+    _ message: String
+) async {
+    for _ in 0..<10_000 {
+        if await provider.resolveCallCount >= expectedCount { return }
+        await Task.yield()
+    }
+    fatalError(message)
+}
+
+private func waitForRefreshCount(
+    _ provider: SequencedCoordinatorProvider,
+    _ expectedCount: Int,
+    _ message: String
+) async {
+    for _ in 0..<10_000 {
+        if await provider.refreshCallCount >= expectedCount { return }
+        await Task.yield()
+    }
+    fatalError(message)
+}
+
 private final class CoordinatorFailingWriteFiles: UsageFileAccessing, @unchecked Sendable {
     func readDataIfPresent(at path: String) throws -> Data? { nil }
     func ensureDirectory(at path: String, mode: mode_t) throws {}
@@ -168,7 +265,11 @@ func runUsageMonitoringCoordinatorChecks() async {
     await testCoordinatorAPIKeyModeSkipsRefresh()
     await testCoordinatorDiskSnapshotIsExactStaleAndDoesNotSuppressRefresh()
     await testCoordinatorCurrentRunFreshnessAndTenMinuteStaleness()
+    await testCoordinatorLatestConcurrentPrepareWins()
     await testCoordinatorDeduplicatesOneProviderAndRefreshesProvidersIndependently()
+    await testCoordinatorAccountSwitchDoesNotJoinOrCommitOldRefresh()
+    await testCoordinatorNonOAuthPrepareInvalidatesOldRefresh()
+    await testCoordinatorInvalidatedMigrationHasNoCacheSideEffects()
     await testCoordinatorSuccessAndFailureStatePriorities()
     await testCoordinatorRateLimitCooldownsArePerAccount()
     await testCoordinatorMigratesOnlyInternalRotation()
@@ -249,7 +350,11 @@ func testCoordinatorCurrentRunFreshnessAndTenMinuteStaleness() async {
     _ = await coordinator.ensureFresh(.codex)
     expect(await provider.refreshCallCount, 1, "current-run snapshot younger than five minutes should suppress refresh")
 
-    now.withValue { $0 = date.addingTimeInterval(301) }
+    now.withValue { $0 = date.addingTimeInterval(300) }
+    _ = await coordinator.ensureFresh(.codex)
+    expect(await provider.refreshCallCount, 1, "snapshot exactly five minutes old should still be fresh")
+
+    now.withValue { $0 = date.addingTimeInterval(300.001) }
     await provider.setRefreshResult(
         UsageRefreshResult(
             providerID: .codex,
@@ -262,7 +367,46 @@ func testCoordinatorCurrentRunFreshnessAndTenMinuteStaleness() async {
 
     now.withValue { $0 = date.addingTimeInterval(902) }
     let aged = await coordinator.state(for: .codex)
-    expect(aged.status, .stale(updatedAt: date.addingTimeInterval(301)), "snapshot older than ten minutes should become stale without an error")
+    expect(aged.status, .stale(updatedAt: date.addingTimeInterval(300.001)), "snapshot older than ten minutes should become stale without an error")
+}
+
+func testCoordinatorLatestConcurrentPrepareWins() async {
+    let date = Date(timeIntervalSince1970: 2_100_002_500)
+    let now = LockedBox(date)
+    let accountA = AccountCacheKey(providerID: .codex, digest: "prepare-a")
+    let accountB = AccountCacheKey(providerID: .codex, digest: "prepare-b")
+    let provider = SequencedCoordinatorProvider(providerID: .codex)
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(accountA)), gated: true)
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(accountB)))
+    let coordinator = UsageMonitoringCoordinator(
+        providers: [provider],
+        cache: coordinatorCache(
+            files: FakeUsageFiles(),
+            path: "/tmp/agent-halo-coordinator-prepare-generation.json",
+            now: now
+        ),
+        now: { now.value }
+    )
+
+    let slowA = Task { await coordinator.prepare(.codex) }
+    await waitForResolveCount(provider, 1, "slow account A prepare did not enter access resolution")
+    let fastB = Task { await coordinator.prepare(.codex) }
+    let fastState = await fastB.value
+    expect(fastState.accessMode, .oauth, "newer account B prepare should publish OAuth mode")
+
+    await provider.resumeResolve(call: 1)
+    _ = await slowA.value
+    let final = await coordinator.state(for: .codex)
+    expect(final.snapshot == nil, "late account A prepare must not restore an account A snapshot")
+
+    await provider.enqueueResolve(.oauthNeedsSignIn(accountKey: accountB))
+    let confirmedB = await coordinator.prepare(.codex)
+    expect(confirmedB.status, .signInAgain, "late account A prepare must leave account B as the active binding")
+    expect(
+        (await provider.resolvedAccountKeys)[2],
+        accountB,
+        "the next prepare should resolve from the latest committed account B binding"
+    )
 }
 
 func testCoordinatorDeduplicatesOneProviderAndRefreshesProvidersIndependently() async {
@@ -299,6 +443,181 @@ func testCoordinatorDeduplicatesOneProviderAndRefreshesProvidersIndependently() 
     await claude.resume()
     _ = await (codexFirst.value, codexSecond.value, claudeFirst.value)
     expect(await codex.refreshCallCount, 1, "joined Codex refresh should still call provider once")
+}
+
+func testCoordinatorAccountSwitchDoesNotJoinOrCommitOldRefresh() async {
+    let date = Date(timeIntervalSince1970: 2_100_003_500)
+    let now = LockedBox(date)
+    let accountA = AccountCacheKey(providerID: .codex, digest: "switch-a")
+    let accountB = AccountCacheKey(providerID: .codex, digest: "switch-b")
+    let provider = SequencedCoordinatorProvider(providerID: .codex)
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(accountA)))
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(accountB)))
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(accountA)))
+    await provider.enqueueRefresh(
+        UsageRefreshResult(
+            providerID: .codex,
+            snapshot: nil,
+            failure: .rateLimited(retryAt: date.addingTimeInterval(3_600))
+        ),
+        gated: true
+    )
+    let snapshotB = coordinatorSnapshot(accountB, at: date, planName: "Account B")
+    await provider.enqueueRefresh(
+        UsageRefreshResult(providerID: .codex, snapshot: snapshotB, failure: nil)
+    )
+    let snapshotA = coordinatorSnapshot(accountA, at: date, planName: "Account A retry")
+    await provider.enqueueRefresh(
+        UsageRefreshResult(providerID: .codex, snapshot: snapshotA, failure: nil)
+    )
+    let cache = coordinatorCache(
+        files: FakeUsageFiles(),
+        path: "/tmp/agent-halo-coordinator-account-switch.json",
+        now: now
+    )
+    let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now.value })
+
+    let requestA = Task { await coordinator.ensureFresh(.codex) }
+    await waitForRefreshCount(provider, 1, "account A refresh did not start")
+    let requestB = Task { await coordinator.ensureFresh(.codex) }
+    await waitForRefreshCount(provider, 2, "account B must start its own refresh instead of joining account A")
+    let stateB = await requestB.value
+    expect(stateB.snapshot, snapshotB, "account B refresh should publish account B data")
+
+    await provider.resumeRefresh(call: 1)
+    _ = await requestA.value
+    expect(
+        (await coordinator.state(for: .codex)).snapshot,
+        snapshotB,
+        "late account A rate-limit result must not overwrite account B state"
+    )
+    expect(try! await cache.snapshot(for: accountA) == nil, "invalidated account A result must not write cache")
+
+    let retriedA = await coordinator.ensureFresh(.codex)
+    expect(await provider.refreshCallCount, 3, "invalidated account A rate-limit must not install cooldown")
+    expect(retriedA.snapshot, snapshotA, "account A should refresh normally after switching back")
+}
+
+func testCoordinatorNonOAuthPrepareInvalidatesOldRefresh() async {
+    let date = Date(timeIntervalSince1970: 2_100_003_600)
+
+    do {
+        let now = LockedBox(date)
+        let accountA = AccountCacheKey(providerID: .codex, digest: "api-invalidate-a")
+        let provider = SequencedCoordinatorProvider(providerID: .codex)
+        await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(accountA)))
+        await provider.enqueueResolve(.apiKey)
+        await provider.enqueueRefresh(
+            UsageRefreshResult(
+                providerID: .codex,
+                snapshot: coordinatorSnapshot(accountA, at: date, planName: "Late OAuth"),
+                failure: nil
+            ),
+            gated: true
+        )
+        let cache = coordinatorCache(
+            files: FakeUsageFiles(),
+            path: "/tmp/agent-halo-coordinator-api-invalidates.json",
+            now: now
+        )
+        let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now.value })
+
+        let oauthRequest = Task { await coordinator.ensureFresh(.codex) }
+        await waitForRefreshCount(provider, 1, "OAuth refresh before API switch did not start")
+        let apiState = await coordinator.prepare(.codex)
+        expect(apiState.accessMode, .apiKey, "API prepare should switch mode immediately")
+        await provider.resumeRefresh(call: 1)
+        _ = await oauthRequest.value
+
+        let final = await coordinator.state(for: .codex)
+        expect(final.accessMode, .apiKey, "late OAuth result must not overwrite API mode")
+        expect(final.snapshot == nil, "late OAuth result must not restore API-mode snapshot")
+        expect(try! await cache.snapshot(for: accountA) == nil, "late OAuth result in API mode must not write cache")
+    }
+
+    do {
+        let now = LockedBox(date.addingTimeInterval(1))
+        let accountA = AccountCacheKey(providerID: .claude, digest: "signin-invalidate-a")
+        let accountB = AccountCacheKey(providerID: .claude, digest: "signin-invalidate-b")
+        let provider = SequencedCoordinatorProvider(providerID: .claude)
+        await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(accountA)))
+        await provider.enqueueResolve(.oauthNeedsSignIn(accountKey: accountB))
+        await provider.enqueueRefresh(
+            UsageRefreshResult(
+                providerID: .claude,
+                snapshot: coordinatorSnapshot(accountA, at: now.value, planName: "Late OAuth"),
+                failure: nil
+            ),
+            gated: true
+        )
+        let cache = coordinatorCache(
+            files: FakeUsageFiles(),
+            path: "/tmp/agent-halo-coordinator-signin-invalidates.json",
+            now: now
+        )
+        let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now.value })
+
+        let oauthRequest = Task { await coordinator.ensureFresh(.claude) }
+        await waitForRefreshCount(provider, 1, "OAuth refresh before sign-in switch did not start")
+        let signInState = await coordinator.prepare(.claude)
+        expect(signInState.status, .signInAgain, "needs-sign-in prepare should publish highest-priority status")
+        await provider.resumeRefresh(call: 1)
+        _ = await oauthRequest.value
+
+        let final = await coordinator.state(for: .claude)
+        expect(final.status, .signInAgain, "late OAuth result must not overwrite sign-in-again state")
+        expect(final.snapshot == nil, "different-account sign-in state must not retain late OAuth data")
+        expect(try! await cache.snapshot(for: accountA) == nil, "late OAuth result while signed out must not write cache")
+    }
+}
+
+func testCoordinatorInvalidatedMigrationHasNoCacheSideEffects() async {
+    let date = Date(timeIntervalSince1970: 2_100_003_700)
+    let now = LockedBox(date)
+    let oldKey = AccountCacheKey(providerID: .codex, digest: "stale-migration-old")
+    let rotatedKey = AccountCacheKey(providerID: .codex, digest: "stale-migration-rotated")
+    let accountB = AccountCacheKey(providerID: .codex, digest: "stale-migration-b")
+    let files = FakeUsageFiles()
+    let path = "/tmp/agent-halo-coordinator-stale-migration.json"
+    let seed = coordinatorCache(files: files, path: path, now: now)
+    let oldSnapshot = coordinatorSnapshot(oldKey, at: date.addingTimeInterval(-60), planName: "Old")
+    try! await seed.store(oldSnapshot)
+    let cache = coordinatorCache(files: files, path: path, now: now)
+
+    let provider = SequencedCoordinatorProvider(providerID: .codex)
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(oldKey)))
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(accountB)))
+    await provider.enqueueRefresh(
+        UsageRefreshResult(
+            providerID: .codex,
+            snapshot: coordinatorSnapshot(rotatedKey, at: date, planName: "Invalidated rotation"),
+            failure: nil,
+            migrateCacheFrom: oldKey
+        ),
+        gated: true
+    )
+    let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now.value })
+
+    let oldRequest = Task { await coordinator.ensureFresh(.codex) }
+    await waitForRefreshCount(provider, 1, "migration refresh did not start")
+    let stateB = await coordinator.prepare(.codex)
+    expect(stateB.snapshot == nil, "account B prepare must not adopt the old account cache")
+    await provider.resumeRefresh(call: 1)
+    _ = await oldRequest.value
+
+    expect(
+        try! await cache.snapshot(for: oldKey)?.snapshot,
+        oldSnapshot,
+        "invalidated migration must leave the old cache entry untouched"
+    )
+    expect(
+        try! await cache.snapshot(for: rotatedKey) == nil,
+        "invalidated migration must not create the rotated cache entry"
+    )
+    expect(
+        (await coordinator.state(for: .codex)).snapshot == nil,
+        "invalidated migration result must not overwrite account B state"
+    )
 }
 
 func testCoordinatorSuccessAndFailureStatePriorities() async {

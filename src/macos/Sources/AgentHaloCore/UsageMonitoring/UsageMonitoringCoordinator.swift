@@ -5,18 +5,44 @@ public actor UsageMonitoringCoordinator {
     private static let staleInterval: TimeInterval = 10 * 60
     private static let defaultCooldown: TimeInterval = 5 * 60
 
+    private struct AccessSignature: Equatable, Sendable {
+        enum Mode: Equatable, Sendable {
+            case apiKey
+            case oauth
+            case oauthNeedsSignIn
+        }
+
+        let mode: Mode
+        let accountKey: AccountCacheKey?
+        let sourceVersion: String?
+    }
+
+    private struct PrepareContext: Sendable {
+        var state: UsageMonitorState
+        var access: ResolvedProviderAccess
+        var signature: AccessSignature
+        var generation: UInt64
+    }
+
+    private struct InFlightRecord {
+        let accountKey: AccountCacheKey
+        let generation: UInt64
+        let signature: AccessSignature
+        let token: UUID
+        let task: Task<UsageRefreshResult, Never>
+    }
+
     private let providers: [UsageProviderID: any UsageProvider]
     private let cache: UsageSnapshotCache
     private let now: @Sendable () -> Date
 
     private var states: [UsageProviderID: UsageMonitorState] = [:]
-    private var inFlight: [UsageProviderID: Task<UsageMonitorState, Never>] = [:]
+    private var contexts: [UsageProviderID: PrepareContext] = [:]
+    private var inFlight: [UsageProviderID: InFlightRecord] = [:]
     private var cooldownUntil: [AccountCacheKey: Date] = [:]
-
-    private var activeAccountKeys: [UsageProviderID: AccountCacheKey] = [:]
-    private var resolvedAccess: [UsageProviderID: ResolvedProviderAccess] = [:]
     private var currentRunSnapshotKeys: Set<AccountCacheKey> = []
-    private var refreshTokens: [UsageProviderID: UUID] = [:]
+    private var prepareSequences: [UsageProviderID: UInt64] = [:]
+    private var generationCounters: [UsageProviderID: UInt64] = [:]
 
     public init(
         providers: [any UsageProvider],
@@ -32,117 +58,57 @@ public actor UsageMonitoringCoordinator {
     }
 
     public func prepare(_ providerID: UsageProviderID) async -> UsageMonitorState {
-        guard let provider = providers[providerID] else {
-            return publishAPIKeyState(providerID)
-        }
-
-        // A transient cache read failure must not prevent credential resolution
-        // or a later network refresh; UsageSnapshotCache retries failed loads.
-        try? await cache.loadIfNeeded()
-        let previousKey = activeAccountKeys[providerID]
-        let access = await provider.resolveAccess(accountKey: previousKey)
-        resolvedAccess[providerID] = access
-
-        switch access {
-        case .apiKey:
-            return publishAPIKeyState(providerID)
-
-        case .oauthNeedsSignIn(let accountKey):
-            activeAccountKeys[providerID] = accountKey
-            let snapshot = await snapshotForPrepare(
-                providerID: providerID,
-                accountKey: accountKey
-            )
-            let state = UsageMonitorState(
-                providerID: providerID,
-                accessMode: .oauth,
-                snapshot: snapshot,
-                status: .signInAgain,
-                lastFailure: .signInAgain,
-                isRefreshing: inFlight[providerID] != nil
-            )
-            states[providerID] = state
-            return state
-
-        case .oauth(let oauthAccess):
-            let accountKey = oauthAccess.accountKey
-            let previousState = states[providerID]
-            let isSameAccount = previousKey == accountKey
-            activeAccountKeys[providerID] = accountKey
-
-            let cached = try? await cache.snapshot(for: accountKey)
-            if cached?.isFromCurrentRun == true {
-                currentRunSnapshotKeys.insert(accountKey)
-            }
-            let snapshot = cached?.snapshot
-                ?? (isSameAccount ? previousState?.snapshot : nil)
-            let preservedFailure = isSameAccount ? previousState?.lastFailure : nil
-            let state = UsageMonitorState(
-                providerID: providerID,
-                accessMode: .oauth,
-                snapshot: snapshot,
-                status: status(
-                    for: snapshot,
-                    isFromCurrentRun: currentRunSnapshotKeys.contains(accountKey),
-                    failure: preservedFailure
-                ),
-                lastFailure: preservedFailure,
-                isRefreshing: inFlight[providerID] != nil
-            )
-            states[providerID] = state
-            return state
-        }
+        await prepareContext(providerID).state
     }
 
     public func ensureFresh(_ providerID: UsageProviderID) async -> UsageMonitorState {
-        let prepared = await prepare(providerID)
-        guard case .oauth(let access) = resolvedAccess[providerID] else {
-            return prepared
+        let prepared = await prepareContext(providerID)
+        guard case .oauth(let access) = prepared.access else {
+            return prepared.state
         }
 
-        if let task = inFlight[providerID], let token = refreshTokens[providerID] {
-            let result = await task.value
-            return finishRefresh(result, providerID: providerID, accountKey: access.accountKey, token: token)
+        if let record = inFlight[providerID] {
+            if record.accountKey == access.accountKey,
+               record.generation == prepared.generation,
+               record.signature == prepared.signature {
+                let result = await record.task.value
+                return await finishRefresh(result, providerID: providerID, expected: record)
+            }
+            invalidateInFlight(providerID)
         }
 
-        if let snapshot = prepared.snapshot,
+        if let snapshot = prepared.state.snapshot,
            currentRunSnapshotKeys.contains(snapshot.accountKey),
-           prepared.lastFailure == nil,
-           now().timeIntervalSince(snapshot.refreshedAt) < Self.refreshInterval {
-            return prepared
+           prepared.state.lastFailure == nil,
+           now().timeIntervalSince(snapshot.refreshedAt) <= Self.refreshInterval {
+            return prepared.state
         }
 
         if let retryAt = cooldownUntil[access.accountKey], now() < retryAt {
-            return prepared
+            return prepared.state
         }
         cooldownUntil.removeValue(forKey: access.accountKey)
 
         var refreshing = prepared
-        refreshing.isRefreshing = true
-        states[providerID] = refreshing
+        refreshing.state.isRefreshing = true
+        commit(refreshing, for: providerID)
 
         let token = UUID()
         let provider = providers[providerID]!
-        let cache = cache
-        let task = Task<UsageMonitorState, Never> {
-            let result = await provider.refresh(using: .oauth(access))
-            guard !Task.isCancelled else {
-                var cancelled = prepared
-                cancelled.isRefreshing = false
-                return cancelled
-            }
-            return await Self.makeRefreshState(
-                result: result,
-                providerID: providerID,
-                retainedSnapshot: prepared.snapshot,
-                cache: cache
-            )
+        let task = Task<UsageRefreshResult, Never> {
+            await provider.refresh(using: .oauth(access))
         }
-        inFlight[providerID] = task
-        refreshTokens[providerID] = token
+        let record = InFlightRecord(
+            accountKey: access.accountKey,
+            generation: refreshing.generation,
+            signature: refreshing.signature,
+            token: token,
+            task: task
+        )
+        inFlight[providerID] = record
 
         let result = await task.value
-        return finishRefresh(result, providerID: providerID, accountKey: access.accountKey, token: token)
+        return await finishRefresh(result, providerID: providerID, expected: record)
     }
 
     public func state(for providerID: UsageProviderID) -> UsageMonitorState {
@@ -159,17 +125,13 @@ public actor UsageMonitoringCoordinator {
         }
         state.status = .stale(updatedAt: snapshot.refreshedAt)
         states[providerID] = state
+        contexts[providerID]?.state = state
         return state
     }
 
     public func cancelAll() {
-        for task in inFlight.values {
-            task.cancel()
-        }
-        inFlight.removeAll()
-        refreshTokens.removeAll()
-        for providerID in states.keys {
-            states[providerID]?.isRefreshing = false
+        for providerID in Array(inFlight.keys) {
+            invalidateInFlight(providerID)
         }
     }
 
@@ -210,30 +172,310 @@ public actor UsageMonitoringCoordinator {
         )
     }
 
-    private func publishAPIKeyState(_ providerID: UsageProviderID) -> UsageMonitorState {
-        activeAccountKeys.removeValue(forKey: providerID)
-        resolvedAccess[providerID] = .apiKey
-        let state = UsageMonitorState(providerID: providerID, accessMode: .apiKey)
-        states[providerID] = state
-        return state
-    }
+    private func prepareContext(_ providerID: UsageProviderID) async -> PrepareContext {
+        let sequence = nextPrepareSequence(for: providerID)
+        guard let provider = providers[providerID] else {
+            return commitResolvedAccess(.apiKey, providerID: providerID, sequence: sequence)
+        }
 
-    private func snapshotForPrepare(
-        providerID: UsageProviderID,
-        accountKey: AccountCacheKey?
-    ) async -> UsageSnapshot? {
-        guard let accountKey else { return nil }
+        try? await cache.loadIfNeeded()
+        let previousAccount = contexts[providerID]?.signature.accountKey
+        let access = await provider.resolveAccess(accountKey: previousAccount)
+
+        guard prepareSequences[providerID] == sequence else {
+            return currentContextOrAPIKey(providerID)
+        }
+
+        let initial = commitResolvedAccess(access, providerID: providerID, sequence: sequence)
+        guard let accountKey = initial.signature.accountKey else {
+            return initial
+        }
+
         let cached = try? await cache.snapshot(for: accountKey)
+        guard prepareSequences[providerID] == sequence,
+              let current = contexts[providerID],
+              current.generation == initial.generation,
+              current.signature == initial.signature
+        else {
+            return currentContextOrAPIKey(providerID)
+        }
+
         if cached?.isFromCurrentRun == true {
             currentRunSnapshotKeys.insert(accountKey)
         }
-        if let snapshot = cached?.snapshot { return snapshot }
-        guard activeAccountKeys[providerID] == accountKey,
-              states[providerID]?.snapshot?.accountKey == accountKey
+        let snapshot = cached?.snapshot ?? initial.state.snapshot
+        var completed = initial
+        completed.state.snapshot = snapshot
+        completed.state.isRefreshing = matchingInFlight(
+            providerID: providerID,
+            context: completed
+        ) != nil
+
+        switch access {
+        case .apiKey:
+            break
+        case .oauthNeedsSignIn:
+            completed.state.status = .signInAgain
+            completed.state.lastFailure = .signInAgain
+        case .oauth:
+            completed.state.status = status(
+                for: snapshot,
+                isFromCurrentRun: currentRunSnapshotKeys.contains(accountKey),
+                failure: completed.state.lastFailure
+            )
+        }
+        commit(completed, for: providerID)
+        return completed
+    }
+
+    private func commitResolvedAccess(
+        _ access: ResolvedProviderAccess,
+        providerID: UsageProviderID,
+        sequence: UInt64
+    ) -> PrepareContext {
+        guard prepareSequences[providerID] == sequence else {
+            return currentContextOrAPIKey(providerID)
+        }
+
+        let signature = Self.signature(for: access)
+        let previous = contexts[providerID]
+        let generation: UInt64
+        if previous?.signature == signature {
+            generation = previous!.generation
+        } else {
+            generation = nextGeneration(for: providerID)
+            invalidateInFlight(providerID)
+        }
+
+        let sameAccount = previous?.signature.accountKey == signature.accountKey
+        let retainedSnapshot = sameAccount ? previous?.state.snapshot : nil
+        let retainedFailure = sameAccount ? previous?.state.lastFailure : nil
+        let isRefreshing = inFlight[providerID].map {
+            $0.accountKey == signature.accountKey
+                && $0.generation == generation
+                && $0.signature == signature
+        } ?? false
+
+        let state: UsageMonitorState
+        switch access {
+        case .apiKey:
+            state = UsageMonitorState(providerID: providerID, accessMode: .apiKey)
+        case .oauthNeedsSignIn:
+            state = UsageMonitorState(
+                providerID: providerID,
+                accessMode: .oauth,
+                snapshot: retainedSnapshot,
+                status: .signInAgain,
+                lastFailure: .signInAgain,
+                isRefreshing: isRefreshing
+            )
+        case .oauth(let oauthAccess):
+            state = UsageMonitorState(
+                providerID: providerID,
+                accessMode: .oauth,
+                snapshot: retainedSnapshot,
+                status: status(
+                    for: retainedSnapshot,
+                    isFromCurrentRun: currentRunSnapshotKeys.contains(oauthAccess.accountKey),
+                    failure: retainedFailure
+                ),
+                lastFailure: retainedFailure,
+                isRefreshing: isRefreshing
+            )
+        }
+
+        let context = PrepareContext(
+            state: state,
+            access: access,
+            signature: signature,
+            generation: generation
+        )
+        commit(context, for: providerID)
+        return context
+    }
+
+    private func finishRefresh(
+        _ result: UsageRefreshResult,
+        providerID: UsageProviderID,
+        expected: InFlightRecord
+    ) async -> UsageMonitorState {
+        guard isCurrent(expected, providerID: providerID),
+              let context = contexts[providerID]
+        else {
+            return state(for: providerID)
+        }
+
+        if let failure = result.failure {
+            return finishFailure(
+                Self.mapFailure(failure),
+                providerID: providerID,
+                context: context,
+                expected: expected
+            )
+        }
+
+        guard let snapshot = result.snapshot,
+              result.providerID == providerID,
+              snapshot.providerID == providerID,
+              snapshot.accountKey.providerID == providerID,
+              result.migrateCacheFrom == nil
+                || result.migrateCacheFrom == expected.accountKey,
+              snapshot.accountKey == expected.accountKey
+                || result.migrateCacheFrom == expected.accountKey
+        else {
+            return finishFailure(
+                .invalidResponse,
+                providerID: providerID,
+                context: context,
+                expected: expected
+            )
+        }
+
+        if let oldKey = result.migrateCacheFrom {
+            try? await cache.migrate(from: oldKey, to: snapshot.accountKey)
+        }
+        guard isCurrent(expected, providerID: providerID) else {
+            return state(for: providerID)
+        }
+        try? await cache.store(snapshot)
+        guard isCurrent(expected, providerID: providerID) else {
+            return state(for: providerID)
+        }
+
+        inFlight.removeValue(forKey: providerID)
+        cooldownUntil.removeValue(forKey: expected.accountKey)
+        cooldownUntil.removeValue(forKey: snapshot.accountKey)
+        currentRunSnapshotKeys.insert(snapshot.accountKey)
+
+        var completed = context
+        completed.state = UsageMonitorState(
+            providerID: providerID,
+            accessMode: .oauth,
+            snapshot: snapshot,
+            status: .fresh(updatedAt: snapshot.refreshedAt),
+            lastFailure: nil,
+            isRefreshing: false
+        )
+
+        if snapshot.accountKey != expected.accountKey,
+           case .oauth(var access) = completed.access {
+            access.accountKey = snapshot.accountKey
+            completed.access = .oauth(access)
+            completed.signature = Self.signature(for: completed.access)
+            completed.generation = nextGeneration(for: providerID)
+        }
+        commit(completed, for: providerID)
+        return completed.state
+    }
+
+    private func finishFailure(
+        _ failure: UsageFailureReason,
+        providerID: UsageProviderID,
+        context: PrepareContext,
+        expected: InFlightRecord
+    ) -> UsageMonitorState {
+        guard isCurrent(expected, providerID: providerID) else {
+            return state(for: providerID)
+        }
+        inFlight.removeValue(forKey: providerID)
+        if case .rateLimited(let retryAt) = failure {
+            cooldownUntil[expected.accountKey] = retryAt
+                ?? now().addingTimeInterval(Self.defaultCooldown)
+        }
+
+        var failed = context
+        failed.state.lastFailure = failure
+        failed.state.status = Self.failureStatus(failure, snapshot: context.state.snapshot)
+        failed.state.isRefreshing = false
+        commit(failed, for: providerID)
+        return failed.state
+    }
+
+    private func matchingInFlight(
+        providerID: UsageProviderID,
+        context: PrepareContext
+    ) -> InFlightRecord? {
+        guard let record = inFlight[providerID],
+              record.accountKey == context.signature.accountKey,
+              record.generation == context.generation,
+              record.signature == context.signature
         else {
             return nil
         }
-        return states[providerID]?.snapshot
+        return record
+    }
+
+    private func isCurrent(
+        _ expected: InFlightRecord,
+        providerID: UsageProviderID
+    ) -> Bool {
+        guard let record = inFlight[providerID],
+              record.token == expected.token,
+              record.accountKey == expected.accountKey,
+              record.generation == expected.generation,
+              record.signature == expected.signature,
+              let context = contexts[providerID],
+              context.generation == expected.generation,
+              context.signature == expected.signature,
+              context.signature.accountKey == expected.accountKey
+        else {
+            return false
+        }
+        return true
+    }
+
+    private func invalidateInFlight(_ providerID: UsageProviderID) {
+        inFlight.removeValue(forKey: providerID)?.task.cancel()
+        states[providerID]?.isRefreshing = false
+        contexts[providerID]?.state.isRefreshing = false
+    }
+
+    private func commit(_ context: PrepareContext, for providerID: UsageProviderID) {
+        contexts[providerID] = context
+        states[providerID] = context.state
+    }
+
+    private func currentContextOrAPIKey(_ providerID: UsageProviderID) -> PrepareContext {
+        if let context = contexts[providerID] {
+            return context
+        }
+        return PrepareContext(
+            state: UsageMonitorState(providerID: providerID, accessMode: .apiKey),
+            access: .apiKey,
+            signature: AccessSignature(mode: .apiKey, accountKey: nil, sourceVersion: nil),
+            generation: generationCounters[providerID] ?? 0
+        )
+    }
+
+    private func nextPrepareSequence(for providerID: UsageProviderID) -> UInt64 {
+        let next = (prepareSequences[providerID] ?? 0) &+ 1
+        prepareSequences[providerID] = next
+        return next
+    }
+
+    private func nextGeneration(for providerID: UsageProviderID) -> UInt64 {
+        let next = (generationCounters[providerID] ?? 0) &+ 1
+        generationCounters[providerID] = next
+        return next
+    }
+
+    private static func signature(for access: ResolvedProviderAccess) -> AccessSignature {
+        switch access {
+        case .apiKey:
+            return AccessSignature(mode: .apiKey, accountKey: nil, sourceVersion: nil)
+        case .oauthNeedsSignIn(let accountKey):
+            return AccessSignature(
+                mode: .oauthNeedsSignIn,
+                accountKey: accountKey,
+                sourceVersion: nil
+            )
+        case .oauth(let access):
+            return AccessSignature(
+                mode: .oauth,
+                accountKey: access.accountKey,
+                sourceVersion: access.sourceVersion
+            )
+        }
     }
 
     private func status(
@@ -250,83 +492,6 @@ public actor UsageMonitoringCoordinator {
             return .stale(updatedAt: snapshot.refreshedAt)
         }
         return .fresh(updatedAt: snapshot.refreshedAt)
-    }
-
-    private func finishRefresh(
-        _ result: UsageMonitorState,
-        providerID: UsageProviderID,
-        accountKey: AccountCacheKey,
-        token: UUID
-    ) -> UsageMonitorState {
-        guard refreshTokens[providerID] == token else {
-            return state(for: providerID)
-        }
-        inFlight.removeValue(forKey: providerID)
-        refreshTokens.removeValue(forKey: providerID)
-
-        var result = result
-        result.isRefreshing = false
-        switch result.lastFailure {
-        case .rateLimited(let retryAt):
-            cooldownUntil[accountKey] = retryAt ?? now().addingTimeInterval(Self.defaultCooldown)
-        case nil:
-            cooldownUntil.removeValue(forKey: accountKey)
-            if let snapshot = result.snapshot {
-                activeAccountKeys[providerID] = snapshot.accountKey
-                currentRunSnapshotKeys.insert(snapshot.accountKey)
-                cooldownUntil.removeValue(forKey: snapshot.accountKey)
-            }
-        default:
-            break
-        }
-        states[providerID] = result
-        return result
-    }
-
-    private static func makeRefreshState(
-        result: UsageRefreshResult,
-        providerID: UsageProviderID,
-        retainedSnapshot: UsageSnapshot?,
-        cache: UsageSnapshotCache
-    ) async -> UsageMonitorState {
-        if let failure = result.failure {
-            let mapped = mapFailure(failure)
-            return UsageMonitorState(
-                providerID: providerID,
-                accessMode: .oauth,
-                snapshot: retainedSnapshot,
-                status: failureStatus(mapped, snapshot: retainedSnapshot),
-                lastFailure: mapped
-            )
-        }
-
-        guard let snapshot = result.snapshot,
-              result.providerID == providerID,
-              snapshot.providerID == providerID,
-              snapshot.accountKey.providerID == providerID
-        else {
-            return UsageMonitorState(
-                providerID: providerID,
-                accessMode: .oauth,
-                snapshot: retainedSnapshot,
-                status: failureStatus(.invalidResponse, snapshot: retainedSnapshot),
-                lastFailure: .invalidResponse
-            )
-        }
-
-        if let oldKey = result.migrateCacheFrom {
-            try? await cache.migrate(from: oldKey, to: snapshot.accountKey)
-        }
-        // Cache persistence is best-effort for the current response. The cache
-        // actor updates its in-memory entry before attempting the disk write.
-        try? await cache.store(snapshot)
-        return UsageMonitorState(
-            providerID: providerID,
-            accessMode: .oauth,
-            snapshot: snapshot,
-            status: .fresh(updatedAt: snapshot.refreshedAt),
-            lastFailure: nil
-        )
     }
 
     private static func mapFailure(_ failure: UsageProviderFailure) -> UsageFailureReason {
