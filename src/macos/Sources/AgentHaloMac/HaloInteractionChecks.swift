@@ -56,18 +56,21 @@ func runHaloInteractionChecks() {
     testCodexRunningIdleUsesStableGreenAggregate()
     testPausedAgentDoesNotUseStableGreenStandby()
     testLiveCodexErrorCyclesThroughBrightAndDimPresentations()
-    testDetailsPanelShowsCodexQuotaAndIdleCopy()
-    testDetailsPanelPrefersMonthlyQuotaWhenPresent()
-    testDetailsPanelShowsPendingMonthlyQuotaForMonthlyPlan()
-    testDetailsPanelCentersSingleMonthlyQuotaRow()
-    testDetailsPanelPrefersPlusQuotaWhenPrimaryAndSecondaryArePresent()
+    testDetailsPanelAlwaysShowsProviderRow()
+    testDetailsPanelShowsPlanOnlyForOAuth()
+    testDetailsPanelShowsSingleAmberUsageWarning()
+    testDetailsPanelShowsFiveHourAndWeeklyRemainingUsage()
+    testDetailsPanelShowsMissingAndExpiredUsageWindows()
+    testDetailsPanelShowsFourIndependentSessionRows()
+    testDetailsPanelDoesNotFallbackSessionTitleToProject()
+    testDetailsPanelKeepsUsageAndSessionBodiesMutuallyExclusive()
+    testDetailsPanelKeepsContextIndependentFromUsageFailure()
+    testDetailsPanelClearsContextAndSessionRowsOffline()
+    testDetailsPanelKeepsFixedWidthForLongProviderContent()
+    testDetailsPanelResizesHeightWithoutAnimation()
     testDetailsPanelShowsCodexStandbyCopy()
-    testDetailsPanelShowsSessionMetadataForCodexAndClaudeCode()
     testDetailsPanelUsesCompactContextPercent()
     testDetailsPanelKeepsContextPillWidthStable()
-    testDetailsPanelPrefersClaudeSessionTitle()
-    testDetailsPanelKeepsFixedWidthForLongClaudeSessionTitle()
-    testDetailsPanelUsesCompactMetadataLayout()
     testVisibleDetailsPanelStatusRefreshIsWiredToTick()
     testStatusLineConfigurationReconciliationIsWiredToTick()
     testCodexPollingWorkIsNotPerformedOnMainTick()
@@ -84,11 +87,9 @@ func runHaloInteractionChecks() {
     testClaudeStandbyDetailsPreferLiveSessionIdentity()
     testClaudeUsageFreshnessTracksExactLiveSession()
     testDetailsPanelUsesTightBottomInset()
-    testDetailsPanelShowsExpiredQuotaAsWaitingForRefresh()
     testDetailsPanelShowsAnswerStreamingCopy()
     testDetailsPanelRefreshesStatusFromLatestAggregate()
     testDetailsPanelLocalizesClaudeActivityDetails()
-    testDetailsPanelShowsContextAndHidesQuotaForClaudeCode()
     testAgentToggleUsesSharedSVGAssets()
     testAgentToggleUsesCodexAndClaudeIcons()
     testAgentToggleKeepsWholeControlClickable()
@@ -797,149 +798,263 @@ private func menuItem(titled title: String, in menu: NSMenu) -> NSMenuItem {
 }
 
 @MainActor
-private func testDetailsPanelShowsCodexQuotaAndIdleCopy() {
+private func testDetailsPanelAlwaysShowsProviderRow() {
     let panel = DetailsPanel()
-    let aggregate = AggregateSnapshot(
-        state: .idle,
-        label: "OFFLINE",
-        detail: AgentKind.codex.offlineDetail,
-        sessions: [],
-        focusedAgent: .codex
+    panel.render(
+        aggregate: detailsAggregate(),
+        model: usageDetailsModel(provider: "Codex")
     )
 
-    panel.update(
-        aggregate: aggregate,
-        quota: RateLimitSnapshot(primaryUsedPercent: 30, secondaryUsedPercent: 60, contextUsedPercent: 42),
-        contextUsedPercent: 42
-    )
-
-    expect(panel.focusedAgentForTesting == .codex, "details panel should select Codex")
-    expect(panel.detailTextForTesting == L10n.shared["status.offline_codex"], "Codex offline copy should be localized")
-    // OFFLINE has no live session, so the context pill should drop out
-    // entirely rather than echo a stale percentage from a prior session.
-    expect(panel.contextPillHiddenForTesting == true, "Codex context pill should be hidden when OFFLINE")
-    expect(panel.primaryQuotaHiddenForTesting == false, "Codex primary quota should be visible")
-    expect(panel.secondaryQuotaHiddenForTesting == false, "Codex secondary quota should be visible")
+    expect(panel.providerTextForTesting, "Codex", "provider row should always show the selected provider")
+    let labels = allDescendants(of: panel.contentView!).compactMap { ($0 as? NSTextField)?.stringValue }
+    expect(!labels.contains("OAuth") && !labels.contains("API"), "details panel should not show an access-mode label")
+    expect(!labels.contains("使用情况/余额") && !labels.contains("会话详情"), "details panel should not show section titles")
 }
 
 @MainActor
-private func testDetailsPanelPrefersMonthlyQuotaWhenPresent() {
+private func testDetailsPanelShowsPlanOnlyForOAuth() {
     let panel = DetailsPanel()
-    let aggregate = AggregateSnapshot(
-        state: .done,
-        label: "STANDBY",
-        detail: AgentKind.codex.localizedStandbyDetail,
-        sessions: [],
-        focusedAgent: .codex
+    panel.render(
+        aggregate: detailsAggregate(),
+        model: usageDetailsModel(provider: "Codex", plan: "Plus")
     )
+    expect(panel.planTextForTesting, "Plus", "OAuth details should show the plan")
+    expect(!panel.planHiddenForTesting, "OAuth plan should be visible")
 
-    panel.update(
-        aggregate: aggregate,
-        quota: RateLimitSnapshot(
-            primaryUsedPercent: 30,
-            secondaryUsedPercent: 60,
-            contextUsedPercent: 9,
-            monthlyUsedPercent: 5
-        ),
-        contextUsedPercent: 9
+    panel.render(
+        aggregate: detailsAggregate(),
+        model: sessionDetailsModel(provider: "Codex", plan: nil)
     )
-
-    expect(panel.primaryQuotaHiddenForTesting == false, "monthly quota should be visible")
-    expect(panel.secondaryQuotaHiddenForTesting == true, "weekly quota should be hidden for monthly accounts")
-    expect(panel.primaryQuotaValueForTesting == L10n.shared.format("quota.remaining", 95), "monthly quota should drive remaining percent")
+    expect(panel.providerTextForTesting, "Codex", "API details should keep the provider")
+    expect(panel.planHiddenForTesting, "API details should hide the plan")
 }
 
 @MainActor
-private func testDetailsPanelShowsPendingMonthlyQuotaForMonthlyPlan() {
+private func testDetailsPanelShowsSingleAmberUsageWarning() {
     let panel = DetailsPanel()
-    let aggregate = AggregateSnapshot(
-        state: .done,
-        label: "STANDBY",
-        detail: AgentKind.codex.localizedStandbyDetail,
-        sessions: [],
-        focusedAgent: .codex
+    let warning = L10n.shared["usage.warning.network"]
+    panel.render(
+        aggregate: detailsAggregate(),
+        model: usageDetailsModel(warning: warning)
     )
 
-    panel.update(
-        aggregate: aggregate,
-        quota: RateLimitSnapshot(
-            primaryUsedPercent: 0,
-            secondaryUsedPercent: 0,
-            contextUsedPercent: 9,
-            hasPrimary: false,
-            hasSecondary: false,
-            hasMonthlyPlan: true
-        ),
-        contextUsedPercent: 9
-    )
-
-    expect(panel.primaryQuotaHiddenForTesting == false, "monthly plan pending quota should be visible")
-    expect(panel.secondaryQuotaHiddenForTesting == true, "weekly quota should stay hidden while monthly data is pending")
-    expect(panel.primaryQuotaValueForTesting == L10n.shared["quota.waiting_refresh"], "monthly plan without usage should wait for refresh")
+    expect(!panel.warningHiddenForTesting, "OAuth refresh failure should show one warning image")
+    expect(panel.warningToolTipForTesting, warning, "warning should expose its full text as a native tooltip")
+    expect(panel.warningAccessibilityLabelForTesting, warning, "warning should expose an accessibility label")
+    expect(panel.warningColorForTesting, NSColor.systemYellow, "warning should use the system amber color")
+    let warningImages = allDescendants(of: panel.contentView!).compactMap { $0 as? NSImageView }
+        .filter { $0.image?.accessibilityDescription == "exclamationmark.triangle.fill" }
+    expect(warningImages.count, 1, "provider row should contain a single warning image")
 }
 
 @MainActor
-private func testDetailsPanelCentersSingleMonthlyQuotaRow() {
-    let plusPanel = DetailsPanel()
-    let monthlyPanel = DetailsPanel()
-    let aggregate = AggregateSnapshot(
-        state: .done,
-        label: "STANDBY",
-        detail: AgentKind.codex.localizedStandbyDetail,
-        sessions: [],
-        focusedAgent: .codex
+private func testDetailsPanelShowsFiveHourAndWeeklyRemainingUsage() {
+    let panel = DetailsPanel()
+    let reset = Date().addingTimeInterval(3_600)
+    panel.render(
+        aggregate: detailsAggregate(),
+        model: usageDetailsModel(windows: [
+            UsageWindow(kind: .weekly, usedPercent: 60, resetsAt: reset, duration: 604_800),
+            UsageWindow(kind: .session, usedPercent: 30, resetsAt: reset, duration: 18_000),
+        ])
     )
 
-    plusPanel.update(
-        aggregate: aggregate,
-        quota: RateLimitSnapshot(primaryUsedPercent: 30, secondaryUsedPercent: 60, contextUsedPercent: 9),
-        contextUsedPercent: 9
-    )
-    monthlyPanel.update(
-        aggregate: aggregate,
-        quota: RateLimitSnapshot(
-            primaryUsedPercent: 0,
-            secondaryUsedPercent: 0,
-            contextUsedPercent: 9,
-            monthlyUsedPercent: 5
-        ),
-        contextUsedPercent: 9
-    )
-
-    expect(
-        monthlyPanel.quotaTopSpacingForTesting > plusPanel.quotaTopSpacingForTesting,
-        "single monthly quota row should sit lower than the compact two-row quota layout"
-    )
+    expect(panel.primaryQuotaTitleForTesting, L10n.shared["quota.5h"], "short window title")
+    expect(panel.secondaryQuotaTitleForTesting, L10n.shared["quota.weekly"], "weekly window title")
+    expect(panel.primaryQuotaValueForTesting, L10n.shared.format("quota.remaining", 70), "short window remaining value")
+    expect(panel.secondaryQuotaValueForTesting, L10n.shared.format("quota.remaining", 40), "weekly remaining value")
+    expect(panel.primaryQuotaMeterFillForTesting, 70, "short window meter should use remaining percent")
+    expect(panel.secondaryQuotaMeterFillForTesting, 40, "weekly meter should use remaining percent")
+    expect(!panel.primaryQuotaResetHiddenForTesting, "future short-window reset should be visible")
+    expect(!panel.secondaryQuotaResetHiddenForTesting, "future weekly reset should be visible")
 }
 
 @MainActor
-private func testDetailsPanelPrefersPlusQuotaWhenPrimaryAndSecondaryArePresent() {
+private func testDetailsPanelShowsMissingAndExpiredUsageWindows() {
     let panel = DetailsPanel()
-    let aggregate = AggregateSnapshot(
-        state: .done,
-        label: "STANDBY",
-        detail: AgentKind.codex.localizedStandbyDetail,
+    panel.render(
+        aggregate: detailsAggregate(),
+        model: usageDetailsModel(windows: [
+            UsageWindow(kind: .weekly, usedPercent: 15, resetsAt: Date().addingTimeInterval(-1), duration: 604_800),
+        ])
+    )
+
+    expect(panel.primaryQuotaValueForTesting, L10n.shared["quota.no_data"], "missing short window should show no data")
+    expect(panel.primaryQuotaResetHiddenForTesting, "missing short-window reset should be hidden")
+    expect(panel.primaryQuotaMeterFillForTesting, 0, "missing short-window meter should be empty")
+    expect(panel.secondaryQuotaValueForTesting, L10n.shared["quota.waiting_refresh"], "expired weekly window should wait for refresh")
+    expect(panel.secondaryQuotaResetHiddenForTesting, "expired weekly reset should be hidden")
+    expect(panel.secondaryQuotaMeterFillForTesting, 0, "expired weekly meter should be empty")
+
+    panel.render(
+        aggregate: detailsAggregate(),
+        model: usageDetailsModel(windows: [
+            UsageWindow(kind: .session, usedPercent: 25, resetsAt: nil, duration: 18_000),
+        ])
+    )
+    expect(panel.primaryQuotaValueForTesting, L10n.shared.format("quota.remaining", 75), "nil reset should preserve remaining usage")
+    expect(panel.primaryQuotaResetHiddenForTesting, "nil reset should not show a placeholder reset")
+}
+
+@MainActor
+private func testDetailsPanelShowsFourIndependentSessionRows() {
+    let panel = DetailsPanel()
+    panel.render(
+        aggregate: detailsAggregate(),
+        model: sessionDetailsModel(session: SessionDetailsSnapshot(
+            projectName: "AgentHalo",
+            sessionTitle: "Redesign details",
+            modelName: "gpt-5.5",
+            inputTokens: 38_000,
+            outputTokens: 1_200
+        ))
+    )
+
+    expect(panel.projectValueForTesting, "AgentHalo", "project row")
+    expect(panel.sessionTitleValueForTesting, "Redesign details", "session title row")
+    expect(panel.modelValueForTesting, "gpt-5.5", "model row")
+    expect(panel.tokenValueForTesting, "↑ 38k  ·  ↓ 1.2k", "token row")
+    expect(panel.projectToolTipForTesting, "AgentHalo", "project tooltip")
+    expect(panel.sessionTitleToolTipForTesting, "Redesign details", "session title tooltip")
+    expect(panel.modelToolTipForTesting, "gpt-5.5", "model tooltip")
+}
+
+@MainActor
+private func testDetailsPanelDoesNotFallbackSessionTitleToProject() {
+    let panel = DetailsPanel()
+    panel.render(
+        aggregate: detailsAggregate(),
+        model: sessionDetailsModel(session: SessionDetailsSnapshot(projectName: "AgentHalo"))
+    )
+
+    expect(panel.projectValueForTesting, "AgentHalo", "project should use projectName only")
+    expect(panel.sessionTitleValueForTesting, "--", "missing title should not fall back to projectName")
+}
+
+@MainActor
+private func testDetailsPanelKeepsUsageAndSessionBodiesMutuallyExclusive() {
+    let panel = DetailsPanel()
+    panel.render(aggregate: detailsAggregate(), model: usageDetailsModel())
+    expect(!panel.usageGroupHiddenForTesting, "OAuth body should show usage")
+    expect(panel.sessionGroupHiddenForTesting, "OAuth body should hide session rows")
+
+    panel.render(aggregate: detailsAggregate(), model: sessionDetailsModel())
+    expect(panel.usageGroupHiddenForTesting, "API body should hide usage")
+    expect(!panel.sessionGroupHiddenForTesting, "API body should show session rows")
+}
+
+@MainActor
+private func testDetailsPanelKeepsContextIndependentFromUsageFailure() {
+    let panel = DetailsPanel()
+    panel.render(
+        aggregate: detailsAggregate(),
+        model: usageDetailsModel(warning: L10n.shared["usage.warning.network"], context: 42)
+    )
+
+    expect(!panel.contextPillHiddenForTesting, "usage failure should not hide live context")
+    expect(panel.contextValueForTesting, "42%", "usage failure should not overwrite context")
+}
+
+@MainActor
+private func testDetailsPanelClearsContextAndSessionRowsOffline() {
+    let panel = DetailsPanel()
+    panel.render(
+        aggregate: detailsAggregate(state: .idle, label: "OFFLINE"),
+        model: sessionDetailsModel(
+            context: 58,
+            session: SessionDetailsSnapshot(
+                projectName: "AgentHalo",
+                sessionTitle: "Stale title",
+                modelName: "gpt-5.5",
+                inputTokens: 100,
+                outputTokens: 20
+            )
+        )
+    )
+
+    expect(panel.contextPillHiddenForTesting, "offline should clear context")
+    expect(panel.projectValueForTesting, "--", "offline should clear project")
+    expect(panel.sessionTitleValueForTesting, "--", "offline should clear session title")
+    expect(panel.modelValueForTesting, "--", "offline should clear model")
+    expect(panel.tokenValueForTesting, "--", "offline should clear tokens")
+}
+
+@MainActor
+private func testDetailsPanelKeepsFixedWidthForLongProviderContent() {
+    let panel = DetailsPanel()
+    let initialWidth = panel.frame.width
+    panel.render(
+        aggregate: detailsAggregate(),
+        model: usageDetailsModel(
+            provider: String(repeating: "Very Long Provider ", count: 8),
+            plan: String(repeating: "Very Long Plan ", count: 8)
+        )
+    )
+    panel.contentView?.layoutSubtreeIfNeeded()
+
+    expect(panel.frameWidthForTesting, initialWidth, "long provider content should not widen the panel")
+    expect(panel.frameWidthForTesting, 268, "details panel should keep the fixed width")
+    expect((panel.contentView?.fittingSize.width ?? 0) <= 268.5, "content should fit the fixed width")
+}
+
+@MainActor
+private func testDetailsPanelResizesHeightWithoutAnimation() {
+    let panel = DetailsPanel()
+    panel.setFrameOrigin(NSPoint(x: 100, y: 500))
+    panel.render(aggregate: detailsAggregate(), model: usageDetailsModel())
+    let usageHeight = panel.frameHeightForTesting
+    let topEdge = panel.frame.maxY
+
+    panel.render(aggregate: detailsAggregate(), model: sessionDetailsModel())
+
+    expect(panel.frameHeightForTesting != usageHeight, "switching bodies should resize to fitting height")
+    expect(panel.frame.maxY, topEdge, "synchronous resizing should preserve the top edge")
+    expect(!panel.lastResizeAnimatedForTesting, "details height should resize without animation")
+}
+
+private func detailsAggregate(
+    state: HaloState = .working,
+    label: String = "EXECUTING",
+    agent: AgentKind = .codex
+) -> AggregateSnapshot {
+    AggregateSnapshot(
+        state: state,
+        label: label,
+        detail: "AgentHalo - Running command",
         sessions: [],
-        focusedAgent: .codex
+        focusedAgent: agent
     )
+}
 
-    panel.update(
-        aggregate: aggregate,
-        quota: RateLimitSnapshot(
-            primaryUsedPercent: 30,
-            secondaryUsedPercent: 60,
-            contextUsedPercent: 27,
-            hasPrimary: true,
-            hasSecondary: true,
-            hasMonthlyPlan: true
-        ),
-        contextUsedPercent: 27
+private func usageDetailsModel(
+    provider: String = "Codex",
+    plan: String? = "Plus",
+    warning: String? = nil,
+    context: Double? = nil,
+    windows: [UsageWindow] = []
+) -> DetailsPanelViewModel {
+    DetailsPanelViewModel(
+        providerName: provider,
+        planName: plan,
+        usageWarning: warning,
+        contextUsedPercent: context,
+        body: .usage(UsageDetailsModel(windows: windows, status: .noData))
     )
+}
 
-    expect(panel.primaryQuotaHiddenForTesting == false, "Plus primary quota should be visible")
-    expect(panel.secondaryQuotaHiddenForTesting == false, "Plus weekly quota should stay visible when both Plus buckets are present")
-    expect(panel.primaryQuotaValueForTesting == L10n.shared.format("quota.remaining", 70), "Plus primary should drive the 5-hour quota value")
-    expect(panel.secondaryQuotaValueForTesting == L10n.shared.format("quota.remaining", 40), "Plus secondary should drive the weekly quota value")
+private func sessionDetailsModel(
+    provider: String = "Claude Code",
+    plan: String? = nil,
+    context: Double? = nil,
+    session: SessionDetailsSnapshot = SessionDetailsSnapshot()
+) -> DetailsPanelViewModel {
+    DetailsPanelViewModel(
+        providerName: provider,
+        planName: plan,
+        usageWarning: nil,
+        contextUsedPercent: context,
+        body: .session(session)
+    )
 }
 
 @MainActor
@@ -955,60 +1070,9 @@ private func testDetailsPanelShowsCodexStandbyCopy() {
         focusedAgent: .codex
     )
 
-    panel.update(aggregate: aggregate, quota: nil, contextUsedPercent: nil)
+    panel.render(aggregate: aggregate, model: usageDetailsModel())
 
     expect(panel.detailTextForTesting == L10n.shared["status.standby_codex"], "Codex standby copy should be localized")
-}
-
-@MainActor
-private func testDetailsPanelShowsSessionMetadataForCodexAndClaudeCode() {
-    let panel = DetailsPanel()
-    let codex = AggregateSnapshot(
-        state: .working,
-        label: "EXECUTING",
-        detail: "AgentHalo - Running command",
-        sessions: [],
-        focusedAgent: .codex
-    )
-    let details = SessionDetailsSnapshot(
-        projectName: "AgentHalo",
-        modelName: "gpt-5.5",
-        inputTokens: 38_000,
-        outputTokens: 1_200
-    )
-
-    panel.update(
-        aggregate: codex,
-        quota: nil,
-        contextUsedPercent: 42,
-        sessionDetails: details,
-        showsQuota: false
-    )
-
-    expect(panel.primaryQuotaHiddenForTesting, "third-party Codex quota should be hidden")
-    expect(!panel.metadataGroupHiddenForTesting, "third-party Codex metadata should be visible")
-    expect(panel.projectValueForTesting, "AgentHalo", "details project value")
-    expect(panel.modelValueForTesting, "gpt-5.5", "details model value")
-    expect(panel.tokenValueForTesting, "↑ 38k  ·  ↓ 1.2k", "details token value")
-
-    let claude = AggregateSnapshot(
-        state: .working,
-        label: "EXECUTING",
-        detail: "AgentHalo - Running command",
-        sessions: [],
-        focusedAgent: .claudeCode
-    )
-    panel.update(
-        aggregate: claude,
-        quota: nil,
-        contextUsedPercent: 58,
-        sessionDetails: details,
-        showsQuota: false
-    )
-
-    expect(panel.focusedAgentForTesting == .claudeCode, "details panel should select Claude Code")
-    expect(!panel.metadataGroupHiddenForTesting, "Claude Code metadata should be visible")
-    expect(panel.tokenValueForTesting, "↑ 38k  ·  ↓ 1.2k", "Claude Code token value")
 }
 
 @MainActor
@@ -1022,18 +1086,10 @@ private func testDetailsPanelUsesCompactContextPercent() {
         focusedAgent: .codex
     )
 
-    panel.update(
-        aggregate: aggregate,
-        quota: RateLimitSnapshot(primaryUsedPercent: 30, secondaryUsedPercent: 60, contextUsedPercent: 58.4),
-        contextUsedPercent: 58.4
-    )
+    panel.render(aggregate: aggregate, model: usageDetailsModel(context: 58.4))
     expect(panel.contextValueForTesting, "58%", "context block should use compact percentage-only copy")
 
-    panel.update(
-        aggregate: aggregate,
-        quota: RateLimitSnapshot(primaryUsedPercent: 30, secondaryUsedPercent: 60, contextUsedPercent: 100),
-        contextUsedPercent: 100
-    )
+    panel.render(aggregate: aggregate, model: usageDetailsModel(context: 100))
     expect(panel.contextValueForTesting, "99%", "context block should cap the visible percentage at 99%")
 }
 
@@ -1048,21 +1104,11 @@ private func testDetailsPanelKeepsContextPillWidthStable() {
         focusedAgent: .claudeCode
     )
 
-    panel.update(
-        aggregate: aggregate,
-        quota: nil,
-        contextUsedPercent: 9,
-        showsQuota: false
-    )
+    panel.render(aggregate: aggregate, model: sessionDetailsModel(context: 9))
     panel.contentView?.layoutSubtreeIfNeeded()
     let singleDigitWidth = panel.contextPillWidthForTesting
 
-    panel.update(
-        aggregate: aggregate,
-        quota: nil,
-        contextUsedPercent: 99,
-        showsQuota: false
-    )
+    panel.render(aggregate: aggregate, model: sessionDetailsModel(context: 99))
     panel.contentView?.layoutSubtreeIfNeeded()
     let doubleDigitWidth = panel.contextPillWidthForTesting
 
@@ -1076,119 +1122,6 @@ private func testDetailsPanelKeepsContextPillWidthStable() {
         panel.contextValueIntrinsicWidthForTesting <= panel.contextValueWidthForTesting + 0.5,
         "context pill should still fit a two-digit percent without truncation"
     )
-}
-
-@MainActor
-private func testDetailsPanelPrefersClaudeSessionTitle() {
-    let panel = DetailsPanel()
-    let aggregate = AggregateSnapshot(
-        state: .working,
-        label: "EXECUTING",
-        detail: "AgentHalo - Running command",
-        sessions: [],
-        focusedAgent: .claudeCode
-    )
-
-    panel.update(
-        aggregate: aggregate,
-        quota: nil,
-        contextUsedPercent: 42,
-        sessionDetails: SessionDetailsSnapshot(
-            projectName: "AgentHalo",
-            sessionTitle: "整理归档 2026q3 测试",
-            modelName: "claude-sonnet-4",
-            inputTokens: 12_000,
-            outputTokens: 900
-        ),
-        showsQuota: false
-    )
-
-    expect(panel.projectValueForTesting, "整理归档 2026q3 测试", "Claude Code details should prefer the AI-generated session title")
-    expect(panel.tokenValueForTesting, "↑ 12k  ·  ↓ 900", "Claude Code token row should keep the compact arrow format")
-}
-
-@MainActor
-private func testDetailsPanelKeepsFixedWidthForLongClaudeSessionTitle() {
-    let panel = DetailsPanel()
-    let initialWidth = panel.frame.width
-    let aggregate = AggregateSnapshot(
-        state: .working,
-        label: "EXECUTING",
-        detail: "AgentHalo - Running command",
-        sessions: [],
-        focusedAgent: .claudeCode
-    )
-
-    panel.update(
-        aggregate: aggregate,
-        quota: nil,
-        contextUsedPercent: 42,
-        sessionDetails: SessionDetailsSnapshot(
-            projectName: "AgentHalo",
-            sessionTitle: String(repeating: "整理归档超长项目标题", count: 12),
-            modelName: "claude-sonnet-4",
-            inputTokens: 12_000,
-            outputTokens: 900
-        ),
-        showsQuota: false
-    )
-    panel.contentView?.layoutSubtreeIfNeeded()
-
-    expect(panel.frame.width, initialWidth, "details panel frame width should stay fixed")
-    expect(
-        (panel.contentView?.fittingSize.width ?? 0) <= initialWidth + 0.5,
-        "details panel content should not request a wider frame for long AI titles"
-    )
-}
-
-@MainActor
-private func testDetailsPanelUsesCompactMetadataLayout() {
-    let panel = DetailsPanel()
-    guard let contentView = panel.contentView else {
-        fatalError("details panel should have a content view")
-    }
-    let metadataGroup = allDescendants(of: contentView)
-        .compactMap { $0 as? NSStackView }
-        .first { stack in
-            let labels = allDescendants(of: stack)
-                .compactMap { $0 as? NSTextField }
-                .map(\.stringValue)
-            let firstLabels = stack.arrangedSubviews.first.map {
-                ([$0] + allDescendants(of: $0))
-                    .compactMap { $0 as? NSTextField }
-                    .map(\.stringValue)
-            } ?? []
-            return labels.contains(L10n.shared["metadata.project"]) && labels.contains(L10n.shared["metadata.model"]) && labels.contains(L10n.shared["metadata.tokens"])
-                && firstLabels.contains(L10n.shared["metadata.project"])
-        }
-
-    guard let metadataGroup else {
-        fatalError("details panel should expose its metadata group")
-    }
-    expect(
-        metadataGroup.arrangedSubviews.count,
-        5,
-        "metadata should separate project from model and model from token"
-    )
-    let arranged = metadataGroup.arrangedSubviews
-    for item in arranged.dropLast() {
-        expect(
-            metadataGroup.customSpacing(after: item) == NSStackView.useDefaultSpacing,
-            "metadata rows and separators should not use asymmetric custom spacing"
-        )
-    }
-    for row in [arranged[0], arranged[2], arranged[4]] {
-        expect(
-            row.constraints.contains { $0.firstAttribute == .height && $0.constant == 28 },
-            "each metadata row should use the same 28pt height"
-        )
-    }
-    for separator in [arranged[1], arranged[3]] {
-        expect(
-            separator.constraints.contains { $0.firstAttribute == .height && $0.constant == 1 },
-            "each metadata separator should be a standalone 1pt rule"
-        )
-    }
 }
 
 @MainActor
@@ -1249,33 +1182,6 @@ private func testDetailsPanelPositioningSnapsToBackingPixels() {
 }
 
 @MainActor
-private func testDetailsPanelShowsExpiredQuotaAsWaitingForRefresh() {
-    let panel = DetailsPanel()
-    let aggregate = AggregateSnapshot(
-        state: .idle,
-        label: "OFFLINE",
-        detail: AgentKind.codex.offlineDetail,
-        sessions: [],
-        focusedAgent: .codex
-    )
-
-    panel.update(
-        aggregate: aggregate,
-        quota: RateLimitSnapshot(
-            primaryUsedPercent: 30,
-            secondaryUsedPercent: 60,
-            primaryResetAt: Date().addingTimeInterval(-5),
-            secondaryResetAt: Date().addingTimeInterval(300),
-            contextUsedPercent: 42
-        ),
-        contextUsedPercent: 42
-    )
-
-    expect(panel.primaryQuotaValueForTesting == L10n.shared["quota.waiting_refresh"], "expired primary quota should wait for Codex refresh")
-    expect(panel.secondaryQuotaValueForTesting == L10n.shared.format("quota.remaining", 40), "valid secondary quota should keep remaining percent")
-}
-
-@MainActor
 private func testDetailsPanelShowsAnswerStreamingCopy() {
     let panel = DetailsPanel()
     let aggregate = AggregateSnapshot(
@@ -1287,7 +1193,7 @@ private func testDetailsPanelShowsAnswerStreamingCopy() {
         answerStreaming: true
     )
 
-    panel.update(aggregate: aggregate, quota: nil, contextUsedPercent: nil)
+    panel.render(aggregate: aggregate, model: usageDetailsModel())
 
     expect(panel.detailTextForTesting == L10n.shared["status.writing_answer"], "answer streaming should use localized copy")
 }
@@ -1295,7 +1201,7 @@ private func testDetailsPanelShowsAnswerStreamingCopy() {
 @MainActor
 private func testDetailsPanelRefreshesStatusFromLatestAggregate() {
     let panel = DetailsPanel()
-    panel.update(
+    panel.render(
         aggregate: AggregateSnapshot(
             state: .thinking,
             label: "THINKING",
@@ -1303,8 +1209,7 @@ private func testDetailsPanelRefreshesStatusFromLatestAggregate() {
             sessions: [],
             focusedAgent: .claudeCode
         ),
-        quota: nil,
-        contextUsedPercent: 27
+        model: sessionDetailsModel(context: 27)
     )
 
     panel.updateStatus(aggregate: AggregateSnapshot(
@@ -1717,31 +1622,6 @@ private func testDetailsPanelLocalizesClaudeActivityDetails() {
 }
 
 @MainActor
-private func testDetailsPanelShowsContextAndHidesQuotaForClaudeCode() {
-    let panel = DetailsPanel()
-    let aggregate = AggregateSnapshot(
-        state: .idle,
-        label: "OFFLINE",
-        detail: AgentKind.claudeCode.offlineDetail,
-        sessions: [],
-        focusedAgent: .claudeCode
-    )
-
-    panel.update(aggregate: aggregate, quota: nil, contextUsedPercent: 58.4)
-
-    expect(panel.focusedAgentForTesting == .claudeCode, "details panel should select Claude Code")
-    expect(panel.detailTextForTesting == L10n.shared["status.offline_claude"], "Claude Code offline copy should be localized")
-    // OFFLINE drops the context pill so the panel doesn't carry over a
-    // percentage from a session that's no longer live.
-    expect(panel.contextPillHiddenForTesting == true, "Claude Code context pill should be hidden when OFFLINE")
-    expect(panel.projectValueForTesting == "--", "Claude Code project should be placeholder when OFFLINE")
-    expect(panel.modelValueForTesting == "--", "Claude Code model should be placeholder when OFFLINE")
-    expect(panel.tokenValueForTesting == "--", "Claude Code tokens should be placeholder when OFFLINE")
-    expect(panel.primaryQuotaHiddenForTesting == true, "Claude Code primary quota should be hidden")
-    expect(panel.secondaryQuotaHiddenForTesting == true, "Claude Code secondary quota should be hidden")
-}
-
-@MainActor
 private func testDetailsPresentationUsesFocusedSessionAndRejectsStaleQuota() {
     let now = Date()
     let thirdPartySession = SessionSnapshot(
@@ -1943,7 +1823,7 @@ private func testDetailsPanelSwitchCallbackSelectsClaudeCode() {
     let panel = DetailsPanel()
     var selected: AgentKind?
     panel.onAgentSelected = { selected = $0 }
-    panel.update(
+    panel.render(
         aggregate: AggregateSnapshot(
             state: .idle,
             label: "OFFLINE",
@@ -1951,8 +1831,7 @@ private func testDetailsPanelSwitchCallbackSelectsClaudeCode() {
             sessions: [],
             focusedAgent: .codex
         ),
-        quota: nil,
-        contextUsedPercent: nil
+        model: usageDetailsModel()
     )
 
     panel.selectAgentForTesting(.claudeCode)

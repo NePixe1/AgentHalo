@@ -11,6 +11,7 @@ final class DetailsPanel: NSPanel {
     private let contextValue = NSTextField(labelWithString: L10n.shared["context.empty"])
     private let titleField = NSTextField(labelWithString: "OFFLINE")
     private let detailField = NSTextField(labelWithString: L10n.shared["status.offline_codex"])
+    private let providerHeader = ProviderHeaderView()
     private let primaryQuota = QuotaRowView(title: L10n.shared["quota.5h"])
     private let secondaryQuota = QuotaRowView(title: L10n.shared["quota.weekly"])
     private let agentToggle = AgentToggleView()
@@ -20,10 +21,14 @@ final class DetailsPanel: NSPanel {
     private let projectRow = MetadataRowView(
         title: L10n.shared["metadata.project"]
     )
+    private let sessionTitleRow = MetadataRowView(
+        title: L10n.shared["metadata.session_title"]
+    )
     private let modelRow = MetadataRowView(
         title: L10n.shared["metadata.model"]
     )
-    private let projectModelSeparator = SeparatorView()
+    private let projectTitleSeparator = SeparatorView()
+    private let titleModelSeparator = SeparatorView()
     private let modelTokenSeparator = SeparatorView()
     private let tokenRow = MetadataRowView(
         title: L10n.shared["metadata.tokens"],
@@ -32,6 +37,7 @@ final class DetailsPanel: NSPanel {
     var onMouseEntered: (() -> Void)?
     var onMouseExited: (() -> Void)?
     var onAgentSelected: ((AgentKind) -> Void)?
+    private(set) var lastResizeAnimatedForTesting = false
 
     init() {
         super.init(
@@ -67,7 +73,10 @@ final class DetailsPanel: NSPanel {
 
         let topRow = makeTopRow()
         stack.addArrangedSubview(topRow)
-        stack.setCustomSpacing(7, after: topRow)
+        stack.setCustomSpacing(5, after: topRow)
+
+        stack.addArrangedSubview(providerHeader)
+        stack.setCustomSpacing(7, after: providerHeader)
 
         titleField.font = .systemFont(ofSize: 24, weight: .bold)
         titleField.lineBreakMode = .byTruncatingTail
@@ -96,7 +105,9 @@ final class DetailsPanel: NSPanel {
         
         metadataGroup.edgeInsets = NSEdgeInsets(top: 4, left: 0, bottom: 0, right: 0)
         metadataGroup.addArrangedSubview(projectRow)
-        metadataGroup.addArrangedSubview(projectModelSeparator)
+        metadataGroup.addArrangedSubview(projectTitleSeparator)
+        metadataGroup.addArrangedSubview(sessionTitleRow)
+        metadataGroup.addArrangedSubview(titleModelSeparator)
         metadataGroup.addArrangedSubview(modelRow)
         metadataGroup.addArrangedSubview(modelTokenSeparator)
         metadataGroup.addArrangedSubview(tokenRow)
@@ -120,6 +131,7 @@ final class DetailsPanel: NSPanel {
             stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
 
             topRow.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
+            providerHeader.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
             titleField.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
             detailField.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
             quotaGroup.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
@@ -130,6 +142,106 @@ final class DetailsPanel: NSPanel {
         ])
     }
 
+    func render(aggregate: AggregateSnapshot, model: DetailsPanelViewModel) {
+        #if DEBUG
+        let startTime = CFAbsoluteTimeGetCurrent()
+        defer {
+            let duration = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
+            if duration > 16.67 {
+                NSLog("[Performance] DetailsPanel.render took %.2fms (>1 frame)", duration)
+            }
+        }
+        #endif
+
+        updateStatus(aggregate: aggregate)
+        let isOffline = aggregate.state == .idle && aggregate.label == "OFFLINE"
+        providerHeader.update(
+            providerName: model.providerName,
+            planName: model.planName,
+            warning: model.usageWarning
+        )
+        updateContext(model.contextUsedPercent, isOffline: isOffline)
+
+        quotaGroup.isHidden = true
+        metadataGroup.isHidden = true
+
+        switch model.body {
+        case .usage(let usage):
+            renderUsage(usage)
+            quotaGroup.isHidden = false
+        case .session(let session):
+            renderSession(session, isOffline: isOffline)
+            metadataGroup.isHidden = false
+        }
+        resizeToFitContent()
+    }
+
+    private func updateContext(_ contextUsedPercent: Double?, isOffline: Bool) {
+        contextPill.isHidden = isOffline || contextUsedPercent == nil
+        contextValue.stringValue = contextUsedPercent.map(Self.compactContextPercent)
+            ?? L10n.shared["context.empty"]
+    }
+
+    private func renderUsage(_ usage: UsageDetailsModel) {
+        primaryQuota.setTitle(L10n.shared["quota.5h"])
+        secondaryQuota.setTitle(L10n.shared["quota.weekly"])
+        renderUsageWindow(usage.windows.first { $0.kind == .session }, in: primaryQuota)
+        renderUsageWindow(usage.windows.first { $0.kind == .weekly }, in: secondaryQuota)
+    }
+
+    private func renderUsageWindow(_ window: UsageWindow?, in row: QuotaRowView) {
+        guard let window else {
+            row.updateUnavailable()
+            return
+        }
+        row.update(usedPercent: window.usedPercent, resetAt: window.resetsAt)
+    }
+
+    private func renderSession(_ session: SessionDetailsSnapshot, isOffline: Bool) {
+        projectRow.setTitle(L10n.shared["metadata.project"])
+        sessionTitleRow.setTitle(L10n.shared["metadata.session_title"])
+        modelRow.setTitle(L10n.shared["metadata.model"])
+        tokenRow.setTitle(L10n.shared["metadata.tokens"])
+
+        if isOffline {
+            projectRow.setValue("--")
+            sessionTitleRow.setValue("--")
+            modelRow.setValue("--")
+            tokenRow.setValue("--")
+            return
+        }
+
+        projectRow.setValue(Self.displayValue(session.projectName), toolTip: session.projectName)
+        sessionTitleRow.setValue(Self.displayValue(session.sessionTitle), toolTip: session.sessionTitle)
+        modelRow.setValue(Self.displayValue(session.modelName), toolTip: session.modelName)
+        if session.inputTokens != nil || session.outputTokens != nil {
+            tokenRow.attributedStringValue = Self.formatTokenAttributedString(
+                input: session.inputTokens,
+                output: session.outputTokens
+            )
+        } else {
+            tokenRow.setValue("--")
+        }
+    }
+
+    private func resizeToFitContent() {
+        contentView?.layoutSubtreeIfNeeded()
+        let scale = screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+        let fittingHeight = ceil(stack.fittingSize.height * scale) / scale
+        let topEdge = frame.maxY
+        let newFrame = NSRect(
+            x: frame.minX,
+            y: topEdge - fittingHeight,
+            width: Self.panelWidth,
+            height: fittingHeight
+        )
+        lastResizeAnimatedForTesting = false
+        setFrame(newFrame, display: false, animate: false)
+    }
+
+    // Task 11 replaces the AppDelegate call site with DetailsContentResolver.
+    // Keep this module-local adapter until that wiring lands so Task 10 remains
+    // independently buildable without retaining the old panel layout logic.
     func update(
         aggregate: AggregateSnapshot,
         quota: RateLimitSnapshot?,
@@ -137,130 +249,48 @@ final class DetailsPanel: NSPanel {
         sessionDetails: SessionDetailsSnapshot? = nil,
         showsQuota: Bool? = nil
     ) {
-        #if DEBUG
-        let startTime = CFAbsoluteTimeGetCurrent()
-        defer {
-            let duration = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
-            if duration > 16.67 {
-                NSLog("[Performance] DetailsPanel.update took %.2fms (>1 frame)", duration)
+        let providerName = aggregate.focusedAgent == .codex ? "Codex" : "Claude Code"
+        let shouldShowUsage = showsQuota ?? (aggregate.focusedAgent == .codex)
+        if shouldShowUsage {
+            var windows: [UsageWindow] = []
+            if let quota, quota.hasPrimary {
+                windows.append(UsageWindow(
+                    kind: .session,
+                    usedPercent: quota.primaryUsedPercent,
+                    resetsAt: quota.primaryResetAt,
+                    duration: 18_000
+                ))
             }
-        }
-        #endif
-
-        updateStatus(aggregate: aggregate)
-
-        // OFFLINE: no live session — drop any stale context-usage pill and
-        // reset metadata rows to the placeholder so the panel doesn't show
-        // numbers from a prior session.
-        let isOffline = aggregate.state == .idle && aggregate.label == "OFFLINE"
-
-        let showsCodexQuota = showsQuota ?? (aggregate.focusedAgent == .codex)
-        stack.setCustomSpacing(showsCodexQuota ? Self.plusQuotaTopSpacing : 4, after: detailField)
-        contextPill.isHidden = isOffline || contextUsedPercent == nil
-        contextValue.stringValue = contextUsedPercent.map {
-            Self.compactContextPercent($0)
-        } ?? L10n.shared["context.empty"]
-        // Hide both groups first to avoid a transient state where both
-        // are visible at the same time, which spikes the stack height
-        // and makes the panel visually "grow" for a frame.
-        quotaGroup.isHidden = true
-        metadataGroup.isHidden = true
-        // Now reveal only the relevant group
-        quotaGroup.isHidden = !showsCodexQuota
-        primaryQuota.isHidden = !showsCodexQuota
-        secondaryQuota.isHidden = !showsCodexQuota
-        metadataGroup.isHidden = showsCodexQuota
-        projectRow.setTitle(L10n.shared["metadata.project"])
-        modelRow.setTitle(L10n.shared["metadata.model"])
-        tokenRow.setTitle(L10n.shared["metadata.tokens"])
-        if isOffline {
-            projectRow.value = "--"
-            modelRow.value = "--"
-            tokenRow.value = "--"
-        } else {
-            projectRow.value = Self.displayValue(sessionDetails?.sessionTitle ?? sessionDetails?.projectName)
-            modelRow.value = Self.displayValue(sessionDetails?.modelName)
-            if sessionDetails?.inputTokens != nil || sessionDetails?.outputTokens != nil {
-                tokenRow.attributedStringValue = Self.formatTokenAttributedString(
-                    input: sessionDetails?.inputTokens,
-                    output: sessionDetails?.outputTokens
+            if let quota, quota.hasSecondary {
+                windows.append(UsageWindow(
+                    kind: .weekly,
+                    usedPercent: quota.secondaryUsedPercent,
+                    resetsAt: quota.secondaryResetAt,
+                    duration: 604_800
+                ))
+            }
+            render(
+                aggregate: aggregate,
+                model: DetailsPanelViewModel(
+                    providerName: providerName,
+                    planName: nil,
+                    usageWarning: nil,
+                    contextUsedPercent: contextUsedPercent,
+                    body: .usage(UsageDetailsModel(windows: windows, status: .noData))
                 )
-            } else {
-                tokenRow.value = "--"
-            }
-        }
-
-        guard showsCodexQuota else {
-            primaryQuota.updateUnavailable()
-            secondaryQuota.updateUnavailable()
-            return
-        }
-
-        applyQuotaLayout(quota, contextUsedPercent: contextUsedPercent)
-    }
-
-    /// Mirrors the Windows `ApplyQuotaMetrics` switch: Plus accounts get the
-    /// 5h + week pair, monthly plans collapse to a single "月额度" row, and a
-    /// monthly account that hasn't surfaced a snapshot yet shows the pending
-    /// placeholder so the panel doesn't look empty while Codex is starting up.
-    private func applyQuotaLayout(_ quota: RateLimitSnapshot?, contextUsedPercent: Double?) {
-        if let quota, quota.hasMonthly {
-            applyMonthlyQuota(quota, hasMonthlyData: true)
-            return
-        }
-        if let quota, quota.hasPrimary, quota.hasSecondary {
-            applyPlusQuota(quota)
-            return
-        }
-        if let quota, quota.hasMonthlyPlan {
-            applyMonthlyQuota(quota, hasMonthlyData: quota.hasMonthly)
-            return
-        }
-        // Context-only: we know there's a session but haven't seen rate limits
-        // yet. Show a monthly placeholder rather than wiping the panel.
-        if contextUsedPercent != nil {
-            applyMonthlyQuota(quota, hasMonthlyData: false)
-            return
-        }
-        applyPlusQuota(nil)
-    }
-
-    private func applyPlusQuota(_ quota: RateLimitSnapshot?) {
-        setQuotaTopSpacing(Self.plusQuotaTopSpacing)
-        primaryQuota.setTitle(L10n.shared["quota.5h"])
-        secondaryQuota.setTitle(L10n.shared["quota.weekly"])
-        primaryQuota.isHidden = false
-        secondaryQuota.isHidden = false
-        if let quota {
-            primaryQuota.update(
-                usedPercent: quota.primaryUsedPercent,
-                resetAt: quota.primaryResetAt
-            )
-            secondaryQuota.update(
-                usedPercent: quota.secondaryUsedPercent,
-                resetAt: quota.secondaryResetAt
             )
         } else {
-            primaryQuota.updateUnavailable()
-            secondaryQuota.updateUnavailable()
+            render(
+                aggregate: aggregate,
+                model: DetailsPanelViewModel(
+                    providerName: providerName,
+                    planName: nil,
+                    usageWarning: nil,
+                    contextUsedPercent: contextUsedPercent,
+                    body: .session(sessionDetails ?? SessionDetailsSnapshot())
+                )
+            )
         }
-    }
-
-    private func applyMonthlyQuota(_ quota: RateLimitSnapshot?, hasMonthlyData: Bool) {
-        setQuotaTopSpacing(Self.monthlyQuotaTopSpacing)
-        primaryQuota.setTitle(L10n.shared["quota.monthly"])
-        primaryQuota.isHidden = false
-        secondaryQuota.isHidden = true
-        if hasMonthlyData, let quota, let used = quota.monthlyUsedPercent {
-            primaryQuota.update(usedPercent: used, resetAt: quota.monthlyResetAt)
-        } else {
-            primaryQuota.updatePending()
-        }
-        secondaryQuota.updateUnavailable()
-    }
-
-    private func setQuotaTopSpacing(_ spacing: CGFloat) {
-        stack.setCustomSpacing(spacing, after: detailField)
     }
 
     func updateStatus(aggregate: AggregateSnapshot) {
@@ -454,12 +484,48 @@ final class DetailsPanel: NSPanel {
         contextValue.cell?.expansionFrame(withFrame: contextValue.bounds, in: contextValue) ?? .zero
     }
 
-    var primaryQuotaHiddenForTesting: Bool {
-        primaryQuota.isHidden || quotaGroup.isHidden
+    var providerTextForTesting: String {
+        providerHeader.providerText
     }
 
-    var secondaryQuotaHiddenForTesting: Bool {
-        secondaryQuota.isHidden || quotaGroup.isHidden
+    var planTextForTesting: String {
+        providerHeader.planText
+    }
+
+    var planHiddenForTesting: Bool {
+        providerHeader.isPlanHidden
+    }
+
+    var warningHiddenForTesting: Bool {
+        providerHeader.isWarningHidden
+    }
+
+    var warningToolTipForTesting: String? {
+        providerHeader.warningToolTip
+    }
+
+    var warningAccessibilityLabelForTesting: String? {
+        providerHeader.warningAccessibilityLabel
+    }
+
+    var warningColorForTesting: NSColor? {
+        providerHeader.warningColor
+    }
+
+    var usageGroupHiddenForTesting: Bool {
+        quotaGroup.isHidden
+    }
+
+    var sessionGroupHiddenForTesting: Bool {
+        metadataGroup.isHidden
+    }
+
+    var primaryQuotaTitleForTesting: String {
+        primaryQuota.titleForTesting
+    }
+
+    var secondaryQuotaTitleForTesting: String {
+        secondaryQuota.titleForTesting
     }
 
     var primaryQuotaValueForTesting: String {
@@ -470,16 +536,28 @@ final class DetailsPanel: NSPanel {
         secondaryQuota.valueForTesting
     }
 
-    var quotaTopSpacingForTesting: CGFloat {
-        stack.customSpacing(after: detailField)
+    var primaryQuotaResetHiddenForTesting: Bool {
+        primaryQuota.resetHiddenForTesting
     }
 
-    var metadataGroupHiddenForTesting: Bool {
-        metadataGroup.isHidden
+    var secondaryQuotaResetHiddenForTesting: Bool {
+        secondaryQuota.resetHiddenForTesting
+    }
+
+    var primaryQuotaMeterFillForTesting: Double {
+        primaryQuota.meterFillForTesting
+    }
+
+    var secondaryQuotaMeterFillForTesting: Double {
+        secondaryQuota.meterFillForTesting
     }
 
     var projectValueForTesting: String {
         projectRow.value
+    }
+
+    var sessionTitleValueForTesting: String {
+        sessionTitleRow.value
     }
 
     var modelValueForTesting: String {
@@ -490,15 +568,106 @@ final class DetailsPanel: NSPanel {
         tokenRow.value
     }
 
+    var projectToolTipForTesting: String? {
+        projectRow.valueToolTip
+    }
+
+    var sessionTitleToolTipForTesting: String? {
+        sessionTitleRow.valueToolTip
+    }
+
+    var modelToolTipForTesting: String? {
+        modelRow.valueToolTip
+    }
+
+    var frameWidthForTesting: CGFloat {
+        frame.width
+    }
+
+    var frameHeightForTesting: CGFloat {
+        frame.height
+    }
+
     func selectAgentForTesting(_ agent: AgentKind) {
         agentToggle.setAgent(agent)
         onAgentSelected?(agent)
     }
 }
 
-private extension DetailsPanel {
-    static let plusQuotaTopSpacing: CGFloat = 13
-    static let monthlyQuotaTopSpacing: CGFloat = 22
+@MainActor
+private final class ProviderHeaderView: NSView {
+    private let providerField = NSTextField(labelWithString: "")
+    private let planField = NSTextField(labelWithString: "")
+    private let warningImage = NSImageView()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        providerField.font = .systemFont(ofSize: 12, weight: .semibold)
+        providerField.textColor = .labelColor
+        providerField.lineBreakMode = .byTruncatingTail
+        providerField.maximumNumberOfLines = 1
+        providerField.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+
+        planField.font = .systemFont(ofSize: 11, weight: .regular)
+        planField.textColor = .secondaryLabelColor
+        planField.lineBreakMode = .byTruncatingTail
+        planField.maximumNumberOfLines = 1
+        planField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        warningImage.image = NSImage(
+            systemSymbolName: "exclamationmark.triangle.fill",
+            accessibilityDescription: "exclamationmark.triangle.fill"
+        )
+        warningImage.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .regular)
+        warningImage.contentTintColor = .systemYellow
+        warningImage.imageScaling = .scaleProportionallyDown
+        warningImage.isHidden = true
+
+        [providerField, planField, warningImage].forEach {
+            $0.translatesAutoresizingMaskIntoConstraints = false
+            addSubview($0)
+        }
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 20),
+            providerField.leadingAnchor.constraint(equalTo: leadingAnchor),
+            providerField.centerYAnchor.constraint(equalTo: centerYAnchor),
+            planField.leadingAnchor.constraint(equalTo: providerField.trailingAnchor, constant: 7),
+            planField.centerYAnchor.constraint(equalTo: centerYAnchor),
+            warningImage.leadingAnchor.constraint(equalTo: planField.trailingAnchor, constant: 7),
+            warningImage.trailingAnchor.constraint(equalTo: trailingAnchor),
+            warningImage.centerYAnchor.constraint(equalTo: centerYAnchor),
+            warningImage.widthAnchor.constraint(equalToConstant: 12),
+            warningImage.heightAnchor.constraint(equalToConstant: 12),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func update(providerName: String, planName: String?, warning: String?) {
+        providerField.stringValue = providerName
+        providerField.toolTip = providerName
+
+        planField.stringValue = planName ?? ""
+        planField.toolTip = planName
+        planField.isHidden = planName == nil
+
+        warningImage.isHidden = warning == nil
+        warningImage.toolTip = warning
+        warningImage.setAccessibilityLabel(warning)
+    }
+
+    var providerText: String { providerField.stringValue }
+    var planText: String { planField.stringValue }
+    var isPlanHidden: Bool { planField.isHidden }
+    var isWarningHidden: Bool { warningImage.isHidden }
+    var warningToolTip: String? { warningImage.toolTip }
+    var warningAccessibilityLabel: String? { warningImage.accessibilityLabel() }
+    var warningColor: NSColor? { warningImage.contentTintColor }
 }
 
 @MainActor
@@ -537,12 +706,22 @@ private final class MetadataRowView: NSView {
 
     var value: String {
         get { valueField.stringValue }
-        set { valueField.stringValue = newValue }
+        set { setValue(newValue) }
     }
 
     var attributedStringValue: NSAttributedString {
         get { valueField.attributedStringValue }
-        set { valueField.attributedStringValue = newValue }
+        set {
+            valueField.attributedStringValue = newValue
+            valueField.toolTip = nil
+        }
+    }
+
+    var valueToolTip: String? { valueField.toolTip }
+
+    func setValue(_ value: String, toolTip: String? = nil) {
+        valueField.stringValue = value
+        valueField.toolTip = toolTip
     }
 
     func setTitle(_ title: String) {
@@ -671,22 +850,24 @@ private final class QuotaRowView: NSView {
         meter.value = 0
     }
 
-    /// Placeholder for the monthly bucket when we know the plan is monthly
-    /// but Codex hasn't surfaced a rate-limit snapshot yet. Mirrors the
-    /// Windows "等待 Codex 刷新" pending row.
-    func updatePending() {
-        valueField.stringValue = L10n.shared["quota.waiting_refresh"]
-        resetField.stringValue = ""
-        resetField.isHidden = true
-        meter.value = 0
-    }
-
     func setTitle(_ title: String) {
         nameField.stringValue = title
     }
 
+    var titleForTesting: String {
+        nameField.stringValue
+    }
+
     var valueForTesting: String {
         valueField.stringValue
+    }
+
+    var resetHiddenForTesting: Bool {
+        resetField.isHidden
+    }
+
+    var meterFillForTesting: Double {
+        meter.value
     }
 
     private func setup() {
