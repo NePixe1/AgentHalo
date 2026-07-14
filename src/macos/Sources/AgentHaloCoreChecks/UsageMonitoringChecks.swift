@@ -32,6 +32,8 @@ func runUsageModelChecks() async {
         fatalError("usage snapshot cache checks failed: \(error)")
     }
 
+    await runUsageMonitoringCoordinatorChecks()
+
     await runCodexAuthChecks()
     runClaudeAuthChecks()
     await runCodexUsageChecks()
@@ -104,6 +106,406 @@ func runUsageSnapshotCacheChecks() async throws {
     try await testUsageSnapshotCacheIgnoresCorruptAndUnknownPayloads()
     try await testUsageSnapshotCacheRetriesTransientReadFailure()
     try await testUsageSnapshotCacheCreatesPrivateParentAndFile()
+}
+
+// MARK: - Usage monitoring coordinator checks
+
+private func coordinatorOAuthAccess(_ key: AccountCacheKey) -> OAuthAccess {
+    OAuthAccess(
+        providerID: key.providerID,
+        accountKey: key,
+        source: .file(path: "/tmp/agent-halo-coordinator-\(key.digest).json"),
+        sourceVersion: "version-\(key.digest)",
+        accessToken: "access-\(key.digest)",
+        refreshToken: "refresh-\(key.digest)",
+        expiresAt: nil,
+        accountID: nil,
+        planHint: nil
+    )
+}
+
+private func coordinatorCache(
+    files: any UsageFileAccessing,
+    path: String,
+    now: LockedBox<Date>
+) -> UsageSnapshotCache {
+    UsageSnapshotCache(
+        cacheURL: URL(fileURLWithPath: path),
+        files: files,
+        now: { now.value }
+    )
+}
+
+private func coordinatorSnapshot(
+    _ key: AccountCacheKey,
+    at date: Date,
+    planName: String = "Pro"
+) -> UsageSnapshot {
+    cacheCheckSnapshot(key: key, refreshedAt: date, planName: planName)
+}
+
+private func waitForRefreshCount(
+    _ provider: FakeUsageProvider,
+    _ expectedCount: Int,
+    _ message: String
+) async {
+    for _ in 0..<10_000 {
+        if await provider.refreshCallCount >= expectedCount { return }
+        await Task.yield()
+    }
+    fatalError(message)
+}
+
+private final class CoordinatorFailingWriteFiles: UsageFileAccessing, @unchecked Sendable {
+    func readDataIfPresent(at path: String) throws -> Data? { nil }
+    func ensureDirectory(at path: String, mode: mode_t) throws {}
+    func writeAtomically(_ data: Data, to path: String, preservingModeOf existingPath: String?) throws {
+        throw FakeUsageFilesError.transientRead
+    }
+}
+
+func runUsageMonitoringCoordinatorChecks() async {
+    await testCoordinatorAPIKeyModeSkipsRefresh()
+    await testCoordinatorDiskSnapshotIsExactStaleAndDoesNotSuppressRefresh()
+    await testCoordinatorCurrentRunFreshnessAndTenMinuteStaleness()
+    await testCoordinatorDeduplicatesOneProviderAndRefreshesProvidersIndependently()
+    await testCoordinatorSuccessAndFailureStatePriorities()
+    await testCoordinatorRateLimitCooldownsArePerAccount()
+    await testCoordinatorMigratesOnlyInternalRotation()
+    await testCoordinatorCancellationAndCacheWriteFailure()
+}
+
+func testCoordinatorAPIKeyModeSkipsRefresh() async {
+    let now = LockedBox(Date(timeIntervalSince1970: 2_100_000_000))
+    let provider = FakeUsageProvider(providerID: .codex, resolveResult: .apiKey)
+    let cache = coordinatorCache(
+        files: FakeUsageFiles(),
+        path: "/tmp/agent-halo-coordinator-api.json",
+        now: now
+    )
+    let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now.value })
+
+    let state = await coordinator.ensureFresh(.codex)
+
+    expect(state.accessMode, .apiKey, "API-key access should publish API mode")
+    expect(state.status == nil, "API-key access should not publish OAuth usage status")
+    expect(state.snapshot == nil, "API-key access should clear OAuth snapshots")
+    expect(await provider.refreshCallCount, 0, "API-key access must never refresh usage")
+}
+
+func testCoordinatorDiskSnapshotIsExactStaleAndDoesNotSuppressRefresh() async {
+    let date = Date(timeIntervalSince1970: 2_100_001_000)
+    let now = LockedBox(date)
+    let files = FakeUsageFiles()
+    let path = "/tmp/agent-halo-coordinator-disk.json"
+    let key = AccountCacheKey(providerID: .codex, digest: "disk-account")
+    let otherKey = AccountCacheKey(providerID: .codex, digest: "other-account")
+    let seed = coordinatorCache(files: files, path: path, now: now)
+    try! await seed.store(coordinatorSnapshot(key, at: date.addingTimeInterval(-60), planName: "Exact"))
+    try! await seed.store(coordinatorSnapshot(otherKey, at: date, planName: "Other"))
+
+    let provider = FakeUsageProvider(providerID: .codex, resolveResult: .oauth(coordinatorOAuthAccess(key)))
+    await provider.setRefreshResult(
+        UsageRefreshResult(
+            providerID: .codex,
+            snapshot: coordinatorSnapshot(key, at: date, planName: "Network"),
+            failure: nil
+        )
+    )
+    let cache = coordinatorCache(files: files, path: path, now: now)
+    let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now.value })
+
+    let prepared = await coordinator.prepare(.codex)
+    expect(prepared.snapshot?.planName, "Exact", "prepare should load only the resolved account snapshot")
+    expect(prepared.status, .stale(updatedAt: date.addingTimeInterval(-60)), "disk snapshot must start stale")
+    expect(await provider.refreshCallCount, 0, "prepare must not perform network refresh")
+
+    let refreshed = await coordinator.ensureFresh(.codex)
+    expect(await provider.refreshCallCount, 1, "disk snapshot must not suppress first-run refresh")
+    expect(refreshed.snapshot?.planName, "Network", "refresh should replace disk snapshot")
+    expect(refreshed.status, .fresh(updatedAt: date), "successful refresh should be fresh")
+}
+
+func testCoordinatorCurrentRunFreshnessAndTenMinuteStaleness() async {
+    let date = Date(timeIntervalSince1970: 2_100_002_000)
+    let now = LockedBox(date)
+    let key = AccountCacheKey(providerID: .codex, digest: "fresh-account")
+    let provider = FakeUsageProvider(providerID: .codex, resolveResult: .oauth(coordinatorOAuthAccess(key)))
+    await provider.setRefreshResult(
+        UsageRefreshResult(
+            providerID: .codex,
+            snapshot: coordinatorSnapshot(key, at: date),
+            failure: nil
+        )
+    )
+    let cache = coordinatorCache(
+        files: FakeUsageFiles(),
+        path: "/tmp/agent-halo-coordinator-fresh.json",
+        now: now
+    )
+    let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now.value })
+
+    _ = await coordinator.ensureFresh(.codex)
+    _ = await coordinator.ensureFresh(.codex)
+    expect(await provider.refreshCallCount, 1, "current-run snapshot younger than five minutes should suppress refresh")
+
+    now.withValue { $0 = date.addingTimeInterval(301) }
+    await provider.setRefreshResult(
+        UsageRefreshResult(
+            providerID: .codex,
+            snapshot: coordinatorSnapshot(key, at: now.value),
+            failure: nil
+        )
+    )
+    _ = await coordinator.ensureFresh(.codex)
+    expect(await provider.refreshCallCount, 2, "five-minute freshness expiry should allow refresh")
+
+    now.withValue { $0 = date.addingTimeInterval(902) }
+    let aged = await coordinator.state(for: .codex)
+    expect(aged.status, .stale(updatedAt: date.addingTimeInterval(301)), "snapshot older than ten minutes should become stale without an error")
+}
+
+func testCoordinatorDeduplicatesOneProviderAndRefreshesProvidersIndependently() async {
+    let date = Date(timeIntervalSince1970: 2_100_003_000)
+    let now = LockedBox(date)
+    let codexKey = AccountCacheKey(providerID: .codex, digest: "dedupe-codex")
+    let claudeKey = AccountCacheKey(providerID: .claude, digest: "dedupe-claude")
+    let codex = FakeUsageProvider(providerID: .codex, resolveResult: .oauth(coordinatorOAuthAccess(codexKey)))
+    let claude = FakeUsageProvider(providerID: .claude, resolveResult: .oauth(coordinatorOAuthAccess(claudeKey)))
+    await codex.setRefreshResult(
+        UsageRefreshResult(providerID: .codex, snapshot: coordinatorSnapshot(codexKey, at: date), failure: nil)
+    )
+    await claude.setRefreshResult(
+        UsageRefreshResult(providerID: .claude, snapshot: coordinatorSnapshot(claudeKey, at: date), failure: nil)
+    )
+    await codex.installGate()
+    await claude.installGate()
+    let cache = coordinatorCache(
+        files: FakeUsageFiles(),
+        path: "/tmp/agent-halo-coordinator-dedupe.json",
+        now: now
+    )
+    let coordinator = UsageMonitoringCoordinator(providers: [codex, claude], cache: cache, now: { now.value })
+
+    let codexFirst = Task { await coordinator.ensureFresh(.codex) }
+    let codexSecond = Task { await coordinator.ensureFresh(.codex) }
+    let claudeFirst = Task { await coordinator.ensureFresh(.claude) }
+    await waitForRefreshCount(codex, 1, "Codex refresh did not start")
+    await waitForRefreshCount(claude, 1, "Claude refresh should start while Codex is gated")
+    expect(await codex.refreshCallCount, 1, "concurrent Codex calls should share one refresh")
+    expect(await claude.refreshCallCount, 1, "Claude should own an independent refresh")
+
+    await codex.resume()
+    await claude.resume()
+    _ = await (codexFirst.value, codexSecond.value, claudeFirst.value)
+    expect(await codex.refreshCallCount, 1, "joined Codex refresh should still call provider once")
+}
+
+func testCoordinatorSuccessAndFailureStatePriorities() async {
+    let date = Date(timeIntervalSince1970: 2_100_004_000)
+    let failures: [UsageProviderFailure] = [.network, .serviceUnavailable, .invalidResponse]
+    for (index, failure) in failures.enumerated() {
+        let now = LockedBox(date.addingTimeInterval(Double(index)))
+        let key = AccountCacheKey(providerID: .codex, digest: "failure-\(index)")
+        let files = FakeUsageFiles()
+        let path = "/tmp/agent-halo-coordinator-failure-\(index).json"
+        let seed = coordinatorCache(files: files, path: path, now: now)
+        let snapshot = coordinatorSnapshot(key, at: now.value.addingTimeInterval(-30))
+        try! await seed.store(snapshot)
+        let provider = FakeUsageProvider(providerID: .codex, resolveResult: .oauth(coordinatorOAuthAccess(key)))
+        await provider.setRefreshError(failure)
+        let coordinator = UsageMonitoringCoordinator(
+            providers: [provider],
+            cache: coordinatorCache(files: files, path: path, now: now),
+            now: { now.value }
+        )
+        let retained = await coordinator.ensureFresh(.codex)
+        expect(retained.snapshot, snapshot, "refresh failure should retain same-account snapshot")
+        expect(retained.status, .stale(updatedAt: snapshot.refreshedAt), "refresh failure with data should be stale")
+
+        let emptyProvider = FakeUsageProvider(providerID: .claude, resolveResult: .oauth(coordinatorOAuthAccess(
+            AccountCacheKey(providerID: .claude, digest: "empty-\(index)")
+        )))
+        await emptyProvider.setRefreshError(failure)
+        let emptyCoordinator = UsageMonitoringCoordinator(
+            providers: [emptyProvider],
+            cache: coordinatorCache(
+                files: FakeUsageFiles(),
+                path: "/tmp/agent-halo-coordinator-empty-\(index).json",
+                now: now
+            ),
+            now: { now.value }
+        )
+        let empty = await emptyCoordinator.ensureFresh(.claude)
+        expect(empty.status, .noData, "refresh failure without snapshot should be noData")
+    }
+
+    let key = AccountCacheKey(providerID: .codex, digest: "recovery")
+    let now = LockedBox(date.addingTimeInterval(10))
+    let provider = FakeUsageProvider(providerID: .codex, resolveResult: .oauth(coordinatorOAuthAccess(key)))
+    await provider.setRefreshError(.network)
+    let cache = coordinatorCache(files: FakeUsageFiles(), path: "/tmp/agent-halo-coordinator-recovery.json", now: now)
+    let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now.value })
+    _ = await coordinator.ensureFresh(.codex)
+    await provider.setRefreshResult(
+        UsageRefreshResult(providerID: .codex, snapshot: coordinatorSnapshot(key, at: now.value), failure: nil)
+    )
+    let recovered = await coordinator.ensureFresh(.codex)
+    expect(recovered.lastFailure == nil, "success should clear the last failure")
+    expect(recovered.status, .fresh(updatedAt: now.value), "success after failure should be fresh")
+
+    let sameKey = AccountCacheKey(providerID: .claude, digest: "sign-in-same")
+    let otherKey = AccountCacheKey(providerID: .claude, digest: "sign-in-other")
+    let signInFiles = FakeUsageFiles()
+    let signInPath = "/tmp/agent-halo-coordinator-sign-in.json"
+    let seed = coordinatorCache(files: signInFiles, path: signInPath, now: now)
+    let sameSnapshot = coordinatorSnapshot(sameKey, at: now.value)
+    try! await seed.store(sameSnapshot)
+    let sameProvider = FakeUsageProvider(providerID: .claude, resolveResult: .oauthNeedsSignIn(accountKey: sameKey))
+    let sameCoordinator = UsageMonitoringCoordinator(
+        providers: [sameProvider],
+        cache: coordinatorCache(files: signInFiles, path: signInPath, now: now),
+        now: { now.value }
+    )
+    let signIn = await sameCoordinator.ensureFresh(.claude)
+    expect(signIn.status, .signInAgain, "sign-in-again should have highest status priority")
+    expect(signIn.snapshot, sameSnapshot, "sign-in-again may retain only the same account snapshot")
+    expect(await sameProvider.refreshCallCount, 0, "sign-in-required access must not refresh")
+
+    await sameProvider.setResolveResult(.oauthNeedsSignIn(accountKey: otherKey))
+    let changed = await sameCoordinator.prepare(.claude)
+    expect(changed.status, .signInAgain, "changed account still requires sign in")
+    expect(changed.snapshot == nil, "changed account must not retain old-account snapshot")
+}
+
+func testCoordinatorRateLimitCooldownsArePerAccount() async {
+    let date = Date(timeIntervalSince1970: 2_100_005_000)
+    let now = LockedBox(date)
+    let key = AccountCacheKey(providerID: .codex, digest: "rate-explicit")
+    let provider = FakeUsageProvider(providerID: .codex, resolveResult: .oauth(coordinatorOAuthAccess(key)))
+    await provider.setRefreshError(.rateLimited(retryAt: date.addingTimeInterval(120)))
+    let coordinator = UsageMonitoringCoordinator(
+        providers: [provider],
+        cache: coordinatorCache(files: FakeUsageFiles(), path: "/tmp/agent-halo-rate-explicit.json", now: now),
+        now: { now.value }
+    )
+    _ = await coordinator.ensureFresh(.codex)
+    now.withValue { $0 = date.addingTimeInterval(119) }
+    _ = await coordinator.ensureFresh(.codex)
+    expect(await provider.refreshCallCount, 1, "Retry-After cooldown should suppress repeated requests")
+    now.withValue { $0 = date.addingTimeInterval(121) }
+    _ = await coordinator.ensureFresh(.codex)
+    expect(await provider.refreshCallCount, 2, "request should resume after Retry-After")
+
+    let fallbackDate = date.addingTimeInterval(1_000)
+    let fallbackNow = LockedBox(fallbackDate)
+    let fallbackKey = AccountCacheKey(providerID: .claude, digest: "rate-default")
+    let fallback = FakeUsageProvider(providerID: .claude, resolveResult: .oauth(coordinatorOAuthAccess(fallbackKey)))
+    await fallback.setRefreshError(.rateLimited(retryAt: nil))
+    let fallbackCoordinator = UsageMonitoringCoordinator(
+        providers: [fallback],
+        cache: coordinatorCache(files: FakeUsageFiles(), path: "/tmp/agent-halo-rate-default.json", now: fallbackNow),
+        now: { fallbackNow.value }
+    )
+    _ = await fallbackCoordinator.ensureFresh(.claude)
+    fallbackNow.withValue { $0 = fallbackDate.addingTimeInterval(299) }
+    _ = await fallbackCoordinator.ensureFresh(.claude)
+    expect(await fallback.refreshCallCount, 1, "missing Retry-After should default to five-minute cooldown")
+    fallbackNow.withValue { $0 = fallbackDate.addingTimeInterval(301) }
+    _ = await fallbackCoordinator.ensureFresh(.claude)
+    expect(await fallback.refreshCallCount, 2, "default cooldown should expire after five minutes")
+}
+
+func testCoordinatorMigratesOnlyInternalRotation() async {
+    let date = Date(timeIntervalSince1970: 2_100_006_000)
+    let now = LockedBox(date)
+    let oldKey = AccountCacheKey(providerID: .codex, digest: "rotation-old")
+    let newKey = AccountCacheKey(providerID: .codex, digest: "rotation-new")
+    let files = FakeUsageFiles()
+    let path = "/tmp/agent-halo-coordinator-migration.json"
+    let seed = coordinatorCache(files: files, path: path, now: now)
+    try! await seed.store(coordinatorSnapshot(oldKey, at: date.addingTimeInterval(-60), planName: "Old"))
+    let cache = coordinatorCache(files: files, path: path, now: now)
+    let provider = FakeUsageProvider(providerID: .codex, resolveResult: .oauth(coordinatorOAuthAccess(oldKey)))
+    await provider.setRefreshResult(
+        UsageRefreshResult(
+            providerID: .codex,
+            snapshot: coordinatorSnapshot(newKey, at: date, planName: "Rotated"),
+            failure: nil,
+            migrateCacheFrom: oldKey
+        )
+    )
+    let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now.value })
+    let migrated = await coordinator.ensureFresh(.codex)
+    expect(migrated.snapshot?.accountKey, newKey, "internal rotation should publish the new key")
+    expect(try! await cache.snapshot(for: oldKey) == nil, "internal rotation should remove the old cache key")
+    expect(try! await cache.snapshot(for: newKey)?.snapshot.planName, "Rotated", "internal rotation stores new snapshot after migration")
+
+    let externalOld = AccountCacheKey(providerID: .claude, digest: "external-old")
+    let externalNew = AccountCacheKey(providerID: .claude, digest: "external-new")
+    let externalFiles = FakeUsageFiles()
+    let externalPath = "/tmp/agent-halo-coordinator-external.json"
+    let externalCache = coordinatorCache(files: externalFiles, path: externalPath, now: now)
+    try! await externalCache.store(coordinatorSnapshot(externalOld, at: date, planName: "Old External"))
+    let externalProvider = FakeUsageProvider(
+        providerID: .claude,
+        resolveResult: .oauth(coordinatorOAuthAccess(externalNew))
+    )
+    let externalCoordinator = UsageMonitoringCoordinator(
+        providers: [externalProvider],
+        cache: externalCache,
+        now: { now.value }
+    )
+    let external = await externalCoordinator.prepare(.claude)
+    expect(external.snapshot == nil, "external account change must not read old account cache")
+}
+
+func testCoordinatorCancellationAndCacheWriteFailure() async {
+    let date = Date(timeIntervalSince1970: 2_100_007_000)
+    let now = LockedBox(date)
+    let key = AccountCacheKey(providerID: .codex, digest: "cancel")
+    let provider = FakeUsageProvider(providerID: .codex, resolveResult: .oauth(coordinatorOAuthAccess(key)))
+    await provider.setRefreshResult(
+        UsageRefreshResult(providerID: .codex, snapshot: coordinatorSnapshot(key, at: date), failure: nil)
+    )
+    await provider.installGate()
+    let coordinator = UsageMonitoringCoordinator(
+        providers: [provider],
+        cache: coordinatorCache(files: FakeUsageFiles(), path: "/tmp/agent-halo-coordinator-cancel.json", now: now),
+        now: { now.value }
+    )
+    let request = Task { await coordinator.ensureFresh(.codex) }
+    await waitForRefreshCount(provider, 1, "cancellable refresh did not start")
+    await coordinator.cancelAll()
+    let cancelled = await request.value
+    expect(cancelled.isRefreshing == false, "cancelled refresh should return a non-refreshing state")
+    expect((await coordinator.state(for: .codex)).isRefreshing == false, "cancelAll should clear refreshing state")
+
+    let writeKey = AccountCacheKey(providerID: .claude, digest: "write-failure")
+    let writeProvider = FakeUsageProvider(
+        providerID: .claude,
+        resolveResult: .oauth(coordinatorOAuthAccess(writeKey))
+    )
+    await writeProvider.setRefreshResult(
+        UsageRefreshResult(
+            providerID: .claude,
+            snapshot: coordinatorSnapshot(writeKey, at: date),
+            failure: nil
+        )
+    )
+    let writeCoordinator = UsageMonitoringCoordinator(
+        providers: [writeProvider],
+        cache: coordinatorCache(
+            files: CoordinatorFailingWriteFiles(),
+            path: "/tmp/agent-halo-coordinator-write-failure.json",
+            now: now
+        ),
+        now: { now.value }
+    )
+    let memory = await writeCoordinator.ensureFresh(.claude)
+    expect(memory.status, .fresh(updatedAt: date), "cache write failure must not break fresh in-memory state")
+    _ = await writeCoordinator.ensureFresh(.claude)
+    expect(await writeProvider.refreshCallCount, 1, "failed disk write should retain current-run cache in memory")
 }
 
 func usageSnapshotPayloadPrivacyViolations(in payload: [String: Any]) -> [String] {
