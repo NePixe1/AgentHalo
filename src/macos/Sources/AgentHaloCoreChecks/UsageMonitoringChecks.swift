@@ -27,6 +27,7 @@ func runUsageModelChecks() async {
     }
 
     await runCodexAuthChecks()
+    runClaudeAuthChecks()
     await runCodexUsageChecks()
 }
 
@@ -623,6 +624,489 @@ func testCodexSourceVersionHashesRawDataBytes() {
     )
     expect(result == nil, true, "persist must refuse a raw-byte source version change")
     expect(mutableFiles.capturedWrites().count, 1, "persist must not write after raw-byte version mismatch")
+}
+
+// MARK: - Claude auth checks
+
+func claudeCheckJSON(_ object: [String: Any]) -> Data {
+    try! JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+}
+
+func claudeCheckCredential(
+    accessToken: String,
+    refreshToken: String? = "refresh-token",
+    expiresAtMilliseconds: Double? = nil,
+    subscriptionType: String? = nil,
+    rateLimitTier: String? = nil,
+    scopes: [String]? = ["user:profile"],
+    extraOAuth: [String: Any] = [:],
+    extraRoot: [String: Any] = [:]
+) -> Data {
+    var oauth: [String: Any] = extraOAuth
+    oauth["accessToken"] = accessToken
+    if let refreshToken { oauth["refreshToken"] = refreshToken }
+    if let expiresAtMilliseconds { oauth["expiresAt"] = expiresAtMilliseconds }
+    if let subscriptionType { oauth["subscriptionType"] = subscriptionType }
+    if let rateLimitTier { oauth["rateLimitTier"] = rateLimitTier }
+    if let scopes { oauth["scopes"] = scopes }
+    var root = extraRoot
+    root["claudeAiOauth"] = oauth
+    return claudeCheckJSON(root)
+}
+
+func claudeCheckString(_ data: Data) -> String {
+    String(data: data, encoding: .utf8)!
+}
+
+func claudeCheckPath(home: String) -> String {
+    "\(home)/.claude/.credentials.json"
+}
+
+func runClaudeAuthChecks() {
+    testClaudeDiscoveryIsKeychainFirst()
+    testClaudeConfigDirChangesPathAndKeychainService()
+    testClaudeConfigDirServiceHashNormalizesUnicode()
+    testClaudeStoredOAuthWinsOverEnvironmentToken()
+    testClaudeEnvironmentTokenAloneIsAPIKeyMode()
+    testClaudeScopesKeepOAuthModeAndAccountIdentity()
+    testClaudeAccountKeyUsesSourceAndTokenDigest()
+    testClaudeExpiresAtUsesEpochMilliseconds()
+    testClaudePlanHintsArePreserved()
+    testClaudeFileAndKeychainRotationPreserveUnknownFieldsAndSource()
+    testClaudePersistRefusesCredentialGenerationMismatch()
+    testClaudeRejectsNonProductionOAuthOverrides()
+}
+
+func testClaudeDiscoveryIsKeychainFirst() {
+    let home = "/tmp/agent-halo-claude-order-\(UUID().uuidString)"
+    let user = "agent-halo-user"
+    let environment = FakeUsageEnvironment(["HOME": home, "USER": user])
+    let filePath = claudeCheckPath(home: home)
+    let files = FakeUsageFiles(contents: [
+        filePath: claudeCheckCredential(accessToken: "file-token"),
+    ])
+
+    let bothKeychainForms = FakeUsageKeychain()
+    try? bothKeychainForms.write(
+        service: "Claude Code-credentials",
+        account: nil,
+        value: claudeCheckString(claudeCheckCredential(accessToken: "legacy-token"))
+    )
+    try? bothKeychainForms.write(
+        service: "Claude Code-credentials",
+        account: user,
+        value: claudeCheckString(claudeCheckCredential(accessToken: "current-user-token"))
+    )
+    let currentUserStore = ClaudeAuthStore(
+        environment: environment,
+        files: files,
+        keychain: bothKeychainForms
+    )
+    guard case .oauth(let currentUser) = currentUserStore.resolveAccess() else {
+        fatalError("current-user Claude keychain credential should resolve to OAuth")
+    }
+    expect(currentUser.accessToken, "current-user-token", "current-user keychain should win")
+    expect(
+        currentUser.source,
+        .keychain(service: "Claude Code-credentials", account: user),
+        "current-user keychain source identity"
+    )
+
+    let legacyOnly = FakeUsageKeychain()
+    try? legacyOnly.write(
+        service: "Claude Code-credentials",
+        account: nil,
+        value: claudeCheckString(claudeCheckCredential(accessToken: "legacy-token"))
+    )
+    let legacyStore = ClaudeAuthStore(environment: environment, files: files, keychain: legacyOnly)
+    guard case .oauth(let legacy) = legacyStore.resolveAccess() else {
+        fatalError("legacy Claude keychain credential should resolve to OAuth")
+    }
+    expect(legacy.accessToken, "legacy-token", "legacy service-only keychain should precede file")
+
+    let fileStore = ClaudeAuthStore(
+        environment: environment,
+        files: files,
+        keychain: FakeUsageKeychain()
+    )
+    guard case .oauth(let file) = fileStore.resolveAccess() else {
+        fatalError("Claude credential file should be the final stored OAuth fallback")
+    }
+    expect(file.accessToken, "file-token", "credential file should load after keychain misses")
+    expect(file.source, .file(path: filePath), "file source should retain its exact path")
+
+    guard let exactFile = currentUserStore.reload(source: .file(path: filePath)) else {
+        fatalError("reload should read the exact requested file source")
+    }
+    expect(exactFile.accessToken, "file-token", "exact file reload must not rediscover keychain")
+}
+
+func testClaudeConfigDirChangesPathAndKeychainService() {
+    let configDir = "/tmp/agent-halo-claude-config-\(UUID().uuidString)"
+    let home = "/tmp/agent-halo-claude-home-\(UUID().uuidString)"
+    let user = "config-user"
+    let suffix = String(UsageDigest.sha256(configDir).prefix(8))
+    let scopedService = "Claude Code-credentials-\(suffix)"
+    let environment = FakeUsageEnvironment([
+        "CLAUDE_CONFIG_DIR": configDir,
+        "HOME": home,
+        "USER": user,
+    ])
+    let files = FakeUsageFiles(contents: [
+        "\(configDir)/.credentials.json": claudeCheckCredential(accessToken: "config-file-token"),
+        claudeCheckPath(home: home): claudeCheckCredential(accessToken: "default-file-token"),
+    ])
+    let keychain = FakeUsageKeychain()
+    try? keychain.write(
+        service: "Claude Code-credentials",
+        account: user,
+        value: claudeCheckString(claudeCheckCredential(accessToken: "base-keychain-token"))
+    )
+    try? keychain.write(
+        service: scopedService,
+        account: user,
+        value: claudeCheckString(claudeCheckCredential(accessToken: "scoped-keychain-token"))
+    )
+    let store = ClaudeAuthStore(environment: environment, files: files, keychain: keychain)
+    guard case .oauth(let scoped) = store.resolveAccess() else {
+        fatalError("config-scoped Claude keychain should resolve to OAuth")
+    }
+    expect(scoped.accessToken, "scoped-keychain-token", "config-scoped service should precede base service")
+    expect(
+        scoped.source,
+        .keychain(service: scopedService, account: user),
+        "config-scoped service should use 8-character SHA256 suffix"
+    )
+
+    let fileOnlyStore = ClaudeAuthStore(
+        environment: environment,
+        files: files,
+        keychain: FakeUsageKeychain()
+    )
+    guard case .oauth(let configFile) = fileOnlyStore.resolveAccess() else {
+        fatalError("CLAUDE_CONFIG_DIR credential file should resolve to OAuth")
+    }
+    expect(configFile.source, .file(path: "\(configDir)/.credentials.json"), "config dir changes file path")
+}
+
+func testClaudeConfigDirServiceHashNormalizesUnicode() {
+    let composedConfigDir = "/tmp/agent-halo-caf\u{00e9}"
+    let decomposedConfigDir = composedConfigDir.decomposedStringWithCanonicalMapping
+    expect(
+        Array(composedConfigDir.utf8) == Array(decomposedConfigDir.utf8),
+        false,
+        "Unicode fixture must use distinct UTF-8 code units"
+    )
+
+    let user = "unicode-user"
+    let normalized = decomposedConfigDir.precomposedStringWithCanonicalMapping
+    let suffix = String(UsageDigest.sha256(normalized).prefix(8))
+    let service = "Claude Code-credentials-\(suffix)"
+    let keychain = FakeUsageKeychain()
+    try? keychain.write(
+        service: service,
+        account: user,
+        value: claudeCheckString(claudeCheckCredential(accessToken: "unicode-config-token"))
+    )
+    let store = ClaudeAuthStore(
+        environment: FakeUsageEnvironment([
+            "CLAUDE_CONFIG_DIR": decomposedConfigDir,
+            "USER": user,
+        ]),
+        files: FakeUsageFiles(),
+        keychain: keychain
+    )
+    guard case .oauth(let access) = store.resolveAccess() else {
+        fatalError("canonically equivalent CLAUDE_CONFIG_DIR should discover the same keychain service")
+    }
+    expect(access.source, .keychain(service: service, account: user), "config service hash uses NFC path")
+}
+
+func testClaudeStoredOAuthWinsOverEnvironmentToken() {
+    let home = "/tmp/agent-halo-claude-env-shadow-\(UUID().uuidString)"
+    let store = ClaudeAuthStore(
+        environment: FakeUsageEnvironment([
+            "HOME": home,
+            "CLAUDE_CODE_OAUTH_TOKEN": "inference-only-token",
+        ]),
+        files: FakeUsageFiles(contents: [
+            claudeCheckPath(home: home): claudeCheckCredential(accessToken: "stored-oauth-token"),
+        ]),
+        keychain: FakeUsageKeychain()
+    )
+    guard case .oauth(let access) = store.resolveAccess() else {
+        fatalError("stored Claude OAuth should win over inference-only environment token")
+    }
+    expect(access.accessToken, "stored-oauth-token", "stored OAuth wins over environment token")
+}
+
+func testClaudeEnvironmentTokenAloneIsAPIKeyMode() {
+    let store = ClaudeAuthStore(
+        environment: FakeUsageEnvironment(["CLAUDE_CODE_OAUTH_TOKEN": "inference-only-token"]),
+        files: FakeUsageFiles(),
+        keychain: FakeUsageKeychain()
+    )
+    guard case .apiKey = store.resolveAccess() else {
+        fatalError("CLAUDE_CODE_OAUTH_TOKEN alone must remain API key mode")
+    }
+}
+
+func testClaudeScopesKeepOAuthModeAndAccountIdentity() {
+    let home = "/tmp/agent-halo-claude-scopes-\(UUID().uuidString)"
+    let path = claudeCheckPath(home: home)
+    let environment = FakeUsageEnvironment(["HOME": home])
+
+    for scopes in [Optional<[String]>.none, []] {
+        let store = ClaudeAuthStore(
+            environment: environment,
+            files: FakeUsageFiles(contents: [
+                path: claudeCheckCredential(accessToken: "allowed-token", scopes: scopes),
+            ]),
+            keychain: FakeUsageKeychain()
+        )
+        guard case .oauth = store.resolveAccess() else {
+            fatalError("absent or empty Claude scopes should remain OAuth mode")
+        }
+    }
+
+    let missingStore = ClaudeAuthStore(
+        environment: environment,
+        files: FakeUsageFiles(contents: [
+            path: claudeCheckCredential(accessToken: "missing-scope-token", scopes: ["user:inference"]),
+        ]),
+        keychain: FakeUsageKeychain()
+    )
+    guard let parsed = missingStore.reload(source: .file(path: path)) else {
+        fatalError("explicitly under-scoped credential should still parse as stored OAuth")
+    }
+    guard case .oauthNeedsSignIn(let accountKey) = missingStore.resolveAccess() else {
+        fatalError("stored OAuth missing user:profile should request OAuth sign-in again")
+    }
+    expect(accountKey, parsed.accountKey, "scope failure keeps the same OAuth account key")
+}
+
+func testClaudeAccountKeyUsesSourceAndTokenDigest() {
+    let home = "/tmp/agent-halo-claude-account-\(UUID().uuidString)"
+    let path = claudeCheckPath(home: home)
+    let environment = FakeUsageEnvironment(["HOME": home])
+
+    func resolved(accessToken: String, refreshToken: String?) -> OAuthAccess {
+        let store = ClaudeAuthStore(
+            environment: environment,
+            files: FakeUsageFiles(contents: [
+                path: claudeCheckCredential(accessToken: accessToken, refreshToken: refreshToken),
+            ]),
+            keychain: FakeUsageKeychain()
+        )
+        guard case .oauth(let access) = store.resolveAccess() else {
+            fatalError("Claude account-key fixture should resolve to OAuth")
+        }
+        return access
+    }
+
+    let withRefresh = resolved(accessToken: "access-token", refreshToken: "stable-refresh")
+    expect(
+        withRefresh.accountKey.digest,
+        UsageDigest.sha256("\(path)|\(UsageDigest.sha256("stable-refresh"))"),
+        "Claude account key uses source identity plus refresh-token digest"
+    )
+    let accessOnly = resolved(accessToken: "access-only", refreshToken: nil)
+    expect(
+        accessOnly.accountKey.digest,
+        UsageDigest.sha256("\(path)|\(UsageDigest.sha256("access-only"))"),
+        "Claude account key falls back to source identity plus access-token digest"
+    )
+    expect(accessOnly.sourceVersion.count, 64, "Claude source version remains a SHA256 digest")
+}
+
+func testClaudeExpiresAtUsesEpochMilliseconds() {
+    let now = Date(timeIntervalSince1970: 1_000_000)
+    let home = "/tmp/agent-halo-claude-expiry-\(UUID().uuidString)"
+    let path = claudeCheckPath(home: home)
+    func access(after seconds: TimeInterval) -> (ClaudeAuthStore, OAuthAccess) {
+        let store = ClaudeAuthStore(
+            environment: FakeUsageEnvironment(["HOME": home]),
+            files: FakeUsageFiles(contents: [
+                path: claudeCheckCredential(
+                    accessToken: "expiry-token-\(seconds)",
+                    expiresAtMilliseconds: now.addingTimeInterval(seconds).timeIntervalSince1970 * 1000
+                ),
+            ]),
+            keychain: FakeUsageKeychain(),
+            now: { now }
+        )
+        guard case .oauth(let access) = store.resolveAccess() else {
+            fatalError("Claude expiresAt fixture should resolve to OAuth")
+        }
+        return (store, access)
+    }
+
+    let (soonStore, soon) = access(after: 3 * 60)
+    expect(soon.expiresAt, now.addingTimeInterval(3 * 60), "expiresAt parses epoch milliseconds")
+    expect(soonStore.needsRefresh(soon), true, "Claude token within five minutes needs refresh")
+    let (farStore, far) = access(after: 10 * 60)
+    expect(farStore.needsRefresh(far), false, "Claude token beyond five minutes does not need refresh")
+}
+
+func testClaudePlanHintsArePreserved() {
+    let home = "/tmp/agent-halo-claude-plan-\(UUID().uuidString)"
+    let store = ClaudeAuthStore(
+        environment: FakeUsageEnvironment(["HOME": home]),
+        files: FakeUsageFiles(contents: [
+            claudeCheckPath(home: home): claudeCheckCredential(
+                accessToken: "plan-token",
+                subscriptionType: "max",
+                rateLimitTier: "default_claude_max_20x"
+            ),
+        ]),
+        keychain: FakeUsageKeychain()
+    )
+    guard case .oauth(let access) = store.resolveAccess() else {
+        fatalError("Claude plan-hint fixture should resolve to OAuth")
+    }
+    expect(access.planHint?.subscriptionType, "max", "subscriptionType plan hint")
+    expect(access.planHint?.rateLimitTier, "default_claude_max_20x", "rateLimitTier plan hint")
+}
+
+func testClaudeFileAndKeychainRotationPreserveUnknownFieldsAndSource() {
+    let now = Date(timeIntervalSince1970: 2_000_000)
+    let rotatedExpiry = now.addingTimeInterval(3600)
+    let home = "/tmp/agent-halo-claude-rotate-\(UUID().uuidString)"
+    let path = claudeCheckPath(home: home)
+    let files = FakeUsageFiles(
+        contents: [
+            path: claudeCheckCredential(
+                accessToken: "old-file-token",
+                extraOAuth: ["oauthCustom": "keep"],
+                extraRoot: ["rootCustom": "keep"]
+            ),
+        ],
+        modes: [path: 0o640]
+    )
+    let fileStore = ClaudeAuthStore(
+        environment: FakeUsageEnvironment(["HOME": home]),
+        files: files,
+        keychain: FakeUsageKeychain(),
+        now: { now }
+    )
+    guard case .oauth(let fileAccess) = fileStore.resolveAccess() else {
+        fatalError("Claude file rotation should start from OAuth")
+    }
+    let fileRotated = try? fileStore.persist(
+        rotation: ClaudeTokenRotation(
+            accessToken: "new-file-token",
+            refreshToken: "new-file-refresh",
+            expiresAt: rotatedExpiry
+        ),
+        replacing: fileAccess
+    )
+    expect(fileRotated?.source, .file(path: path), "file rotation keeps exact source")
+    expect(files.storedMode(for: path), 0o640, "file rotation preserves original permissions")
+    guard let fileWrite = files.capturedWrites().last,
+          let fileObject = try? JSONSerialization.jsonObject(with: fileWrite.data) as? [String: Any],
+          let fileOAuth = fileObject["claudeAiOauth"] as? [String: Any]
+    else {
+        fatalError("Claude file rotation should write valid merged JSON")
+    }
+    expect(fileObject["rootCustom"] as? String, "keep", "file rotation preserves unknown root field")
+    expect(fileOAuth["oauthCustom"] as? String, "keep", "file rotation preserves unknown OAuth field")
+    expect(fileOAuth["accessToken"] as? String, "new-file-token", "file access token rotates")
+    expect(fileOAuth["expiresAt"] as? Double, rotatedExpiry.timeIntervalSince1970 * 1000, "expiry writes epoch ms")
+
+    let user = "rotate-user"
+    let keychain = FakeUsageKeychain()
+    try? keychain.write(
+        service: "Claude Code-credentials",
+        account: user,
+        value: claudeCheckString(claudeCheckCredential(
+            accessToken: "old-keychain-token",
+            extraOAuth: ["keychainCustom": "keep"]
+        ))
+    )
+    let keychainStore = ClaudeAuthStore(
+        environment: FakeUsageEnvironment(["USER": user]),
+        files: FakeUsageFiles(),
+        keychain: keychain,
+        now: { now }
+    )
+    guard case .oauth(let keychainAccess) = keychainStore.resolveAccess() else {
+        fatalError("Claude keychain rotation should start from OAuth")
+    }
+    let keychainRotated = try? keychainStore.persist(
+        rotation: ClaudeTokenRotation(
+            accessToken: "new-keychain-token",
+            refreshToken: nil,
+            expiresAt: rotatedExpiry
+        ),
+        replacing: keychainAccess
+    )
+    expect(
+        keychainRotated?.source,
+        .keychain(service: "Claude Code-credentials", account: user),
+        "keychain rotation keeps exact service/account source"
+    )
+    let writtenKeychain = try? keychain.read(service: "Claude Code-credentials", account: user)
+    guard let keychainData = writtenKeychain.flatMap({ Data($0.utf8) }),
+          let keychainObject = try? JSONSerialization.jsonObject(with: keychainData) as? [String: Any],
+          let keychainOAuth = keychainObject["claudeAiOauth"] as? [String: Any]
+    else {
+        fatalError("Claude keychain rotation should write valid merged JSON")
+    }
+    expect(keychainOAuth["keychainCustom"] as? String, "keep", "keychain rotation preserves unknown field")
+    expect(keychainOAuth["refreshToken"] as? String, "refresh-token", "nil rotated refresh preserves stored refresh")
+}
+
+func testClaudePersistRefusesCredentialGenerationMismatch() {
+    let home = "/tmp/agent-halo-claude-version-\(UUID().uuidString)"
+    let path = claudeCheckPath(home: home)
+    let files = FakeUsageFiles(contents: [
+        path: claudeCheckCredential(accessToken: "old-token", refreshToken: "old-refresh"),
+    ])
+    let store = ClaudeAuthStore(
+        environment: FakeUsageEnvironment(["HOME": home]),
+        files: files,
+        keychain: FakeUsageKeychain()
+    )
+    guard case .oauth(let expected) = store.resolveAccess() else {
+        fatalError("Claude version check should start from OAuth")
+    }
+    try? files.writeAtomically(
+        claudeCheckCredential(accessToken: "external-login", refreshToken: "external-refresh"),
+        to: path,
+        preservingModeOf: path
+    )
+    let result = try? store.persist(
+        rotation: ClaudeTokenRotation(
+            accessToken: "refreshed-old-login",
+            refreshToken: "refreshed-old-refresh",
+            expiresAt: Date(timeIntervalSince1970: 3_000_000)
+        ),
+        replacing: expected
+    )
+    expect(result == nil, true, "external Claude re-login must invalidate credential generation")
+    expect(files.capturedWrites().count, 1, "mismatched generation must not be overwritten")
+}
+
+func testClaudeRejectsNonProductionOAuthOverrides() {
+    let home = "/tmp/agent-halo-claude-custom-oauth-\(UUID().uuidString)"
+    let files = FakeUsageFiles(contents: [
+        claudeCheckPath(home: home): claudeCheckCredential(accessToken: "stored-token"),
+    ])
+    for override in [
+        ("CLAUDE_CODE_CUSTOM_OAUTH_URL", "https://custom.invalid"),
+        ("CLAUDE_LOCAL_OAUTH_API_BASE", "http://localhost:8000"),
+        ("ANTHROPIC_BASE_URL", "https://inference-proxy.invalid"),
+        ("USE_STAGING_OAUTH", "1"),
+    ] {
+        let store = ClaudeAuthStore(
+            environment: FakeUsageEnvironment(["HOME": home, override.0: override.1]),
+            files: files,
+            keychain: FakeUsageKeychain()
+        )
+        guard case .apiKey = store.resolveAccess() else {
+            fatalError("non-production OAuth override \(override.0) must not use stored OAuth")
+        }
+    }
 }
 
 // MARK: - Codex usage checks
