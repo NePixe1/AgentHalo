@@ -266,60 +266,6 @@ class DetailsPanel: NSPanel {
         screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
     }
 
-    // Task 11 replaces the AppDelegate call site with DetailsContentResolver.
-    // Keep this module-local adapter until that wiring lands so Task 10 remains
-    // independently buildable without retaining the old panel layout logic.
-    func update(
-        aggregate: AggregateSnapshot,
-        quota: RateLimitSnapshot?,
-        contextUsedPercent: Double?,
-        sessionDetails: SessionDetailsSnapshot? = nil,
-        showsQuota: Bool? = nil
-    ) {
-        let providerName = aggregate.focusedAgent == .codex ? "Codex" : "Claude Code"
-        let shouldShowUsage = showsQuota ?? (aggregate.focusedAgent == .codex)
-        if shouldShowUsage {
-            var windows: [UsageWindow] = []
-            if let quota, quota.hasPrimary {
-                windows.append(UsageWindow(
-                    kind: .session,
-                    usedPercent: quota.primaryUsedPercent,
-                    resetsAt: quota.primaryResetAt,
-                    duration: 18_000
-                ))
-            }
-            if let quota, quota.hasSecondary {
-                windows.append(UsageWindow(
-                    kind: .weekly,
-                    usedPercent: quota.secondaryUsedPercent,
-                    resetsAt: quota.secondaryResetAt,
-                    duration: 604_800
-                ))
-            }
-            render(
-                aggregate: aggregate,
-                model: DetailsPanelViewModel(
-                    providerName: providerName,
-                    planName: nil,
-                    usageWarning: nil,
-                    contextUsedPercent: contextUsedPercent,
-                    body: .usage(UsageDetailsModel(windows: windows, status: .noData))
-                )
-            )
-        } else {
-            render(
-                aggregate: aggregate,
-                model: DetailsPanelViewModel(
-                    providerName: providerName,
-                    planName: nil,
-                    usageWarning: nil,
-                    contextUsedPercent: contextUsedPercent,
-                    body: .session(sessionDetails ?? SessionDetailsSnapshot())
-                )
-            )
-        }
-    }
-
     func updateStatus(aggregate: AggregateSnapshot) {
         titleField.stringValue = aggregate.label
         let rgb = HaloVisualModel.stateColor(aggregate.state)

@@ -5,12 +5,6 @@ private let haloSizeMenuWidth: CGFloat = 252
 private let haloSizeMenuHeight: CGFloat = 44
 private let haloSizeMenuTextInset: CGFloat = 21
 
-struct DetailsPresentation: Equatable {
-    var sessionDetails: SessionDetailsSnapshot
-    var showsQuota: Bool
-    var contextUsedPercent: Double?
-}
-
 struct LiveErrorPresentationUpdate: Equatable {
     var presentation: ErrorPresentation
     var acknowledgeErrorAt: Date?
@@ -108,7 +102,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsSaveTimer: Timer?
     private var systemOverlaySuspended = false
     private var placementState = HaloPlacementRuntimeState()
-    private let rateLimitReader = RateLimitReader()
+    private let usageCoordinator = UsageMonitoringCoordinator.live()
+    private var usageStates: [UsageProviderID: UsageMonitorState] = [:]
+    private var usageRefreshLoopTask: Task<Void, Never>?
+    private var usageRequestTasks: [UsageProviderID: Task<Void, Never>] = [:]
+    private let usageRefreshInterval: TimeInterval = 5 * 60
     private let claudeContextUsageReader = ClaudeContextUsageReader()
     private let contextReaderQueue = DispatchQueue(
         label: "com.agenthalo.context-reader",
@@ -172,6 +170,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Initialize L10n with user's saved preference
         L10n.shared.setLanguage(settings.language)
         currentLanguage = L10n.shared.currentLanguage
+        startUsageRefreshLoop()
+        requestUsageRefresh(for: Self.usageProviderID(for: settings.focusedAgent))
 
         // Observe language changes
         languageObserver = NotificationCenter.default.addObserver(
@@ -190,6 +190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // Rebuild menu so all items show new language
                 self.lastStatusMenuSignature = nil
                 self.tick()
+                self.refreshVisibleDetailsPanel()
             }
         }
         tick()
@@ -197,6 +198,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        usageRefreshLoopTask?.cancel()
+        usageRefreshLoopTask = nil
+        usageRequestTasks.values.forEach { $0.cancel() }
+        usageRequestTasks.removeAll()
+        Task { await usageCoordinator.cancelAll() }
         codexActivityMonitor.stop()
         claudeActivityMonitor.stop()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
@@ -591,6 +597,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard settings.focusedAgent != agent else {
             tick()
             refreshVisibleDetailsPanel()
+            requestUsageRefresh(for: Self.usageProviderID(for: agent))
             return
         }
         settings.focusedAgent = agent
@@ -600,6 +607,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         tick()
         refreshVisibleDetailsPanel()
+        requestUsageRefresh(for: Self.usageProviderID(for: agent))
     }
 
     @objc private func quit() {
@@ -775,13 +783,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         positionDetailsPanel()
         detailsPanel.orderFrontRegardless()
+        requestUsageRefresh(for: Self.usageProviderID(for: settings.focusedAgent))
     }
 
     private func updateDetailsPanelContent(rawClaudeSnapshots: [SessionSnapshot]? = nil) {
         let rawClaudeSnapshots = rawClaudeSnapshots
             ?? (settings.focusedAgent == .claudeCode ? claudeSnapshots() : [])
         let displayedAggregate = displayAggregate()
-        let quota = settings.focusedAgent == .codex ? rateLimitReader.read() : nil
+        let providerID = Self.usageProviderID(for: settings.focusedAgent)
+        let monitorState = usageStates[providerID]
+            ?? UsageMonitorState(providerID: providerID, accessMode: .apiKey)
         let claudeMainSessionId = settings.focusedAgent == .claudeCode
             ? Self.claudeMainSessionIdForDetails(
                 displayedAggregate: displayedAggregate,
@@ -801,22 +812,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 )
             }
         }
-        let presentation = Self.detailsPresentationForDetails(
-            focusedAgent: settings.focusedAgent,
-            displayedAggregate: displayedAggregate,
-            claudeMainSessionId: claudeMainSessionId,
-            mainClaudeSessions: claudeActivitySnapshot.transcriptSnapshots,
-            liveClaudeSession: claudeActivitySnapshot.preferredStandbySession,
-            quota: quota,
-            claudeUsage: claudeUsage
+        let exactSessionDetails: SessionDetailsSnapshot
+        let exactContextUsedPercent: Double?
+        switch settings.focusedAgent {
+        case .codex:
+            let session = displayedAggregate.sessions.first
+            exactSessionDetails = SessionDetailsSnapshot(
+                projectName: session?.projectName,
+                sessionTitle: session?.sessionTitle,
+                modelName: session?.modelName,
+                inputTokens: session?.inputTokens,
+                outputTokens: session?.outputTokens
+            )
+            exactContextUsedPercent = session?.contextUsedPercent
+        case .claudeCode:
+            let resolved = ClaudeMainSessionDetailsResolver.resolve(
+                mainSessionId: claudeMainSessionId,
+                mainSessions: claudeActivitySnapshot.transcriptSnapshots,
+                liveSession: claudeActivitySnapshot.preferredStandbySession,
+                usage: claudeUsage
+            )
+            exactSessionDetails = resolved.sessionDetails
+            exactContextUsedPercent = resolved.contextUsedPercent
+        }
+        let model = DetailsContentResolver.resolve(
+            providerID: providerID,
+            monitorState: monitorState,
+            isOffline: displayedAggregate.state == .idle && displayedAggregate.label == "OFFLINE",
+            sessionDetails: exactSessionDetails,
+            contextUsedPercent: exactContextUsedPercent,
+            now: Date()
         )
-        detailsPanel.update(
-            aggregate: displayedAggregate,
-            quota: quota,
-            contextUsedPercent: presentation.contextUsedPercent,
-            sessionDetails: presentation.sessionDetails,
-            showsQuota: presentation.showsQuota
-        )
+        detailsPanel.render(aggregate: displayedAggregate, model: model)
     }
 
     static func claudeMainSessionIdForDetails(
@@ -847,43 +874,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .whileSessionIsLive
     }
 
-    static func detailsPresentationForDetails(
-        focusedAgent: AgentKind,
-        displayedAggregate: AggregateSnapshot,
-        claudeMainSessionId: String?,
-        mainClaudeSessions: [SessionSnapshot],
-        liveClaudeSession: ClaudeLiveSessionSnapshot?,
-        quota: RateLimitSnapshot?,
-        claudeUsage: ClaudeContextUsageSnapshot?
-    ) -> DetailsPresentation {
-        switch focusedAgent {
+    static func usageProviderID(for agent: AgentKind) -> UsageProviderID {
+        switch agent {
         case .codex:
-            let session = displayedAggregate.sessions.first
-            let showsQuota = session?.hasRateLimits ?? (quota != nil)
-            return DetailsPresentation(
-                sessionDetails: SessionDetailsSnapshot(
-                    projectName: session?.projectName,
-                    modelName: session?.modelName,
-                    inputTokens: session?.inputTokens,
-                    outputTokens: session?.outputTokens
-                ),
-                showsQuota: showsQuota,
-                contextUsedPercent: session?.contextUsedPercent
-                    ?? (showsQuota ? quota?.contextUsedPercent : nil)
-            )
+            return .codex
         case .claudeCode:
-            let resolved = ClaudeMainSessionDetailsResolver.resolve(
-                mainSessionId: claudeMainSessionId,
-                mainSessions: mainClaudeSessions,
-                liveSession: liveClaudeSession,
-                usage: claudeUsage
-            )
-            return DetailsPresentation(
-                sessionDetails: resolved.sessionDetails,
-                showsQuota: false,
-                contextUsedPercent: resolved.contextUsedPercent
-            )
+            return .claude
         }
+    }
+
+    private func startUsageRefreshLoop() {
+        usageRefreshLoopTask?.cancel()
+        let sleepNanoseconds = UInt64(usageRefreshInterval * 1_000_000_000)
+        usageRefreshLoopTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: sleepNanoseconds)
+                } catch {
+                    return
+                }
+                guard let self, !Task.isCancelled else {
+                    return
+                }
+                requestUsageRefresh(for: Self.usageProviderID(for: settings.focusedAgent))
+            }
+        }
+    }
+
+    private func requestUsageRefresh(for providerID: UsageProviderID) {
+        guard usageRequestTasks[providerID] == nil else {
+            return
+        }
+        usageRequestTasks[providerID] = Task { [weak self] in
+            guard let self else { return }
+            let prepared = await usageCoordinator.prepare(providerID)
+            guard !Task.isCancelled else { return }
+            publishUsageState(prepared, for: providerID)
+
+            let refreshed = await usageCoordinator.ensureFresh(providerID)
+            guard !Task.isCancelled else { return }
+            publishUsageState(refreshed, for: providerID)
+            usageRequestTasks[providerID] = nil
+        }
+    }
+
+    private func publishUsageState(_ state: UsageMonitorState, for providerID: UsageProviderID) {
+        usageStates[providerID] = state
+        guard providerID == Self.usageProviderID(for: settings.focusedAgent),
+              detailsPanel.isVisible else {
+            return
+        }
+        updateDetailsPanelContent()
     }
 
     private func refreshVisibleDetailsPanel() {

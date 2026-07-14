@@ -72,6 +72,7 @@ func runHaloInteractionChecks() {
     testDetailsPanelUsesCompactContextPercent()
     testDetailsPanelKeepsContextPillWidthStable()
     testVisibleDetailsPanelStatusRefreshIsWiredToTick()
+    testUsageMonitoringLifecycleWiring()
     testStatusLineConfigurationReconciliationIsWiredToTick()
     testCodexPollingWorkIsNotPerformedOnMainTick()
     testCodexActivityDispatchIsThrottled()
@@ -83,7 +84,7 @@ func runHaloInteractionChecks() {
     testClaudeLiveSessionsRefreshIsThrottled()
     testHaloUsesShapeLayersNotCpuRasterization()
     testIdleAnimationUsesLowPowerCadence()
-    testDetailsPresentationUsesFocusedSessionAndRejectsStaleQuota()
+    testUsageProviderMappingIsTotal()
     testClaudeStandbyDetailsPreferLiveSessionIdentity()
     testClaudeUsageFreshnessTracksExactLiveSession()
     testDetailsPanelUsesTightBottomInset()
@@ -1334,6 +1335,166 @@ private func testVisibleDetailsPanelStatusRefreshIsWiredToTick() {
     )
 }
 
+private func testUsageMonitoringLifecycleWiring() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let appDelegateURL = sourceDirectory.appendingPathComponent("AppDelegate.swift")
+    guard let source = try? String(contentsOf: appDelegateURL, encoding: .utf8),
+          let launchStart = source.range(
+            of: "    func applicationDidFinishLaunching"
+          )?.lowerBound,
+          let launchEnd = source.range(
+            of: "    func applicationWillTerminate",
+            range: launchStart..<source.endIndex
+          )?.lowerBound,
+          let terminationEnd = source.range(
+            of: "    func applicationDidChangeScreenParameters",
+            range: launchEnd..<source.endIndex
+          )?.lowerBound,
+          let tickStart = source.range(of: "    private func tick() {")?.lowerBound,
+          let tickEnd = source.range(
+            of: "    private func createStatusItem()",
+            range: tickStart..<source.endIndex
+          )?.lowerBound,
+          let showStart = source.range(of: "    private func showDetails() {")?.lowerBound,
+          let showEnd = source.range(
+            of: "    private func updateDetailsPanelContent",
+            range: showStart..<source.endIndex
+          )?.lowerBound,
+          let updateStart = source.range(
+            of: "    private func updateDetailsPanelContent"
+          )?.lowerBound,
+          let updateEnd = source.range(
+            of: "    static func claudeMainSessionIdForDetails",
+            range: updateStart..<source.endIndex
+          )?.lowerBound,
+          let selectionStart = source.range(of: "    func setFocusedAgent(")?.lowerBound,
+          let selectionEnd = source.range(
+            of: "    @objc private func quit()",
+            range: selectionStart..<source.endIndex
+          )?.lowerBound,
+          let loopStart = source.range(of: "    private func startUsageRefreshLoop()")?.lowerBound,
+          let requestStart = source.range(
+            of: "    private func requestUsageRefresh",
+            range: loopStart..<source.endIndex
+          )?.lowerBound,
+          let publishStart = source.range(
+            of: "    private func publishUsageState",
+            range: requestStart..<source.endIndex
+          )?.lowerBound,
+          let publishEnd = source.range(
+            of: "    private func refreshVisibleDetailsPanel",
+            range: publishStart..<source.endIndex
+          )?.lowerBound else {
+        fatalError("AppDelegate usage-monitoring source should be readable")
+    }
+
+    let launchSource = source[launchStart..<launchEnd]
+    let terminationSource = source[launchEnd..<terminationEnd]
+    let tickSource = source[tickStart..<tickEnd]
+    let showSource = source[showStart..<showEnd]
+    let updateSource = source[updateStart..<updateEnd]
+    let selectionSource = source[selectionStart..<selectionEnd]
+    let loopSource = source[loopStart..<requestStart]
+    let requestSource = source[requestStart..<publishStart]
+    let publishSource = source[publishStart..<publishEnd]
+
+    expect(
+        source.contains("private let usageCoordinator = UsageMonitoringCoordinator.live()"),
+        "AppDelegate should own the live Usage coordinator"
+    )
+    expect(
+        source.contains("private var usageRefreshLoopTask: Task<Void, Never>?")
+            && source.contains("private var usageRequestTasks: [UsageProviderID: Task<Void, Never>] = [:]")
+            && source.contains("private let usageRefreshInterval: TimeInterval = 5 * 60"),
+        "Usage refresh should have a dedicated five-minute Task"
+    )
+    expect(
+        launchSource.contains("startUsageRefreshLoop()")
+            && launchSource.contains(
+                "requestUsageRefresh(for: Self.usageProviderID(for: settings.focusedAgent))"
+            )
+            && launchSource.range(of: "L10n.shared.setLanguage")!.lowerBound
+                < launchSource.range(of: "startUsageRefreshLoop()")!.lowerBound,
+        "launch should start the Usage loop and refresh the current Provider"
+    )
+    expect(
+        launchSource.contains("self.refreshVisibleDetailsPanel()"),
+        "language changes should redraw visible Provider details"
+    )
+    expect(
+        !tickSource.contains("usageCoordinator")
+            && !tickSource.contains("requestUsageRefresh")
+            && !tickSource.contains("refreshUsage"),
+        "Usage requests must stay out of tick and the 0.3-second timer path"
+    )
+    expect(
+        showSource.contains("updateDetailsPanelContent")
+            && showSource.contains("requestUsageRefresh")
+            && showSource.range(of: "updateDetailsPanelContent")!.lowerBound
+                < showSource.range(of: "requestUsageRefresh")!.lowerBound,
+        "showDetails should render current state before preparing and refreshing Usage"
+    )
+    expect(
+        selectionSource.contains("requestUsageRefresh(for: Self.usageProviderID(for: agent))"),
+        "agent selection should prepare and refresh the target Provider"
+    )
+    expect(
+        !selectionSource.contains("cancel()"),
+        "agent selection must not cancel another Provider's safe request"
+    )
+    expect(
+        requestSource.contains("guard usageRequestTasks[providerID] == nil")
+            && requestSource.contains("let prepared = await usageCoordinator.prepare(providerID)")
+            && requestSource.contains("publishUsageState(prepared, for: providerID)")
+            && requestSource.contains("let refreshed = await usageCoordinator.ensureFresh(providerID)")
+            && requestSource.contains("publishUsageState(refreshed, for: providerID)"),
+        "Usage requests should publish prepare and ensureFresh results in two phases"
+    )
+    expect(
+        publishSource.contains("usageStates[providerID] = state")
+            && publishSource.contains(
+                "guard providerID == Self.usageProviderID(for: settings.focusedAgent)"
+            )
+            && publishSource.contains("detailsPanel.isVisible")
+            && publishSource.range(of: "usageStates[providerID] = state")!.lowerBound
+                < publishSource.range(of: "guard providerID ==")!.lowerBound,
+        "async Usage publication should store by Provider before focus and visibility revalidation"
+    )
+    expect(
+        loopSource.contains("Task.sleep(nanoseconds:")
+            && loopSource.contains(
+                "requestUsageRefresh(for: Self.usageProviderID(for: settings.focusedAgent))"
+            ),
+        "the dedicated low-frequency loop should refresh the currently focused Provider"
+    )
+    expect(
+        source.contains("case .codex:") && source.contains("return .codex")
+            && source.contains("case .claudeCode:") && source.contains("return .claude"),
+        "AgentKind should map totally to its Usage Provider"
+    )
+    expect(
+        terminationSource.contains("usageRefreshLoopTask?.cancel()")
+            && terminationSource.contains("usageRequestTasks.values.forEach { $0.cancel() }")
+            && terminationSource.contains("Task { await usageCoordinator.cancelAll() }"),
+        "termination should cancel the refresh loop, wrapper tasks and coordinator work"
+    )
+    expect(
+        updateSource.contains("DetailsContentResolver.resolve(")
+            && updateSource.contains("detailsPanel.render(aggregate: displayedAggregate, model: model)")
+            && updateSource.contains("sessionTitle: session?.sessionTitle")
+            && updateSource.contains("ClaudeMainSessionDetailsResolver.resolve("),
+        "details content should resolve a view model and render it"
+    )
+    expect(
+        !updateSource.contains("rateLimitReader")
+            && !updateSource.contains("RateLimitReader")
+            && !updateSource.contains("showsQuota")
+            && !updateSource.contains("quota")
+            && !updateSource.contains("DetailsPresentation"),
+        "the new details path must not retain legacy quota assembly"
+    )
+}
+
 private func testStatusLineConfigurationReconciliationIsWiredToTick() {
     let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
     let appDelegateURL = sourceDirectory.appendingPathComponent("AppDelegate.swift")
@@ -1703,140 +1864,9 @@ private func testDetailsPanelLocalizesClaudeActivityDetails() {
 }
 
 @MainActor
-private func testDetailsPresentationUsesFocusedSessionAndRejectsStaleQuota() {
-    let now = Date()
-    let thirdPartySession = SessionSnapshot(
-        threadId: "codex-third-party",
-        projectName: "AgentHalo",
-        workingDirectory: "/tmp/AgentHalo",
-        state: .working,
-        action: "Running command",
-        lastEventAt: now,
-        completedAt: nil,
-        active: true,
-        modelName: "gpt-5.5",
-        inputTokens: 38_000,
-        outputTokens: 1_200,
-        hasRateLimits: false,
-        contextUsedPercent: 20
-    )
-    let staleQuota = RateLimitSnapshot(
-        primaryUsedPercent: 20,
-        secondaryUsedPercent: 80,
-        contextUsedPercent: 42
-    )
-    let codexAggregate = AggregateSnapshot(
-        state: .working,
-        label: "EXECUTING",
-        detail: "AgentHalo - Running command",
-        sessions: [thirdPartySession],
-        focusedAgent: .codex
-    )
-
-    let thirdParty = AppDelegate.detailsPresentationForDetails(
-        focusedAgent: .codex,
-        displayedAggregate: codexAggregate,
-        claudeMainSessionId: nil,
-        mainClaudeSessions: [],
-        liveClaudeSession: nil,
-        quota: staleQuota,
-        claudeUsage: nil
-    )
-    expect(!thirdParty.showsQuota, "stale global quota must not override current third-party Codex session")
-    expect(thirdParty.sessionDetails.modelName, "gpt-5.5", "Codex details should use focused session model")
-    expect(thirdParty.contextUsedPercent, 20, "Codex context should use the focused session rather than stale quota")
-
-    var subscriptionSession = thirdPartySession
-    subscriptionSession.hasRateLimits = true
-    let subscriptionAggregate = AggregateSnapshot(
-        state: .working,
-        label: "EXECUTING",
-        detail: "AgentHalo - Running command",
-        sessions: [subscriptionSession],
-        focusedAgent: .codex
-    )
-    let subscription = AppDelegate.detailsPresentationForDetails(
-        focusedAgent: .codex,
-        displayedAggregate: subscriptionAggregate,
-        claudeMainSessionId: nil,
-        mainClaudeSessions: [],
-        liveClaudeSession: nil,
-        quota: staleQuota,
-        claudeUsage: nil
-    )
-    expect(subscription.showsQuota, "Codex session with rate limits should keep quota UI")
-
-    let claudeSession = SessionSnapshot(
-        threadId: "cc-current",
-        projectName: "agent-a47ee146bdd2ba852",
-        workingDirectory: "/tmp/AgentHalo/.claude/worktrees/agent-a47ee146bdd2ba852",
-        state: .working,
-        action: "Thinking",
-        lastEventAt: now,
-        completedAt: nil,
-        active: true,
-        agent: .claudeCode
-    )
-    let claudeAggregate = AggregateSnapshot(
-        state: .working,
-        label: "THINKING",
-        detail: "AgentHalo - Thinking",
-        sessions: [claudeSession],
-        focusedAgent: .claudeCode
-    )
-    let matchingUsage = ClaudeContextUsageSnapshot(
-        sessionId: "cc-current",
-        usedPercent: 58,
-        modelName: "claude-sonnet-4",
-        inputTokens: 38_000,
-        outputTokens: 1_200,
-        updatedAt: now
-    )
-    let mainTranscript = SessionSnapshot(
-        threadId: "cc-current",
-        projectName: "AgentHalo",
-        workingDirectory: "/tmp/AgentHalo",
-        state: .idle,
-        action: "Ready",
-        lastEventAt: now,
-        completedAt: nil,
-        active: false,
-        agent: .claudeCode
-    )
-    let liveSession = ClaudeLiveSessionSnapshot(
-        sessionId: "cc-current",
-        workingDirectory: "/tmp/AgentHalo",
-        processId: 1,
-        status: "idle",
-        updatedAt: now
-    )
-    let claude = AppDelegate.detailsPresentationForDetails(
-        focusedAgent: .claudeCode,
-        displayedAggregate: claudeAggregate,
-        claudeMainSessionId: "cc-current",
-        mainClaudeSessions: [mainTranscript],
-        liveClaudeSession: liveSession,
-        quota: nil,
-        claudeUsage: matchingUsage
-    )
-    expect(!claude.showsQuota, "Claude Code should use metadata UI")
-    expect(claude.contextUsedPercent, 58, "Claude Code should retain context usage")
-    expect(claude.sessionDetails.projectName, "AgentHalo", "standby details should use the main project")
-    expect(claude.sessionDetails.modelName, "claude-sonnet-4", "Claude details should use matching statusline model")
-
-    var mismatchedUsage = matchingUsage
-    mismatchedUsage.sessionId = "cc-other"
-    let mismatched = AppDelegate.detailsPresentationForDetails(
-        focusedAgent: .claudeCode,
-        displayedAggregate: claudeAggregate,
-        claudeMainSessionId: "cc-current",
-        mainClaudeSessions: [mainTranscript],
-        liveClaudeSession: liveSession,
-        quota: nil,
-        claudeUsage: mismatchedUsage
-    )
-    expect(mismatched.sessionDetails.modelName == nil, "Claude details must reject another session's model")
-    expect(mismatched.contextUsedPercent == nil, "Claude details must reject another session's context usage")
+private func testUsageProviderMappingIsTotal() {
+    expect(AppDelegate.usageProviderID(for: .codex), .codex, "Codex Provider mapping")
+    expect(AppDelegate.usageProviderID(for: .claudeCode), .claude, "Claude Provider mapping")
 }
 
 @MainActor
