@@ -46,6 +46,50 @@ public protocol UsageKeychainAccessing: Sendable {
     func write(service: String, account: String?, value: String) throws
 }
 
+/// A deliberately inert credential backend used only by packaged verification.
+public struct DisabledUsageKeychain: UsageKeychainAccessing {
+    public init() {}
+    public func read(service: String, account: String?) throws -> String? { nil }
+    public func readFirstMatching(service: String) throws -> UsageKeychainItem? { nil }
+    public func write(service: String, account: String?, value: String) throws {
+        throw UsageKeychainError.disabled
+    }
+}
+
+public enum UsageMonitoringRuntimeMode: Equatable, Sendable {
+    case production
+    case packagedVerification
+}
+
+public enum UsageKeychainBackend: Equatable, Sendable {
+    case securityFramework
+    case disabled
+}
+
+public struct UsageKeychainDependency: Sendable {
+    public let keychain: any UsageKeychainAccessing
+    public let backend: UsageKeychainBackend
+}
+
+public enum UsageMonitoringDependencyFactory {
+    public static func keychain(
+        for mode: UsageMonitoringRuntimeMode,
+        securityItems: @Sendable () -> any UsageSecurityItemAccessing = {
+            SecurityFrameworkUsageItems()
+        }
+    ) -> UsageKeychainDependency {
+        switch mode {
+        case .production:
+            return UsageKeychainDependency(
+                keychain: SecurityUsageKeychain(items: securityItems()),
+                backend: .securityFramework
+            )
+        case .packagedVerification:
+            return UsageKeychainDependency(keychain: DisabledUsageKeychain(), backend: .disabled)
+        }
+    }
+}
+
 /// Injectable external-process runner. Production uses `Process`; checks
 /// use a fake.
 public protocol UsageProcessRunning: Sendable {
@@ -328,6 +372,9 @@ public final class SecurityUsageKeychain: UsageKeychainAccessing {
     }
 
     public func read(service: String, account: String?) throws -> String? {
+        guard let account, !account.isEmpty else {
+            throw UsageKeychainError.missingExactAccount
+        }
         let result = items.copyMatching(
             SecurityUsageKeychainQuery(
                 service: service,
@@ -372,6 +419,9 @@ public final class SecurityUsageKeychain: UsageKeychainAccessing {
     }
 
     public func write(service: String, account: String?, value: String) throws {
+        guard let account, !account.isEmpty else {
+            throw UsageKeychainError.missingExactAccount
+        }
         let data = Data(value.utf8)
         let query = SecurityUsageKeychainQuery(
             service: service,
@@ -397,6 +447,8 @@ public final class SecurityUsageKeychain: UsageKeychainAccessing {
 /// Keychain access errors. Does not carry the secret value.
 public enum UsageKeychainError: Error, Equatable, Sendable {
     case unexpectedExitCode(Int)
+    case missingExactAccount
+    case disabled
 }
 
 /// Production process runner backed by `Process`. Enforces a timeout so a
@@ -441,7 +493,11 @@ extension UsageKeychainError: CustomStringConvertible {
     public var description: String {
         switch self {
         case .unexpectedExitCode(let code):
-            return "keychain command exited with code \(code)"
+            return "keychain operation failed with status \(code)"
+        case .missingExactAccount:
+            return "keychain write requires an exact account"
+        case .disabled:
+            return "keychain access is disabled"
         }
     }
 }

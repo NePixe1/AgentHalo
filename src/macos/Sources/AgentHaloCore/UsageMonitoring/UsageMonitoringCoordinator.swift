@@ -23,6 +23,12 @@ public actor UsageMonitoringCoordinator {
         var signature: AccessSignature
         var generation: UInt64
         var prepareSequence: UInt64
+        var cancellationGeneration: UInt64
+    }
+
+    private struct PreparedResolution: Sendable {
+        let access: ResolvedProviderAccess
+        let cached: CachedUsageSnapshot?
     }
 
     private struct InFlightRecord {
@@ -34,11 +40,11 @@ public actor UsageMonitoringCoordinator {
     }
 
     private struct PrepareTaskRecord {
-        let task: Task<ResolvedProviderAccess, Never>
+        let task: Task<PreparedResolution, Never>
     }
 
     private let providers: [UsageProviderID: any UsageProvider]
-    private let cache: UsageSnapshotCache
+    private let cache: any UsageSnapshotCaching
     private let now: @Sendable () -> Date
 
     private var states: [UsageProviderID: UsageMonitorState] = [:]
@@ -57,7 +63,7 @@ public actor UsageMonitoringCoordinator {
 
     public init(
         providers: [any UsageProvider],
-        cache: UsageSnapshotCache,
+        cache: any UsageSnapshotCaching,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         self.providers = Dictionary(
@@ -86,6 +92,12 @@ public actor UsageMonitoringCoordinator {
         prepared: PrepareContext,
         externalRecoveryRemaining: Int
     ) async -> UsageMonitorState {
+        guard !isCancelling,
+              prepared.cancellationGeneration == cancellationGeneration,
+              !Task.isCancelled
+        else {
+            return cancellationContext(for: providerID).state
+        }
         guard case .oauth(let access) = prepared.access else {
             return prepared.state
         }
@@ -119,6 +131,12 @@ public actor UsageMonitoringCoordinator {
 
         var refreshing = prepared
         refreshing.state.isRefreshing = true
+        guard !isCancelling,
+              refreshing.cancellationGeneration == cancellationGeneration,
+              !Task.isCancelled
+        else {
+            return cancellationContext(for: providerID).state
+        }
         commit(refreshing, for: providerID)
 
         let token = UUID()
@@ -195,11 +213,12 @@ public actor UsageMonitoringCoordinator {
     }
 
     public static func live(
-        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        mode: UsageMonitoringRuntimeMode = .production
     ) -> UsageMonitoringCoordinator {
         let environment = ProcessInfoUsageEnvironment()
         let files = FilesystemUsageFiles()
-        let keychain = SecurityUsageKeychain()
+        let keychain = UsageMonitoringDependencyFactory.keychain(for: mode).keychain
         let http = URLSessionUsageHTTPClient(fixedHost: "official usage endpoints")
 
         let codexAuthStore = CodexAuthStore(
@@ -235,20 +254,45 @@ public actor UsageMonitoringCoordinator {
         let lifecycleGeneration = cancellationGeneration
         let sequence = nextPrepareSequence(for: providerID)
         guard let provider = providers[providerID] else {
-            return commitResolvedAccess(.apiKey, providerID: providerID, sequence: sequence)
+            return commitResolvedAccess(
+                .apiKey,
+                providerID: providerID,
+                sequence: sequence,
+                cancellationGeneration: lifecycleGeneration
+            )
         }
 
         let previousAccount = contexts[providerID]?.signature.accountKey
         let token = UUID()
         let cache = self.cache
-        let task = Task<ResolvedProviderAccess, Never> {
+        let task = Task<PreparedResolution, Never> {
             try? await cache.loadIfNeeded()
-            guard !Task.isCancelled else { return .apiKey }
-            return await provider.resolveAccess(accountKey: previousAccount)
+            guard !Task.isCancelled else {
+                return PreparedResolution(access: .apiKey, cached: nil)
+            }
+            let access = await provider.resolveAccess(accountKey: previousAccount)
+            guard !Task.isCancelled else {
+                return PreparedResolution(access: access, cached: nil)
+            }
+            let accountKey: AccountCacheKey?
+            if case .oauth(let oauth) = access {
+                accountKey = oauth.accountKey
+            } else if case .oauthNeedsSignIn(let signInKey) = access {
+                accountKey = signInKey
+            } else {
+                accountKey = nil
+            }
+            let cached: CachedUsageSnapshot?
+            if let accountKey {
+                cached = try? await cache.snapshot(for: accountKey)
+            } else {
+                cached = nil
+            }
+            return PreparedResolution(access: access, cached: cached)
         }
         prepareTasks[token] = PrepareTaskRecord(task: task)
-        let access = await task.value
-        prepareTasks.removeValue(forKey: token)
+        let resolution = await task.value
+        defer { prepareTasks.removeValue(forKey: token) }
 
         guard !isCancelling,
               cancellationGeneration == lifecycleGeneration,
@@ -261,13 +305,21 @@ public actor UsageMonitoringCoordinator {
             return await latestCommittedContext(for: providerID)
         }
 
-        let initial = commitResolvedAccess(access, providerID: providerID, sequence: sequence)
+        let access = resolution.access
+        let initial = commitResolvedAccess(
+            access,
+            providerID: providerID,
+            sequence: sequence,
+            cancellationGeneration: lifecycleGeneration
+        )
         guard let accountKey = initial.signature.accountKey else {
             return initial
         }
 
-        let cached = try? await cache.snapshot(for: accountKey)
-        guard prepareSequences[providerID] == sequence,
+        guard !isCancelling,
+              cancellationGeneration == lifecycleGeneration,
+              !Task.isCancelled,
+              prepareSequences[providerID] == sequence,
               let current = contexts[providerID],
               current.prepareSequence == sequence,
               current.generation == initial.generation,
@@ -276,6 +328,7 @@ public actor UsageMonitoringCoordinator {
             return await latestCommittedContext(for: providerID)
         }
 
+        let cached = resolution.cached
         if cached?.isFromCurrentRun == true {
             currentRunSnapshotKeys.insert(accountKey)
         }
@@ -315,14 +368,16 @@ public actor UsageMonitoringCoordinator {
             access: .apiKey,
             signature: Self.signature(for: .apiKey),
             generation: generationCounters[providerID] ?? 0,
-            prepareSequence: prepareSequences[providerID] ?? 0
+            prepareSequence: prepareSequences[providerID] ?? 0,
+            cancellationGeneration: cancellationGeneration
         )
     }
 
     private func commitResolvedAccess(
         _ access: ResolvedProviderAccess,
         providerID: UsageProviderID,
-        sequence: UInt64
+        sequence: UInt64,
+        cancellationGeneration: UInt64
     ) -> PrepareContext {
         let signature = Self.signature(for: access)
         let previous = contexts[providerID]
@@ -376,7 +431,8 @@ public actor UsageMonitoringCoordinator {
             access: access,
             signature: signature,
             generation: generation,
-            prepareSequence: sequence
+            prepareSequence: sequence,
+            cancellationGeneration: cancellationGeneration
         )
         commit(context, for: providerID)
         resumeSupersededPrepareWaiters(with: context, for: providerID)

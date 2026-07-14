@@ -48,8 +48,16 @@ public struct CodexAuthStore: Sendable {
             }
         }
 
-        if let access = reload(source: .keychain(service: Self.keychainService, account: nil)) {
-            return .oauth(access)
+        if let item = try? keychain.readFirstMatching(service: Self.keychainService) {
+            let data = Data(item.value.utf8)
+            if let object = try? CredentialJSON.object(from: data),
+               let access = makeOAuthAccess(
+                   from: data,
+                   object: object,
+                   source: .keychain(service: Self.keychainService, account: item.account)
+               ) {
+                return .oauth(access)
+            }
         }
 
         return .apiKey

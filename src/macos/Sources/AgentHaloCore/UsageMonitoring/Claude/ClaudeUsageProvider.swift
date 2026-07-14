@@ -150,20 +150,23 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
         }
         let response = try await usageClient.refreshToken(refreshToken)
         let rotation = try Self.rotation(from: response, now: now())
-        var inMemory = Self.rotatedAccess(rotation, replacing: expected)
+        var requestAccess = Self.rotatedAccess(rotation, replacing: expected)
+        requestAccess.accountKey = expected.accountKey
+        var persistedAccess: OAuthAccess?
 
         do {
             if let persisted = try authStore.persist(rotation: rotation, replacing: expected) {
-                inMemory = persisted
+                requestAccess = persisted
+                persistedAccess = persisted
             }
         } catch {
             NSLog("[ClaudeUsage] rotated credential writeback failed; continuing in memory")
         }
 
-        let migration = inMemory.accountKey != expected.accountKey
+        let migration = persistedAccess.map { $0.accountKey != expected.accountKey } == true
             ? expected.accountKey
             : nil
-        return (inMemory, migration)
+        return (requestAccess, migration)
     }
 
     private func generationChecked<Value: Sendable>(

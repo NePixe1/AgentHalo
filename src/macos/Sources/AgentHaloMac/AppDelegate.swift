@@ -137,7 +137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsSaveTimer: Timer?
     private var systemOverlaySuspended = false
     private var placementState = HaloPlacementRuntimeState()
-    private let usageCoordinator = UsageMonitoringCoordinator.live()
+    private let usageCoordinator: UsageMonitoringCoordinator
     private var usageStates: [UsageProviderID: UsageMonitorState] = [:]
     private var usageRefreshLoopTask: Task<Void, Never>?
     private var usageRequestTasks: [UsageProviderID: UsageRequestRecord] = [:]
@@ -165,10 +165,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     init(
         settingsStore: SettingsStore = SettingsStore(),
-        codexActivator: @escaping @MainActor () -> Void = CodexAppDetector.activateCodex
+        codexActivator: @escaping @MainActor () -> Void = CodexAppDetector.activateCodex,
+        usageCoordinator: UsageMonitoringCoordinator = .live()
     ) {
         self.settingsStore = settingsStore
         self.codexActivator = codexActivator
+        self.usageCoordinator = usageCoordinator
         self.settings = settingsStore.load()
         self.aggregate = SessionAggregator.aggregate(
             snapshots: [],

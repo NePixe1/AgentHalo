@@ -5,10 +5,17 @@ public struct CachedUsageSnapshot: Equatable, Sendable {
     public var isFromCurrentRun: Bool
 }
 
+public protocol UsageSnapshotCaching: Sendable {
+    func loadIfNeeded() async throws
+    func snapshot(for key: AccountCacheKey) async throws -> CachedUsageSnapshot?
+    func store(_ snapshot: UsageSnapshot) async throws
+    func migrate(from oldKey: AccountCacheKey, to newKey: AccountCacheKey) async throws
+}
+
 /// Provider-and-account scoped persistence for the last successful usage
 /// snapshots. The payload only contains provider-neutral usage models; raw
 /// credentials, requests and responses never enter this API.
-public actor UsageSnapshotCache {
+public actor UsageSnapshotCache: UsageSnapshotCaching {
     private static let schemaVersion = 1
     private static let maximumAccountsPerProvider = 3
     private static let maximumEntryAge: TimeInterval = 30 * 24 * 60 * 60

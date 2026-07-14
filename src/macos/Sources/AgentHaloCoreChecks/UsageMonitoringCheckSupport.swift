@@ -224,6 +224,66 @@ final class FakeUsageSecurityItems: UsageSecurityItemAccessing, @unchecked Senda
     func snapshot() -> State { state.value }
 }
 
+final class StatefulUsageSecurityItems: UsageSecurityItemAccessing, @unchecked Sendable {
+    struct Key: Hashable { let service: String; let account: String }
+    private let values: LockedBox<[Key: Data]>
+
+    init(_ initial: [(service: String, account: String, value: String)]) {
+        values = LockedBox(Dictionary(uniqueKeysWithValues: initial.map {
+            (Key(service: $0.service, account: $0.account), Data($0.value.utf8))
+        }))
+    }
+
+    func copyMatching(_ query: SecurityUsageKeychainQuery) -> SecurityUsageKeychainResult {
+        values.withValue { values in
+            let match: (key: Key, value: Data)?
+            if let account = query.account,
+               let value = values[Key(service: query.service, account: account)] {
+                match = (Key(service: query.service, account: account), value)
+            } else {
+                match = values
+                    .filter { $0.key.service == query.service }
+                    .sorted { $0.key.account < $1.key.account }
+                    .first
+                    .map { ($0.key, $0.value) }
+            }
+            guard let match else {
+                return SecurityUsageKeychainResult(
+                    status: UsageSecurityStatus.itemNotFound,
+                    account: nil,
+                    data: nil
+                )
+            }
+            return SecurityUsageKeychainResult(
+                status: UsageSecurityStatus.success,
+                account: query.returnAttributes ? match.key.account : nil,
+                data: query.returnData ? match.value : nil
+            )
+        }
+    }
+
+    func update(_ query: SecurityUsageKeychainQuery, value: Data) -> Int32 {
+        guard let account = query.account else { return -50 }
+        return values.withValue { values in
+            let key = Key(service: query.service, account: account)
+            guard values[key] != nil else { return UsageSecurityStatus.itemNotFound }
+            values[key] = value
+            return UsageSecurityStatus.success
+        }
+    }
+
+    func add(service: String, account: String?, value: Data) -> Int32 {
+        guard let account else { return -50 }
+        values.withValue { $0[Key(service: service, account: account)] = value }
+        return UsageSecurityStatus.success
+    }
+
+    func value(service: String, account: String) -> String? {
+        values.value[Key(service: service, account: account)]
+            .flatMap { String(data: $0, encoding: .utf8) }
+    }
+}
+
 // MARK: - Recording process runner
 
 struct RecordedUsageProcessCall: Equatable {

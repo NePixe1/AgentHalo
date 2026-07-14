@@ -589,6 +589,28 @@ private final class CoordinatorFailingWriteFiles: UsageFileAccessing, @unchecked
     }
 }
 
+private actor BlockingSnapshotCache: UsageSnapshotCaching {
+    private var continuation: CheckedContinuation<CachedUsageSnapshot?, Never>?
+    private(set) var snapshotCallCount = 0
+    private(set) var storeCallCount = 0
+
+    func loadIfNeeded() async throws {}
+
+    func snapshot(for key: AccountCacheKey) async throws -> CachedUsageSnapshot? {
+        snapshotCallCount += 1
+        return await withCheckedContinuation { continuation = $0 }
+    }
+
+    func store(_ snapshot: UsageSnapshot) async throws { storeCallCount += 1 }
+    func migrate(from oldKey: AccountCacheKey, to newKey: AccountCacheKey) async throws {}
+
+    func releaseSnapshot() {
+        let pending = continuation
+        continuation = nil
+        pending?.resume(returning: nil)
+    }
+}
+
 func runUsageMonitoringCoordinatorChecks() async {
     await testCoordinatorAPIKeyModeSkipsRefresh()
     await testCoordinatorDiskSnapshotIsExactStaleAndDoesNotSuppressRefresh()
@@ -602,10 +624,12 @@ func runUsageMonitoringCoordinatorChecks() async {
     await testCoordinatorSuccessAndFailureStatePriorities()
     await testCoordinatorRateLimitCooldownsArePerAccount()
     await testCoordinatorMigratesOnlyInternalRotation()
+    await testCoordinatorKeepsStableCacheWhenCodexRotationCannotPersist()
     await testCoordinatorRecoversRealCodexProviderAfterExternalLogin()
     await testCoordinatorRecoversRealClaudeProviderAfterExternalLogin()
     await testCoordinatorCancelAllAwaitsRefreshQuiescence()
     await testCoordinatorCancelAllAwaitsPrepareQuiescence()
+    await testCoordinatorCancelAllTracksBlockedCacheSnapshotThroughCommitBoundary()
     await testCoordinatorCancellationAndCacheWriteFailure()
 }
 
@@ -1159,6 +1183,35 @@ func testCoordinatorMigratesOnlyInternalRotation() async {
     expect(external.snapshot == nil, "external account change must not read old account cache")
 }
 
+func testCoordinatorKeepsStableCacheWhenCodexRotationCannotPersist() async {
+    let now = Date(timeIntervalSince1970: 2_100_006_100)
+    let authFiles = CodexCheckFailingFiles()
+    let expiring = codexCheckJWT(exp: now.addingTimeInterval(60).timeIntervalSince1970)
+    let fixture = makeCodexProviderFixture(token: expiring, now: now, files: authFiles)
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: codexUsageResponse(#"{"access_token":"memory-access","refresh_token":"memory-refresh"}"#))
+    await http.enqueue(response: codexUsageResponse(#"{"plan_type":"plus"}"#))
+    let provider = CodexUsageProvider(
+        authStore: fixture.0,
+        usageClient: CodexUsageClient(http: http),
+        now: { now }
+    )
+    let cacheFiles = FakeUsageFiles()
+    let cache = coordinatorCache(
+        files: cacheFiles,
+        path: "/tmp/agent-halo-unpersisted-rotation.json",
+        now: LockedBox(now)
+    )
+    try! await cache.store(coordinatorSnapshot(fixture.1.accountKey, at: now.addingTimeInterval(-600)))
+    let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now })
+
+    let refreshed = await coordinator.ensureFresh(.codex)
+    expect(refreshed.snapshot?.accountKey, fixture.1.accountKey, "failed writeback keeps Coordinator on the stable key")
+    let preparedAgain = await coordinator.prepare(.codex)
+    expect(preparedAgain.snapshot?.accountKey, fixture.1.accountKey, "next prepare from the old source finds the old-key cache")
+    expect(try! await cache.snapshot(for: fixture.1.accountKey) != nil, "old stable cache entry remains present")
+}
+
 func testCoordinatorRecoversRealCodexProviderAfterExternalLogin() async {
     let date = Date(timeIntervalSince1970: 2_100_006_500)
     let oldToken = codexCheckJWT(exp: date.addingTimeInterval(3_600).timeIntervalSince1970)
@@ -1340,6 +1393,36 @@ func testCoordinatorCancelAllAwaitsPrepareQuiescence() async {
     _ = await request.value
     expect(await provider.activeResolveCount, 0, "cancelAll must return only after prepare exits")
     expect(await provider.refreshCallCount, 0, "cancelled prepare must not start Provider refresh")
+}
+
+func testCoordinatorCancelAllTracksBlockedCacheSnapshotThroughCommitBoundary() async {
+    let key = AccountCacheKey(providerID: .codex, digest: "blocked-cache-prepare")
+    let provider = SequencedCoordinatorProvider(providerID: .codex)
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(key)))
+    let cache = BlockingSnapshotCache()
+    let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache)
+    let request = Task { await coordinator.ensureFresh(.codex) }
+    for _ in 0..<10_000 {
+        if await cache.snapshotCallCount == 1 { break }
+        await Task.yield()
+    }
+    expect(await cache.snapshotCallCount, 1, "prepare must reach the blocking cache snapshot")
+
+    let didReturn = LockedBox(false)
+    let cancellation = Task {
+        await coordinator.cancelAll()
+        didReturn.withValue { $0 = true }
+    }
+    for _ in 0..<100 { await Task.yield() }
+    expect(!didReturn.value, "cancelAll must await a prepare blocked in cache.snapshot")
+
+    await cache.releaseSnapshot()
+    await cancellation.value
+    _ = await request.value
+    expect(await provider.refreshCallCount, 0, "late cancelled prepare must not start refresh")
+    expect(await cache.storeCallCount, 0, "late cancelled prepare must not write cache")
+    expect((await coordinator.state(for: .codex)).snapshot == nil, "late cancelled prepare must not commit")
+    await cache.releaseSnapshot()
 }
 
 func testCoordinatorCancellationAndCacheWriteFailure() async {
@@ -1901,7 +1984,7 @@ func testCodexDiscoveryOrderWithoutCodexHome() {
     let keychain = FakeUsageKeychain()
     try? keychain.write(
         service: CodexAuthStore.keychainService,
-        account: nil,
+        account: "codex-account",
         value: String(data: codexCheckJSON(["tokens": ["access_token": "key-token"]]), encoding: .utf8)!
     )
     let storeKey = CodexAuthStore(environment: env, files: FakeUsageFiles(), keychain: keychain)
@@ -1911,7 +1994,7 @@ func testCodexDiscoveryOrderWithoutCodexHome() {
     expect(keyAccess.accessToken, "key-token", "keychain should be the last candidate")
     if case .keychain(let service, let account) = keyAccess.source {
         expect(service, CodexAuthStore.keychainService, "keychain service is Codex Auth")
-        expect(account == nil, true, "keychain account is nil")
+        expect(account, "codex-account", "keychain source keeps the discovered exact account")
     } else {
         fatalError("keychain source should be a keychain")
     }
@@ -2184,14 +2267,14 @@ func testCodexFileRotationPreservesCustomKeysAndMode() {
 }
 
 /// Case 8: Keychain rotation writes to service `Codex Auth` with the same
-/// account form.
+/// exact discovered account.
 func testCodexKeychainRotationWritesToCodexAuth() {
     let env = FakeUsageEnvironment()
     let keychain = FakeUsageKeychain()
     let kcJSON = String(data: codexCheckJSON([
         "tokens": ["access_token": "old-token", "account_id": "acct-1", "refresh_token": "old-rt"],
     ]), encoding: .utf8)!
-    try? keychain.write(service: CodexAuthStore.keychainService, account: nil, value: kcJSON)
+    try? keychain.write(service: CodexAuthStore.keychainService, account: "codex-account", value: kcJSON)
 
     let store = CodexAuthStore(environment: env, files: FakeUsageFiles(), keychain: keychain)
     guard case .oauth(let access) = store.resolveAccess() else {
@@ -2225,8 +2308,8 @@ func testCodexKeychainRotationWritesToCodexAuth() {
     expect(rotated.accountID, "acct-1", "account_id preserved")
 
     // The keychain entry should be updated at the same service/account.
-    expect(keychain.contains(service: CodexAuthStore.keychainService, account: nil), "keychain entry present")
-    let written = try? keychain.read(service: CodexAuthStore.keychainService, account: nil)
+    expect(keychain.contains(service: CodexAuthStore.keychainService, account: "codex-account"), "keychain entry present")
+    let written = try? keychain.read(service: CodexAuthStore.keychainService, account: "codex-account")
     guard let writtenObj = try? JSONSerialization.jsonObject(
         with: Data((written ?? "").utf8)
     ) as? [String: Any] else {
@@ -2393,8 +2476,10 @@ func claudeCheckPath(home: String) -> String {
 }
 
 func runClaudeAuthChecks() {
+    testUsageDependencyFactoryDisablesProductionKeychainForPackagedVerification()
     testSecurityUsageKeychainUsesAttributeOnlyMetadataThenExactDataRead()
     testSecurityUsageKeychainWritesSecretBytesInProcess()
+    testSecurityUsageKeychainRefusesServiceOnlyWriteAndUpdatesOneExactAccount()
     testSecurityUsageKeychainMapsNotFoundAndFrameworkErrors()
     testSecurityUsageKeychainSourceContainsNoSecretCLIPath()
     testClaudeDiscoveryIsKeychainFirst()
@@ -2412,6 +2497,28 @@ func runClaudeAuthChecks() {
     testClaudePersistRefusesServiceOnlySourceWithoutAccount()
     testClaudePersistRefusesCredentialGenerationMismatch()
     testClaudeRejectsNonProductionOAuthOverrides()
+}
+
+func testUsageDependencyFactoryDisablesProductionKeychainForPackagedVerification() {
+    let productionInstantiations = LockedBox(0)
+    let verification = UsageMonitoringDependencyFactory.keychain(for: .packagedVerification) {
+        productionInstantiations.withValue { $0 += 1 }
+        return FakeUsageSecurityItems()
+    }
+    expect(verification.backend, .disabled, "packaged verification must assemble the disabled backend")
+    expect(productionInstantiations.value, 0, "packaged verification must not instantiate Security.framework")
+    expect(
+        try? verification.keychain.readFirstMatching(service: CodexAuthStore.keychainService),
+        nil,
+        "disabled Keychain must always report not found"
+    )
+
+    let production = UsageMonitoringDependencyFactory.keychain(for: .production) {
+        productionInstantiations.withValue { $0 += 1 }
+        return FakeUsageSecurityItems()
+    }
+    expect(production.backend, .securityFramework, "normal startup must assemble SecurityUsageKeychain")
+    expect(productionInstantiations.value, 1, "production factory should instantiate its Security backend once")
 }
 
 func testSecurityUsageKeychainUsesAttributeOnlyMetadataThenExactDataRead() {
@@ -2476,6 +2583,29 @@ func testSecurityUsageKeychainWritesSecretBytesInProcess() {
     expect(addState.additions.first?.value, Data(secret.utf8), "add passes secret bytes in process")
 }
 
+func testSecurityUsageKeychainRefusesServiceOnlyWriteAndUpdatesOneExactAccount() {
+    let service = CodexAuthStore.keychainService
+    let items = StatefulUsageSecurityItems([
+        (service, "account-a", "value-a"),
+        (service, "account-b", "value-b"),
+    ])
+    let keychain = SecurityUsageKeychain(items: items)
+    let discovered = try? keychain.readFirstMatching(service: service)
+    expect(discovered?.account, "account-a", "legacy metadata ordering should discover the first exact account")
+
+    do {
+        try keychain.write(service: service, account: nil, value: "bulk-write")
+        fatalError("service-only Keychain writes must be rejected")
+    } catch let error as UsageKeychainError {
+        expect(error, .missingExactAccount, "ambiguous Keychain identity must fail safely")
+    } catch {
+        fatalError("unexpected Keychain error type")
+    }
+    try? keychain.write(service: service, account: discovered?.account, value: "rotated-a")
+    expect(items.value(service: service, account: "account-a"), "rotated-a", "target account rotates")
+    expect(items.value(service: service, account: "account-b"), "value-b", "other same-service account stays untouched")
+}
+
 func testSecurityUsageKeychainMapsNotFoundAndFrameworkErrors() {
     let missingItems = FakeUsageSecurityItems()
     missingItems.enqueueCopy(
@@ -2486,7 +2616,7 @@ func testSecurityUsageKeychainMapsNotFoundAndFrameworkErrors() {
         )
     )
     let missing = SecurityUsageKeychain(items: missingItems)
-    expect(try? missing.read(service: "missing", account: nil), nil, "SecItem not-found should remain nil")
+    expect(try? missing.read(service: "missing", account: "exact"), nil, "SecItem not-found should remain nil")
 
     let failureStatus: Int32 = -50
     let failingItems = FakeUsageSecurityItems()
@@ -2495,7 +2625,7 @@ func testSecurityUsageKeychainMapsNotFoundAndFrameworkErrors() {
     )
     let failing = SecurityUsageKeychain(items: failingItems)
     do {
-        _ = try failing.read(service: "broken", account: nil)
+        _ = try failing.read(service: "broken", account: "exact")
         fatalError("unexpected Security.framework status should throw")
     } catch let error as UsageKeychainError {
         expect(error, .unexpectedExitCode(Int(failureStatus)), "framework error mapping stays classified")
@@ -3702,7 +3832,8 @@ func testCodexProviderUsesRotatedTokenWhenWritebackFails() async {
     let requests = await http.capturedRequests
     expect(result.failure == nil, "writeback failure must not fail current usage request")
     expect(requests.last?.headers["authorization"], "Bearer memory-access", "in-memory token must serve current request")
-    expect(result.migrateCacheFrom, fixture.1.accountKey, "in-memory internal rotation should still migrate cache")
+    expect(result.snapshot?.accountKey, fixture.1.accountKey, "unpersisted Codex rotation keeps the stable account key")
+    expect(result.migrateCacheFrom == nil, "unpersisted Codex rotation must not migrate cache")
 }
 
 // MARK: - Claude usage checks
@@ -4329,5 +4460,6 @@ func testClaudeProviderUsesRotatedTokenWhenWritebackFails() async {
     let requests = await http.capturedRequests
     expect(result.failure == nil, "Claude writeback failure must not fail current request")
     expect(requests.last?.headers["authorization"], "Bearer memory-access", "Claude in-memory token serves current request")
-    expect(result.migrateCacheFrom, fixture.1.accountKey, "Claude in-memory internal rotation migrates cache")
+    expect(result.snapshot?.accountKey, fixture.1.accountKey, "unpersisted Claude rotation keeps the stable account key")
+    expect(result.migrateCacheFrom == nil, "unpersisted Claude rotation must not migrate cache")
 }

@@ -156,11 +156,14 @@ public struct CodexUsageProvider: UsageProvider, Sendable {
             idToken: response.idToken,
             refreshedAt: refreshedAt
         )
-        var inMemory = Self.rotatedAccess(response, replacing: expected)
+        var requestAccess = Self.rotatedAccess(response, replacing: expected)
+        requestAccess.accountKey = expected.accountKey
+        var persistedAccess: OAuthAccess?
 
         do {
             if let persisted = try authStore.persist(rotation: rotation, replacing: expected) {
-                inMemory = persisted
+                requestAccess = persisted
+                persistedAccess = persisted
             }
         } catch {
             // Deliberately omit the underlying error: it may contain a path or
@@ -168,10 +171,10 @@ public struct CodexUsageProvider: UsageProvider, Sendable {
             NSLog("[CodexUsage] rotated credential writeback failed; continuing in memory")
         }
 
-        let migration = inMemory.accountKey != expected.accountKey
+        let migration = persistedAccess.map { $0.accountKey != expected.accountKey } == true
             ? expected.accountKey
             : nil
-        return (inMemory, migration)
+        return (requestAccess, migration)
     }
 
     private func generationChecked<Value: Sendable>(

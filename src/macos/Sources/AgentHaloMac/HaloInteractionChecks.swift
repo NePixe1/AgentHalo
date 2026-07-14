@@ -75,6 +75,7 @@ func runHaloInteractionChecks() {
     testUsageTerminationWaitsForCoordinatorCancellation()
     testUsageTerminationHandshakeRejectsDuplicateWork()
     testUsageMonitoringLifecycleWiring()
+    testPackagedVerificationRuntimeSelectionIsExplicit()
     testStatusLineConfigurationReconciliationIsWiredToTick()
     testCodexPollingWorkIsNotPerformedOnMainTick()
     testCodexActivityDispatchIsThrottled()
@@ -97,6 +98,26 @@ func runHaloInteractionChecks() {
     testAgentToggleUsesCodexAndClaudeIcons()
     testAgentToggleKeepsWholeControlClickable()
     testDetailsPanelSwitchCallbackSelectsClaudeCode()
+}
+
+private func testPackagedVerificationRuntimeSelectionIsExplicit() {
+    let mainURL = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("main.swift")
+    guard let source = try? String(contentsOf: mainURL, encoding: .utf8) else {
+        fatalError("main.swift should be readable")
+    }
+    expect(
+        source.contains("let packagedVerificationArgument = \"--packaged-verification\"")
+            && source.contains("? .packagedVerification")
+            && source.contains(": .production")
+            && source.contains("UsageMonitoringCoordinator.live(mode: runtimeMode)"),
+        "only the explicit packaged marker should select disabled-Keychain assembly"
+    )
+    expect(
+        source.contains("PACKAGED_VERIFICATION_KEYCHAIN_DISABLED"),
+        "packaged verification should emit an auditable runtime marker"
+    )
 }
 
 @MainActor
@@ -1485,8 +1506,10 @@ private func testUsageMonitoringLifecycleWiring() {
     let publishSource = source[publishStart..<publishEnd]
 
     expect(
-        source.contains("private let usageCoordinator = UsageMonitoringCoordinator.live()"),
-        "AppDelegate should own the live Usage coordinator"
+        source.contains("private let usageCoordinator: UsageMonitoringCoordinator")
+            && source.contains("usageCoordinator: UsageMonitoringCoordinator = .live()")
+            && source.contains("self.usageCoordinator = usageCoordinator"),
+        "AppDelegate should own an injectable Usage coordinator with a production default"
     )
     expect(
         source.contains("private var usageRefreshLoopTask: Task<Void, Never>?")

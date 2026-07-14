@@ -140,7 +140,7 @@ case "$mode" in
       PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
       LANG="en_US.UTF-8" \
       ANTHROPIC_BASE_URL="http://127.0.0.1.invalid" \
-      /usr/bin/sandbox-exec -p "$sandbox_profile" "$app_binary" \
+      /usr/bin/sandbox-exec -p "$sandbox_profile" "$app_binary" --packaged-verification \
       >"$verify_diagnostics/app.log" 2>&1 &
     verify_pid=$!
 
@@ -159,6 +159,10 @@ case "$mode" in
     done
     if [[ "$verified_command" != "$app_binary" && "$verified_command" != "$app_binary "* ]]; then
       echo "Isolated PID $verify_pid is not the packaged binary: $verified_command" >&2
+      false
+    fi
+    if [[ "$verified_command" != *" --packaged-verification"* ]]; then
+      echo "Packaged verification marker missing from isolated launch: $verified_command" >&2
       false
     fi
 
@@ -180,6 +184,7 @@ case "$mode" in
       sleep 0.05
     done
     test -f "$readiness_lock"
+    /usr/bin/grep -q '^PACKAGED_VERIFICATION_KEYCHAIN_DISABLED$' "$verify_diagnostics/app.log"
 
     if [[ "${AGENTHALO_VERIFY_FORCE_READINESS_FAILURE:-0}" == "1" ]]; then
       echo "Forced isolated readiness failure" >&2
@@ -205,7 +210,7 @@ case "$mode" in
     sleep 1
     kill -0 "$verify_pid"
 
-    echo "Isolation: empty inherited environment, temporary home/config, network and Keychain denied"
+    echo "Isolation: explicit disabled-Keychain runtime, empty inherited environment, temporary home/config, network sandbox"
     echo "Verified isolated packaged PID $verify_pid: $verified_command"
     echo "Readiness: isolated instance lock + nonempty zero-session diagnostics"
     ;;
