@@ -27,6 +27,7 @@ func runUsageModelChecks() async {
     }
 
     await runCodexAuthChecks()
+    await runCodexUsageChecks()
 }
 
 /// Exercises the real `FilesystemUsageFiles.writeAtomically` path: an empty
@@ -622,4 +623,362 @@ func testCodexSourceVersionHashesRawDataBytes() {
     )
     expect(result == nil, true, "persist must refuse a raw-byte source version change")
     expect(mutableFiles.capturedWrites().count, 1, "persist must not write after raw-byte version mismatch")
+}
+
+// MARK: - Codex usage checks
+
+func codexUsageResponse(
+    statusCode: Int = 200,
+    headers: [String: String] = [:],
+    _ body: String
+) -> UsageHTTPResponse {
+    UsageHTTPResponse(statusCode: statusCode, headers: headers, body: Data(body.utf8))
+}
+
+func expectCodexFailure(
+    _ expected: UsageProviderFailure,
+    _ message: String,
+    operation: () async throws -> Void
+) async {
+    do {
+        try await operation()
+        fatalError("\(message): expected \(expected), got success")
+    } catch let failure as UsageProviderFailure {
+        expect(failure, expected, message)
+    } catch {
+        fatalError("\(message): unexpected error type")
+    }
+}
+
+func runCodexUsageChecks() async {
+    await testCodexUsageClientBuildsOnlyOfficialRequests()
+    await testCodexUsageClientClassifiesFailures()
+    testCodexUsageMapperPlansWindowsAndRestrictedFields()
+    testCodexUsageMapperClassifiesInvalidResponses()
+    await testCodexProviderAdoptsExternalSourceWithoutMigration()
+    await testCodexProviderRefreshesProactively()
+    await testCodexProviderRetriesOneUnauthorizedAndMigratesCache()
+    await testCodexProviderStopsAfterSecondUnauthorized()
+    await testCodexProviderRefreshCodesRequireSignIn()
+    await testCodexProviderUsesRotatedTokenWhenWritebackFails()
+}
+
+func testCodexUsageClientBuildsOnlyOfficialRequests() async {
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: codexUsageResponse(#"{"plan_type":"plus"}"#))
+    await http.enqueue(response: codexUsageResponse(#"{"access_token":"new-access","refresh_token":"new-refresh","id_token":"new-id"}"#))
+    let client = CodexUsageClient(http: http, now: { Date(timeIntervalSince1970: 2_000_000_000) })
+
+    _ = try? await client.fetchUsage(accessToken: "access token", accountID: "account-1")
+    let refreshed = try? await client.refreshToken("refresh token+/=")
+    expect(refreshed?.accessToken, "new-access", "refresh response access token")
+
+    let requests = await http.capturedRequests
+    expect(requests.count, 2, "client should issue exactly usage and refresh requests")
+    expect(requests[0].method, "GET", "usage method")
+    expect(requests[0].host, "chatgpt.com", "usage official host")
+    expect(requests[0].path, "/backend-api/wham/usage", "usage official path")
+    expect(requests[0].timeout, 10, "usage timeout")
+    expect(requests[0].headers["authorization"], "Bearer access token", "usage bearer header")
+    expect(requests[0].headers["chatgpt-account-id"], "account-1", "usage account header")
+
+    expect(requests[1].method, "POST", "refresh method")
+    expect(requests[1].host, "auth.openai.com", "refresh official host")
+    expect(requests[1].path, "/oauth/token", "refresh official path")
+    expect(requests[1].timeout, 15, "refresh timeout")
+    expect(requests[1].headers["content-type"], "application/x-www-form-urlencoded", "refresh content type")
+    let form = String(data: requests[1].body ?? Data(), encoding: .utf8) ?? ""
+    expect(form.contains("grant_type=refresh_token"), "refresh form grant type")
+    expect(form.contains("client_id=app_EMoamEEZ73f0CkXaXp7hrann"), "refresh form client id")
+    expect(form.contains("refresh_token=refresh%20token%2B%2F%3D"), "refresh token must be form encoded")
+    expect(
+        requests.allSatisfy {
+            !$0.path.contains("reset-credit") && !$0.path.contains("balance") &&
+                !$0.path.contains("spend") && ["chatgpt.com", "auth.openai.com"].contains($0.host)
+        },
+        "Codex client must call only the two approved official endpoints"
+    )
+
+    let noAccountHTTP = RecordingUsageHTTPClient()
+    await noAccountHTTP.enqueue(response: codexUsageResponse(#"{"plan_type":"free"}"#))
+    _ = try? await CodexUsageClient(http: noAccountHTTP).fetchUsage(accessToken: "a", accountID: nil)
+    let noAccountRequests = await noAccountHTTP.capturedRequests
+    expect(noAccountRequests.first?.headers["chatgpt-account-id"] == nil, "account header must be optional")
+}
+
+func testCodexUsageClientClassifiesFailures() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+
+    let transport = RecordingUsageHTTPClient()
+    await transport.enqueue(error: .network)
+    await expectCodexFailure(.network, "transport failure") {
+        _ = try await CodexUsageClient(http: transport, now: { now }).fetchUsage(accessToken: "a", accountID: nil)
+    }
+
+    let unavailable = RecordingUsageHTTPClient()
+    await unavailable.enqueue(response: codexUsageResponse(statusCode: 503, "{}"))
+    await expectCodexFailure(.serviceUnavailable, "5xx failure") {
+        _ = try await CodexUsageClient(http: unavailable, now: { now }).fetchUsage(accessToken: "a", accountID: nil)
+    }
+
+    let limited = RecordingUsageHTTPClient()
+    await limited.enqueue(response: codexUsageResponse(statusCode: 429, headers: ["Retry-After": "120"], "{}"))
+    await expectCodexFailure(.rateLimited(retryAt: now.addingTimeInterval(120)), "Retry-After seconds") {
+        _ = try await CodexUsageClient(http: limited, now: { now }).fetchUsage(accessToken: "a", accountID: nil)
+    }
+
+    let dateLimited = RecordingUsageHTTPClient()
+    await dateLimited.enqueue(response: codexUsageResponse(
+        statusCode: 429,
+        headers: ["Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"],
+        "{}"
+    ))
+    let retryDate = Date(timeIntervalSince1970: 1_445_412_480)
+    await expectCodexFailure(.rateLimited(retryAt: retryDate), "Retry-After HTTP date") {
+        _ = try await CodexUsageClient(http: dateLimited, now: { now }).fetchUsage(accessToken: "a", accountID: nil)
+    }
+
+    let malformed = RecordingUsageHTTPClient()
+    await malformed.enqueue(response: codexUsageResponse("not-json"))
+    await expectCodexFailure(.invalidResponse, "malformed successful usage body") {
+        _ = try await CodexUsageClient(http: malformed).fetchUsage(accessToken: "a", accountID: nil)
+    }
+}
+
+func testCodexUsageMapperPlansWindowsAndRestrictedFields() {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let accountKey = AccountCacheKey(providerID: .codex, digest: "mapper")
+    let planCases: [(String, String?)] = [
+        ("prolite", "Pro 5x"), ("pro", "Pro 20x"), ("free", "Free"),
+        ("plus", "Plus"), ("", nil), ("team_plan", "Team Plan"),
+    ]
+    for (raw, expected) in planCases {
+        let mapped = try? CodexUsageMapper.map(
+            response: codexUsageResponse(
+                #"{"plan_type":"\#(raw)","rate_limit":{"primary_window":{"used_percent":1}}}"#
+            ),
+            accountKey: accountKey,
+            now: now
+        )
+        expect(mapped?.planName, expected, "Codex plan mapping for \(raw)")
+    }
+
+    let response = codexUsageResponse("""
+    {
+      "plan_type": "pro",
+      "rate_limit": {
+        "primary_window": {
+          "used_percent": -5,
+          "limit_window_seconds": 18000,
+          "reset_after_seconds": 60
+        },
+        "secondary_window": {
+          "used_percent": 140,
+          "limit_window_seconds": 604800,
+          "reset_at": "2033-05-18T03:35:00Z"
+        }
+      },
+      "additional_rate_limits": [{"rate_limit":{"primary_window":{"used_percent":55}}}],
+      "credits": {"balance": 100},
+      "rate_limit_reset_credits": {"available_count": 9},
+      "balance": 100,
+      "spend": 50
+    }
+    """)
+    guard let mapped = try? CodexUsageMapper.map(response: response, accountKey: accountKey, now: now) else {
+        fatalError("valid Codex usage should map")
+    }
+    expect(mapped.windows.count, 2, "mapper must expose exactly the two supported windows")
+    expect(mapped.windows[0].kind, .session, "primary 5-hour window kind")
+    expect(mapped.windows[0].usedPercent, 0, "used percent lower clamp")
+    expect(mapped.windows[0].duration, 18_000, "session duration")
+    expect(mapped.windows[0].resetsAt, now.addingTimeInterval(60), "reset-after seconds")
+    expect(mapped.windows[1].kind, .weekly, "secondary weekly window kind")
+    expect(mapped.windows[1].usedPercent, 100, "used percent upper clamp")
+    expect(mapped.windows[1].duration, 604_800, "weekly duration")
+    expect(mapped.windows[1].resetsAt, ISO8601DateFormatter().date(from: "2033-05-18T03:35:00Z"), "ISO reset time")
+
+    let weeklyOnly = try? CodexUsageMapper.map(
+        response: codexUsageResponse("""
+        {"rate_limit":{"primary_window":{"used_percent":5,"limit_window_seconds":604800}}}
+        """),
+        accountKey: accountKey,
+        now: now
+    )
+    expect(weeklyOnly?.windows.count, 1, "missing secondary must stay absent")
+    expect(weeklyOnly?.windows.first?.kind, .weekly, "sole 7-day primary must reclassify as weekly")
+}
+
+func testCodexUsageMapperClassifiesInvalidResponses() {
+    let key = AccountCacheKey(providerID: .codex, digest: "invalid")
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let cases: [(UsageHTTPResponse, UsageProviderFailure)] = [
+        (codexUsageResponse("{}"), .invalidResponse),
+        (codexUsageResponse(#"{"credits":{"balance":100}}"#), .invalidResponse),
+        (codexUsageResponse(statusCode: 401, "{}"), .signInAgain),
+        (codexUsageResponse(statusCode: 503, "{}"), .serviceUnavailable),
+    ]
+    for (response, expected) in cases {
+        do {
+            _ = try CodexUsageMapper.map(response: response, accountKey: key, now: now)
+            fatalError("invalid Codex response should fail")
+        } catch let failure as UsageProviderFailure {
+            expect(failure, expected, "Codex mapper failure classification")
+        } catch {
+            fatalError("unexpected Codex mapper error")
+        }
+    }
+}
+
+func makeCodexProviderFixture(
+    token: String,
+    refreshToken: String = "refresh-old",
+    accountID: String? = nil,
+    now: Date,
+    files: (any UsageFileAccessing)? = nil
+) -> (CodexAuthStore, OAuthAccess, any UsageFileAccessing, String) {
+    let home = "/tmp/agent-halo-provider-\(UUID().uuidString)"
+    let path = codexCheckAuthPath(home: home)
+    var tokens: [String: Any] = ["access_token": token, "refresh_token": refreshToken]
+    if let accountID { tokens["account_id"] = accountID }
+    let initial = codexCheckJSON(["tokens": tokens, "last_refresh": "2030-01-01T00:00:00Z"])
+    let resolvedFiles: any UsageFileAccessing = files ?? FakeUsageFiles(contents: [path: initial])
+    if let custom = resolvedFiles as? CodexCheckFailingFiles {
+        custom.setData(initial, at: path)
+    }
+    let store = CodexAuthStore(
+        environment: FakeUsageEnvironment(["HOME": home]),
+        files: resolvedFiles,
+        keychain: FakeUsageKeychain(),
+        now: { now }
+    )
+    guard case .oauth(let access) = store.resolveAccess() else {
+        fatalError("provider fixture should resolve OAuth")
+    }
+    return (store, access, resolvedFiles, path)
+}
+
+func testCodexProviderAdoptsExternalSourceWithoutMigration() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let oldJWT = codexCheckJWT(exp: now.addingTimeInterval(60).timeIntervalSince1970)
+    let fixture = makeCodexProviderFixture(token: oldJWT, now: now)
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let externalJWT = codexCheckJWT(exp: now.addingTimeInterval(3_600).timeIntervalSince1970)
+    try? files.writeAtomically(
+        codexCheckJSON(["tokens": ["access_token": externalJWT, "refresh_token": "external-refresh"]]),
+        to: fixture.3,
+        preservingModeOf: fixture.3
+    )
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: codexUsageResponse(#"{"plan_type":"plus"}"#))
+    let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expect(result.failure == nil, "external source adoption should succeed")
+    expect(result.migrateCacheFrom == nil, "external source adoption must not migrate cache")
+    expect(requests.count, 1, "fresh external token must avoid refresh")
+    expect(requests.first?.headers["authorization"], "Bearer \(externalJWT)", "usage must use external token")
+}
+
+func testCodexProviderRefreshesProactively() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let expiring = codexCheckJWT(exp: now.addingTimeInterval(60).timeIntervalSince1970)
+    let fixture = makeCodexProviderFixture(token: expiring, accountID: "stable-account", now: now)
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: codexUsageResponse(#"{"access_token":"proactive-access","refresh_token":"proactive-refresh"}"#))
+    await http.enqueue(response: codexUsageResponse(#"{"plan_type":"free"}"#))
+    let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expect(result.failure == nil, "proactive refresh should succeed")
+    expect(requests.map(\.path), ["/oauth/token", "/backend-api/wham/usage"], "proactive refresh order")
+    expect(requests.last?.headers["authorization"], "Bearer proactive-access", "proactive token must serve usage")
+    expect(result.migrateCacheFrom == nil, "stable account id should not require cache migration")
+}
+
+func testCodexProviderRetriesOneUnauthorizedAndMigratesCache() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fresh = codexCheckJWT(exp: now.addingTimeInterval(3_600).timeIntervalSince1970)
+    let fixture = makeCodexProviderFixture(token: fresh, now: now)
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: codexUsageResponse(statusCode: 401, "{}"))
+    await http.enqueue(response: codexUsageResponse(#"{"access_token":"retry-access","refresh_token":"retry-refresh"}"#))
+    await http.enqueue(response: codexUsageResponse(#"{"plan_type":"pro"}"#))
+    let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expect(result.failure == nil, "first 401 should refresh and retry")
+    expect(
+        requests.map(\.path),
+        ["/backend-api/wham/usage", "/oauth/token", "/backend-api/wham/usage"],
+        "401 retry request order"
+    )
+    expect(requests.last?.headers["authorization"], "Bearer retry-access", "retry must use rotated token")
+    expect(result.migrateCacheFrom, fixture.1.accountKey, "internal rotation should return old cache key")
+}
+
+func testCodexProviderStopsAfterSecondUnauthorized() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fresh = codexCheckJWT(exp: now.addingTimeInterval(3_600).timeIntervalSince1970)
+    let fixture = makeCodexProviderFixture(token: fresh, now: now)
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: codexUsageResponse(statusCode: 401, "{}"))
+    await http.enqueue(response: codexUsageResponse(#"{"access_token":"retry-access"}"#))
+    await http.enqueue(response: codexUsageResponse(statusCode: 401, "{}"))
+    let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expect(result.failure, .signInAgain, "second 401 should require sign in")
+    expect(requests.filter { $0.path == "/backend-api/wham/usage" }.count, 2, "usage must retry at most once")
+}
+
+func testCodexProviderRefreshCodesRequireSignIn() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    for code in ["refresh_token_expired", "refresh_token_reused", "refresh_token_invalidated"] {
+        let fresh = codexCheckJWT(exp: now.addingTimeInterval(3_600).timeIntervalSince1970)
+        let fixture = makeCodexProviderFixture(token: fresh, now: now)
+        let http = RecordingUsageHTTPClient()
+        await http.enqueue(response: codexUsageResponse(statusCode: 401, "{}"))
+        await http.enqueue(response: codexUsageResponse(statusCode: 400, #"{"error":{"code":"\#(code)"}}"#))
+        let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+        let result = await provider.refresh(using: .oauth(fixture.1))
+        expect(result.failure, .signInAgain, "refresh code \(code) should require sign in")
+    }
+}
+
+final class CodexCheckFailingFiles: UsageFileAccessing, @unchecked Sendable {
+    private let data = LockedBox<[String: Data]>([:])
+
+    func setData(_ value: Data, at path: String) {
+        data.withValue { $0[path] = value }
+    }
+
+    func readDataIfPresent(at path: String) throws -> Data? {
+        data.value[path]
+    }
+
+    func writeAtomically(_ data: Data, to path: String, preservingModeOf existingPath: String?) throws {
+        throw UsageProviderFailure.network
+    }
+}
+
+func testCodexProviderUsesRotatedTokenWhenWritebackFails() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let files = CodexCheckFailingFiles()
+    let expiring = codexCheckJWT(exp: now.addingTimeInterval(60).timeIntervalSince1970)
+    let fixture = makeCodexProviderFixture(token: expiring, now: now, files: files)
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: codexUsageResponse(#"{"access_token":"memory-access","refresh_token":"memory-refresh"}"#))
+    await http.enqueue(response: codexUsageResponse(#"{"plan_type":"plus"}"#))
+    let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expect(result.failure == nil, "writeback failure must not fail current usage request")
+    expect(requests.last?.headers["authorization"], "Bearer memory-access", "in-memory token must serve current request")
+    expect(result.migrateCacheFrom, fixture.1.accountKey, "in-memory internal rotation should still migrate cache")
 }

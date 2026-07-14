@@ -9,13 +9,22 @@ public struct UsageHTTPRequest: Sendable {
     public var path: String
     public var headers: [String: String]
     public var body: Data?
+    public var timeout: TimeInterval
 
-    public init(method: String, host: String, path: String, headers: [String: String], body: Data?) {
+    public init(
+        method: String,
+        host: String,
+        path: String,
+        headers: [String: String],
+        body: Data?,
+        timeout: TimeInterval = 30
+    ) {
         self.method = method
         self.host = host
         self.path = path
         self.headers = UsageHTTPRequest.normalizeHeaders(headers)
         self.body = body
+        self.timeout = timeout
     }
 
     /// Lowercase every header key so lookups are case-insensitive on both
@@ -75,6 +84,7 @@ public final class URLSessionUsageHTTPClient: UsageHTTPClient {
         var urlRequest = URLRequest(url: URL(string: "https://\(request.host)\(request.path)")!)
         urlRequest.httpMethod = request.method
         urlRequest.httpBody = request.body
+        urlRequest.timeoutInterval = request.timeout
         for (key, value) in request.headers {
             urlRequest.setValue(value, forHTTPHeaderField: key)
         }

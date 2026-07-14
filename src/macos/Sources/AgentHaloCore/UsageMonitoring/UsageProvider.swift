@@ -6,11 +6,18 @@ public struct UsageRefreshResult: Sendable {
     public let providerID: UsageProviderID
     public let snapshot: UsageSnapshot?
     public let failure: UsageProviderFailure?
+    public let migrateCacheFrom: AccountCacheKey?
 
-    public init(providerID: UsageProviderID, snapshot: UsageSnapshot?, failure: UsageProviderFailure?) {
+    public init(
+        providerID: UsageProviderID,
+        snapshot: UsageSnapshot?,
+        failure: UsageProviderFailure?,
+        migrateCacheFrom: AccountCacheKey? = nil
+    ) {
         self.providerID = providerID
         self.snapshot = snapshot
         self.failure = failure
+        self.migrateCacheFrom = migrateCacheFrom
     }
 }
 
