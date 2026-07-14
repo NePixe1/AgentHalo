@@ -807,10 +807,12 @@ private func testDetailsPanelAlwaysShowsProviderRow() {
 
     expect(panel.providerTextForTesting, "Codex", "provider row should always show the selected provider")
     expect(
-        Array(panel.contentOrderForTesting.prefix(4)),
-        [.agentSwitcher, .provider, .statusTitle, .statusDetail],
-        "provider row should sit between the Agent switcher and Halo status"
+        panel.contentOrderForTesting,
+        [.agentSwitcher, .provider, .statusTitle, .statusDetail, .usageBody, .sessionBody],
+        "provider row should sit directly between the Agent switcher and Halo status in the exact panel structure"
     )
+    expect(panel.contentOrderForTesting.count, 6, "details panel should contain exactly six top-level rows")
+    expect(!panel.contentOrderForTesting.contains(.unknown), "details panel should reject unknown top-level rows")
     expect(panel.providerRowHeightForTesting, 20, "provider row should use its fixed height")
     let labels = allDescendants(of: panel.contentView!).compactMap { ($0 as? NSTextField)?.stringValue }
     expect(!labels.contains("OAuth") && !labels.contains("API"), "details panel should not show an access-mode label")
@@ -822,10 +824,12 @@ private func testDetailsPanelAlwaysShowsProviderRow() {
     )
     expect(panel.providerTextForTesting, "Claude Code", "offline details should retain the provider row")
     expect(
-        Array(panel.contentOrderForTesting.prefix(4)),
-        [.agentSwitcher, .provider, .statusTitle, .statusDetail],
-        "offline provider row should keep the same structural position"
+        panel.contentOrderForTesting,
+        [.agentSwitcher, .provider, .statusTitle, .statusDetail, .usageBody, .sessionBody],
+        "offline provider row should keep the same exact structural position"
     )
+    expect(panel.contentOrderForTesting.count, 6, "offline details should keep exactly six top-level rows")
+    expect(!panel.contentOrderForTesting.contains(.unknown), "offline details should reject unknown top-level rows")
     expect(panel.providerRowHeightForTesting, 20, "offline provider row should keep the shared height")
 }
 
@@ -940,6 +944,8 @@ private func testDetailsPanelShowsFourIndependentSessionRows() {
         [.project, .separator, .sessionTitle, .separator, .model, .separator, .tokens],
         "API rows should keep the required arranged-subview order"
     )
+    expect(panel.sessionBodyOrderForTesting.count, 7, "API body should contain exactly seven arranged subviews")
+    expect(!panel.sessionBodyOrderForTesting.contains(.unknown), "API body should reject unknown rows or titles")
     expect(
         panel.sessionBodyOrderForTesting.filter { $0 == .separator }.count,
         3,

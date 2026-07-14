@@ -8,6 +8,7 @@ enum DetailsPanelContentRole: Equatable {
     case statusDetail
     case usageBody
     case sessionBody
+    case unknown
 }
 
 enum DetailsPanelSessionBodyRole: Equatable {
@@ -16,6 +17,7 @@ enum DetailsPanelSessionBodyRole: Equatable {
     case sessionTitle
     case model
     case tokens
+    case unknown
 }
 
 @MainActor
@@ -510,14 +512,14 @@ class DetailsPanel: NSPanel {
     }
 
     var contentOrderForTesting: [DetailsPanelContentRole] {
-        stack.arrangedSubviews.compactMap { view in
+        stack.arrangedSubviews.map { view in
             if view === topRow { return .agentSwitcher }
             if view === providerHeader { return .provider }
             if view === titleField { return .statusTitle }
             if view === detailField { return .statusDetail }
             if view === quotaGroup { return .usageBody }
             if view === metadataGroup { return .sessionBody }
-            return nil
+            return .unknown
         }
     }
 
@@ -563,13 +565,13 @@ class DetailsPanel: NSPanel {
     }
 
     var sessionBodyOrderForTesting: [DetailsPanelSessionBodyRole] {
-        metadataGroup.arrangedSubviews.compactMap { view in
+        metadataGroup.arrangedSubviews.map { view in
             if view === projectRow { return .project }
             if view === sessionTitleRow { return .sessionTitle }
             if view === modelRow { return .model }
             if view === tokenRow { return .tokens }
             if view is SeparatorView { return .separator }
-            return nil
+            return .unknown
         }
     }
 
