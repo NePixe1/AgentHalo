@@ -22,6 +22,7 @@ public actor UsageMonitoringCoordinator {
         var access: ResolvedProviderAccess
         var signature: AccessSignature
         var generation: UInt64
+        var prepareSequence: UInt64
     }
 
     private struct InFlightRecord {
@@ -43,6 +44,9 @@ public actor UsageMonitoringCoordinator {
     private var currentRunSnapshotKeys: Set<AccountCacheKey> = []
     private var prepareSequences: [UsageProviderID: UInt64] = [:]
     private var generationCounters: [UsageProviderID: UInt64] = [:]
+    private var supersededPrepareWaiters: [
+        UsageProviderID: [CheckedContinuation<PrepareContext, Never>]
+    ] = [:]
 
     public init(
         providers: [any UsageProvider],
@@ -183,7 +187,7 @@ public actor UsageMonitoringCoordinator {
         let access = await provider.resolveAccess(accountKey: previousAccount)
 
         guard prepareSequences[providerID] == sequence else {
-            return currentContextOrAPIKey(providerID)
+            return await latestCommittedContext(for: providerID)
         }
 
         let initial = commitResolvedAccess(access, providerID: providerID, sequence: sequence)
@@ -194,10 +198,11 @@ public actor UsageMonitoringCoordinator {
         let cached = try? await cache.snapshot(for: accountKey)
         guard prepareSequences[providerID] == sequence,
               let current = contexts[providerID],
+              current.prepareSequence == sequence,
               current.generation == initial.generation,
               current.signature == initial.signature
         else {
-            return currentContextOrAPIKey(providerID)
+            return await latestCommittedContext(for: providerID)
         }
 
         if cached?.isFromCurrentRun == true {
@@ -233,10 +238,6 @@ public actor UsageMonitoringCoordinator {
         providerID: UsageProviderID,
         sequence: UInt64
     ) -> PrepareContext {
-        guard prepareSequences[providerID] == sequence else {
-            return currentContextOrAPIKey(providerID)
-        }
-
         let signature = Self.signature(for: access)
         let previous = contexts[providerID]
         let generation: UInt64
@@ -288,9 +289,11 @@ public actor UsageMonitoringCoordinator {
             state: state,
             access: access,
             signature: signature,
-            generation: generation
+            generation: generation,
+            prepareSequence: sequence
         )
         commit(context, for: providerID)
+        resumeSupersededPrepareWaiters(with: context, for: providerID)
         return context
     }
 
@@ -435,16 +438,30 @@ public actor UsageMonitoringCoordinator {
         states[providerID] = context.state
     }
 
-    private func currentContextOrAPIKey(_ providerID: UsageProviderID) -> PrepareContext {
-        if let context = contexts[providerID] {
+    private func latestCommittedContext(for providerID: UsageProviderID) async -> PrepareContext {
+        if let context = contexts[providerID],
+           context.prepareSequence == prepareSequences[providerID] {
             return context
         }
-        return PrepareContext(
-            state: UsageMonitorState(providerID: providerID, accessMode: .apiKey),
-            access: .apiKey,
-            signature: AccessSignature(mode: .apiKey, accountKey: nil, sourceVersion: nil),
-            generation: generationCounters[providerID] ?? 0
-        )
+        return await withCheckedContinuation { continuation in
+            if let context = contexts[providerID],
+               context.prepareSequence == prepareSequences[providerID] {
+                continuation.resume(returning: context)
+            } else {
+                supersededPrepareWaiters[providerID, default: []].append(continuation)
+            }
+        }
+    }
+
+    private func resumeSupersededPrepareWaiters(
+        with context: PrepareContext,
+        for providerID: UsageProviderID
+    ) {
+        guard context.prepareSequence == prepareSequences[providerID] else { return }
+        let waiters = supersededPrepareWaiters.removeValue(forKey: providerID) ?? []
+        for waiter in waiters {
+            waiter.resume(returning: context)
+        }
     }
 
     private func nextPrepareSequence(for providerID: UsageProviderID) -> UInt64 {

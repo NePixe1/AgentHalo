@@ -266,6 +266,7 @@ func runUsageMonitoringCoordinatorChecks() async {
     await testCoordinatorDiskSnapshotIsExactStaleAndDoesNotSuppressRefresh()
     await testCoordinatorCurrentRunFreshnessAndTenMinuteStaleness()
     await testCoordinatorLatestConcurrentPrepareWins()
+    await testCoordinatorSupersededFirstEnsureFreshAwaitsCommittedContext()
     await testCoordinatorDeduplicatesOneProviderAndRefreshesProvidersIndependently()
     await testCoordinatorAccountSwitchDoesNotJoinOrCommitOldRefresh()
     await testCoordinatorNonOAuthPrepareInvalidatesOldRefresh()
@@ -395,7 +396,8 @@ func testCoordinatorLatestConcurrentPrepareWins() async {
     expect(fastState.accessMode, .oauth, "newer account B prepare should publish OAuth mode")
 
     await provider.resumeResolve(call: 1)
-    _ = await slowA.value
+    let slowState = await slowA.value
+    expect(slowState.accessMode, .oauth, "superseded prepare must return account B's real OAuth context")
     let final = await coordinator.state(for: .codex)
     expect(final.snapshot == nil, "late account A prepare must not restore an account A snapshot")
 
@@ -407,6 +409,52 @@ func testCoordinatorLatestConcurrentPrepareWins() async {
         accountB,
         "the next prepare should resolve from the latest committed account B binding"
     )
+}
+
+func testCoordinatorSupersededFirstEnsureFreshAwaitsCommittedContext() async {
+    let date = Date(timeIntervalSince1970: 2_100_002_750)
+    let now = LockedBox(date)
+    let account = AccountCacheKey(providerID: .codex, digest: "first-concurrent")
+    let snapshot = coordinatorSnapshot(account, at: date, planName: "Shared OAuth")
+    let provider = SequencedCoordinatorProvider(providerID: .codex)
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(account)), gated: true)
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(account)), gated: true)
+    await provider.enqueueRefresh(
+        UsageRefreshResult(providerID: .codex, snapshot: snapshot, failure: nil),
+        gated: true
+    )
+    let coordinator = UsageMonitoringCoordinator(
+        providers: [provider],
+        cache: coordinatorCache(
+            files: FakeUsageFiles(),
+            path: "/tmp/agent-halo-coordinator-first-concurrent.json",
+            now: now
+        ),
+        now: { now.value }
+    )
+
+    let first = Task { await coordinator.ensureFresh(.codex) }
+    await waitForResolveCount(provider, 1, "first ensureFresh did not enter access resolution")
+    let second = Task { await coordinator.ensureFresh(.codex) }
+    await waitForResolveCount(provider, 2, "second ensureFresh did not enter access resolution")
+
+    // Let the superseded call return from its resolver while the latest call
+    // still has no committed context. It must suspend for that context rather
+    // than manufacture an API-key fallback.
+    await provider.resumeResolve(call: 1)
+    for _ in 0..<100 { await Task.yield() }
+    await provider.resumeResolve(call: 2)
+
+    await waitForRefreshCount(provider, 1, "latest OAuth context did not start refresh")
+    await provider.resumeRefresh(call: 1)
+    let firstState = await first.value
+    let secondState = await second.value
+
+    expect(firstState.accessMode, .oauth, "superseded first ensureFresh must not return API-key mode")
+    expect(secondState.accessMode, .oauth, "latest ensureFresh should retain OAuth mode")
+    expect(firstState.snapshot, snapshot, "superseded first ensureFresh should join the shared OAuth refresh")
+    expect(secondState.snapshot, snapshot, "latest ensureFresh should return the shared OAuth refresh")
+    expect(await provider.refreshCallCount, 1, "first concurrent ensureFresh calls must deduplicate refresh")
 }
 
 func testCoordinatorDeduplicatesOneProviderAndRefreshesProvidersIndependently() async {
