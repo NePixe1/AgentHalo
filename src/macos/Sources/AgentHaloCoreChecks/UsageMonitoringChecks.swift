@@ -1677,7 +1677,9 @@ func runClaudeUsageChecks() async {
     await testClaudeProviderScopeFailureSkipsHTTP()
     await testClaudeProviderAdoptsExternalSourceWithoutMigration()
     await testClaudeProviderAdoptsExternalSourceChangedDuringRefresh()
+    await testClaudeProviderAdoptsExternalSourceAfterRefreshFailure()
     await testClaudeProviderAdoptsExternalSourceChangedDuringUsage()
+    await testClaudeProviderAdoptsExternalSourceAfterUsageTransportFailure()
     await testClaudeProviderAdoptsExternalSourceChangedDuringUnauthorizedRetry()
     await testClaudeProviderRefreshesProactively()
     await testClaudeProviderRetriesOneUnauthorizedAndMigratesCache()
@@ -1932,6 +1934,40 @@ actor ClaudeCheckMutatingHTTPClient: UsageHTTPClient {
     }
 }
 
+enum ClaudeCheckHTTPOutcome: Sendable {
+    case response(UsageHTTPResponse)
+    case failure(UsageProviderFailure)
+}
+
+actor ClaudeCheckMutatingOutcomeHTTPClient: UsageHTTPClient {
+    private var outcomes: [ClaudeCheckHTTPOutcome]
+    private let mutationPath: String
+    private let mutation: @Sendable () -> Void
+    private(set) var capturedRequests: [UsageHTTPRequest] = []
+
+    init(
+        outcomes: [ClaudeCheckHTTPOutcome],
+        mutationPath: String,
+        mutation: @escaping @Sendable () -> Void
+    ) {
+        self.outcomes = outcomes
+        self.mutationPath = mutationPath
+        self.mutation = mutation
+    }
+
+    func send(_ request: UsageHTTPRequest) async throws -> UsageHTTPResponse {
+        capturedRequests.append(request)
+        if request.path == mutationPath { mutation() }
+        guard !outcomes.isEmpty else { throw UsageProviderFailure.invalidResponse }
+        switch outcomes.removeFirst() {
+        case .response(let response):
+            return response
+        case .failure(let failure):
+            throw failure
+        }
+    }
+}
+
 func testClaudeProviderAdoptsExternalSourceChangedDuringRefresh() async {
     let now = Date(timeIntervalSince1970: 2_000_000_000)
     let fixture = makeClaudeProviderFixture(accessToken: "expiring-old", expiresAt: now.addingTimeInterval(60), now: now)
@@ -1964,6 +2000,41 @@ func testClaudeProviderAdoptsExternalSourceChangedDuringRefresh() async {
         requests.last?.headers["authorization"],
         "Bearer external-during-refresh",
         "usage after generation mismatch must use the external credential"
+    )
+}
+
+func testClaudeProviderAdoptsExternalSourceAfterRefreshFailure() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeClaudeProviderFixture(accessToken: "expiring-invalid-grant", expiresAt: now.addingTimeInterval(60), now: now)
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let externalData = claudeCheckCredential(
+        accessToken: "external-after-invalid-grant",
+        refreshToken: "external-invalid-grant-refresh",
+        expiresAtMilliseconds: now.addingTimeInterval(3_600).timeIntervalSince1970 * 1000,
+        subscriptionType: "max",
+        rateLimitTier: "default_claude_max_5x"
+    )
+    let http = ClaudeCheckMutatingOutcomeHTTPClient(
+        outcomes: [
+            .response(claudeUsageResponse(statusCode: 400, #"{"error":"invalid_grant"}"#)),
+            .response(claudeUsageResponse(#"{"five_hour":{"utilization":13}}"#)),
+        ],
+        mutationPath: "/v1/oauth/token",
+        mutation: {
+            try? files.writeAtomically(externalData, to: fixture.3, preservingModeOf: fixture.3)
+        }
+    )
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expect(result.failure == nil, "external Claude login during invalid_grant refresh should be adopted")
+    expect(result.migrateCacheFrom == nil, "external login after invalid_grant clears migration")
+    expect(result.snapshot?.planName, "Max 5x", "invalid_grant race snapshot uses external plan")
+    expect(
+        requests.last?.headers["authorization"],
+        "Bearer external-after-invalid-grant",
+        "invalid_grant race restarts with external credential"
     )
 }
 
@@ -2002,6 +2073,56 @@ func testClaudeProviderAdoptsExternalSourceChangedDuringUsage() async {
         "Bearer external-during-usage",
         "usage-race retry must use the external credential"
     )
+}
+
+func testClaudeProviderAdoptsExternalSourceAfterUsageTransportFailure() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeClaudeProviderFixture(accessToken: "old-transport-access", expiresAt: now.addingTimeInterval(3_600), now: now)
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let externalData = claudeCheckCredential(
+        accessToken: "external-after-network",
+        refreshToken: "external-network-refresh",
+        expiresAtMilliseconds: now.addingTimeInterval(3_600).timeIntervalSince1970 * 1000,
+        subscriptionType: "max",
+        rateLimitTier: "default_claude_max_5x"
+    )
+    let http = ClaudeCheckMutatingOutcomeHTTPClient(
+        outcomes: [
+            .failure(.network),
+            .response(claudeUsageResponse(#"{"seven_day":{"utilization":14}}"#)),
+        ],
+        mutationPath: "/api/oauth/usage",
+        mutation: {
+            try? files.writeAtomically(externalData, to: fixture.3, preservingModeOf: fixture.3)
+        }
+    )
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expect(result.failure == nil, "external Claude login during usage transport failure should be adopted")
+    expect(result.migrateCacheFrom == nil, "external login after usage transport failure clears migration")
+    expect(result.snapshot?.planName, "Max 5x", "transport-race snapshot uses external plan")
+    expect(
+        requests.last?.headers["authorization"],
+        "Bearer external-after-network",
+        "transport-race retry uses external credential"
+    )
+
+    let unchangedFixture = makeClaudeProviderFixture(
+        accessToken: "unchanged-network",
+        expiresAt: now.addingTimeInterval(3_600),
+        now: now
+    )
+    let unchangedHTTP = RecordingUsageHTTPClient()
+    await unchangedHTTP.enqueue(error: .network)
+    let unchangedProvider = ClaudeUsageProvider(
+        authStore: unchangedFixture.0,
+        usageClient: ClaudeUsageClient(http: unchangedHTTP),
+        now: { now }
+    )
+    let unchangedResult = await unchangedProvider.refresh(using: .oauth(unchangedFixture.1))
+    expect(unchangedResult.failure, .network, "unchanged Claude usage transport failure stays network")
 }
 
 func testClaudeProviderAdoptsExternalSourceChangedDuringUnauthorizedRetry() async {
