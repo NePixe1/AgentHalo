@@ -10,6 +10,8 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 build_script="$root_dir/scripts/build-macos.sh"
 app_bundle="$root_dir/outputs/AgentHalo-macOS/$bundle_name"
 app_binary="$app_bundle/Contents/MacOS/$app_name"
+core_resource_bundle="$app_bundle/AgentHaloMac_AgentHaloCore.bundle"
+shared_locales="$root_dir/src/shared/locales"
 
 usage() {
   echo "usage: $0 [run|--debug|--logs|--telemetry|--verify]" >&2
@@ -25,6 +27,20 @@ build_app() {
 
 open_app() {
   /usr/bin/open -n "$app_bundle"
+}
+
+verify_packaged_locales() {
+  for language in en zh; do
+    packaged_locale="$core_resource_bundle/locales/$language.json"
+    if [[ ! -r "$packaged_locale" ]]; then
+      echo "Missing packaged locale: $packaged_locale" >&2
+      return 1
+    fi
+    if ! cmp -s "$shared_locales/$language.json" "$packaged_locale"; then
+      echo "Packaged locale differs from shared source: $packaged_locale" >&2
+      return 1
+    fi
+  done
 }
 
 stop_running_app
@@ -46,6 +62,7 @@ case "$mode" in
     /usr/bin/log stream --info --style compact --predicate "subsystem == \"$bundle_id\""
     ;;
   --verify|verify)
+    verify_packaged_locales
     open_app
     sleep 2
     pgrep -x "$app_name" >/dev/null
