@@ -2480,7 +2480,6 @@ testPlanModeWithoutFinalAnswerStillTurnsGreen()
 testPlanModeFlagResetsAfterFatalTurn()
 testAggregateFiltersInactiveAndTimedOutSessions()
 await runUsageModelChecks()
-await runCodexAuthChecks()
 print("PASS AgentHaloCore checks")
 
 func testClaudeReducerDoesNotCompleteWithoutExplicitCompletionEvent() {

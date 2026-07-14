@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 public struct CodexTokenRotation: Sendable {
     public var accessToken: String
@@ -67,6 +68,21 @@ public struct CodexAuthStore: Sendable {
         return now().timeIntervalSince(lastRefresh) > 8 * 24 * 60 * 60
     }
 
+    /// Reloads the exact credential source and applies its stored
+    /// `last_refresh` when the access token has no readable JWT expiry.
+    public func needsRefresh(_ access: OAuthAccess) -> Bool {
+        do {
+            guard let payload = try readPayload(from: access.source),
+                  UsageDigest.sha256Data(payload.data) == access.sourceVersion
+            else {
+                return needsRefresh(access, lastRefresh: nil)
+            }
+            return needsRefresh(access, lastRefresh: payload.lastRefresh)
+        } catch {
+            return needsRefresh(access, lastRefresh: nil)
+        }
+    }
+
     public func persist(
         rotation: CodexTokenRotation,
         replacing expected: OAuthAccess
@@ -120,7 +136,9 @@ public struct CodexAuthStore: Sendable {
         ]
     }
 
-    private func readPayload(from source: CredentialSource) throws -> (data: Data, object: [String: Any])? {
+    private func readPayload(
+        from source: CredentialSource
+    ) throws -> (data: Data, object: [String: Any], lastRefresh: Date?)? {
         let data: Data
         switch source {
         case .file(let path):
@@ -132,7 +150,9 @@ public struct CodexAuthStore: Sendable {
         }
 
         guard let object = try? CredentialJSON.object(from: data) else { return nil }
-        return (data, object)
+        let lastRefresh = CredentialJSON.string(object, path: ["last_refresh"])
+            .flatMap(Self.parseDate)
+        return (data, object, lastRefresh)
     }
 
     private func makeOAuthAccess(
@@ -206,6 +226,15 @@ public struct CodexAuthStore: Sendable {
         return formatter.string(from: date)
     }
 
+    private static func parseDate(_ value: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: value) {
+            return date
+        }
+        return ISO8601DateFormatter().date(from: value)
+    }
+
     private static func join(_ base: String, _ suffix: String) -> String {
         let trimmed = base.replacingOccurrences(of: #"/+$"#, with: "", options: .regularExpression)
         return trimmed.isEmpty ? "/\(suffix)" : "\(trimmed)/\(suffix)"
@@ -214,6 +243,6 @@ public struct CodexAuthStore: Sendable {
 
 private extension UsageDigest {
     static func sha256Data(_ data: Data) -> String {
-        sha256(String(decoding: data, as: UTF8.self))
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }

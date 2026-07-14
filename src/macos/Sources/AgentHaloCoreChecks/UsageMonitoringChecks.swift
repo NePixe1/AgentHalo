@@ -25,6 +25,8 @@ func runUsageModelChecks() async {
     } catch {
         fatalError("filesystem usage files checks failed: \(error)")
     }
+
+    await runCodexAuthChecks()
 }
 
 /// Exercises the real `FilesystemUsageFiles.writeAtomically` path: an empty
@@ -101,9 +103,11 @@ func runCodexAuthChecks() async {
     testCodexAPIKeyOnlyAndNoCredentialReturnAPIKey()
     testCodexAccountKeyDigest()
     testCodexNeedsRefresh()
+    testCodexNeedsRefreshUsesStoredLastRefresh()
     testCodexFileRotationPreservesCustomKeysAndMode()
     testCodexKeychainRotationWritesToCodexAuth()
     testCodexPersistRefusesOnVersionMismatch()
+    testCodexSourceVersionHashesRawDataBytes()
 }
 
 /// Case 1: `CODEX_HOME/auth.json` wins over default paths.
@@ -334,6 +338,50 @@ func testCodexNeedsRefresh() {
     )
 }
 
+/// The convenience path used by the provider must parse `last_refresh` from
+/// the exact stored JSON instead of requiring the caller to reconstruct it.
+func testCodexNeedsRefreshUsesStoredLastRefresh() {
+    let now = Date(timeIntervalSince1970: 2_000_000)
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+    func storedResult(lastRefresh: Date?) -> Bool {
+        let home = "/tmp/agent-halo-stored-refresh-\(UUID().uuidString)"
+        let path = codexCheckAuthPath(home: home)
+        var object: [String: Any] = ["tokens": ["access_token": "not-a-jwt"]]
+        if let lastRefresh {
+            object["last_refresh"] = formatter.string(from: lastRefresh)
+        }
+        let store = CodexAuthStore(
+            environment: FakeUsageEnvironment(["HOME": home]),
+            files: FakeUsageFiles(contents: [path: codexCheckJSON(object)]),
+            keychain: FakeUsageKeychain(),
+            now: { now }
+        )
+        guard case .oauth(let access) = store.resolveAccess() else {
+            fatalError("stored last_refresh case should resolve to OAuth")
+        }
+        return store.needsRefresh(access)
+    }
+
+    let eightDays: TimeInterval = 8 * 24 * 60 * 60
+    expect(
+        storedResult(lastRefresh: now.addingTimeInterval(-eightDays - 60)),
+        true,
+        "stored last_refresh older than 8 days requires refresh"
+    )
+    expect(
+        storedResult(lastRefresh: now.addingTimeInterval(-eightDays + 60)),
+        false,
+        "stored last_refresh newer than 8 days does not require refresh"
+    )
+    expect(
+        storedResult(lastRefresh: nil),
+        false,
+        "stored login without exp or last_refresh does not require refresh"
+    )
+}
+
 /// Case 7: File rotation preserves a custom top-level key, a custom nested
 /// token key and the original mode.
 func testCodexFileRotationPreservesCustomKeysAndMode() {
@@ -498,4 +546,80 @@ func testCodexPersistRefusesOnVersionMismatch() {
     // No additional write beyond the external one.
     expect(files.capturedWrites().count, 1, "persist must not write on version mismatch")
     expect(originalVersion != UsageDigest.sha256(""), true, "original version is a real digest")
+}
+
+/// A source version must hash the exact bytes, not a lossy UTF-8 decoding.
+/// These UTF-16LE documents differ only by a non-ASCII custom value; both are
+/// valid JSON, while neither can be decoded as UTF-8.
+func testCodexSourceVersionHashesRawDataBytes() {
+    func utf16JSON(marker: String) -> Data {
+        var data = Data([0xFF, 0xFE])
+        data.append(
+            #"{"marker":"\#(marker)","tokens":{"access_token":"same-token","refresh_token":"same-rt"}}"#
+                .data(using: .utf16LittleEndian)!
+        )
+        return data
+    }
+
+    let home = "/tmp/agent-halo-raw-version-\(UUID().uuidString)"
+    let path = codexCheckAuthPath(home: home)
+    let originalData = utf16JSON(marker: "é")
+    let changedData = utf16JSON(marker: "ê")
+    expect(String(data: originalData, encoding: .utf8) == nil, true, "original UTF-16 JSON is not UTF-8")
+    expect(String(data: changedData, encoding: .utf8) == nil, true, "changed UTF-16 JSON is not UTF-8")
+    expect(
+        (try? JSONSerialization.jsonObject(with: originalData)) != nil,
+        true,
+        "original UTF-16 JSON remains parseable"
+    )
+    expect(
+        (try? JSONSerialization.jsonObject(with: changedData)) != nil,
+        true,
+        "changed UTF-16 JSON remains parseable"
+    )
+
+    let environment = FakeUsageEnvironment(["HOME": home])
+    let originalStore = CodexAuthStore(
+        environment: environment,
+        files: FakeUsageFiles(contents: [path: originalData]),
+        keychain: FakeUsageKeychain()
+    )
+    guard case .oauth(let originalAccess) = originalStore.resolveAccess() else {
+        fatalError("original UTF-16 JSON should resolve to OAuth")
+    }
+    let changedStore = CodexAuthStore(
+        environment: environment,
+        files: FakeUsageFiles(contents: [path: changedData]),
+        keychain: FakeUsageKeychain()
+    )
+    guard case .oauth(let changedAccess) = changedStore.resolveAccess() else {
+        fatalError("changed UTF-16 JSON should resolve to OAuth")
+    }
+    expect(
+        originalAccess.sourceVersion != changedAccess.sourceVersion,
+        true,
+        "different raw JSON bytes must produce different source versions"
+    )
+
+    let mutableFiles = FakeUsageFiles(contents: [path: originalData])
+    let mutableStore = CodexAuthStore(
+        environment: environment,
+        files: mutableFiles,
+        keychain: FakeUsageKeychain()
+    )
+    guard case .oauth(let expected) = mutableStore.resolveAccess() else {
+        fatalError("mutable UTF-16 JSON should resolve to OAuth")
+    }
+    try? mutableFiles.writeAtomically(changedData, to: path, preservingModeOf: path)
+    let result = try? mutableStore.persist(
+        rotation: CodexTokenRotation(
+            accessToken: "rotated-token",
+            refreshToken: nil,
+            idToken: nil,
+            refreshedAt: Date(timeIntervalSince1970: 2_000_000)
+        ),
+        replacing: expected
+    )
+    expect(result == nil, true, "persist must refuse a raw-byte source version change")
+    expect(mutableFiles.capturedWrites().count, 1, "persist must not write after raw-byte version mismatch")
 }
