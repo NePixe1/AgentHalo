@@ -2,6 +2,8 @@ import Foundation
 import AgentHaloCore
 
 func runUsageModelChecks() async {
+    testUsageMonitoringLocalization()
+
     let key = AccountCacheKey(providerID: .codex, digest: "abc")
     let snapshot = UsageSnapshot(
         providerID: .codex,
@@ -42,6 +44,53 @@ func runUsageModelChecks() async {
     runClaudeAuthChecks()
     await runCodexUsageChecks()
     await runClaudeUsageChecks()
+}
+
+func testUsageMonitoringLocalization() {
+    let originalLanguage = L10n.shared.currentLanguage
+    defer { L10n.shared.setLanguage(originalLanguage) }
+
+    let translations: [(String, [(String, String)])] = [
+        (
+            "en",
+            [
+                ("quota.5h", "5-Hour"),
+                ("quota.weekly", "Weekly"),
+                ("quota.waiting_refresh", "Waiting for Refresh"),
+                ("metadata.session_title", "Session title"),
+                ("usage.warning.sign_in_codex", "Sign in to Codex again to refresh usage."),
+                ("usage.warning.sign_in_claude", "Sign in to Claude Code again to refresh usage."),
+                ("usage.warning.rate_limited", "Usage requests are limited. AgentHalo will retry later."),
+                ("usage.warning.stale", "Usage may be outdated. Last updated {0}."),
+                ("usage.warning.network", "Usage could not be refreshed because of a network error."),
+                ("usage.warning.service", "The usage service is temporarily unavailable."),
+                ("usage.warning.invalid", "The usage service returned unavailable data."),
+            ]
+        ),
+        (
+            "zh",
+            [
+                ("quota.5h", "五小时"),
+                ("quota.weekly", "每周"),
+                ("quota.waiting_refresh", "等待刷新"),
+                ("metadata.session_title", "会话标题"),
+                ("usage.warning.sign_in_codex", "请重新登录 Codex 以刷新使用情况。"),
+                ("usage.warning.sign_in_claude", "请重新登录 Claude Code 以刷新使用情况。"),
+                ("usage.warning.rate_limited", "使用情况请求过于频繁，AgentHalo 将稍后重试。"),
+                ("usage.warning.stale", "使用情况可能已过期，上次更新于 {0}。"),
+                ("usage.warning.network", "网络异常，暂时无法刷新使用情况。"),
+                ("usage.warning.service", "使用情况服务暂时不可用。"),
+                ("usage.warning.invalid", "使用情况服务暂未返回可用数据。"),
+            ]
+        ),
+    ]
+
+    for (language, expectedTranslations) in translations {
+        L10n.shared.setLanguage(language)
+        for (key, expectedValue) in expectedTranslations {
+            expect(L10n.shared[key], expectedValue, "\(language) localization for \(key)")
+        }
+    }
 }
 
 func testDetailsContentResolverSeparatesOAuthUsageAndAPISessionDetails() {
