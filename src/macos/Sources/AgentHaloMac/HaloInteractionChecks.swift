@@ -17,6 +17,7 @@ private func expect<T: Equatable>(_ actual: T, _ expected: T, _ message: String)
 func runHaloInteractionChecks() {
     L10n.shared.setLanguage("zh")
     testDetailsPanelUsesEvenPointHeight()
+    testDetailsPanelNormalizesDynamicHeightForTargetScale()
     testDetailsPanelPixelAlignmentUsesBackingScale()
     testDetailsPanelPositioningSnapsToBackingPixels()
     testL10nEnglishSwitchProducesEnglishStrings()
@@ -1102,12 +1103,13 @@ private func testDetailsPanelResizesHeightWithoutAnimation() {
     guard let usageCall = panel.resizeCalls.last else {
         fatalError("usage render should apply a resize frame")
     }
-    let usageExpectedHeight = ceil(
-        panel.stackFittingHeightForTesting * panel.backingScaleForTesting
-    ) / panel.backingScaleForTesting
+    let usageExpectedHeight = DetailsPanel.evenPanelHeight(
+        for: panel.stackFittingHeightForTesting,
+        backingScaleFactor: panel.backingScaleForTesting
+    )
     expect(!usageCall.display, "usage resize should not request immediate display")
     expect(!usageCall.animate, "usage resize should not animate")
-    expect(usageCall.frame.height, usageExpectedHeight, "usage height should be the pixel-ceiled stack fitting height")
+    expect(usageCall.frame.height, usageExpectedHeight, "usage height should be an even, pixel-aligned stack fitting height")
     expect(usageCall.frame.maxY, initialTopEdge, "usage resize should preserve the prior top edge")
     expect(panel.frame, usageCall.frame, "window should apply the observed usage resize frame")
 
@@ -1118,12 +1120,13 @@ private func testDetailsPanelResizesHeightWithoutAnimation() {
     guard let sessionCall = panel.resizeCalls.last else {
         fatalError("session render should apply a resize frame")
     }
-    let sessionExpectedHeight = ceil(
-        panel.stackFittingHeightForTesting * panel.backingScaleForTesting
-    ) / panel.backingScaleForTesting
+    let sessionExpectedHeight = DetailsPanel.evenPanelHeight(
+        for: panel.stackFittingHeightForTesting,
+        backingScaleFactor: panel.backingScaleForTesting
+    )
     expect(!sessionCall.display, "session resize should not request immediate display")
     expect(!sessionCall.animate, "session resize should not animate")
-    expect(sessionCall.frame.height, sessionExpectedHeight, "session height should be the pixel-ceiled stack fitting height")
+    expect(sessionCall.frame.height, sessionExpectedHeight, "session height should be an even, pixel-aligned stack fitting height")
     expect(sessionCall.frame.height != usageHeight, "switching bodies should resize to fitting height")
     expect(sessionCall.frame.maxY, usageTopEdge, "session resize should preserve the prior top edge")
     expect(panel.frame, sessionCall.frame, "window should apply the observed session resize frame")
@@ -1281,6 +1284,20 @@ private func testDetailsPanelUsesEvenPointHeight() {
 }
 
 @MainActor
+private func testDetailsPanelNormalizesDynamicHeightForTargetScale() {
+    expect(
+        DetailsPanel.evenPanelHeight(for: 191.5, backingScaleFactor: 1),
+        192,
+        "1x target screens should not display a half-point details-panel height"
+    )
+    expect(
+        DetailsPanel.evenPanelHeight(for: 192.5, backingScaleFactor: 2),
+        194,
+        "dynamic details-panel heights should remain even when moving between backing scales"
+    )
+}
+
+@MainActor
 private func testDetailsPanelPixelAlignmentUsesBackingScale() {
     expect(
         AppDelegate.pixelAlignedOrigin(CGPoint(x: 20.25, y: 40.5), backingScaleFactor: 1),
@@ -1315,6 +1332,10 @@ private func testDetailsPanelPositioningSnapsToBackingPixels() {
     expect(
         positionSource.contains("layoutSubtreeIfNeeded()") && positionSource.contains("displayIfNeeded()"),
         "details panel should flush layout and drawing before orderFront"
+    )
+    expect(
+        positionSource.contains("evenPanelHeight"),
+        "details panel height should be normalized for the target screen before first display"
     )
 }
 

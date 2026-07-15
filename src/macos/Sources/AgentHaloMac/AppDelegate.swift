@@ -1049,6 +1049,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let screen = NSScreen.screens.first { $0.visibleFrame.intersects(panel.frame) } ?? NSScreen.main
         let area = screen?.visibleFrame ?? panel.frame
         let gap: CGFloat = 10
+        let scale = screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+        let normalizedHeight = DetailsPanel.evenPanelHeight(
+            for: detailsPanel.frame.height,
+            backingScaleFactor: scale
+        )
+        if normalizedHeight != detailsPanel.frame.height {
+            let currentFrame = detailsPanel.frame
+            detailsPanel.applyResizeFrame(
+                NSRect(
+                    x: currentFrame.minX,
+                    y: currentFrame.maxY - normalizedHeight,
+                    width: currentFrame.width,
+                    height: normalizedHeight
+                ),
+                display: false,
+                animate: false
+            )
+        }
         var x = panel.frame.minX - detailsPanel.frame.width - gap
         if x < area.minX + 8 {
             x = panel.frame.maxX + gap
@@ -1058,7 +1076,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             x: max(area.minX + 8, min(x, area.maxX - detailsPanel.frame.width - 8)),
             y: y
         )
-        let scale = screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
         detailsPanel.setFrameOrigin(Self.pixelAlignedOrigin(clampedOrigin, backingScaleFactor: scale))
         detailsPanel.contentView?.layoutSubtreeIfNeeded()
         detailsPanel.contentView?.displayIfNeeded()

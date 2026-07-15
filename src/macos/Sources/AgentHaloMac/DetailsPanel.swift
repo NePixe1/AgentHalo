@@ -247,7 +247,10 @@ class DetailsPanel: NSPanel {
     private func resizeToFitContent() {
         contentView?.layoutSubtreeIfNeeded()
         let scale = effectiveBackingScale
-        let fittingHeight = ceil(stack.fittingSize.height * scale) / scale
+        let fittingHeight = Self.evenPanelHeight(
+            for: stack.fittingSize.height,
+            backingScaleFactor: scale
+        )
         let topEdge = frame.maxY
         let newFrame = NSRect(
             x: frame.minX,
@@ -264,6 +267,12 @@ class DetailsPanel: NSPanel {
 
     private var effectiveBackingScale: CGFloat {
         screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+    }
+
+    static func evenPanelHeight(for fittingHeight: CGFloat, backingScaleFactor: CGFloat) -> CGFloat {
+        let scale = backingScaleFactor > 0 ? backingScaleFactor : 1
+        let pixelAlignedHeight = ceil(fittingHeight * scale) / scale
+        return ceil(pixelAlignedHeight / 2) * 2
     }
 
     func updateStatus(aggregate: AggregateSnapshot) {
