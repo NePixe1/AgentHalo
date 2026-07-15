@@ -12,7 +12,6 @@ enum DetailsPanelContentRole: Equatable {
 }
 
 enum DetailsPanelSessionBodyRole: Equatable {
-    case project
     case separator
     case sessionTitle
     case model
@@ -37,16 +36,12 @@ class DetailsPanel: NSPanel {
     private let contextPill = NSView()
     private let quotaGroup = NSStackView()
     private let metadataGroup = NSStackView()
-    private let projectRow = MetadataRowView(
-        title: L10n.shared["metadata.project"]
-    )
     private let sessionTitleRow = MetadataRowView(
         title: L10n.shared["metadata.session_title"]
     )
     private let modelRow = MetadataRowView(
         title: L10n.shared["metadata.model"]
     )
-    private let projectTitleSeparator = SeparatorView()
     private let titleModelSeparator = SeparatorView()
     private let modelTokenSeparator = SeparatorView()
     private let tokenRow = MetadataRowView(
@@ -124,8 +119,6 @@ class DetailsPanel: NSPanel {
         metadataGroup.translatesAutoresizingMaskIntoConstraints = false
         
         metadataGroup.edgeInsets = NSEdgeInsets(top: 4, left: 0, bottom: 0, right: 0)
-        metadataGroup.addArrangedSubview(projectRow)
-        metadataGroup.addArrangedSubview(projectTitleSeparator)
         metadataGroup.addArrangedSubview(sessionTitleRow)
         metadataGroup.addArrangedSubview(titleModelSeparator)
         metadataGroup.addArrangedSubview(modelRow)
@@ -218,20 +211,17 @@ class DetailsPanel: NSPanel {
     }
 
     private func renderSession(_ session: SessionDetailsSnapshot, isOffline: Bool) {
-        projectRow.setTitle(L10n.shared["metadata.project"])
         sessionTitleRow.setTitle(L10n.shared["metadata.session_title"])
         modelRow.setTitle(L10n.shared["metadata.model"])
         tokenRow.setTitle(L10n.shared["metadata.tokens"])
 
         if isOffline {
-            projectRow.setValue("--")
             sessionTitleRow.setValue("--")
             modelRow.setValue("--")
             tokenRow.setValue("--")
             return
         }
 
-        projectRow.setValue(Self.displayValue(session.projectName), toolTip: session.projectName)
         sessionTitleRow.setValue(Self.displayValue(session.sessionTitle), toolTip: session.sessionTitle)
         modelRow.setValue(Self.displayValue(session.modelName), toolTip: session.modelName)
         if session.inputTokens != nil || session.outputTokens != nil {
@@ -531,7 +521,6 @@ class DetailsPanel: NSPanel {
 
     var sessionBodyOrderForTesting: [DetailsPanelSessionBodyRole] {
         metadataGroup.arrangedSubviews.map { view in
-            if view === projectRow { return .project }
             if view === sessionTitleRow { return .sessionTitle }
             if view === modelRow { return .model }
             if view === tokenRow { return .tokens }
@@ -542,7 +531,7 @@ class DetailsPanel: NSPanel {
 
     var sessionRowHeightsForTesting: [CGFloat] {
         contentView?.layoutSubtreeIfNeeded()
-        return [projectRow, sessionTitleRow, modelRow, tokenRow].map(\.frame.height)
+        return [sessionTitleRow, modelRow, tokenRow].map(\.frame.height)
     }
 
     var primaryQuotaTitleForTesting: String {
@@ -577,10 +566,6 @@ class DetailsPanel: NSPanel {
         secondaryQuota.meterFillForTesting
     }
 
-    var projectValueForTesting: String {
-        projectRow.value
-    }
-
     var sessionTitleValueForTesting: String {
         sessionTitleRow.value
     }
@@ -591,10 +576,6 @@ class DetailsPanel: NSPanel {
 
     var tokenValueForTesting: String {
         tokenRow.value
-    }
-
-    var projectToolTipForTesting: String? {
-        projectRow.valueToolTip
     }
 
     var sessionTitleToolTipForTesting: String? {

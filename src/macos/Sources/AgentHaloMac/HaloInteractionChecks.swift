@@ -64,8 +64,8 @@ func runHaloInteractionChecks() {
     testDetailsPanelShowsSingleAmberUsageWarning()
     testDetailsPanelShowsFiveHourAndWeeklyRemainingUsage()
     testDetailsPanelShowsMissingAndExpiredUsageWindows()
-    testDetailsPanelShowsFourIndependentSessionRows()
-    testDetailsPanelDoesNotFallbackSessionTitleToProject()
+    testDetailsPanelShowsThreeIndependentSessionRows()
+    testDetailsPanelLeavesMissingSessionTitleEmpty()
     testDetailsPanelKeepsUsageAndSessionBodiesMutuallyExclusive()
     testDetailsPanelKeepsContextIndependentFromUsageFailure()
     testDetailsPanelClearsContextAndSessionRowsOffline()
@@ -976,7 +976,7 @@ private func testDetailsPanelShowsMissingAndExpiredUsageWindows() {
 }
 
 @MainActor
-private func testDetailsPanelShowsFourIndependentSessionRows() {
+private func testDetailsPanelShowsThreeIndependentSessionRows() {
     let panel = DetailsPanel()
     panel.render(
         aggregate: detailsAggregate(),
@@ -989,41 +989,38 @@ private func testDetailsPanelShowsFourIndependentSessionRows() {
         ))
     )
 
-    expect(panel.projectValueForTesting, "AgentHalo", "project row")
     expect(panel.sessionTitleValueForTesting, "Redesign details", "session title row")
     expect(panel.modelValueForTesting, "gpt-5.5", "model row")
     expect(panel.tokenValueForTesting, "↑ 38k  ·  ↓ 1.2k", "token row")
-    expect(panel.projectToolTipForTesting, "AgentHalo", "project tooltip")
     expect(panel.sessionTitleToolTipForTesting, "Redesign details", "session title tooltip")
     expect(panel.modelToolTipForTesting, "gpt-5.5", "model tooltip")
     expect(
         panel.sessionBodyOrderForTesting,
-        [.project, .separator, .sessionTitle, .separator, .model, .separator, .tokens],
-        "API rows should keep the required arranged-subview order"
+        [.sessionTitle, .separator, .model, .separator, .tokens],
+        "API rows should omit the project row"
     )
-    expect(panel.sessionBodyOrderForTesting.count, 7, "API body should contain exactly seven arranged subviews")
+    expect(panel.sessionBodyOrderForTesting.count, 5, "API body should contain exactly five arranged subviews")
     expect(!panel.sessionBodyOrderForTesting.contains(.unknown), "API body should reject unknown rows or titles")
     expect(
         panel.sessionBodyOrderForTesting.filter { $0 == .separator }.count,
-        3,
-        "API rows should contain three separators"
+        2,
+        "API rows should contain two separators"
     )
     expect(
         panel.sessionRowHeightsForTesting,
-        [28, 28, 28, 28],
+        [28, 28, 28],
         "all API metadata rows should use the same 28pt height"
     )
 }
 
 @MainActor
-private func testDetailsPanelDoesNotFallbackSessionTitleToProject() {
+private func testDetailsPanelLeavesMissingSessionTitleEmpty() {
     let panel = DetailsPanel()
     panel.render(
         aggregate: detailsAggregate(),
         model: sessionDetailsModel(session: SessionDetailsSnapshot(projectName: "AgentHalo"))
     )
 
-    expect(panel.projectValueForTesting, "AgentHalo", "project should use projectName only")
     expect(panel.sessionTitleValueForTesting, "--", "missing title should not fall back to projectName")
 }
 
@@ -1069,7 +1066,6 @@ private func testDetailsPanelClearsContextAndSessionRowsOffline() {
     )
 
     expect(panel.contextPillHiddenForTesting, "offline should clear context")
-    expect(panel.projectValueForTesting, "--", "offline should clear project")
     expect(panel.sessionTitleValueForTesting, "--", "offline should clear session title")
     expect(panel.modelValueForTesting, "--", "offline should clear model")
     expect(panel.tokenValueForTesting, "--", "offline should clear tokens")
