@@ -103,7 +103,6 @@ class DetailsPanel: NSPanel {
         stack.addArrangedSubview(titleField)
         stack.setCustomSpacing(2, after: titleField)
         stack.addArrangedSubview(detailField)
-        stack.setCustomSpacing(13, after: detailField)
 
         quotaGroup.orientation = .vertical
         quotaGroup.spacing = 8
@@ -118,7 +117,7 @@ class DetailsPanel: NSPanel {
         metadataGroup.alignment = .width
         metadataGroup.translatesAutoresizingMaskIntoConstraints = false
         
-        metadataGroup.edgeInsets = NSEdgeInsets(top: 4, left: 0, bottom: 0, right: 0)
+        metadataGroup.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 2, right: 0)
         metadataGroup.addArrangedSubview(sessionTitleRow)
         metadataGroup.addArrangedSubview(titleModelSeparator)
         metadataGroup.addArrangedSubview(modelRow)
@@ -598,6 +597,10 @@ class DetailsPanel: NSPanel {
         stack.fittingSize.height
     }
 
+    var metadataTopInsetForTesting: CGFloat {
+        metadataGroup.edgeInsets.top
+    }
+
     var backingScaleForTesting: CGFloat {
         effectiveBackingScale
     }
@@ -802,7 +805,7 @@ private final class MetadataRowView: NSView {
         valueBackground.addSubview(valueField)
 
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 28),
+            heightAnchor.constraint(equalToConstant: 24),
 
             nameField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 0),
             nameField.centerYAnchor.constraint(equalTo: centerYAnchor),

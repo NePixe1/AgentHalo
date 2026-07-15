@@ -1008,8 +1008,8 @@ private func testDetailsPanelShowsThreeIndependentSessionRows() {
     )
     expect(
         panel.sessionRowHeightsForTesting,
-        [28, 28, 28],
-        "all API metadata rows should use the same 28pt height"
+        [24, 24, 24],
+        "all API metadata rows should use the same 24pt height"
     )
 }
 
@@ -1116,6 +1116,7 @@ private func testDetailsPanelResizesHeightWithoutAnimation() {
     guard let sessionCall = panel.resizeCalls.last else {
         fatalError("session render should apply a resize frame")
     }
+    expect(panel.metadataTopInsetForTesting, 0, "session metadata should start immediately after the subtitle")
     let sessionExpectedHeight = DetailsPanel.evenPanelHeight(
         for: panel.stackFittingHeightForTesting,
         backingScaleFactor: panel.backingScaleForTesting
@@ -1123,7 +1124,7 @@ private func testDetailsPanelResizesHeightWithoutAnimation() {
     expect(!sessionCall.display, "session resize should not request immediate display")
     expect(!sessionCall.animate, "session resize should not animate")
     expect(sessionCall.frame.height, sessionExpectedHeight, "session height should be an even, pixel-aligned stack fitting height")
-    expect(sessionCall.frame.height != usageHeight, "switching bodies should resize to fitting height")
+    expect(sessionCall.frame.height, usageHeight, "switching bodies should keep the same panel height")
     expect(sessionCall.frame.maxY, usageTopEdge, "session resize should preserve the prior top edge")
     expect(panel.frame, sessionCall.frame, "window should apply the observed session resize frame")
 }
