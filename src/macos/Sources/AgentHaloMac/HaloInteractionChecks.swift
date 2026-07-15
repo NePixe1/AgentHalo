@@ -58,6 +58,8 @@ func runHaloInteractionChecks() {
     testLiveCodexErrorCyclesThroughBrightAndDimPresentations()
     testDetailsPanelAlwaysShowsProviderRow()
     testDetailsPanelShowsPlanOnlyForOAuth()
+    testDetailsPanelKeepsPlanNextToProvider()
+    testDetailsPanelKeepsWarningNextToProviderWithoutPlan()
     testDetailsPanelShowsSingleAmberUsageWarning()
     testDetailsPanelShowsFiveHourAndWeeklyRemainingUsage()
     testDetailsPanelShowsMissingAndExpiredUsageWindows()
@@ -873,6 +875,36 @@ private func testDetailsPanelShowsPlanOnlyForOAuth() {
     )
     expect(panel.providerTextForTesting, "Codex", "API details should keep the provider")
     expect(panel.planHiddenForTesting, "API details should hide the plan")
+}
+
+@MainActor
+private func testDetailsPanelKeepsPlanNextToProvider() {
+    let panel = DetailsPanel()
+    panel.render(
+        aggregate: detailsAggregate(),
+        model: usageDetailsModel(provider: "Codex", plan: "Plus")
+    )
+
+    let spacing = panel.providerPlanVisibleSpacingForTesting
+    expect(
+        spacing >= 5 && spacing <= 7.5,
+        "OAuth plan should follow the provider by 5-7pt, got \(spacing)pt"
+    )
+}
+
+@MainActor
+private func testDetailsPanelKeepsWarningNextToProviderWithoutPlan() {
+    let panel = DetailsPanel()
+    panel.render(
+        aggregate: detailsAggregate(),
+        model: usageDetailsModel(plan: nil, warning: "Refresh failed")
+    )
+
+    let spacing = panel.providerWarningVisibleSpacingForTesting
+    expect(
+        spacing >= 5 && spacing <= 7.5,
+        "warning should follow the provider by 5-7pt when plan is absent, got \(spacing)pt"
+    )
 }
 
 @MainActor

@@ -482,6 +482,16 @@ class DetailsPanel: NSPanel {
         providerHeader.planText
     }
 
+    var providerPlanVisibleSpacingForTesting: CGFloat {
+        contentView?.layoutSubtreeIfNeeded()
+        return providerHeader.providerPlanVisibleSpacing
+    }
+
+    var providerWarningVisibleSpacingForTesting: CGFloat {
+        contentView?.layoutSubtreeIfNeeded()
+        return providerHeader.providerWarningVisibleSpacing
+    }
+
     var planHiddenForTesting: Bool {
         providerHeader.isPlanHidden
     }
@@ -613,6 +623,8 @@ private final class ProviderHeaderView: NSView {
     private let providerField = NSTextField(labelWithString: "")
     private let planField = NSTextField(labelWithString: "")
     private let warningImage = NSImageView()
+    private var planToWarningConstraint: NSLayoutConstraint!
+    private var providerToWarningConstraint: NSLayoutConstraint!
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -622,12 +634,14 @@ private final class ProviderHeaderView: NSView {
         providerField.textColor = .labelColor
         providerField.lineBreakMode = .byTruncatingTail
         providerField.maximumNumberOfLines = 1
+        providerField.setContentHuggingPriority(.required, for: .horizontal)
         providerField.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
 
         planField.font = .systemFont(ofSize: 11, weight: .regular)
         planField.textColor = .secondaryLabelColor
         planField.lineBreakMode = .byTruncatingTail
         planField.maximumNumberOfLines = 1
+        planField.setContentHuggingPriority(.required, for: .horizontal)
         planField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         warningImage.image = NSImage(
@@ -643,14 +657,22 @@ private final class ProviderHeaderView: NSView {
             $0.translatesAutoresizingMaskIntoConstraints = false
             addSubview($0)
         }
+        planToWarningConstraint = warningImage.leadingAnchor.constraint(
+            equalTo: planField.trailingAnchor,
+            constant: 7
+        )
+        providerToWarningConstraint = warningImage.leadingAnchor.constraint(
+            equalTo: providerField.trailingAnchor,
+            constant: 7
+        )
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: 20),
             providerField.leadingAnchor.constraint(equalTo: leadingAnchor),
             providerField.centerYAnchor.constraint(equalTo: centerYAnchor),
             planField.leadingAnchor.constraint(equalTo: providerField.trailingAnchor, constant: 7),
             planField.centerYAnchor.constraint(equalTo: centerYAnchor),
-            warningImage.leadingAnchor.constraint(equalTo: planField.trailingAnchor, constant: 7),
-            warningImage.trailingAnchor.constraint(equalTo: trailingAnchor),
+            planToWarningConstraint,
+            warningImage.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
             warningImage.centerYAnchor.constraint(equalTo: centerYAnchor),
             warningImage.widthAnchor.constraint(equalToConstant: 12),
             warningImage.heightAnchor.constraint(equalToConstant: 12),
@@ -669,6 +691,13 @@ private final class ProviderHeaderView: NSView {
         planField.stringValue = planName ?? ""
         planField.toolTip = planName
         planField.isHidden = planName == nil
+        if planName == nil {
+            planToWarningConstraint.isActive = false
+            providerToWarningConstraint.isActive = true
+        } else {
+            providerToWarningConstraint.isActive = false
+            planToWarningConstraint.isActive = true
+        }
 
         warningImage.isHidden = warning == nil
         warningImage.toolTip = warning
@@ -677,6 +706,12 @@ private final class ProviderHeaderView: NSView {
 
     var providerText: String { providerField.stringValue }
     var planText: String { planField.stringValue }
+    var providerPlanVisibleSpacing: CGFloat {
+        planField.frame.minX - providerField.frame.minX - providerField.intrinsicContentSize.width
+    }
+    var providerWarningVisibleSpacing: CGFloat {
+        warningImage.frame.minX - providerField.frame.maxX
+    }
     var isPlanHidden: Bool { planField.isHidden }
     var isWarningHidden: Bool { warningImage.isHidden }
     var warningToolTip: String? { warningImage.toolTip }
