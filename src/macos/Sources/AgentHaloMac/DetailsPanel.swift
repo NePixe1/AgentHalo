@@ -91,7 +91,7 @@ class DetailsPanel: NSPanel {
         stack.setCustomSpacing(5, after: topRow)
 
         stack.addArrangedSubview(providerHeader)
-        stack.setCustomSpacing(7, after: providerHeader)
+        stack.setCustomSpacing(3, after: providerHeader)
 
         titleField.font = .systemFont(ofSize: 24, weight: .bold)
         titleField.lineBreakMode = .byTruncatingTail
@@ -103,6 +103,7 @@ class DetailsPanel: NSPanel {
         stack.addArrangedSubview(titleField)
         stack.setCustomSpacing(2, after: titleField)
         stack.addArrangedSubview(detailField)
+        stack.setCustomSpacing(4, after: detailField)
 
         quotaGroup.orientation = .vertical
         quotaGroup.spacing = 8

@@ -71,6 +71,7 @@ func runHaloInteractionChecks() {
     testDetailsPanelClearsContextAndSessionRowsOffline()
     testDetailsPanelKeepsFixedWidthForLongProviderContent()
     testDetailsPanelResizesHeightWithoutAnimation()
+    testDetailsPanelMovesTitleGapIntoBodySpacing()
     testDetailsPanelShowsCodexStandbyCopy()
     testDetailsPanelUsesCompactContextPercent()
     testDetailsPanelKeepsContextPillWidthStable()
@@ -1127,6 +1128,85 @@ private func testDetailsPanelResizesHeightWithoutAnimation() {
     expect(sessionCall.frame.height, usageHeight, "switching bodies should keep the same panel height")
     expect(sessionCall.frame.maxY, usageTopEdge, "session resize should preserve the prior top edge")
     expect(panel.frame, sessionCall.frame, "window should apply the observed session resize frame")
+}
+
+@MainActor
+private func testDetailsPanelMovesTitleGapIntoBodySpacing() {
+    let panel = DetailsPanel()
+    let aggregate = AggregateSnapshot(
+        state: .done,
+        label: "STANDBY",
+        detail: "Codex Standing By",
+        sessions: [],
+        focusedAgent: .codex
+    )
+    panel.render(
+        aggregate: aggregate,
+        model: usageDetailsModel(
+            windows: [
+                UsageWindow(kind: .session, usedPercent: 25, resetsAt: nil, duration: 18_000),
+                UsageWindow(kind: .weekly, usedPercent: 10, resetsAt: nil, duration: 604_800)
+            ]
+        )
+    )
+    guard let contentView = panel.contentView else {
+        fatalError("details panel should expose its content view")
+    }
+    contentView.layoutSubtreeIfNeeded()
+
+    func frame(of value: String) -> NSRect {
+        guard let field = allDescendants(of: contentView)
+            .compactMap({ $0 as? NSTextField })
+            .first(where: { $0.stringValue == value }) else {
+            fatalError("details panel should expose text field: \(value)")
+        }
+        return field.convert(field.bounds, to: contentView)
+    }
+
+    func containingFrame(of value: String) -> NSRect {
+        guard let field = allDescendants(of: contentView)
+            .compactMap({ $0 as? NSTextField })
+            .first(where: { $0.stringValue == value }),
+              let container = field.superview else {
+            fatalError("details panel should expose container for text field: \(value)")
+        }
+        return container.convert(container.bounds, to: contentView)
+    }
+
+    guard let providerField = allDescendants(of: contentView)
+        .compactMap({ $0 as? NSTextField })
+        .first(where: { $0.stringValue == "Plus" }),
+          let providerHeader = providerField.superview else {
+        fatalError("details panel should expose provider header")
+    }
+    let providerFrame = providerHeader.convert(providerHeader.bounds, to: contentView)
+    let titleFrame = frame(of: "STANDBY")
+    let detailFrame = frame(of: "Codex Standing By")
+    let quotaRow = containingFrame(of: L10n.shared["quota.5h"])
+
+    expect(providerFrame.minY - titleFrame.maxY, 3, "title should move 4pt closer to provider")
+    expect(detailFrame.minY - quotaRow.maxY, 4, "usage body should receive the released title spacing")
+
+    panel.render(
+        aggregate: aggregate,
+        model: sessionDetailsModel(
+            provider: "Claude Code",
+            plan: nil,
+            session: SessionDetailsSnapshot(
+                sessionTitle: "Layout spacing",
+                modelName: "gpt-5.5",
+                inputTokens: 100,
+                outputTokens: 20
+            )
+        )
+    )
+    contentView.layoutSubtreeIfNeeded()
+    let sessionProviderFrame = providerHeader.convert(providerHeader.bounds, to: contentView)
+    let sessionTitleFrame = frame(of: "STANDBY")
+    let sessionDetailFrame = frame(of: "Codex Standing By")
+    let sessionTitleRow = containingFrame(of: L10n.shared["metadata.session_title"])
+    expect(sessionProviderFrame.minY - sessionTitleFrame.maxY, 3, "session title should keep the tightened provider gap")
+    expect(sessionDetailFrame.minY - sessionTitleRow.maxY, 4, "session body should receive the released title spacing")
 }
 
 @MainActor
