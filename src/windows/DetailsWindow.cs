@@ -175,7 +175,6 @@ public sealed class DetailsWindow : Window
         private readonly DispatcherTimer quotaTimer;
         private UsageMetrics previewMetrics;
         private ClaudeCodeMetrics previewClaudeMetrics;
-        private bool showsMonthly;
         private AgentKind currentAgent;
         private AggregateSnapshot currentAggregate;
         private List<SessionSnapshot> currentSessions;
@@ -437,9 +436,6 @@ public sealed class DetailsWindow : Window
             }
             else
             {
-                // Codex offline still surfaces the quota rows (rendered as
-                // "quota.no_data"); only the context pill should drop out
-                // since there's no live session to source a percentage from.
                 RefreshQuota();
             }
             // Drop the context pill rather than echoing a percentage from the
@@ -558,7 +554,7 @@ public sealed class DetailsWindow : Window
             }
             else
             {
-                ApplyPlusQuota(new UsageMetrics { ContextInputTokens = -1 });
+                ApplyQuotaMetrics(new UsageMetrics { ContextInputTokens = -1 });
                 SetContextPercent(false, 0);
             }
         }
@@ -620,7 +616,7 @@ public sealed class DetailsWindow : Window
             System.Windows.Shapes.Path icon, bool selected)
         {
             border.Opacity = selected ? 1.0 : 0.58;
-            icon.Fill = CreateCodexGradientBrush();
+            icon.Fill = System.Windows.Media.Brushes.Black;
         }
 
         private static void StyleClaudeSwitch(Border border,
@@ -647,57 +643,17 @@ public sealed class DetailsWindow : Window
 
         private void ApplyQuotaMetrics(UsageMetrics metrics)
         {
-            if (metrics.HasPrimary && metrics.HasSecondary)
-            {
-                ApplyPlusQuota(metrics);
-            }
-            else if (metrics.HasMonthly)
-            {
-                ApplyMonthlyQuota(metrics, true);
-            }
-            else if (metrics.HasContext)
-            {
-                ApplyMonthlyQuota(metrics, false);
-            }
-            else
-            {
-                ApplyPlusQuota(metrics);
-            }
-        }
-
-        private void ApplyPlusQuota(UsageMetrics metrics)
-        {
-            showsMonthly = false;
             quotaGroup.VerticalAlignment = VerticalAlignment.Center;
             fiveHourLabel.Text = L10n.Instance["quota.5h"];
             weekLabel.Text = L10n.Instance["quota.weekly"];
             fiveHourRow.Visibility = Visibility.Visible;
             weekRow.Visibility = Visibility.Visible;
             fiveHourRow.Margin = new Thickness(0);
-            weekRow.Margin = new Thickness(0, 10, 0, 0);
-            ApplyQuota(metrics.HasPrimary, metrics.PrimaryUsedPercent,
-                metrics.PrimaryResetUtc, fiveHourValue, fiveHourReset, fiveHourBar);
-            ApplyQuota(metrics.HasSecondary, metrics.SecondaryUsedPercent,
-                metrics.SecondaryResetUtc, weekValue, weekReset, weekBar);
-        }
-
-        private void ApplyMonthlyQuota(UsageMetrics metrics, bool hasMonthlyData)
-        {
-            showsMonthly = true;
-            quotaGroup.VerticalAlignment = VerticalAlignment.Center;
-            fiveHourLabel.Text = L10n.Instance["quota.monthly"];
-            fiveHourRow.Visibility = Visibility.Visible;
-            weekRow.Visibility = Visibility.Collapsed;
-            fiveHourRow.Margin = new Thickness(0);
-            if (hasMonthlyData)
-            {
-                ApplyQuota(true, metrics.MonthlyUsedPercent,
-                    metrics.MonthlyResetUtc, fiveHourValue, fiveHourReset, fiveHourBar);
-            }
-            else
-            {
-                ApplyQuotaPending(fiveHourValue, fiveHourReset, fiveHourBar);
-            }
+            weekRow.Margin = new Thickness(0, 8, 0, 0);
+            ApplyQuota(metrics.HasFiveHour, metrics.FiveHourUsedPercent,
+                metrics.FiveHourResetUtc, fiveHourValue, fiveHourReset, fiveHourBar);
+            ApplyQuota(metrics.HasWeekly, metrics.WeeklyUsedPercent,
+                metrics.WeeklyResetUtc, weekValue, weekReset, weekBar);
         }
 
         private static void ApplyQuota(bool available, double usedPercent,
@@ -725,15 +681,6 @@ public sealed class DetailsWindow : Window
             reset.Visibility = String.IsNullOrEmpty(reset.Text)
                 ? Visibility.Collapsed : Visibility.Visible;
             bar.Value = remaining;
-        }
-
-        private static void ApplyQuotaPending(TextBlock value, TextBlock reset,
-            RoundedMeter bar)
-        {
-            value.Text = L10n.Instance["quota.waiting_refresh"];
-            reset.Text = String.Empty;
-            reset.Visibility = Visibility.Collapsed;
-            bar.Value = 0;
         }
 
         public static bool IsQuotaExpired(DateTime resetUtc, DateTime nowUtc)
@@ -817,8 +764,8 @@ public sealed class DetailsWindow : Window
             return grid;
         }
 
-        private const string CodexIconPath =
-            "M9.064 3.344a4.578 4.578 0 012.285-.312c1 .115 1.891.54 2.673 1.275.01.01.024.017.037.021a.09.09 0 00.043 0 4.55 4.55 0 013.046.275l.047.022.116.057a4.581 4.581 0 012.188 2.399c.209.51.313 1.041.315 1.595a4.24 4.24 0 01-.134 1.223.123.123 0 00.03.115c.594.607.988 1.33 1.183 2.17.289 1.425-.007 2.71-.887 3.854l-.136.166a4.548 4.548 0 01-2.201 1.388.123.123 0 00-.081.076c-.191.551-.383 1.023-.74 1.494-.9 1.187-2.222 1.846-3.711 1.838-1.187-.006-2.239-.44-3.157-1.302a.107.107 0 00-.105-.024c-.388.125-.78.143-1.204.138a4.441 4.441 0 01-1.945-.466 4.544 4.544 0 01-1.61-1.335c-.152-.202-.303-.392-.414-.617a5.81 5.81 0 01-.37-.961 4.582 4.582 0 01-.014-2.298.124.124 0 00.006-.056.085.085 0 00-.027-.048 4.467 4.467 0 01-1.034-1.651 3.896 3.896 0 01-.251-1.192 5.189 5.189 0 01.141-1.6c.337-1.112.982-1.985 1.933-2.618.212-.141.413-.251.601-.33.215-.089.43-.164.646-.227a.098.098 0 00.065-.066 4.51 4.51 0 01.829-1.615 4.535 4.535 0 011.837-1.388zm3.482 10.565a.637.637 0 000 1.272h3.636a.637.637 0 100-1.272h-3.636zM8.462 9.23a.637.637 0 00-1.106.631l1.272 2.224-1.266 2.136a.636.636 0 101.095.649l1.454-2.455a.636.636 0 00.005-.64L8.462 9.23z";
+        private const string OpenAiBlossomIconPath =
+            "M249.176 323.434V298.276C249.176 296.158 249.971 294.569 251.825 293.509L302.406 264.381C309.29 260.409 317.5 258.555 325.973 258.555C357.75 258.555 377.877 283.185 377.877 309.399C377.877 311.253 377.877 313.371 377.611 315.49L325.178 284.771C322.001 282.919 318.822 282.919 315.645 284.771L249.176 323.434ZM367.283 421.415V361.301C367.283 357.592 365.694 354.945 362.516 353.092L296.048 314.43L317.763 301.982C319.617 300.925 321.206 300.925 323.058 301.982L373.639 331.112C388.205 339.586 398.003 357.592 398.003 375.069C398.003 395.195 386.087 413.733 367.283 421.412V421.415ZM233.553 368.452L211.838 355.742C209.986 354.684 209.19 353.095 209.19 350.975V292.718C209.19 264.383 230.905 242.932 260.301 242.932C271.423 242.932 281.748 246.641 290.49 253.26L238.321 283.449C235.146 285.303 233.555 287.951 233.555 291.659V368.455L233.553 368.452ZM280.292 395.462L249.176 377.985V340.913L280.292 323.436L311.407 340.913V377.985L280.292 395.462ZM300.286 475.968C289.163 475.968 278.837 472.259 270.097 465.64L322.264 435.449C325.441 433.597 327.03 430.949 327.03 427.239V350.445L349.011 363.155C350.865 364.213 351.66 365.802 351.66 367.922V426.179C351.66 454.514 329.679 475.965 300.286 475.965V475.968ZM237.525 416.915L186.944 387.785C172.378 379.31 162.582 361.305 162.582 343.827C162.582 323.436 174.763 305.164 193.563 297.485V357.861C193.563 361.571 195.154 364.217 198.33 366.071L264.535 404.467L242.82 416.915C240.967 417.972 239.377 417.972 237.525 416.915ZM234.614 460.343C204.689 460.343 182.71 437.833 182.71 410.028C182.71 407.91 182.976 405.792 183.238 403.672L235.405 433.863C238.582 435.715 241.763 435.715 244.938 433.863L311.407 395.466V420.622C311.407 422.742 310.612 424.331 308.758 425.389L258.179 454.519C251.293 458.491 243.083 460.343 234.611 460.343H234.614ZM300.286 491.854C332.329 491.854 359.073 469.082 365.167 438.892C394.825 431.211 413.892 403.406 413.892 375.073C413.892 356.535 405.948 338.529 391.648 325.552C392.972 319.991 393.766 314.43 393.766 308.87C393.766 271.003 363.048 242.666 327.562 242.666C320.413 242.666 313.528 243.723 306.644 246.109C294.725 234.457 278.307 227.042 260.301 227.042C228.258 227.042 201.513 249.815 195.42 280.004C165.761 287.685 146.694 315.49 146.694 343.824C146.694 362.362 154.638 380.368 168.938 393.344C167.613 398.906 166.819 404.467 166.819 410.027C166.819 447.894 197.538 476.231 233.024 476.231C240.172 476.231 247.058 475.173 253.943 472.788C265.859 484.441 282.278 491.854 300.286 491.854Z";
 
         private const string ClaudeCodeIconPath =
             "M6.9 2.7h10.2c.9 0 1.6.7 1.6 1.6v3.4h2.4c.8 0 1.4.6 1.4 1.4v3.9c0 .8-.6 1.4-1.4 1.4h-2.4v6.9h-3.2v-6.9h-2.1v6.9h-2.8v-6.9H8.5v6.9H5.3v-6.9H2.9c-.8 0-1.4-.6-1.4-1.4V9.1c0-.8.6-1.4 1.4-1.4h2.4V4.3c0-.9.7-1.6 1.6-1.6z";
@@ -873,7 +820,7 @@ public sealed class DetailsWindow : Window
             hitLayer.ColumnDefinitions.Add(new ColumnDefinition());
             Grid.SetColumnSpan(hitLayer, 2);
 
-            Viewbox codexIconBox = CreateSwitchIcon(CodexIconPath, 24, 24, 21,
+            Viewbox codexIconBox = CreateSwitchIcon(OpenAiBlossomIconPath, 18,
                 out codexIcon);
             codexBorder = new Border
             {
@@ -901,19 +848,21 @@ public sealed class DetailsWindow : Window
             return shell;
         }
 
-        private static Viewbox CreateSwitchIcon(string pathData, double sourceWidth,
-            double sourceHeight, double displaySize,
+        private static Viewbox CreateSwitchIcon(string pathData, double displaySize,
             out System.Windows.Shapes.Path icon)
         {
+            Geometry geometry = Geometry.Parse(pathData).Clone();
+            System.Windows.Rect bounds = geometry.Bounds;
+            geometry.Transform = new TranslateTransform(-bounds.X, -bounds.Y);
             Canvas canvas = new Canvas
             {
-                Width = sourceWidth,
-                Height = sourceHeight
+                Width = bounds.Width,
+                Height = bounds.Height
             };
             icon = new System.Windows.Shapes.Path
             {
-                Data = Geometry.Parse(pathData),
-                Fill = new SolidColorBrush(MediaColor.FromRgb(18, 42, 58)),
+                Data = geometry,
+                Fill = System.Windows.Media.Brushes.Black,
                 Stretch = Stretch.None
             };
             canvas.Children.Add(icon);
@@ -927,21 +876,6 @@ public sealed class DetailsWindow : Window
                 Child = canvas
             };
             return viewbox;
-        }
-
-        private static MediaBrush CreateCodexGradientBrush()
-        {
-            System.Windows.Media.LinearGradientBrush brush =
-                new System.Windows.Media.LinearGradientBrush();
-            brush.StartPoint = new MediaPoint(0, 0);
-            brush.EndPoint = new MediaPoint(0, 1);
-            brush.GradientStops.Add(new GradientStop(
-                MediaColor.FromRgb(177, 167, 255), 0));
-            brush.GradientStops.Add(new GradientStop(
-                MediaColor.FromRgb(122, 157, 255), 0.5));
-            brush.GradientStops.Add(new GradientStop(
-                MediaColor.FromRgb(57, 65, 255), 1));
-            return brush;
         }
 
         private static Viewbox CreateClaudeCodeSwitchIcon(double displaySize,
@@ -1057,9 +991,7 @@ public sealed class DetailsWindow : Window
 
         private void RefreshAllText()
         {
-            fiveHourLabel.Text = showsMonthly
-                ? L10n.Instance["quota.monthly"]
-                : L10n.Instance["quota.5h"];
+            fiveHourLabel.Text = L10n.Instance["quota.5h"];
             weekLabel.Text = L10n.Instance["quota.weekly"];
             claudeProjectTitle.Text = L10n.Instance["metadata.project"];
             claudeModelTitle.Text = L10n.Instance["metadata.model"];
