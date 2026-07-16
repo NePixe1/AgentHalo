@@ -32,21 +32,30 @@
   "status.permission_denied": "Permission Denied",
   "status.reviewing_result": "Reviewing Result",
 
-  "quota.5h": "5-Hour Quota",
-  "quota.weekly": "Weekly Quota",
+  "quota.5h": "5-Hour",
+  "quota.weekly": "Weekly",
   "quota.monthly": "Monthly Quota",
   "quota.remaining": "{0}% Remaining",
   "quota.no_data": "No Data",
-  "quota.waiting_refresh": "Waiting for refresh",
+  "quota.waiting_refresh": "Waiting for Refresh",
 
   "context.title": "Context",
   "context.label": "Context {0}%",
   "context.empty": "Context --",
 
   "metadata.project": "Project",
+  "metadata.session_title": "Session title",
   "metadata.model": "Model",
   "metadata.tokens": "Input/Output",
   "metadata.separator": "  ·  ",
+
+  "usage.warning.sign_in_codex": "Sign in to Codex again to refresh usage.",
+  "usage.warning.sign_in_claude": "Sign in to Claude Code again to refresh usage.",
+  "usage.warning.rate_limited": "Usage requests are limited. AgentHalo will retry later.",
+  "usage.warning.stale": "Usage may be outdated. Last updated {0}.",
+  "usage.warning.network": "Usage could not be refreshed because of a network error.",
+  "usage.warning.service": "The usage service is temporarily unavailable.",
+  "usage.warning.invalid": "The usage service returned unavailable data.",
 
   "failure.auth_expired": "Authentication Expired",
   "failure.quota_exhausted": "Quota Exhausted",
