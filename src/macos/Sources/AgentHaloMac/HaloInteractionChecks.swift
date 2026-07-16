@@ -1086,8 +1086,8 @@ private func testDetailsPanelKeepsFixedWidthForLongProviderContent() {
     panel.contentView?.layoutSubtreeIfNeeded()
 
     expect(panel.frameWidthForTesting, initialWidth, "long provider content should not widen the panel")
-    expect(panel.frameWidthForTesting, 268, "details panel should keep the fixed width")
-    expect((panel.contentView?.fittingSize.width ?? 0) <= 268.5, "content should fit the fixed width")
+    expect(panel.frameWidthForTesting, 278, "details panel should keep the expanded fixed width")
+    expect((panel.contentView?.fittingSize.width ?? 0) <= 278.5, "content should fit the expanded fixed width")
 }
 
 @MainActor

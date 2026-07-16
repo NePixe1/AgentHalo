@@ -21,7 +21,7 @@ enum DetailsPanelSessionBodyRole: Equatable {
 
 @MainActor
 class DetailsPanel: NSPanel {
-    private static let panelWidth: CGFloat = 268
+    private static let panelWidth: CGFloat = 278
     private static let contextPillWidth: CGFloat = 42
     private static let contextPillHorizontalPadding: CGFloat = 3
 
