@@ -1107,6 +1107,7 @@ private func testDetailsPanelResizesHeightWithoutAnimation() {
     expect(!usageCall.display, "usage resize should not request immediate display")
     expect(!usageCall.animate, "usage resize should not animate")
     expect(usageCall.frame.height, usageExpectedHeight, "usage height should be an even, pixel-aligned stack fitting height")
+    expect(usageCall.frame.height, 196, "title refinements should preserve the established panel height")
     expect(usageCall.frame.maxY, initialTopEdge, "usage resize should preserve the prior top edge")
     expect(panel.frame, usageCall.frame, "window should apply the observed usage resize frame")
 
@@ -1154,12 +1155,17 @@ private func testDetailsPanelMovesTitleGapIntoBodySpacing() {
     }
     contentView.layoutSubtreeIfNeeded()
 
-    func frame(of value: String) -> NSRect {
+    func field(of value: String) -> NSTextField {
         guard let field = allDescendants(of: contentView)
             .compactMap({ $0 as? NSTextField })
             .first(where: { $0.stringValue == value }) else {
             fatalError("details panel should expose text field: \(value)")
         }
+        return field
+    }
+
+    func frame(of value: String) -> NSRect {
+        let field = field(of: value)
         return field.convert(field.bounds, to: contentView)
     }
 
@@ -1186,13 +1192,17 @@ private func testDetailsPanelMovesTitleGapIntoBodySpacing() {
     }
     let topRowFrame = topRow.convert(topRow.bounds, to: contentView)
     let providerFrame = providerHeader.convert(providerHeader.bounds, to: contentView)
-    let titleFrame = frame(of: "STANDBY")
-    let detailFrame = frame(of: "Codex Standing By")
+    let titleField = field(of: "STANDBY")
+    let detailField = field(of: "Codex Standing By")
+    let titleFrame = titleField.convert(titleField.bounds, to: contentView)
+    let detailFrame = detailField.convert(detailField.bounds, to: contentView)
     let quotaRow = containingFrame(of: L10n.shared["quota.5h"])
 
-    expect(topRowFrame.minY - providerFrame.maxY, 2, "provider and title should move 3pt closer to the top row")
+    expect(titleField.font?.pointSize, 22, "status title should use the smaller font")
+    expect(detailField.font?.pointSize, 12, "status detail should use the smaller font")
+    expect(topRowFrame.minY - providerFrame.maxY, 0, "provider and title should move 2pt closer to the top row")
     expect(providerFrame.minY - titleFrame.maxY, 3, "title should move 4pt closer to provider")
-    expect(detailFrame.minY - quotaRow.maxY, 7, "usage body should receive the released title spacing")
+    expect(detailFrame.minY - quotaRow.maxY, 11, "usage body should receive the released title spacing")
 
     panel.render(
         aggregate: aggregate,
@@ -1213,7 +1223,7 @@ private func testDetailsPanelMovesTitleGapIntoBodySpacing() {
     let sessionDetailFrame = frame(of: "Codex Standing By")
     let sessionTitleRow = containingFrame(of: L10n.shared["metadata.session_title"])
     expect(sessionProviderFrame.minY - sessionTitleFrame.maxY, 3, "session title should keep the tightened provider gap")
-    expect(sessionDetailFrame.minY - sessionTitleRow.maxY, 7, "session body should receive the released title spacing")
+    expect(sessionDetailFrame.minY - sessionTitleRow.maxY, 11, "session body should receive the released title spacing")
 }
 
 @MainActor

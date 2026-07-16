@@ -88,22 +88,22 @@ class DetailsPanel: NSPanel {
         let topRow = makeTopRow()
         self.topRow = topRow
         stack.addArrangedSubview(topRow)
-        stack.setCustomSpacing(2, after: topRow)
+        stack.setCustomSpacing(0, after: topRow)
 
         stack.addArrangedSubview(providerHeader)
         stack.setCustomSpacing(3, after: providerHeader)
 
-        titleField.font = .systemFont(ofSize: 24, weight: .bold)
+        titleField.font = .systemFont(ofSize: 22, weight: .bold)
         titleField.lineBreakMode = .byTruncatingTail
         titleField.alignment = .left
-        detailField.font = .systemFont(ofSize: 13)
+        detailField.font = .systemFont(ofSize: 12)
         detailField.textColor = NSColor(calibratedRed: 0.38, green: 0.45, blue: 0.50, alpha: 1)
         detailField.lineBreakMode = .byTruncatingTail
         detailField.alignment = .left
         stack.addArrangedSubview(titleField)
         stack.setCustomSpacing(2, after: titleField)
         stack.addArrangedSubview(detailField)
-        stack.setCustomSpacing(7, after: detailField)
+        stack.setCustomSpacing(11, after: detailField)
 
         quotaGroup.orientation = .vertical
         quotaGroup.spacing = 8
