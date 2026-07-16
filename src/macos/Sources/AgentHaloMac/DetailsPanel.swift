@@ -106,7 +106,7 @@ class DetailsPanel: NSPanel {
         stack.setCustomSpacing(11, after: detailField)
 
         quotaGroup.orientation = .vertical
-        quotaGroup.spacing = 8
+        quotaGroup.spacing = 4
         quotaGroup.alignment = .leading
         quotaGroup.translatesAutoresizingMaskIntoConstraints = false
         quotaGroup.addArrangedSubview(primaryQuota)
@@ -180,9 +180,13 @@ class DetailsPanel: NSPanel {
 
         switch model.body {
         case .usage(let usage):
+            stack.setCustomSpacing(16, after: detailField)
+            stack.edgeInsets.bottom = 6
             renderUsage(usage)
             quotaGroup.isHidden = false
         case .session(let session):
+            stack.setCustomSpacing(11, after: detailField)
+            stack.edgeInsets.bottom = 4
             renderSession(session, isOffline: isOffline)
             metadataGroup.isHidden = false
         }
@@ -935,7 +939,7 @@ private final class QuotaRowView: NSView {
         }
         resetField.isHidden = true
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 34),
+            heightAnchor.constraint(equalToConstant: 33),
             nameField.leadingAnchor.constraint(equalTo: leadingAnchor),
             nameField.topAnchor.constraint(equalTo: topAnchor),
             resetField.leadingAnchor.constraint(equalTo: nameField.trailingAnchor, constant: 7),

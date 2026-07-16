@@ -1197,12 +1197,14 @@ private func testDetailsPanelMovesTitleGapIntoBodySpacing() {
     let titleFrame = titleField.convert(titleField.bounds, to: contentView)
     let detailFrame = detailField.convert(detailField.bounds, to: contentView)
     let quotaRow = containingFrame(of: L10n.shared["quota.5h"])
+    let weeklyQuotaRow = containingFrame(of: L10n.shared["quota.weekly"])
 
     expect(titleField.font?.pointSize, 22, "status title should use the smaller font")
     expect(detailField.font?.pointSize, 12, "status detail should use the smaller font")
     expect(topRowFrame.minY - providerFrame.maxY, 0, "provider and title should move 2pt closer to the top row")
     expect(providerFrame.minY - titleFrame.maxY, 3, "title should move 4pt closer to provider")
-    expect(detailFrame.minY - quotaRow.maxY, 11, "usage body should receive the released title spacing")
+    expect(detailFrame.minY - quotaRow.maxY, 16, "usage body should keep a clear gap below the subtitle")
+    expect(quotaRow.minY - weeklyQuotaRow.maxY, 4, "quota rows should be compact")
 
     panel.render(
         aggregate: aggregate,
