@@ -88,7 +88,7 @@ class DetailsPanel: NSPanel {
         let topRow = makeTopRow()
         self.topRow = topRow
         stack.addArrangedSubview(topRow)
-        stack.setCustomSpacing(5, after: topRow)
+        stack.setCustomSpacing(2, after: topRow)
 
         stack.addArrangedSubview(providerHeader)
         stack.setCustomSpacing(3, after: providerHeader)
@@ -103,7 +103,7 @@ class DetailsPanel: NSPanel {
         stack.addArrangedSubview(titleField)
         stack.setCustomSpacing(2, after: titleField)
         stack.addArrangedSubview(detailField)
-        stack.setCustomSpacing(4, after: detailField)
+        stack.setCustomSpacing(7, after: detailField)
 
         quotaGroup.orientation = .vertical
         quotaGroup.spacing = 8

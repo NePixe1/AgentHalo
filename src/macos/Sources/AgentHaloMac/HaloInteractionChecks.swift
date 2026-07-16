@@ -1179,13 +1179,20 @@ private func testDetailsPanelMovesTitleGapIntoBodySpacing() {
           let providerHeader = providerField.superview else {
         fatalError("details panel should expose provider header")
     }
+    guard let agentToggle = allDescendants(of: contentView)
+        .first(where: { $0 is AgentToggleView }),
+          let topRow = agentToggle.superview else {
+        fatalError("details panel should expose top row")
+    }
+    let topRowFrame = topRow.convert(topRow.bounds, to: contentView)
     let providerFrame = providerHeader.convert(providerHeader.bounds, to: contentView)
     let titleFrame = frame(of: "STANDBY")
     let detailFrame = frame(of: "Codex Standing By")
     let quotaRow = containingFrame(of: L10n.shared["quota.5h"])
 
+    expect(topRowFrame.minY - providerFrame.maxY, 2, "provider and title should move 3pt closer to the top row")
     expect(providerFrame.minY - titleFrame.maxY, 3, "title should move 4pt closer to provider")
-    expect(detailFrame.minY - quotaRow.maxY, 4, "usage body should receive the released title spacing")
+    expect(detailFrame.minY - quotaRow.maxY, 7, "usage body should receive the released title spacing")
 
     panel.render(
         aggregate: aggregate,
@@ -1206,7 +1213,7 @@ private func testDetailsPanelMovesTitleGapIntoBodySpacing() {
     let sessionDetailFrame = frame(of: "Codex Standing By")
     let sessionTitleRow = containingFrame(of: L10n.shared["metadata.session_title"])
     expect(sessionProviderFrame.minY - sessionTitleFrame.maxY, 3, "session title should keep the tightened provider gap")
-    expect(sessionDetailFrame.minY - sessionTitleRow.maxY, 4, "session body should receive the released title spacing")
+    expect(sessionDetailFrame.minY - sessionTitleRow.maxY, 7, "session body should receive the released title spacing")
 }
 
 @MainActor
