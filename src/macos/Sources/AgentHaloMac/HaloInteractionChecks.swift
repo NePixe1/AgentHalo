@@ -100,6 +100,7 @@ func runHaloInteractionChecks() {
     testDetailsPanelLocalizesClaudeActivityDetails()
     testAgentToggleUsesSharedSVGAssets()
     testAgentToggleUsesCodexAndClaudeIcons()
+    testAgentToggleSelectionPillFitsItsIconWidth()
     testAgentToggleKeepsWholeControlClickable()
     testDetailsPanelSwitchCallbackSelectsClaudeCode()
 }
@@ -2180,6 +2181,19 @@ private func testAgentToggleUsesCodexAndClaudeIcons() {
     expect(!visibleLabels.contains("CC"), "agent toggle should replace the CC text with an icon")
     expect(icons.count == 2, "agent toggle should render one icon for each agent")
     expect(icons.allSatisfy { $0.image != nil }, "agent toggle should load both shared SVG images")
+}
+
+@MainActor
+private func testAgentToggleSelectionPillFitsItsIconWidth() {
+    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 110, height: 24))
+    toggle.layoutSubtreeIfNeeded()
+
+    let selectionPill = toggle.subviews.first?.subviews.first
+    expect(
+        selectionPill?.frame.width ?? 0,
+        51,
+        "selected agent pill should fit the icon width without extra horizontal expansion"
+    )
 }
 
 @MainActor

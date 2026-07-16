@@ -1071,8 +1071,8 @@ final class AgentToggleView: NSView {
         let targetIcon = selectedAgent == .codex ? codexIcon : claudeIcon
 
         activeBgConstraints = [
-            activeBg.leadingAnchor.constraint(equalTo: targetIcon.leadingAnchor, constant: -2),
-            activeBg.trailingAnchor.constraint(equalTo: targetIcon.trailingAnchor, constant: 2),
+            activeBg.leadingAnchor.constraint(equalTo: targetIcon.leadingAnchor),
+            activeBg.trailingAnchor.constraint(equalTo: targetIcon.trailingAnchor),
             activeBg.topAnchor.constraint(equalTo: bgView.topAnchor, constant: 2),
             activeBg.bottomAnchor.constraint(equalTo: bgView.bottomAnchor, constant: -2)
         ]
