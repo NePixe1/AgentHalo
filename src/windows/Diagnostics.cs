@@ -513,19 +513,31 @@ public static class Diagnostics
                     "\"model_context_window\":100}}}";
                 string quotaOnlyRate =
                     "{\"payload\":{\"info\":{\"rate_limits\":{\"primary\":{" +
-                    "\"used_percent\":25,\"resets_at\":4102444800}," +
-                    "\"secondary\":{\"used_percent\":40," +
+                    "\"used_percent\":25,\"window_minutes\":300," +
+                    "\"resets_at\":4102444800}," +
+                    "\"secondary\":{\"used_percent\":40,\"window_minutes\":10080," +
                     "\"resets_at\":4102444800}}}}}";
                 UsageMetrics parsedUsage;
                 Assert(RateLimitReader.TryReadFromNewestLinesForTest(
                     new[] { contextOnlyRate, quotaOnlyRate }, out parsedUsage),
                     "rate limit parser reads split snapshots");
-                Assert(parsedUsage.HasPrimary && parsedUsage.HasSecondary &&
+                Assert(parsedUsage.HasFiveHour && parsedUsage.HasWeekly &&
                     parsedUsage.HasContext, "rate limit parser fills all fields");
-                Assert(Math.Abs(parsedUsage.PrimaryUsedPercent - 25) < 0.001 &&
-                    Math.Abs(parsedUsage.SecondaryUsedPercent - 40) < 0.001 &&
+                Assert(Math.Abs(parsedUsage.FiveHourUsedPercent - 25) < 0.001 &&
+                    Math.Abs(parsedUsage.WeeklyUsedPercent - 40) < 0.001 &&
                     Math.Abs(parsedUsage.ContextUsedPercent - 50) < 0.001,
                     "rate limit parser preserves latest field values");
+                string weeklyOnlyRate =
+                    "{\"payload\":{\"info\":{\"rate_limits\":{\"primary\":{" +
+                    "\"used_percent\":0,\"window_minutes\":10080," +
+                    "\"resets_at\":4102444800},\"secondary\":null}," +
+                    "\"last_token_usage\":{\"input_tokens\":10}," +
+                    "\"model_context_window\":100}}}";
+                Assert(RateLimitReader.TryReadFromNewestLinesForTest(
+                    new[] { weeklyOnlyRate }, out parsedUsage) &&
+                    parsedUsage.HasWeekly && !parsedUsage.HasFiveHour &&
+                    Math.Abs(parsedUsage.WeeklyUsedPercent) < 0.001,
+                    "single primary 10080-minute window is weekly, not five-hour");
                 string monthlyRate =
                     "{\"payload\":{\"info\":{\"rate_limits\":{\"monthly\":{" +
                     "\"used_percent\":37,\"resets_at\":4102444800}}," +
@@ -534,8 +546,8 @@ public static class Diagnostics
                 Assert(RateLimitReader.TryReadFromNewestLinesForTest(
                     new[] { monthlyRate }, out parsedUsage),
                     "rate limit parser reads monthly quota");
-                Assert(parsedUsage.HasMonthly && !parsedUsage.HasPrimary &&
-                    !parsedUsage.HasSecondary &&
+                Assert(parsedUsage.HasMonthly && !parsedUsage.HasFiveHour &&
+                    !parsedUsage.HasWeekly &&
                     Math.Abs(parsedUsage.MonthlyUsedPercent - 37) < 0.001,
                     "monthly quota stays separate from Plus buckets");
                 string longPrimaryRate =
@@ -1299,12 +1311,9 @@ public static class Diagnostics
             DetailsWindow panel = new DetailsWindow();
             panel.SetPreviewMetrics(new UsageMetrics
             {
-                HasPrimary = true,
-                HasSecondary = true,
-                PrimaryUsedPercent = 47,
-                SecondaryUsedPercent = 76,
-                PrimaryResetUtc = DateTime.Today.AddHours(14).AddMinutes(58).ToUniversalTime(),
-                SecondaryResetUtc = DateTime.Today.AddDays(3).AddHours(9)
+                HasWeekly = true,
+                WeeklyUsedPercent = 76,
+                WeeklyResetUtc = DateTime.Today.AddDays(3).AddHours(9)
                     .AddMinutes(36).ToUniversalTime(),
                 ContextInputTokens = 202600,
                 ContextWindowTokens = 258400
@@ -1335,44 +1344,6 @@ public static class Diagnostics
                 encoder.Save(stream);
             }
             panel.Close();
-
-            DetailsWindow monthlyPanel = new DetailsWindow();
-            monthlyPanel.SetPreviewMetrics(new UsageMetrics
-            {
-                HasMonthly = true,
-                MonthlyUsedPercent = 62,
-                MonthlyResetUtc = DateTime.Today.AddDays(12).AddHours(9)
-                    .AddMinutes(30).ToUniversalTime(),
-                ContextInputTokens = 89120,
-                ContextWindowTokens = 258400
-            });
-            monthlyPanel.UpdateContent(aggregate, sessions);
-            FrameworkElement monthlyContent = monthlyPanel.Content as FrameworkElement;
-            monthlyPanel.Content = null;
-
-            Grid monthlyStage = new Grid();
-            monthlyStage.Width = 380;
-            monthlyStage.Background = new SolidColorBrush(MediaColor.FromRgb(7, 10, 15));
-            monthlyContent.Width = 324;
-            monthlyContent.Margin = new Thickness(28);
-            monthlyStage.Children.Add(monthlyContent);
-            monthlyStage.Measure(new System.Windows.Size(380, 1000));
-            double monthlyHeight = Math.Ceiling(monthlyStage.DesiredSize.Height);
-            monthlyStage.Height = monthlyHeight;
-            monthlyStage.Arrange(new Rect(0, 0, 380, monthlyHeight));
-            monthlyStage.UpdateLayout();
-
-            RenderTargetBitmap monthlyBitmap = new RenderTargetBitmap(760,
-                (int)(monthlyHeight * 2), 192, 192, PixelFormats.Pbgra32);
-            monthlyBitmap.Render(monthlyStage);
-            PngBitmapEncoder monthlyEncoder = new PngBitmapEncoder();
-            monthlyEncoder.Frames.Add(BitmapFrame.Create(monthlyBitmap));
-            using (FileStream stream = File.Create(Path.Combine(outputDirectory,
-                "panel-monthly.png")))
-            {
-                monthlyEncoder.Save(stream);
-            }
-            monthlyPanel.Close();
 
             List<SessionSnapshot> claudeSessions = new List<SessionSnapshot>();
             claudeSessions.Add(new SessionSnapshot

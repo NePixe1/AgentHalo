@@ -1456,13 +1456,13 @@ public static class CodexFailureReader
 
 public static class RateLimitReader
     {
-        public static bool TryRead(out double primaryUsed, out double secondaryUsed)
+        public static bool TryRead(out double fiveHourUsed, out double weeklyUsed)
         {
             UsageMetrics metrics;
             bool result = TryRead(out metrics);
-            primaryUsed = metrics.PrimaryUsedPercent;
-            secondaryUsed = metrics.SecondaryUsedPercent;
-            return result && metrics.HasPrimary && metrics.HasSecondary;
+            fiveHourUsed = metrics.FiveHourUsedPercent;
+            weeklyUsed = metrics.WeeklyUsedPercent;
+            return result && metrics.HasFiveHour && metrics.HasWeekly;
         }
 
         public static bool TryReadMonthly(out double monthlyUsed)
@@ -1541,7 +1541,7 @@ public static class RateLimitReader
             catch
             {
             }
-            return metrics.HasPrimary || metrics.HasSecondary || metrics.HasMonthly ||
+            return metrics.HasFiveHour || metrics.HasWeekly || metrics.HasMonthly ||
                 metrics.HasContext;
         }
 
@@ -1567,14 +1567,13 @@ public static class RateLimitReader
                     return true;
                 }
             }
-            return metrics.HasPrimary || metrics.HasSecondary || metrics.HasMonthly ||
+            return metrics.HasFiveHour || metrics.HasWeekly || metrics.HasMonthly ||
                 metrics.HasContext;
         }
 
         private static bool HasCompleteMetrics(UsageMetrics metrics)
         {
-            return metrics.HasContext &&
-                ((metrics.HasPrimary && metrics.HasSecondary) || metrics.HasMonthly);
+            return metrics.HasContext && metrics.HasWeekly;
         }
 
         private static void ApplyRateLimitLine(string line, UsageMetrics metrics,
@@ -1601,26 +1600,20 @@ public static class RateLimitReader
             {
                 ApplyMonthly(metrics, monthly);
             }
+            Dictionary<string, object> weekly = FindNamedLimit(limits,
+                "weekly", "week", "weekly_usage", "weekly_quota");
+            if (!metrics.HasWeekly && weekly != null)
+            {
+                ApplyWeekly(metrics, weekly);
+            }
             bool primaryLooksMonthly = primary != null && secondary == null &&
                 LooksLikeMonthlyLimit(primary, limits);
             if (!metrics.HasMonthly && primaryLooksMonthly)
             {
                 ApplyMonthly(metrics, primary);
             }
-            if (!metrics.HasPrimary && primary != null && !primaryLooksMonthly)
-            {
-                metrics.PrimaryUsedPercent = Number(primary,
-                    GeneratedHaloSpec.RateUsedPercentKey);
-                metrics.PrimaryResetUtc = UnixTime(primary, "resets_at");
-                metrics.HasPrimary = true;
-            }
-            if (!metrics.HasSecondary && secondary != null)
-            {
-                metrics.SecondaryUsedPercent = Number(secondary,
-                    GeneratedHaloSpec.RateUsedPercentKey);
-                metrics.SecondaryResetUtc = UnixTime(secondary, "resets_at");
-                metrics.HasSecondary = true;
-            }
+            ApplyClassifiedWindow(metrics, primary, primaryLooksMonthly);
+            ApplyClassifiedWindow(metrics, secondary, false);
             Dictionary<string, object> lastUsage = Child(info, "last_token_usage");
             if (!metrics.HasContext && lastUsage != null && info != null &&
                 lastUsage.ContainsKey("input_tokens") &&
@@ -1658,6 +1651,73 @@ public static class RateLimitReader
             return null;
         }
 
+        private static Dictionary<string, object> FindNamedLimit(
+            Dictionary<string, object> limits, params string[] keys)
+        {
+            if (limits == null)
+            {
+                return null;
+            }
+            foreach (string key in keys)
+            {
+                Dictionary<string, object> child = Child(limits, key);
+                if (child != null)
+                {
+                    return child;
+                }
+            }
+            return null;
+        }
+
+        private static void ApplyClassifiedWindow(UsageMetrics metrics,
+            Dictionary<string, object> source, bool alreadyClassifiedAsMonthly)
+        {
+            if (source == null || alreadyClassifiedAsMonthly)
+            {
+                return;
+            }
+            double minutes;
+            if (!TryWindowMinutes(source, out minutes))
+            {
+                return;
+            }
+            if (Math.Abs(minutes - GeneratedHaloSpec.RateFiveHourWindowMinutes) < 0.5)
+            {
+                if (!metrics.HasFiveHour)
+                {
+                    metrics.FiveHourUsedPercent = UsedPercent(source);
+                    metrics.FiveHourResetUtc = UnixTime(source, "resets_at");
+                    metrics.HasFiveHour = true;
+                }
+                return;
+            }
+            if (Math.Abs(minutes - GeneratedHaloSpec.RateWeeklyWindowMinutes) < 0.5)
+            {
+                if (!metrics.HasWeekly)
+                {
+                    ApplyWeekly(metrics, source);
+                }
+                return;
+            }
+            if (minutes >= GeneratedHaloSpec.RateMonthlyMinimumWindowMinutes &&
+                !metrics.HasMonthly)
+            {
+                ApplyMonthly(metrics, source);
+            }
+        }
+
+        private static bool TryWindowMinutes(Dictionary<string, object> source,
+            out double minutes)
+        {
+            minutes = 0;
+            object value;
+            return source != null &&
+                source.TryGetValue(GeneratedHaloSpec.RateWindowMinutesKey, out value) &&
+                value != null && Double.TryParse(
+                    Convert.ToString(value, CultureInfo.InvariantCulture),
+                    NumberStyles.Float, CultureInfo.InvariantCulture, out minutes);
+        }
+
         private static bool LooksLikeMonthlyLimit(Dictionary<string, object> limit,
             Dictionary<string, object> limits)
         {
@@ -1665,14 +1725,10 @@ public static class RateLimitReader
             {
                 return false;
             }
-            object window;
-            if (limit.TryGetValue("window_minutes", out window))
+            double minutes;
+            if (TryWindowMinutes(limit, out minutes))
             {
-                double minutes = Convert.ToDouble(window, CultureInfo.InvariantCulture);
-                if (minutes >= 28 * 24 * 60)
-                {
-                    return true;
-                }
+                return minutes >= GeneratedHaloSpec.RateMonthlyMinimumWindowMinutes;
             }
             string plan = Convert.ToString(Value(limits, "plan_type"),
                 CultureInfo.InvariantCulture);
@@ -1691,6 +1747,14 @@ public static class RateLimitReader
             metrics.MonthlyUsedPercent = UsedPercent(source);
             metrics.MonthlyResetUtc = UnixTime(source, "resets_at");
             metrics.HasMonthly = true;
+        }
+
+        private static void ApplyWeekly(UsageMetrics metrics,
+            Dictionary<string, object> source)
+        {
+            metrics.WeeklyUsedPercent = UsedPercent(source);
+            metrics.WeeklyResetUtc = UnixTime(source, "resets_at");
+            metrics.HasWeekly = true;
         }
 
         private static double Number(Dictionary<string, object> source, string key)

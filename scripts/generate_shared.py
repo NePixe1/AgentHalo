@@ -236,6 +236,10 @@ namespace CodexHalo
         public const string RatePrimaryKey = {csharp_string(primary_path[0])};
         public const string RateSecondaryKey = {csharp_string(secondary_path[0])};
         public const string RateUsedPercentKey = {csharp_string(primary_path[1])};
+        public const string RateWindowMinutesKey = {csharp_string(rate['windowMinutesKey'])};
+        public const int RateFiveHourWindowMinutes = {rate['fiveHourWindowMinutes']};
+        public const int RateWeeklyWindowMinutes = {rate['weeklyWindowMinutes']};
+        public const int RateMonthlyMinimumWindowMinutes = {rate['monthlyMinimumWindowMinutes']};
         public const int RateLimitTailBytes = {rate['tailBytes']};
         public const int RateLimitRecentFileCount = {rate['recentFileCount']};
         public const int RateLimitRecentLineCount = {rate['recentLineCount']};
@@ -439,6 +443,10 @@ public enum GeneratedHaloSpec {{
     public static let ratePrimaryKey = {swift_string(primary_path[0])}
     public static let rateSecondaryKey = {swift_string(secondary_path[0])}
     public static let rateUsedPercentKey = {swift_string(primary_path[1])}
+    public static let rateWindowMinutesKey = {swift_string(rate['windowMinutesKey'])}
+    public static let rateFiveHourWindowMinutes = {rate['fiveHourWindowMinutes']}
+    public static let rateWeeklyWindowMinutes = {rate['weeklyWindowMinutes']}
+    public static let rateMonthlyMinimumWindowMinutes = {rate['monthlyMinimumWindowMinutes']}
     public static let rateLimitTailBytes = {rate['tailBytes']}
     public static let rateLimitRecentFileCount = {rate['recentFileCount']}
     public static let rateLimitRecentLineCount = {rate['recentLineCount']}
