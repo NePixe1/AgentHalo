@@ -59,14 +59,14 @@ public sealed class AggregateSnapshot
 
 public sealed class UsageMetrics
     {
-        public bool HasPrimary;
-        public bool HasSecondary;
+        public bool HasFiveHour;
+        public bool HasWeekly;
         public bool HasMonthly;
-        public double PrimaryUsedPercent;
-        public double SecondaryUsedPercent;
+        public double FiveHourUsedPercent;
+        public double WeeklyUsedPercent;
         public double MonthlyUsedPercent;
-        public DateTime PrimaryResetUtc;
-        public DateTime SecondaryResetUtc;
+        public DateTime FiveHourResetUtc;
+        public DateTime WeeklyResetUtc;
         public DateTime MonthlyResetUtc;
         public long ContextInputTokens;
         public long ContextWindowTokens;

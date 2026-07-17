@@ -127,6 +127,10 @@
     "containerPaths": [["payload", "rate_limits"], ["payload", "info", "rate_limits"]],
     "primaryPath": ["primary", "used_percent"],
     "secondaryPath": ["secondary", "used_percent"],
+    "windowMinutesKey": "window_minutes",
+    "fiveHourWindowMinutes": 300,
+    "weeklyWindowMinutes": 10080,
+    "monthlyMinimumWindowMinutes": 40320,
     "tailBytes": 1048576,
     "recentFileCount": 16,
     "recentLineCount": 300
