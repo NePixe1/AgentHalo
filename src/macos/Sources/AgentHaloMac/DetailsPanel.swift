@@ -264,6 +264,10 @@ class DetailsPanel: NSPanel {
         titleField.textColor = NSColor(calibratedRed: rgb.red / 255, green: rgb.green / 255, blue: rgb.blue / 255, alpha: 1)
         detailField.stringValue = Self.localizedDetail(for: aggregate)
         agentToggle.setAgent(aggregate.focusedAgent)
+        if aggregate.focusedAgent == .codex {
+            let isOffline = aggregate.state == .idle && aggregate.label == "OFFLINE"
+            updateContext(aggregate.sessions.first?.contextUsedPercent, isOffline: isOffline)
+        }
     }
 
     static func formatResetTime(_ date: Date?) -> String {
@@ -932,8 +936,8 @@ final class AgentToggleView: NSView {
             NSLayoutConstraint.activate(activeBgConstraints)
         }
 
-        codexIcon.alphaValue = selectedAgent == .codex ? 1 : 0.58
-        claudeIcon.alphaValue = selectedAgent == .claudeCode ? 1 : 0.58
+        codexIcon.alphaValue = selectedAgent == .codex ? 1 : 0.40
+        claudeIcon.alphaValue = selectedAgent == .claudeCode ? 1 : 0.40
     }
 
     private func configureIcon(_ imageView: NSImageView, assetName: String, accessibilityLabel: String) {

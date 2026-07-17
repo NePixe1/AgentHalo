@@ -93,9 +93,11 @@ func runHaloInteractionChecks() {
     testDetailsPanelUsesTightBottomInset()
     testDetailsPanelShowsAnswerStreamingCopy()
     testDetailsPanelRefreshesStatusFromLatestAggregate()
+    testDetailsPanelShowsContextWhenLiveCodexUsageArrives()
     testDetailsPanelLocalizesClaudeActivityDetails()
     testAgentToggleUsesSharedSVGAssets()
     testAgentToggleUsesCodexAndClaudeIcons()
+    testAgentToggleDimsInactiveIconMoreStrongly()
     testAgentToggleSelectionPillFitsItsIconWidth()
     testAgentToggleKeepsWholeControlClickable()
     testDetailsPanelSwitchCallbackSelectsClaudeCode()
@@ -1397,6 +1399,46 @@ private func testDetailsPanelRefreshesStatusFromLatestAggregate() {
     expect(panel.contextValueForTesting == "27%", "status refresh should preserve existing metadata")
 }
 
+@MainActor
+private func testDetailsPanelShowsContextWhenLiveCodexUsageArrives() {
+    let panel = DetailsPanel()
+    panel.render(
+        aggregate: AggregateSnapshot(
+            state: .thinking,
+            label: "THINKING",
+            detail: "AgentHalo - Planning",
+            sessions: [],
+            focusedAgent: .codex
+        ),
+        model: usageDetailsModel(context: nil)
+    )
+
+    expect(panel.contextPillHiddenForTesting, "missing context should keep the pill hidden")
+
+    let session = SessionSnapshot(
+        threadId: "codex-thinking",
+        projectName: "AgentHalo",
+        workingDirectory: "/tmp/AgentHalo",
+        state: .thinking,
+        action: "Thinking",
+        lastEventAt: Date(),
+        completedAt: nil,
+        active: true,
+        agent: .codex,
+        contextUsedPercent: 42
+    )
+    panel.updateStatus(aggregate: AggregateSnapshot(
+        state: .thinking,
+        label: "THINKING",
+        detail: "AgentHalo - Planning",
+        sessions: [session],
+        focusedAgent: .codex
+    ))
+
+    expect(!panel.contextPillHiddenForTesting, "live Codex context should reveal the pill without reopening details")
+    expect(panel.contextValueForTesting == "42%", "live Codex context should show its real percentage")
+}
+
 private func testVisibleDetailsPanelStatusRefreshIsWiredToTick() {
     let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
     let appDelegateURL = sourceDirectory.appendingPathComponent("AppDelegate.swift")
@@ -2098,6 +2140,23 @@ private func testAgentToggleUsesCodexAndClaudeIcons() {
     expect(!visibleLabels.contains("CC"), "agent toggle should replace the CC text with an icon")
     expect(icons.count == 2, "agent toggle should render one icon for each agent")
     expect(icons.allSatisfy { $0.image != nil }, "agent toggle should load both shared SVG images")
+}
+
+@MainActor
+private func testAgentToggleDimsInactiveIconMoreStrongly() {
+    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 110, height: 24))
+    let icons = allDescendants(of: toggle).compactMap { $0 as? NSImageView }
+
+    expect(icons.count == 2, "agent toggle should expose both agent icons for opacity checks")
+    guard icons.count == 2 else { return }
+
+    expect(icons[0].alphaValue, 1, "selected Codex icon should remain fully opaque")
+    expect(icons[1].alphaValue, 0.40, "inactive Claude Code icon should use stronger dimming")
+
+    toggle.setAgent(.claudeCode)
+
+    expect(icons[0].alphaValue, 0.40, "inactive Codex icon should use stronger dimming")
+    expect(icons[1].alphaValue, 1, "selected Claude Code icon should remain fully opaque")
 }
 
 @MainActor
