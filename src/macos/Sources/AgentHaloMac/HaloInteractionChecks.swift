@@ -57,11 +57,7 @@ func runHaloInteractionChecks() {
     testCodexRunningIdleUsesStableGreenAggregate()
     testPausedAgentDoesNotUseStableGreenStandby()
     testLiveCodexErrorCyclesThroughBrightAndDimPresentations()
-    testDetailsPanelAlwaysShowsProviderRow()
-    testDetailsPanelShowsPlanOnlyForOAuth()
-    testDetailsPanelKeepsPlanNextToProvider()
-    testDetailsPanelKeepsWarningNextToProviderWithoutPlan()
-    testDetailsPanelShowsSingleAmberUsageWarning()
+    testDetailsPanelHidesProviderPlanAndWarning()
     testDetailsPanelShowsFiveHourAndWeeklyRemainingUsage()
     testDetailsPanelShowsMissingAndExpiredUsageWindows()
     testDetailsPanelShowsThreeIndependentSessionRows()
@@ -827,105 +823,34 @@ private func menuItem(titled title: String, in menu: NSMenu) -> NSMenuItem {
 }
 
 @MainActor
-private func testDetailsPanelAlwaysShowsProviderRow() {
+private func testDetailsPanelHidesProviderPlanAndWarning() {
     let panel = DetailsPanel()
+    let warning = L10n.shared["usage.warning.network"]
+    let expectedOrder: [DetailsPanelContentRole] = [
+        .agentSwitcher, .statusTitle, .statusDetail, .usageBody, .sessionBody
+    ]
+
     panel.render(
         aggregate: detailsAggregate(),
-        model: usageDetailsModel(provider: "Codex")
+        model: usageDetailsModel(provider: "Codex", plan: "Plus", warning: warning)
     )
 
-    expect(panel.providerTextForTesting, "Codex", "provider row should always show the selected provider")
-    expect(
-        panel.contentOrderForTesting,
-        [.agentSwitcher, .provider, .statusTitle, .statusDetail, .usageBody, .sessionBody],
-        "provider row should sit directly between the Agent switcher and Halo status in the exact panel structure"
-    )
-    expect(panel.contentOrderForTesting.count, 6, "details panel should contain exactly six top-level rows")
-    expect(!panel.contentOrderForTesting.contains(.unknown), "details panel should reject unknown top-level rows")
-    expect(panel.providerRowHeightForTesting, 20, "provider row should use its fixed height")
-    let labels = allDescendants(of: panel.contentView!).compactMap { ($0 as? NSTextField)?.stringValue }
-    expect(!labels.contains("OAuth") && !labels.contains("API"), "details panel should not show an access-mode label")
-    expect(!labels.contains("使用情况/余额") && !labels.contains("会话详情"), "details panel should not show section titles")
+    expect(panel.contentOrderForTesting, expectedOrder, "details panel should omit the provider header")
+    expect(!panel.usageGroupHiddenForTesting, "OAuth usage body should remain visible")
+    let usageLabels = allDescendants(of: panel.contentView!).compactMap { ($0 as? NSTextField)?.stringValue }
+    expect(!usageLabels.contains("Codex"), "details panel should not display the provider name")
+    expect(!usageLabels.contains("Plus"), "details panel should not display the plan name")
+    let usageWarningImages = allDescendants(of: panel.contentView!).compactMap { $0 as? NSImageView }
+        .filter { $0.image?.accessibilityDescription == "exclamationmark.triangle.fill" }
+    expect(usageWarningImages.isEmpty, "details panel should not display a usage warning icon")
 
     panel.render(
         aggregate: detailsAggregate(state: .idle, label: "OFFLINE"),
-        model: sessionDetailsModel(provider: "Claude Code")
-    )
-    expect(panel.providerTextForTesting, "Claude Code", "offline details should retain the provider row")
-    expect(
-        panel.contentOrderForTesting,
-        [.agentSwitcher, .provider, .statusTitle, .statusDetail, .usageBody, .sessionBody],
-        "offline provider row should keep the same exact structural position"
-    )
-    expect(panel.contentOrderForTesting.count, 6, "offline details should keep exactly six top-level rows")
-    expect(!panel.contentOrderForTesting.contains(.unknown), "offline details should reject unknown top-level rows")
-    expect(panel.providerRowHeightForTesting, 20, "offline provider row should keep the shared height")
-}
-
-@MainActor
-private func testDetailsPanelShowsPlanOnlyForOAuth() {
-    let panel = DetailsPanel()
-    panel.render(
-        aggregate: detailsAggregate(),
-        model: usageDetailsModel(provider: "Codex", plan: "Plus")
-    )
-    expect(panel.planTextForTesting, "Plus", "OAuth details should show the plan")
-    expect(!panel.planHiddenForTesting, "OAuth plan should be visible")
-
-    panel.render(
-        aggregate: detailsAggregate(),
-        model: sessionDetailsModel(provider: "Codex", plan: nil)
-    )
-    expect(panel.providerTextForTesting, "Codex", "API details should keep the provider")
-    expect(panel.planHiddenForTesting, "API details should hide the plan")
-}
-
-@MainActor
-private func testDetailsPanelKeepsPlanNextToProvider() {
-    let panel = DetailsPanel()
-    panel.render(
-        aggregate: detailsAggregate(),
-        model: usageDetailsModel(provider: "Codex", plan: "Plus")
+        model: sessionDetailsModel(provider: "Claude Code", plan: nil)
     )
 
-    let spacing = panel.providerPlanVisibleSpacingForTesting
-    expect(
-        spacing >= 5 && spacing <= 7.5,
-        "OAuth plan should follow the provider by 5-7pt, got \(spacing)pt"
-    )
-}
-
-@MainActor
-private func testDetailsPanelKeepsWarningNextToProviderWithoutPlan() {
-    let panel = DetailsPanel()
-    panel.render(
-        aggregate: detailsAggregate(),
-        model: usageDetailsModel(plan: nil, warning: "Refresh failed")
-    )
-
-    let spacing = panel.providerWarningVisibleSpacingForTesting
-    expect(
-        spacing >= 5 && spacing <= 7.5,
-        "warning should follow the provider by 5-7pt when plan is absent, got \(spacing)pt"
-    )
-}
-
-@MainActor
-private func testDetailsPanelShowsSingleAmberUsageWarning() {
-    let panel = DetailsPanel()
-    let warning = L10n.shared["usage.warning.network"]
-    panel.render(
-        aggregate: detailsAggregate(),
-        model: usageDetailsModel(warning: warning)
-    )
-
-    expect(!panel.warningHiddenForTesting, "OAuth refresh failure should show one warning image")
-    expect(panel.warningToolTipForTesting, warning, "warning should expose its full text as a native tooltip")
-    expect(panel.warningAccessibilityLabelForTesting, warning, "warning should expose an accessibility label")
-    expect(panel.warningColorForTesting, NSColor.systemYellow, "warning should use the system amber color")
-    let warningImages = allDescendants(of: panel.contentView!).compactMap { $0 as? NSImageView }
-        .filter { $0.image?.accessibilityDescription == "exclamationmark.triangle.fill" }
-    expect(warningImages.count, 1, "provider row should contain a single warning image")
+    expect(panel.contentOrderForTesting, expectedOrder, "API details should also omit the provider header")
+    expect(!panel.sessionGroupHiddenForTesting, "API session body should remain visible")
 }
 
 @MainActor
@@ -1108,7 +1033,7 @@ private func testDetailsPanelResizesHeightWithoutAnimation() {
     expect(!usageCall.display, "usage resize should not request immediate display")
     expect(!usageCall.animate, "usage resize should not animate")
     expect(usageCall.frame.height, usageExpectedHeight, "usage height should be an even, pixel-aligned stack fitting height")
-    expect(usageCall.frame.height, 196, "title refinements should preserve the established panel height")
+    expect(usageCall.frame.height, 172, "hiding the provider header should reduce the established panel height")
     expect(usageCall.frame.maxY, initialTopEdge, "usage resize should preserve the prior top edge")
     expect(panel.frame, usageCall.frame, "window should apply the observed usage resize frame")
 
@@ -1180,19 +1105,12 @@ private func testDetailsPanelMovesTitleGapIntoBodySpacing() {
         return container.convert(container.bounds, to: contentView)
     }
 
-    guard let providerField = allDescendants(of: contentView)
-        .compactMap({ $0 as? NSTextField })
-        .first(where: { $0.stringValue == "Plus" }),
-          let providerHeader = providerField.superview else {
-        fatalError("details panel should expose provider header")
-    }
     guard let agentToggle = allDescendants(of: contentView)
         .first(where: { $0 is AgentToggleView }),
           let topRow = agentToggle.superview else {
         fatalError("details panel should expose top row")
     }
     let topRowFrame = topRow.convert(topRow.bounds, to: contentView)
-    let providerFrame = providerHeader.convert(providerHeader.bounds, to: contentView)
     let titleField = field(of: "STANDBY")
     let detailField = field(of: "Codex Standing By")
     let titleFrame = titleField.convert(titleField.bounds, to: contentView)
@@ -1202,8 +1120,7 @@ private func testDetailsPanelMovesTitleGapIntoBodySpacing() {
 
     expect(titleField.font?.pointSize, 22, "status title should use the smaller font")
     expect(detailField.font?.pointSize, 12, "status detail should use the smaller font")
-    expect(topRowFrame.minY - providerFrame.maxY, 0, "provider and title should move 2pt closer to the top row")
-    expect(providerFrame.minY - titleFrame.maxY, 3, "title should move 4pt closer to provider")
+    expect(topRowFrame.minY - titleFrame.maxY, 0, "status title should start immediately below the agent switcher")
     expect(detailFrame.minY - quotaRow.maxY, 16, "usage body should keep a clear gap below the subtitle")
     expect(quotaRow.minY - weeklyQuotaRow.maxY, 4, "quota rows should be compact")
 
@@ -1221,11 +1138,11 @@ private func testDetailsPanelMovesTitleGapIntoBodySpacing() {
         )
     )
     contentView.layoutSubtreeIfNeeded()
-    let sessionProviderFrame = providerHeader.convert(providerHeader.bounds, to: contentView)
+    let sessionTopRowFrame = topRow.convert(topRow.bounds, to: contentView)
     let sessionTitleFrame = frame(of: "STANDBY")
     let sessionDetailFrame = frame(of: "Codex Standing By")
     let sessionTitleRow = containingFrame(of: L10n.shared["metadata.session_title"])
-    expect(sessionProviderFrame.minY - sessionTitleFrame.maxY, 3, "session title should keep the tightened provider gap")
+    expect(sessionTopRowFrame.minY - sessionTitleFrame.maxY, 0, "session title should start immediately below the agent switcher")
     expect(sessionDetailFrame.minY - sessionTitleRow.maxY, 11, "session body should receive the released title spacing")
 }
 

@@ -3,7 +3,6 @@ import AgentHaloCore
 
 enum DetailsPanelContentRole: Equatable {
     case agentSwitcher
-    case provider
     case statusTitle
     case statusDetail
     case usageBody
@@ -29,7 +28,6 @@ class DetailsPanel: NSPanel {
     private let contextValue = NSTextField(labelWithString: L10n.shared["context.empty"])
     private let titleField = NSTextField(labelWithString: "OFFLINE")
     private let detailField = NSTextField(labelWithString: L10n.shared["status.offline_codex"])
-    private let providerHeader = ProviderHeaderView()
     private let primaryQuota = QuotaRowView(title: L10n.shared["quota.5h"])
     private let secondaryQuota = QuotaRowView(title: L10n.shared["quota.weekly"])
     private let agentToggle = AgentToggleView()
@@ -90,9 +88,6 @@ class DetailsPanel: NSPanel {
         stack.addArrangedSubview(topRow)
         stack.setCustomSpacing(0, after: topRow)
 
-        stack.addArrangedSubview(providerHeader)
-        stack.setCustomSpacing(3, after: providerHeader)
-
         titleField.font = .systemFont(ofSize: 22, weight: .bold)
         titleField.lineBreakMode = .byTruncatingTail
         titleField.alignment = .left
@@ -144,7 +139,6 @@ class DetailsPanel: NSPanel {
             stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
 
             topRow.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
-            providerHeader.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
             titleField.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
             detailField.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
             quotaGroup.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
@@ -168,11 +162,6 @@ class DetailsPanel: NSPanel {
 
         updateStatus(aggregate: aggregate)
         let isOffline = aggregate.state == .idle && aggregate.label == "OFFLINE"
-        providerHeader.update(
-            providerName: model.providerName,
-            planName: model.planName,
-            warning: model.usageWarning
-        )
         updateContext(model.contextUsedPercent, isOffline: isOffline)
 
         quotaGroup.isHidden = true
@@ -181,7 +170,7 @@ class DetailsPanel: NSPanel {
         switch model.body {
         case .usage(let usage):
             stack.setCustomSpacing(16, after: detailField)
-            stack.edgeInsets.bottom = 6
+            stack.edgeInsets.bottom = 4
             renderUsage(usage)
             quotaGroup.isHidden = false
         case .session(let session):
@@ -463,56 +452,12 @@ class DetailsPanel: NSPanel {
     var contentOrderForTesting: [DetailsPanelContentRole] {
         stack.arrangedSubviews.map { view in
             if view === topRow { return .agentSwitcher }
-            if view === providerHeader { return .provider }
             if view === titleField { return .statusTitle }
             if view === detailField { return .statusDetail }
             if view === quotaGroup { return .usageBody }
             if view === metadataGroup { return .sessionBody }
             return .unknown
         }
-    }
-
-    var providerRowHeightForTesting: CGFloat {
-        contentView?.layoutSubtreeIfNeeded()
-        return providerHeader.frame.height
-    }
-
-    var providerTextForTesting: String {
-        providerHeader.providerText
-    }
-
-    var planTextForTesting: String {
-        providerHeader.planText
-    }
-
-    var providerPlanVisibleSpacingForTesting: CGFloat {
-        contentView?.layoutSubtreeIfNeeded()
-        return providerHeader.providerPlanVisibleSpacing
-    }
-
-    var providerWarningVisibleSpacingForTesting: CGFloat {
-        contentView?.layoutSubtreeIfNeeded()
-        return providerHeader.providerWarningVisibleSpacing
-    }
-
-    var planHiddenForTesting: Bool {
-        providerHeader.isPlanHidden
-    }
-
-    var warningHiddenForTesting: Bool {
-        providerHeader.isWarningHidden
-    }
-
-    var warningToolTipForTesting: String? {
-        providerHeader.warningToolTip
-    }
-
-    var warningAccessibilityLabelForTesting: String? {
-        providerHeader.warningAccessibilityLabel
-    }
-
-    var warningColorForTesting: NSColor? {
-        providerHeader.warningColor
     }
 
     var usageGroupHiddenForTesting: Bool {
@@ -614,107 +559,6 @@ class DetailsPanel: NSPanel {
         agentToggle.setAgent(agent)
         onAgentSelected?(agent)
     }
-}
-
-@MainActor
-private final class ProviderHeaderView: NSView {
-    private let providerField = NSTextField(labelWithString: "")
-    private let planField = NSTextField(labelWithString: "")
-    private let warningImage = NSImageView()
-    private var planToWarningConstraint: NSLayoutConstraint!
-    private var providerToWarningConstraint: NSLayoutConstraint!
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        translatesAutoresizingMaskIntoConstraints = false
-
-        providerField.font = .systemFont(ofSize: 12, weight: .semibold)
-        providerField.textColor = .labelColor
-        providerField.lineBreakMode = .byTruncatingTail
-        providerField.maximumNumberOfLines = 1
-        providerField.setContentHuggingPriority(.required, for: .horizontal)
-        providerField.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
-
-        planField.font = .systemFont(ofSize: 11, weight: .regular)
-        planField.textColor = .secondaryLabelColor
-        planField.lineBreakMode = .byTruncatingTail
-        planField.maximumNumberOfLines = 1
-        planField.setContentHuggingPriority(.required, for: .horizontal)
-        planField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        warningImage.image = NSImage(
-            systemSymbolName: "exclamationmark.triangle.fill",
-            accessibilityDescription: "exclamationmark.triangle.fill"
-        )
-        warningImage.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .regular)
-        warningImage.contentTintColor = .systemYellow
-        warningImage.imageScaling = .scaleProportionallyDown
-        warningImage.isHidden = true
-
-        [providerField, planField, warningImage].forEach {
-            $0.translatesAutoresizingMaskIntoConstraints = false
-            addSubview($0)
-        }
-        planToWarningConstraint = warningImage.leadingAnchor.constraint(
-            equalTo: planField.trailingAnchor,
-            constant: 7
-        )
-        providerToWarningConstraint = warningImage.leadingAnchor.constraint(
-            equalTo: providerField.trailingAnchor,
-            constant: 7
-        )
-        NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 20),
-            providerField.leadingAnchor.constraint(equalTo: leadingAnchor),
-            providerField.centerYAnchor.constraint(equalTo: centerYAnchor),
-            planField.leadingAnchor.constraint(equalTo: providerField.trailingAnchor, constant: 7),
-            planField.centerYAnchor.constraint(equalTo: centerYAnchor),
-            planToWarningConstraint,
-            warningImage.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
-            warningImage.centerYAnchor.constraint(equalTo: centerYAnchor),
-            warningImage.widthAnchor.constraint(equalToConstant: 12),
-            warningImage.heightAnchor.constraint(equalToConstant: 12),
-        ])
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    func update(providerName: String, planName: String?, warning: String?) {
-        providerField.stringValue = providerName
-        providerField.toolTip = providerName
-
-        planField.stringValue = planName ?? ""
-        planField.toolTip = planName
-        planField.isHidden = planName == nil
-        if planName == nil {
-            planToWarningConstraint.isActive = false
-            providerToWarningConstraint.isActive = true
-        } else {
-            providerToWarningConstraint.isActive = false
-            planToWarningConstraint.isActive = true
-        }
-
-        warningImage.isHidden = warning == nil
-        warningImage.toolTip = warning
-        warningImage.setAccessibilityLabel(warning)
-    }
-
-    var providerText: String { providerField.stringValue }
-    var planText: String { planField.stringValue }
-    var providerPlanVisibleSpacing: CGFloat {
-        planField.frame.minX - providerField.frame.minX - providerField.intrinsicContentSize.width
-    }
-    var providerWarningVisibleSpacing: CGFloat {
-        warningImage.frame.minX - providerField.frame.maxX
-    }
-    var isPlanHidden: Bool { planField.isHidden }
-    var isWarningHidden: Bool { warningImage.isHidden }
-    var warningToolTip: String? { warningImage.toolTip }
-    var warningAccessibilityLabel: String? { warningImage.accessibilityLabel() }
-    var warningColor: NSColor? { warningImage.contentTintColor }
 }
 
 @MainActor
