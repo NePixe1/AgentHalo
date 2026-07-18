@@ -804,6 +804,57 @@ private final class QuotaRowView: NSView {
 }
 
 @MainActor
+enum QuotaMeterPalette {
+    private struct Stop {
+        let percent: Double
+        let red: Double
+        let green: Double
+        let blue: Double
+    }
+
+    private static let stops = [
+        Stop(percent: 0, red: 202, green: 217, blue: 224),
+        Stop(percent: 25, red: 168, green: 191, blue: 202),
+        Stop(percent: 50, red: 112, green: 148, blue: 169),
+        Stop(percent: 75, red: 82, green: 121, blue: 146),
+        Stop(percent: 100, red: 64, green: 105, blue: 132),
+    ]
+
+    static func fillColor(for remainingPercent: Double) -> NSColor {
+        let clamped = min(100, max(0, remainingPercent))
+        guard let upperIndex = stops.firstIndex(where: { clamped <= $0.percent }) else {
+            return color(for: stops[stops.count - 1])
+        }
+        guard upperIndex > 0 else {
+            return color(for: stops[0])
+        }
+
+        let lower = stops[upperIndex - 1]
+        let upper = stops[upperIndex]
+        let progress = (clamped - lower.percent) / (upper.percent - lower.percent)
+        return NSColor(
+            deviceRed: component(from: lower.red, to: upper.red, progress: progress),
+            green: component(from: lower.green, to: upper.green, progress: progress),
+            blue: component(from: lower.blue, to: upper.blue, progress: progress),
+            alpha: 1
+        )
+    }
+
+    private static func color(for stop: Stop) -> NSColor {
+        NSColor(
+            deviceRed: CGFloat(stop.red) / 255,
+            green: CGFloat(stop.green) / 255,
+            blue: CGFloat(stop.blue) / 255,
+            alpha: 1
+        )
+    }
+
+    private static func component(from start: Double, to end: Double, progress: Double) -> CGFloat {
+        CGFloat(start + (end - start) * progress) / 255
+    }
+}
+
+@MainActor
 private final class RoundedMeterView: NSView {
     var value: Double = 0 {
         didSet {
@@ -825,7 +876,7 @@ private final class RoundedMeterView: NSView {
             return
         }
         let fillWidth = max(bounds.height, rawFillWidth)
-        NSColor(calibratedRed: 0.29, green: 0.68, blue: 0.79, alpha: 1).setFill()
+        QuotaMeterPalette.fillColor(for: value).setFill()
         NSBezierPath(
             roundedRect: NSRect(x: 0, y: 0, width: fillWidth, height: bounds.height),
             xRadius: radius,

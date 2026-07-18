@@ -59,6 +59,7 @@ func runHaloInteractionChecks() {
     testLiveCodexErrorCyclesThroughBrightAndDimPresentations()
     testDetailsPanelHidesProviderPlanAndWarning()
     testDetailsPanelShowsFiveHourAndWeeklyRemainingUsage()
+    testQuotaMeterUsesApprovedSoftFadePalette()
     testDetailsPanelShowsMissingAndExpiredUsageWindows()
     testDetailsPanelShowsThreeIndependentSessionRows()
     testDetailsPanelLeavesMissingSessionTitleEmpty()
@@ -875,6 +876,51 @@ private func testDetailsPanelShowsFiveHourAndWeeklyRemainingUsage() {
     expect(panel.secondaryQuotaMeterFillForTesting, 40, "weekly meter should use remaining percent")
     expect(!panel.primaryQuotaResetHiddenForTesting, "future short-window reset should be visible")
     expect(!panel.secondaryQuotaResetHiddenForTesting, "future weekly reset should be visible")
+}
+
+@MainActor
+private func testQuotaMeterUsesApprovedSoftFadePalette() {
+    expectQuotaColor(QuotaMeterPalette.fillColor(for: 100), red: 64, green: 105, blue: 132, "100% quota color")
+    expectQuotaColor(QuotaMeterPalette.fillColor(for: 75), red: 82, green: 121, blue: 146, "75% quota color")
+    expectQuotaColor(QuotaMeterPalette.fillColor(for: 50), red: 112, green: 148, blue: 169, "50% quota color")
+    expectQuotaColor(QuotaMeterPalette.fillColor(for: 25), red: 168, green: 191, blue: 202, "25% quota color")
+    expectQuotaColor(QuotaMeterPalette.fillColor(for: 0), red: 202, green: 217, blue: 224, "0% quota color")
+
+    expectQuotaColor(QuotaMeterPalette.fillColor(for: 62.5), red: 97, green: 134.5, blue: 157.5, "interpolated quota color")
+    expectQuotaColor(QuotaMeterPalette.fillColor(for: 120), red: 64, green: 105, blue: 132, "quota color upper clamp")
+    expectQuotaColor(QuotaMeterPalette.fillColor(for: -20), red: 202, green: 217, blue: 224, "quota color lower clamp")
+
+    let fuller = quotaColorBytes(QuotaMeterPalette.fillColor(for: 75))
+    let lower = quotaColorBytes(QuotaMeterPalette.fillColor(for: 25))
+    expect(lower.red >= fuller.red && lower.green >= fuller.green && lower.blue >= fuller.blue,
+           "lower remaining quota should use a lighter RGB color")
+}
+
+@MainActor
+private func expectQuotaColor(
+    _ color: NSColor,
+    red: Double,
+    green: Double,
+    blue: Double,
+    _ message: String
+) {
+    let actual = quotaColorBytes(color)
+    let tolerance = 0.001
+    expect(abs(actual.red - red) < tolerance, "\(message) red")
+    expect(abs(actual.green - green) < tolerance, "\(message) green")
+    expect(abs(actual.blue - blue) < tolerance, "\(message) blue")
+}
+
+@MainActor
+private func quotaColorBytes(_ color: NSColor) -> (red: Double, green: Double, blue: Double) {
+    guard let rgb = color.usingColorSpace(.deviceRGB) else {
+        fatalError("quota color should convert to device RGB")
+    }
+    return (
+        Double(rgb.redComponent) * 255,
+        Double(rgb.greenComponent) * 255,
+        Double(rgb.blueComponent) * 255
+    )
 }
 
 @MainActor
