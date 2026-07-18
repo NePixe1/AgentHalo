@@ -855,7 +855,7 @@ enum QuotaMeterPalette {
 }
 
 @MainActor
-private final class RoundedMeterView: NSView {
+final class RoundedMeterView: NSView {
     var value: Double = 0 {
         didSet {
             needsDisplay = true

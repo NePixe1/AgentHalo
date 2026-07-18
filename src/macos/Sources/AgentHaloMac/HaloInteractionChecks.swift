@@ -60,6 +60,7 @@ func runHaloInteractionChecks() {
     testDetailsPanelHidesProviderPlanAndWarning()
     testDetailsPanelShowsFiveHourAndWeeklyRemainingUsage()
     testQuotaMeterUsesApprovedSoftFadePalette()
+    testQuotaMeterRendersApprovedSoftFadeOutput()
     testDetailsPanelShowsMissingAndExpiredUsageWindows()
     testDetailsPanelShowsThreeIndependentSessionRows()
     testDetailsPanelLeavesMissingSessionTitleEmpty()
@@ -874,6 +875,10 @@ private func testDetailsPanelShowsFiveHourAndWeeklyRemainingUsage() {
     expect(panel.secondaryQuotaValueForTesting, L10n.shared.format("quota.remaining", 40), "weekly remaining value")
     expect(panel.primaryQuotaMeterFillForTesting, 70, "short window meter should use remaining percent")
     expect(panel.secondaryQuotaMeterFillForTesting, 40, "weekly meter should use remaining percent")
+    panel.contentView?.layoutSubtreeIfNeeded()
+    let meters = panel.contentView.map(allDescendants(of:))?.compactMap { $0 as? RoundedMeterView } ?? []
+    expect(meters.count, 2, "usage panel quota meter count")
+    expect(meters.allSatisfy { abs($0.frame.height - 4) < 0.001 }, "usage panel quota meters should remain 4pt high")
     expect(!panel.primaryQuotaResetHiddenForTesting, "future short-window reset should be visible")
     expect(!panel.secondaryQuotaResetHiddenForTesting, "future weekly reset should be visible")
 }
@@ -894,6 +899,98 @@ private func testQuotaMeterUsesApprovedSoftFadePalette() {
     let lower = quotaColorBytes(QuotaMeterPalette.fillColor(for: 25))
     expect(lower.red >= fuller.red && lower.green >= fuller.green && lower.blue >= fuller.blue,
            "lower remaining quota should use a lighter RGB color")
+}
+
+@MainActor
+private func testQuotaMeterRendersApprovedSoftFadeOutput() {
+    let full = renderQuotaMeter(remainingPercent: 100)
+    expectRenderedQuotaColor(full, x: 50, y: 2, red: 64, green: 105, blue: 132, "100% rendered fill")
+
+    let quarter = renderQuotaMeter(remainingPercent: 25)
+    expectRenderedQuotaColor(quarter, x: 20, y: 2, red: 168, green: 191, blue: 202, "25% rendered fill")
+    expect(quotaPixel(quarter, x: 30, y: 2).alpha < 0.5, "25% meter should show track after the remaining-width fill")
+
+    let threeQuarters = renderQuotaMeter(remainingPercent: 75)
+    expectRenderedQuotaColor(threeQuarters, x: 70, y: 2, red: 82, green: 121, blue: 146, "75% rendered fill")
+    expect(quotaPixel(threeQuarters, x: 80, y: 2).alpha < 0.5, "75% meter should show track after the remaining-width fill")
+
+    let empty = renderQuotaMeter(remainingPercent: 0)
+    expect(empty.pixelsHigh, 4, "rendered quota meter height")
+    expect(quotaPixel(empty, x: 50, y: 2).alpha < 0.5, "0% meter should render only the translucent track")
+    expect(
+        quotaPixel(empty, x: 0, y: 0).alpha < quotaPixel(empty, x: 50, y: 2).alpha,
+        "0% track should retain rounded corners"
+    )
+    expect(
+        (0..<empty.pixelsHigh).allSatisfy { y in
+            (0..<empty.pixelsWide).allSatisfy { x in quotaPixel(empty, x: x, y: y).alpha < 0.5 }
+        },
+        "0% meter should not render an opaque fill"
+    )
+}
+
+@MainActor
+private func renderQuotaMeter(remainingPercent: Double) -> NSBitmapImageRep {
+    let width = 100
+    let height = 4
+    guard let bitmap = NSBitmapImageRep(
+        bitmapDataPlanes: nil,
+        pixelsWide: width,
+        pixelsHigh: height,
+        bitsPerSample: 8,
+        samplesPerPixel: 4,
+        hasAlpha: true,
+        isPlanar: false,
+        colorSpaceName: .deviceRGB,
+        bitmapFormat: [],
+        bytesPerRow: 0,
+        bitsPerPixel: 0
+    ), let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
+        fatalError("quota meter bitmap context should be available")
+    }
+
+    let meter = RoundedMeterView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+    meter.value = remainingPercent
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = context
+    meter.draw(meter.bounds)
+    NSGraphicsContext.restoreGraphicsState()
+    return bitmap
+}
+
+@MainActor
+private func expectRenderedQuotaColor(
+    _ bitmap: NSBitmapImageRep,
+    x: Int,
+    y: Int,
+    red: Double,
+    green: Double,
+    blue: Double,
+    _ message: String
+) {
+    let actual = quotaPixel(bitmap, x: x, y: y)
+    let tolerance = 1.1
+    expect(actual.alpha > 0.99, "\(message) should be opaque")
+    expect(abs(actual.red - red) < tolerance, "\(message) red")
+    expect(abs(actual.green - green) < tolerance, "\(message) green")
+    expect(abs(actual.blue - blue) < tolerance, "\(message) blue")
+}
+
+@MainActor
+private func quotaPixel(
+    _ bitmap: NSBitmapImageRep,
+    x: Int,
+    y: Int
+) -> (red: Double, green: Double, blue: Double, alpha: Double) {
+    guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else {
+        fatalError("quota meter pixel should be readable in device RGB")
+    }
+    return (
+        Double(color.redComponent) * 255,
+        Double(color.greenComponent) * 255,
+        Double(color.blueComponent) * 255,
+        Double(color.alphaComponent)
+    )
 }
 
 @MainActor

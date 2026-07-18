@@ -14,6 +14,7 @@
 - Full quota color is exactly `#406984`.
 - Approved color stops are 100% `#406984`, 75% `#527992`, 50% `#7094A9`, 25% `#A8BFCA`, and 0% `#CAD9E0`.
 - Interpolate continuously in RGB space between adjacent stops after clamping input to `0...100`.
+- Construct palette colors with `deviceRed` so the approved hexadecimal stops retain their exact deviceRGB bytes.
 - Keep the meter width calculation, 4pt height, rounded geometry, background track color, panel sizing, quota parsing, reset text, and quota copy unchanged.
 - At 0% remaining, retain the current early return so no fill is drawn.
 
@@ -134,7 +135,7 @@ enum QuotaMeterPalette {
         let upper = stops[upperIndex]
         let progress = (clamped - lower.percent) / (upper.percent - lower.percent)
         return NSColor(
-            calibratedRed: component(from: lower.red, to: upper.red, progress: progress),
+            deviceRed: component(from: lower.red, to: upper.red, progress: progress),
             green: component(from: lower.green, to: upper.green, progress: progress),
             blue: component(from: lower.blue, to: upper.blue, progress: progress),
             alpha: 1
@@ -143,7 +144,7 @@ enum QuotaMeterPalette {
 
     private static func color(for stop: Stop) -> NSColor {
         NSColor(
-            calibratedRed: CGFloat(stop.red) / 255,
+            deviceRed: CGFloat(stop.red) / 255,
             green: CGFloat(stop.green) / 255,
             blue: CGFloat(stop.blue) / 255,
             alpha: 1
@@ -244,17 +245,19 @@ bash scripts/run-macos.sh --verify
 
 Expected: exits 0 after launching the staged app in isolated verification mode and completing the packaged runtime checks.
 
-- [ ] **Step 4: Inspect the visible packaged meter**
+- [ ] **Step 4: Verify the final rendered meter output**
 
-Run the staged app from the repository root:
+The `AgentHaloMac --self-check` suite must render the real `RoundedMeterView.draw(_:)` path into a deterministic offscreen deviceRGB bitmap and inspect its pixels. Verify the approved fill colors, translucent track distinction, remaining-based width, 4pt height, rounded corners, and the absence of an opaque fill at 0%.
+
+When UI automation can open the borderless hover panel, also run the staged app from the repository root for an optional visual companion check:
 
 ```bash
 bash scripts/run-macos.sh run
 ```
 
-Hover the halo to open the details panel and inspect the live quota row. Compare its displayed remaining percentage with the exact automated color stops from Task 1; capture a screenshot for handoff.
+Hover the halo to open the details panel and inspect the live quota row. Compare its displayed remaining percentage with the exact automated color stops from Task 1; capture a screenshot for handoff when possible. If automation cannot expand the borderless AppKit panel, the deterministic offscreen pixel check is the acceptance evidence rather than blocking verification.
 
-Expected: the live bar is darker at higher remaining values and lighter at lower remaining values; it retains the existing 4pt height, rounded ends, background track, and remaining-based width. Exact 100%, 75%, 50%, and 25% RGB values remain enforced by the self-check even when the live account is not currently at those percentages.
+Expected: the rendered bar is darker at higher remaining values and lighter at lower remaining values; it retains the existing 4pt height, rounded ends, background track, and remaining-based width. Exact 100%, 75%, 50%, and 25% RGB values remain enforced by the self-check even when the live account is not currently at those percentages.
 
 - [ ] **Step 5: Prove Windows and layout scope remain unchanged**
 
