@@ -460,9 +460,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func workspaceApplicationDidTerminate(_ notification: Notification) {
         let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
         guard CodexAppDetector.noteApplicationDidTerminate(app) else { return }
-        if CodexAppDetector.isCodexForeground(app) {
-            codexIsForeground = false
-        }
+        updateFrontmostApplication(NSWorkspace.shared.frontmostApplication)
         tick()
     }
 

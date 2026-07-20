@@ -2005,17 +2005,24 @@ private func testCodexAppDetectorUsesWorkspaceEvents() {
           let refreshEnd = appDelegateSource.range(
             of: "    private func createStatusItem()",
             range: refreshStart..<appDelegateSource.endIndex
+          )?.lowerBound,
+          let terminateStart = appDelegateSource.range(of: "    @objc private func workspaceApplicationDidTerminate")?.lowerBound,
+          let terminateEnd = appDelegateSource.range(
+            of: "    @objc private func workspaceApplicationDidActivate",
+            range: terminateStart..<appDelegateSource.endIndex
           )?.lowerBound else {
         fatalError("Codex application-state sources should be readable")
     }
 
     let tickSource = appDelegateSource[tickStart..<tickEnd]
     let refreshSource = appDelegateSource[refreshStart..<refreshEnd]
+    let terminateSource = appDelegateSource[terminateStart..<terminateEnd]
     expect(detectorSource.contains("noteApplicationDidLaunch"), "Codex launch events should update the running cache")
     expect(detectorSource.contains("noteApplicationDidTerminate"), "Codex termination events should invalidate the running cache")
     expect(detectorSource.contains("static func isCodexForeground(_ app: NSRunningApplication?)"), "Codex foreground detection should consume the application supplied by workspace events")
     expect(detectorSource.contains("executableURL"), "Codex app detection should preserve executable metadata matching")
     expect(detectorSource.contains("allowLocalizedName: false"), "Codex running scans should preserve the localized-name exclusion")
+    expect(detectorSource.contains("guard runningCacheValue == true"), "termination events should invalidate a positive cache even when terminated-process metadata is unavailable")
     expect(!detectorSource.contains("runningCacheExpiresAt"), "event-driven Codex running state should not expire on a timer")
     expect(!detectorSource.contains("runningCacheInterval"), "event-driven Codex running state should not poll LaunchServices")
     expect(appDelegateSource.contains("NSWorkspace.didLaunchApplicationNotification"), "AppDelegate should observe application launches")
@@ -2024,6 +2031,7 @@ private func testCodexAppDetectorUsesWorkspaceEvents() {
     expect(!tickSource.contains("frontmostApplication"), "the 0.3-second tick should not query the frontmost application")
     expect(!tickSource.contains("CodexAppDetector.isCodexForeground()"), "the 0.3-second tick should consume cached foreground state")
     expect(!refreshSource.contains("CodexAppDetector.isCodexForeground()"), "aggregate refresh should consume cached foreground state")
+    expect(terminateSource.contains("updateFrontmostApplication(NSWorkspace.shared.frontmostApplication)"), "termination events that invalidate running state should also recalibrate foreground state once")
 }
 
 private func testSessionMonitorsUseFastFileMetadata() {

@@ -25,7 +25,7 @@ enum CodexAppDetector {
 
     @discardableResult
     static func noteApplicationDidTerminate(_ app: NSRunningApplication?) -> Bool {
-        guard let app, isCodexApp(app, allowLocalizedName: false) else { return false }
+        guard runningCacheValue == true else { return false }
         runningCacheValue = nil
         return true
     }
