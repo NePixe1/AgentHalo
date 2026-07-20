@@ -88,6 +88,8 @@ func runHaloInteractionChecks() {
     testClaudePollingIsThrottledWhenCodexFocused()
     testClaudeLiveSessionsRefreshIsThrottled()
     testHaloUsesShapeLayersNotCpuRasterization()
+    testRuntimeRingLayerPixelsMatchBaseline()
+    testRuntimeRingLayerModelMatchesVisualModel()
     testIdleAnimationUsesLowPowerCadence()
     testUsageProviderMappingIsTotal()
     testClaudeStandbyDetailsPreferLiveSessionIdentity()
@@ -2064,6 +2066,217 @@ private func testHaloUsesShapeLayersNotCpuRasterization() {
     expect(rendererSource.contains("ringLayerCount"), "HaloRenderer should declare the fixed ring layer count")
     expect(rendererSource.contains("CATransaction.setDisableActions(true)"), "HaloRenderer should disable implicit animations so per-frame updates snap instead of smoothing")
     expect(rendererSource.contains("path.move(to: startPoint)"), "HaloRenderer should start each ring arc as a fresh subpath so the two gaps are not bridged by a connecting chord")
+}
+
+private struct RuntimeRingPixelBaseline: Equatable, CustomStringConvertible {
+    let name: String
+    let scale1x: UInt64
+    let scale2x: UInt64
+
+    var description: String {
+        "\(name)=\(scale1x)/\(scale2x)"
+    }
+}
+
+private func testRuntimeRingLayerPixelsMatchBaseline() {
+    let actual = runtimeRingBaselineInputs().map { name, input in
+        RuntimeRingPixelBaseline(
+            name: name,
+            scale1x: runtimeRingPixelDigest(input: input, scale: 1),
+            scale2x: runtimeRingPixelDigest(input: input, scale: 2)
+        )
+    }
+    let expected = actual.map {
+        switch $0.name {
+        case "idle": RuntimeRingPixelBaseline(name: $0.name, scale1x: 9_157_935_398_303_114_304, scale2x: 792_215_409_298_594_995)
+        case "thinking-transition": RuntimeRingPixelBaseline(name: $0.name, scale1x: 18_263_668_307_828_975_996, scale2x: 16_554_340_612_245_316_771)
+        case "working-transition": RuntimeRingPixelBaseline(name: $0.name, scale1x: 12_993_536_598_127_623_339, scale2x: 2_392_339_819_924_786_549)
+        case "done-flash": RuntimeRingPixelBaseline(name: $0.name, scale1x: 9_769_252_484_924_121_485, scale2x: 1_225_950_950_426_213_083)
+        case "steady-done": RuntimeRingPixelBaseline(name: $0.name, scale1x: 17_978_034_851_077_033_543, scale2x: 1_457_001_038_851_966_828)
+        case "attention": RuntimeRingPixelBaseline(name: $0.name, scale1x: 10_501_950_660_515_111_630, scale2x: 4_937_630_093_659_706_074)
+        case "error-bright": RuntimeRingPixelBaseline(name: $0.name, scale1x: 8_644_262_692_397_123_069, scale2x: 9_421_780_012_299_167_297)
+        case "error-flashing": RuntimeRingPixelBaseline(name: $0.name, scale1x: 18_303_220_726_574_026_612, scale2x: 5_015_660_681_156_215_522)
+        case "answer-streaming": RuntimeRingPixelBaseline(name: $0.name, scale1x: 6_822_724_794_953_432_050, scale2x: 6_664_607_458_272_913_376)
+        default: RuntimeRingPixelBaseline(name: $0.name, scale1x: 0, scale2x: 0)
+        }
+    }
+
+    expect(
+        actual,
+        expected,
+        "runtime CAShapeLayer ring pixels must match the pre-optimization baseline"
+    )
+}
+
+private func testRuntimeRingLayerModelMatchesVisualModel() {
+    let bounds = CGRect(x: 0, y: 0, width: 112, height: 112)
+    for (name, input) in runtimeRingBaselineInputs() {
+        let (_, layers) = makeRuntimeRingLayers(input: input, bounds: bounds, scale: 2)
+        let styles = expectedRuntimeRingStyles(input: input, bounds: bounds)
+
+        expect(layers.count, HaloRenderer.ringLayerCount, "\(name) must keep the fixed runtime ring layer count")
+        expect(styles.count, HaloRenderer.ringLayerCount, "\(name) visual model must produce one style per runtime ring layer")
+        for (index, pair) in zip(layers, styles).enumerated() {
+            let (layer, style) = pair
+            expect(layer.frame, bounds, "\(name) layer \(index) frame must match HaloView bounds")
+            expect(layer.path != nil, true, "\(name) layer \(index) must receive the current path")
+            expect(layer.fillColor, NSColor.clear.cgColor, "\(name) layer \(index) fill must remain transparent")
+            expect(layer.lineCap, CAShapeLayerLineCap.round, "\(name) layer \(index) line cap must remain round")
+            expect(layer.lineJoin, CAShapeLayerLineJoin.round, "\(name) layer \(index) line join must remain round")
+            expect(layer.lineWidth, style.width, "\(name) layer \(index) width must match HaloVisualModel")
+            expect(layer.strokeColor, style.color.cgColor, "\(name) layer \(index) color must match HaloVisualModel")
+        }
+    }
+}
+
+private func expectedRuntimeRingStyles(
+    input: HaloRenderInput,
+    bounds: CGRect
+) -> [(width: CGFloat, color: NSColor)] {
+    let visualState: HaloState = input.answerStreaming ? .done : input.state
+    let target = HaloVisualModel.targetVisual(
+        state: visualState,
+        time: input.sinceState,
+        errorPresentation: input.errorPresentation,
+        steadyDone: input.steadyDone
+    )
+    var visual = HaloVisualModel.transitionVisual(
+        from: input.transitionFrom,
+        to: target,
+        progress: input.transition
+    )
+    let color = HaloVisualModel.animatedColor(
+        from: input.transitionFrom.color,
+        to: target.color,
+        progress: input.transition
+    )
+    let streamingFlash = input.answerStreaming
+        ? HaloVisualModel.completionDoubleFlash(
+            sinceState: HaloMath.positiveModulo(input.sinceState, 1.8)
+        )
+        : 0
+    let doneFlash = input.state == .done && !input.steadyDone && input.transition >= 0.999
+        ? HaloVisualModel.completionDoubleFlash(sinceState: input.sinceState)
+        : 0
+    let completionFlash = max(doneFlash, streamingFlash)
+    visual.powered = HaloMath.clamp(visual.powered + completionFlash * 0.82, 0, 1)
+    let scale = HaloGeometry.scale(in: bounds)
+    let intensity = HaloMath.clamp(
+        visual.intensity
+            + HaloMath.stateBreath(visualState, time: input.time) * 0.18
+            + completionFlash * 0.5,
+        0,
+        1.32
+    )
+    let bodyWidth = scale * (visual.bodyWidth + completionFlash * 0.65)
+    let material = HaloVisualModel.materialSnapshot(color: color, visual: visual, intensity: intensity)
+    return [
+        (scale * HaloGeometry.widestGlowWidth, runtimeRingColor(material.emissionColor, alpha: material.glowAlphas[0])),
+        (scale * 14.5, runtimeRingColor(material.emissionColor, alpha: material.glowAlphas[1])),
+        (scale * 11.2, runtimeRingColor(material.emissionColor, alpha: material.glowAlphas[2])),
+        (scale * 9.8, runtimeRingColor(material.glowColor, alpha: material.glowAlphas[3])),
+        (bodyWidth + scale * 1.15, runtimeRingColor(material.darkMaterial, alpha: material.darkAlpha)),
+        (bodyWidth, runtimeRingColor(material.poweredMaterial, alpha: material.materialAlpha)),
+        (max(scale * 0.9, bodyWidth - scale * 2.25), runtimeRingColor(material.poweredCore, alpha: material.coreAlpha)),
+        (scale * 1.65, runtimeRingColor(HaloRGB(red: 255, green: 255, blue: 255), alpha: material.whiteSparkAlpha))
+    ]
+}
+
+private func runtimeRingColor(_ rgb: HaloRGB, alpha: Double) -> NSColor {
+    NSColor(
+        calibratedRed: HaloMath.clamp(rgb.red, 0, 255) / 255,
+        green: HaloMath.clamp(rgb.green, 0, 255) / 255,
+        blue: HaloMath.clamp(rgb.blue, 0, 255) / 255,
+        alpha: HaloMath.clamp(alpha, 0, 255) / 255
+    )
+}
+
+private func runtimeRingBaselineInputs() -> [(String, HaloRenderInput)] {
+    let idle = HaloVisualModel.targetVisual(
+        state: .idle,
+        time: 0,
+        errorPresentation: .flashing,
+        steadyDone: false
+    )
+    let thinking = HaloVisualModel.targetVisual(
+        state: .thinking,
+        time: 0,
+        errorPresentation: .flashing,
+        steadyDone: false
+    )
+    let working = HaloVisualModel.targetVisual(
+        state: .working,
+        time: 0,
+        errorPresentation: .flashing,
+        steadyDone: false
+    )
+    return [
+        ("idle", HaloRenderInput(state: .idle, errorPresentation: .flashing, steadyDone: false, answerStreaming: false, transitionFrom: idle, time: 2.4, sinceState: 2.4, transition: 1, gapA: 97, gapB: 247)),
+        ("thinking-transition", HaloRenderInput(state: .thinking, errorPresentation: .flashing, steadyDone: false, answerStreaming: false, transitionFrom: idle, time: 0.42, sinceState: 0.42, transition: 0.37, gapA: 112.96, gapB: 262.96)),
+        ("working-transition", HaloRenderInput(state: .working, errorPresentation: .flashing, steadyDone: false, answerStreaming: false, transitionFrom: thinking, time: 1.1, sinceState: 0.45, transition: 0.6, gapA: 138.8, gapB: 288.8)),
+        ("done-flash", HaloRenderInput(state: .done, errorPresentation: .flashing, steadyDone: false, answerStreaming: false, transitionFrom: working, time: 1.2, sinceState: 0.55, transition: 1, gapA: 142.6, gapB: 292.6)),
+        ("steady-done", HaloRenderInput(state: .done, errorPresentation: .flashing, steadyDone: true, answerStreaming: false, transitionFrom: working, time: 2.4, sinceState: 2.4, transition: 1, gapA: 188.2, gapB: 338.2)),
+        ("attention", HaloRenderInput(state: .attention, errorPresentation: .flashing, steadyDone: false, answerStreaming: false, transitionFrom: idle, time: 0.8, sinceState: 0.8, transition: 1, gapA: 127.4, gapB: 277.4)),
+        ("error-bright", HaloRenderInput(state: .error, errorPresentation: .bright, steadyDone: false, answerStreaming: false, transitionFrom: working, time: 1.3, sinceState: 1.3, transition: 1, gapA: 146.4, gapB: 296.4)),
+        ("error-flashing", HaloRenderInput(state: .error, errorPresentation: .flashing, steadyDone: false, answerStreaming: false, transitionFrom: working, time: 1.65, sinceState: 1.65, transition: 1, gapA: 159.7, gapB: 309.7)),
+        ("answer-streaming", HaloRenderInput(state: .working, errorPresentation: .flashing, steadyDone: false, answerStreaming: true, transitionFrom: working, time: 0.72, sinceState: 0.72, transition: 1, gapA: 124.36, gapB: 274.36))
+    ]
+}
+
+private func runtimeRingPixelDigest(input: HaloRenderInput, scale: CGFloat) -> UInt64 {
+    let size = CGSize(width: 112, height: 112)
+    let (root, _) = makeRuntimeRingLayers(
+        input: input,
+        bounds: CGRect(origin: .zero, size: size),
+        scale: scale
+    )
+
+    let width = Int(size.width * scale)
+    let height = Int(size.height * scale)
+    var pixels = [UInt8](repeating: 0, count: width * height * 4)
+    pixels.withUnsafeMutableBytes { bytes in
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(
+                data: bytes.baseAddress,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width * 4,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              ) else {
+            return
+        }
+        context.scaleBy(x: scale, y: scale)
+        root.render(in: context)
+    }
+    return pixels.reduce(1_469_598_103_934_665_603) { hash, byte in
+        (hash ^ UInt64(byte)) &* 1_099_511_628_211
+    }
+}
+
+private func makeRuntimeRingLayers(
+    input: HaloRenderInput,
+    bounds: CGRect,
+    scale: CGFloat
+) -> (CALayer, [CAShapeLayer]) {
+    let root = CALayer()
+    root.bounds = bounds
+    root.anchorPoint = .zero
+    root.position = .zero
+    root.contentsScale = scale
+    let layers = (0..<HaloRenderer.ringLayerCount).map { _ in
+        let layer = CAShapeLayer()
+        layer.fillColor = NSColor.clear.cgColor
+        layer.lineCap = .round
+        layer.lineJoin = .round
+        layer.frame = bounds
+        layer.contentsScale = scale
+        root.addSublayer(layer)
+        return layer
+    }
+    HaloRenderer.applyRingLayers(layers, bounds: bounds, input: input)
+    return (root, layers)
 }
 
 private func testClaudeLiveSessionsRefreshIsThrottled() {
