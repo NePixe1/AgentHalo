@@ -151,6 +151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let instanceLock = InstanceLock()
     private let codexActivator: @MainActor () -> Void
     private var liveErrorPresentationState = LiveErrorPresentationState()
+    private var codexIsForeground = false
     private var codexWasForeground = false
     private var lastStatusMenuSignature: StatusMenuSignature?
     private var lastStatusIconState: HaloState?
@@ -192,7 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         createHaloPanel()
         reconcileHaloPlacement()
         registerSystemOverlayObservers()
-        updateSystemOverlaySuspension(for: NSWorkspace.shared.frontmostApplication)
+        updateFrontmostApplication(NSWorkspace.shared.frontmostApplication)
         codexActivitySnapshot = codexActivityMonitor.snapshot()
         codexActivityMonitor.start { [weak self] snapshot in
             Task { @MainActor in
@@ -287,7 +288,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let now = Date()
         reconcileClaudeStatusLineConfiguration(now: now)
-        updateSystemOverlaySuspension(for: NSWorkspace.shared.frontmostApplication)
         acknowledgeCompletedIfCodexIsForeground()
         let codexRunning = CodexAppDetector.isCodexRunning()
         codexActivityMonitor.updatePollingContext(
@@ -340,7 +340,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 : claudeActivitySnapshot.preferredStandbySession != nil
         )
         applyRealtimeCodexActivity(codexActivitySnapshot.realtimeActivity)
-        let codexIsForeground = CodexAppDetector.isCodexForeground()
         let errorUpdate = liveErrorPresentationState.update(
             aggregate: aggregate,
             codexIsForeground: codexIsForeground,
@@ -430,6 +429,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let center = NSWorkspace.shared.notificationCenter
         center.addObserver(
             self,
+            selector: #selector(workspaceApplicationDidLaunch(_:)),
+            name: NSWorkspace.didLaunchApplicationNotification,
+            object: nil
+        )
+        center.addObserver(
+            self,
+            selector: #selector(workspaceApplicationDidTerminate(_:)),
+            name: NSWorkspace.didTerminateApplicationNotification,
+            object: nil
+        )
+        center.addObserver(
+            self,
             selector: #selector(workspaceApplicationDidActivate(_:)),
             name: NSWorkspace.didActivateApplicationNotification,
             object: nil
@@ -442,13 +453,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
+    @objc private func workspaceApplicationDidLaunch(_ notification: Notification) {
+        let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+        if CodexAppDetector.noteApplicationDidLaunch(app) {
+            tick()
+        }
+    }
+
+    @objc private func workspaceApplicationDidTerminate(_ notification: Notification) {
+        let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+        guard CodexAppDetector.noteApplicationDidTerminate(app) else { return }
+        if CodexAppDetector.isCodexForeground(app) {
+            codexIsForeground = false
+        }
+        tick()
+    }
+
     @objc private func workspaceApplicationDidActivate(_ notification: Notification) {
         let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-        updateSystemOverlaySuspension(for: app)
+        updateFrontmostApplication(app)
     }
 
     @objc private func workspaceActiveSpaceDidChange(_ notification: Notification) {
-        updateSystemOverlaySuspension(for: NSWorkspace.shared.frontmostApplication)
+        updateFrontmostApplication(NSWorkspace.shared.frontmostApplication)
+    }
+
+    private func updateFrontmostApplication(_ app: NSRunningApplication?) {
+        codexIsForeground = CodexAppDetector.isCodexForeground(app)
+        updateSystemOverlaySuspension(for: app)
     }
 
     private func updateSystemOverlaySuspension(for app: NSRunningApplication?) {
@@ -772,7 +804,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let updated = settings.acknowledgingCompletedSessions(
-            CodexAppDetector.isCodexForeground() ? codexSnapshots() : []
+            codexIsForeground ? codexSnapshots() : []
         )
         if updated.acknowledged != settings.acknowledged {
             settings = updated

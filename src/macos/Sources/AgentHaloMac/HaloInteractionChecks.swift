@@ -83,7 +83,7 @@ func runHaloInteractionChecks() {
     testCodexActivityDispatchIsThrottled()
     testCodexSQLiteReadersUseInProcessSQLite()
     testCodexSQLiteReadersUseRecentRowWindows()
-    testCodexAppDetectorCachesRunningApplicationScans()
+    testCodexAppDetectorUsesWorkspaceEvents()
     testSessionMonitorsUseFastFileMetadata()
     testClaudePollingIsThrottledWhenCodexFocused()
     testClaudeLiveSessionsRefreshIsThrottled()
@@ -1989,17 +1989,40 @@ private func testCodexSQLiteReadersUseRecentRowWindows() {
     )
 }
 
-private func testCodexAppDetectorCachesRunningApplicationScans() {
+private func testCodexAppDetectorUsesWorkspaceEvents() {
     let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
     let detectorURL = sourceDirectory.appendingPathComponent("CodexAppDetector.swift")
-    guard let source = try? String(contentsOf: detectorURL, encoding: .utf8) else {
-        fatalError("CodexAppDetector source should be readable")
+    let appDelegateURL = sourceDirectory.appendingPathComponent("AppDelegate.swift")
+    guard let detectorSource = try? String(contentsOf: detectorURL, encoding: .utf8),
+          let appDelegateSource = try? String(contentsOf: appDelegateURL, encoding: .utf8),
+          let tickStart = appDelegateSource.range(of: "    private func tick() {")?.lowerBound,
+          let tickEnd = appDelegateSource.range(
+            of: "    private func claudeActivityDidChange",
+            range: tickStart..<appDelegateSource.endIndex
+          )?.lowerBound,
+          let refreshStart = appDelegateSource.range(of: "    private func refreshAggregateAndUI")?.lowerBound,
+          let refreshEnd = appDelegateSource.range(
+            of: "    private func createStatusItem()",
+            range: refreshStart..<appDelegateSource.endIndex
+          )?.lowerBound else {
+        fatalError("Codex application-state sources should be readable")
     }
 
-    expect(source.contains("runningCacheExpiresAt"), "Codex running detection should cache app scans")
-    expect(source.contains("runningCacheInterval"), "Codex running detection should throttle LaunchServices work")
-    expect(source.contains("executableURL"), "Codex app detection should prefer cheap executable metadata before localizedName")
-    expect(source.contains("allowLocalizedName: false"), "Codex running scans should skip localizedName fallback")
+    let tickSource = appDelegateSource[tickStart..<tickEnd]
+    let refreshSource = appDelegateSource[refreshStart..<refreshEnd]
+    expect(detectorSource.contains("noteApplicationDidLaunch"), "Codex launch events should update the running cache")
+    expect(detectorSource.contains("noteApplicationDidTerminate"), "Codex termination events should invalidate the running cache")
+    expect(detectorSource.contains("static func isCodexForeground(_ app: NSRunningApplication?)"), "Codex foreground detection should consume the application supplied by workspace events")
+    expect(detectorSource.contains("executableURL"), "Codex app detection should preserve executable metadata matching")
+    expect(detectorSource.contains("allowLocalizedName: false"), "Codex running scans should preserve the localized-name exclusion")
+    expect(!detectorSource.contains("runningCacheExpiresAt"), "event-driven Codex running state should not expire on a timer")
+    expect(!detectorSource.contains("runningCacheInterval"), "event-driven Codex running state should not poll LaunchServices")
+    expect(appDelegateSource.contains("NSWorkspace.didLaunchApplicationNotification"), "AppDelegate should observe application launches")
+    expect(appDelegateSource.contains("NSWorkspace.didTerminateApplicationNotification"), "AppDelegate should observe application termination")
+    expect(appDelegateSource.contains("private var codexIsForeground = false"), "AppDelegate should cache Codex foreground state")
+    expect(!tickSource.contains("frontmostApplication"), "the 0.3-second tick should not query the frontmost application")
+    expect(!tickSource.contains("CodexAppDetector.isCodexForeground()"), "the 0.3-second tick should consume cached foreground state")
+    expect(!refreshSource.contains("CodexAppDetector.isCodexForeground()"), "aggregate refresh should consume cached foreground state")
 }
 
 private func testSessionMonitorsUseFastFileMetadata() {
