@@ -88,6 +88,7 @@ func runHaloInteractionChecks() {
     testClaudePollingIsThrottledWhenCodexFocused()
     testClaudeLiveSessionsRefreshIsThrottled()
     testHaloUsesShapeLayersNotCpuRasterization()
+    testRingSubmissionsAvoidConstantWork()
     testRuntimeRingLayerPixelsMatchBaseline()
     testRuntimeRingLayerModelMatchesVisualModel()
     testIdleAnimationUsesLowPowerCadence()
@@ -2089,6 +2090,44 @@ private func testHaloUsesShapeLayersNotCpuRasterization() {
     expect(rendererSource.contains("ringLayerCount"), "HaloRenderer should declare the fixed ring layer count")
     expect(rendererSource.contains("CATransaction.setDisableActions(true)"), "HaloRenderer should disable implicit animations so per-frame updates snap instead of smoothing")
     expect(rendererSource.contains("path.move(to: startPoint)"), "HaloRenderer should start each ring arc as a fresh subpath so the two gaps are not bridged by a connecting chord")
+}
+
+private func testRingSubmissionsAvoidConstantWork() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let appDelegateURL = sourceDirectory.appendingPathComponent("AppDelegate.swift")
+    let rendererURL = sourceDirectory.appendingPathComponent("HaloRenderer.swift")
+    let haloViewURL = sourceDirectory.appendingPathComponent("HaloView.swift")
+    guard let appDelegateSource = try? String(contentsOf: appDelegateURL, encoding: .utf8),
+          let rendererSource = try? String(contentsOf: rendererURL, encoding: .utf8),
+          let haloViewSource = try? String(contentsOf: haloViewURL, encoding: .utf8),
+          let refreshStart = appDelegateSource.range(of: "    private func refreshAggregateAndUI")?.lowerBound,
+          let refreshEnd = appDelegateSource.range(
+            of: "    private func createStatusItem()",
+            range: refreshStart..<appDelegateSource.endIndex
+          )?.lowerBound,
+          let applyStart = rendererSource.range(of: "    static func applyRingLayers")?.lowerBound,
+          let applyEnd = rendererSource.range(
+            of: "    private static func ringPath",
+            range: applyStart..<rendererSource.endIndex
+          )?.lowerBound else {
+        fatalError("ring submission sources should be readable")
+    }
+
+    let refreshSource = appDelegateSource[refreshStart..<refreshEnd]
+    let applySource = rendererSource[applyStart..<applyEnd]
+    expect(!refreshSource.contains("haloView?.redrawRing()"), "aggregate refresh should not redraw the same ring state twice")
+    expect(!applySource.contains("layer.fillColor ="), "fillColor should be initialized once instead of assigned every frame")
+    expect(!applySource.contains("layer.lineCap ="), "lineCap should be initialized once instead of assigned every frame")
+    expect(!applySource.contains("layer.lineJoin ="), "lineJoin should be initialized once instead of assigned every frame")
+    expect(!applySource.contains("layer.frame = bounds"), "ring-layer frames should change only during setup or resize")
+    expect(applySource.contains("layer.path = path"), "the current ring path must still be submitted every frame")
+    expect(applySource.contains("layer.strokeColor = style.color.cgColor"), "the current stroke color must still be submitted every frame")
+    expect(applySource.contains("layer.lineWidth = style.width"), "the current line width must still be submitted every frame")
+    expect(haloViewSource.contains("shape.fillColor = NSColor.clear.cgColor"), "ring setup must retain the transparent fill")
+    expect(haloViewSource.contains("shape.lineCap = .round"), "ring setup must retain round line caps")
+    expect(haloViewSource.contains("shape.lineJoin = .round"), "ring setup must retain round line joins")
+    expect(haloViewSource.contains("shape.frame = bounds"), "ring setup must initialize every layer frame")
+    expect(haloViewSource.contains("shape.frame = resizedBounds"), "ring resize must update every layer frame")
 }
 
 private struct RuntimeRingPixelBaseline: Equatable, CustomStringConvertible {

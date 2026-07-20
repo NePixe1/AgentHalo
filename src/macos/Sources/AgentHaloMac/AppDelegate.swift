@@ -370,9 +370,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             errorPresentation: errorUpdate.presentation
         )
         refreshVisibleDetailsStatus()
-        if !systemOverlaySuspended {
-            haloView?.redrawRing()
-        }
         if statusItem != nil {
             updateStatusMenu()
         }
