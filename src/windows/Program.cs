@@ -58,6 +58,10 @@ public static class Program
             {
                 return Diagnostics.WriteClaudeSnapshot(args[2]);
             }
+            if (args.Length >= 3 && args[1] == "--usage-snapshot")
+            {
+                return Diagnostics.WriteCodexUsageSnapshot(args[2]);
+            }
 
             if (args.Length < 2)
             {

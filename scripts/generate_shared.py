@@ -273,6 +273,11 @@ namespace CodexHalo
         {{
             return ContainsAny((value ?? String.Empty).ToLowerInvariant(), AttentionContains);
         }}
+        public static bool IsExecutionLifecycleEvent(string value)
+        {{
+            return ContainsAny((value ?? String.Empty).ToLowerInvariant(),
+                ExecutionLifecycleContains);
+        }}
 
         public static string FriendlyAction(string raw)
         {{
@@ -472,6 +477,9 @@ public enum GeneratedHaloSpec {{
     public static func isToolCall(_ value: String) -> Bool {{ toolCallExact.contains(value.lowercased()) }}
     public static func isAttentionEvent(_ value: String) -> Bool {{
         containsAny(value.lowercased(), Array(attentionContains))
+    }}
+    public static func isExecutionLifecycleEvent(_ value: String) -> Bool {{
+        containsAny(value.lowercased(), Array(executionLifecycleContains))
     }}
 
     public static func friendlyAction(_ raw: String) -> String {{

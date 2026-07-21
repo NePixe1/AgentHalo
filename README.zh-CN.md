@@ -17,7 +17,7 @@
   </p>
   <p>
     <img src="https://img.shields.io/badge/版本-0.14.0-14B8A6?style=for-the-badge" alt="Version"/>
-    <img src="https://img.shields.io/badge/仅本地运行-0F172A?style=for-the-badge" alt="Local Only"/>
+    <img src="https://img.shields.io/badge/隐私优先-0F172A?style=for-the-badge" alt="Privacy First"/>
     <img src="https://img.shields.io/badge/Swift-FA7343?style=for-the-badge&logo=swift&logoColor=white" alt="Swift"/>
     <img src="https://img.shields.io/badge/Xcode-007ACC?style=for-the-badge&logo=xcode&logoColor=white" alt="Xcode"/>
     <img src="https://img.shields.io/badge/C%23-512BD4?style=for-the-badge&logo=csharp&logoColor=white" alt="C#"/>
@@ -74,15 +74,18 @@ swift run AgentHaloDiagnostics --transition-strip /tmp/agent-halo-transitions
 2. 解压整个 ZIP 压缩包，不要直接在压缩包内运行。
 3. 双击 `AgentHalo.exe`，光环会出现在主显示器右上方附近。
 
-程序没有安装器，不会修改 Codex，也不需要 OpenAI API Key。
+程序没有安装器，也不需要 OpenAI API Key。为独立刷新额度，Agent Halo
+会复用 Codex 已有的 OAuth 登录凭据；OAuth Token 轮换时会原子更新 Codex
+原有的 `auth.json`。
 
 ## 操作
 
 - 拖动光环：调整位置，靠近屏幕边缘时会自动吸附。
-- 鼠标悬停：查看当前状态、5 小时额度和周额度。
+- 鼠标悬停：查看当前状态；官方 Codex OAuth 显示 5 小时额度和周额度。
+- 使用 CCSwitch、自定义模型提供商或 API Key 时，Codex 面板会自动改为显示项目、模型和本轮输入/输出 Token，不展示 API Key、Base URL 或中转工具名称。
 - 悬停详情面板提供 `Codex / CC` 切换。Agent Halo 会同时监听两个工具，但光环颜色、状态文案和额度行只跟随当前选中的监控对象。
 - 上下文 pill 显示当前监控对象的上下文占用：Codex 显示配额上下文占用，Claude Code 显示通过 status line proxy 捕获的上下文窗口使用率。
-- Codex 额度行只在 `Codex` 视图显示。切到 `CC` 时，详情面板只显示 Claude Code 会话状态，不混入 Codex 余额信息。
+- Codex 官方额度行只在 OAuth 模式显示；自定义 API 模式和 `CC` 视图使用相同高度的信息行，不混入虚假的官方额度。
 - 任务完成后绿色会缓慢呼吸；再次打开 Codex 后自动确认并变为不发光的稳定绿色。
 - 右键单击：打开状态预览、暂停监听、开机启动和退出菜单。
 - 右键”光环大小”：选择 `75% / 100% / 125%`，重启后保持设置。
@@ -109,13 +112,18 @@ swift run AgentHaloDiagnostics --transition-strip /tmp/agent-halo-transitions
 
 ## 隐私
 
-Agent Halo 只在本机读取 `%USERPROFILE%\.codex\sessions` 中的生命周期事件、
-额度信息，并在 macOS 上自动配置 `~/.claude/settings.json` 中的 Claude Code
+Agent Halo 只在本机读取 `%USERPROFILE%\.codex\sessions` 中的生命周期事件，
+并在 macOS 上自动配置 `~/.claude/settings.json` 中的 Claude Code
 生命周期 hooks 和 status line proxy。它会将 hook 事件写入
 `~/.agent-halo/claude-code-status.jsonl`，上下文快照写入
 `~/.agent-halo/claude-code-context.json`。它还会只读查询 `logs_2.sqlite`
-中结构化的 Codex 连接和服务故障记录。程序不会上传数据、调用网络服务，
-也不会读取或保存 API Key。
+中结构化的 Codex 连接和服务故障记录。
+
+为了独立刷新 Codex 额度，程序会读取现有 OAuth 登录凭据，并仅向
+`auth.openai.com` 与 `chatgpt.com` 的官方接口发起 HTTPS 请求。OAuth Token
+不会写入 Agent Halo 缓存；Token 轮换时只会原子写回 Codex 原有凭据文件。
+Agent Halo 的额度缓存仅保存账户哈希、使用百分比和重置时间，不上传会话内容，
+也不读取或保存 OpenAI API Key。
 
 ## Windows 安全提示
 

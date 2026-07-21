@@ -30,6 +30,62 @@ namespace CodexHalo
 {
 public static class Diagnostics
     {
+        public static int WriteCodexUsageSnapshot(string outputPath)
+        {
+            try
+            {
+                CodexUsageMonitor monitor = CodexUsageMonitor.Instance;
+                monitor.RequestRefreshForTest();
+                DateTime deadline = DateTime.UtcNow.AddSeconds(20);
+                while (monitor.IsRefreshing && DateTime.UtcNow < deadline)
+                {
+                    Thread.Sleep(100);
+                }
+                UsageMetrics metrics;
+                monitor.TryRead(out metrics);
+                Dictionary<string, object> result = new Dictionary<string, object>();
+                result["status"] = monitor.Status.ToString();
+                result["has_five_hour"] = metrics != null && metrics.HasFiveHour;
+                result["has_weekly"] = metrics != null && metrics.HasWeekly;
+                result["has_context"] = metrics != null && metrics.HasContext;
+                if (metrics != null && metrics.HasFiveHour)
+                {
+                    result["five_hour_used_percent"] = metrics.FiveHourUsedPercent;
+                    result["five_hour_resets_at"] = Iso(metrics.FiveHourResetUtc);
+                }
+                if (metrics != null && metrics.HasWeekly)
+                {
+                    result["weekly_used_percent"] = metrics.WeeklyUsedPercent;
+                    result["weekly_resets_at"] = Iso(metrics.WeeklyResetUtc);
+                }
+                if (metrics != null && metrics.HasContext)
+                {
+                    result["context_used_percent"] = metrics.ContextUsedPercent;
+                }
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                File.WriteAllText(outputPath, serializer.Serialize(result),
+                    new UTF8Encoding(false));
+                return monitor.Status == CodexUsageDataStatus.Fresh ? 0 : 2;
+            }
+            catch (Exception ex)
+            {
+                File.WriteAllText(outputPath, "{\"status\":\"Error\",\"detail\":\"" +
+                    EscapeJson(ex.GetType().Name) + "\"}", new UTF8Encoding(false));
+                return 1;
+            }
+        }
+
+        private static string Iso(DateTime value)
+        {
+            return value == DateTime.MinValue ? String.Empty :
+                value.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture);
+        }
+
+        private static string EscapeJson(string value)
+        {
+            return (value ?? String.Empty).Replace("\\", "\\\\").Replace("\"", "\\\"");
+        }
+
         public static int RunSelfTest(string outputPath)
         {
             try
@@ -40,15 +96,92 @@ public static class Diagnostics
                 string now = DateTime.UtcNow.ToString("o");
                 List<string> lines = new List<string>();
                 lines.Add("{\"timestamp\":\"" + now + "\",\"type\":\"session_meta\",\"payload\":{\"id\":\"" +
-                    id + "\",\"cwd\":\"C:\\\\work\\\\halo\"}}");
+                    id + "\",\"cwd\":\"C:\\\\work\\\\halo\",\"model_provider\":\"ccswitch\"}}");
+                lines.Add("{\"timestamp\":\"" + now +
+                    "\",\"type\":\"turn_context\",\"payload\":{\"cwd\":\"C:\\\\work\\\\halo\"," +
+                    "\"model\":\"glm-5.2\",\"collaboration_mode\":{\"mode\":\"default\"}}}");
                 lines.Add("{\"timestamp\":\"" + now +
                     "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}");
                 lines.Add("{\"timestamp\":\"" + now +
                     "\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"shell_command\"}}");
+                lines.Add("{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{" +
+                    "\"total_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":400,\"output_tokens\":80}," +
+                    "\"last_token_usage\":{\"input_tokens\":200,\"cached_input_tokens\":100,\"output_tokens\":20}," +
+                    "\"model_context_window\":200000}}}");
                 File.WriteAllLines(temp, lines.ToArray(), Encoding.UTF8);
                 SessionTracker tracker = new SessionTracker(temp);
                 Assert(tracker.Snapshot.ProjectName == "halo", "project metadata");
                 Assert(tracker.Snapshot.State == HaloState.Working, "function call -> working");
+                Assert(tracker.Snapshot.ModelName == "glm-5.2" &&
+                    tracker.Snapshot.ModelProvider == "ccswitch",
+                    "Codex model and provider metadata");
+                Assert(tracker.Snapshot.TurnInputTokens == 200 &&
+                    tracker.Snapshot.TurnCachedInputTokens == 100 &&
+                    tracker.Snapshot.TurnOutputTokens == 20,
+                    "Codex first turn token sample");
+                Assert(tracker.Snapshot.ContextInputTokens == 200 &&
+                    tracker.Snapshot.ContextWindowTokens == 200000,
+                    "Codex context token sample");
+
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{" +
+                    "\"total_token_usage\":{\"input_tokens\":1600,\"cached_input_tokens\":700,\"output_tokens\":120}," +
+                    "\"last_token_usage\":{\"input_tokens\":600,\"cached_input_tokens\":300,\"output_tokens\":40}," +
+                    "\"model_context_window\":200000}}}\n", Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.TurnInputTokens == 800 &&
+                    tracker.Snapshot.TurnCachedInputTokens == 400 &&
+                    tracker.Snapshot.TurnOutputTokens == 60,
+                    "Codex turn tokens use cumulative delta");
+
+                CodexProviderProfile customProfile = new CodexProviderProfile
+                {
+                    Model = "glm-5.2",
+                    ProviderId = "ccswitch",
+                    ProviderName = "Custom Provider",
+                    BaseUrl = "http://127.0.0.1:8317/v1",
+                    IsCustomApi = true
+                };
+                CodexCustomApiMetrics customMetrics = CodexCustomApiMetricsReader.Read(
+                    new List<SessionSnapshot> { tracker.Snapshot }, customProfile,
+                    CodexUsageDataStatus.Fresh);
+                Assert(customMetrics.IsCustomApi && customMetrics.Model == "glm-5.2" &&
+                    customMetrics.ProjectName == "halo" &&
+                    customMetrics.InputTokens == 800 && customMetrics.OutputTokens == 60,
+                    "Codex custom API metrics use session metadata");
+                CodexProviderProfile officialProfile = new CodexProviderProfile
+                {
+                    ProviderId = "openai",
+                    BaseUrl = "https://api.openai.com/v1"
+                };
+                SessionSnapshot officialSnapshot = new SessionSnapshot
+                {
+                    Agent = AgentKind.Codex,
+                    ModelProvider = "openai",
+                    ModelName = "gpt-5.6-sol"
+                };
+                Assert(!CodexCustomApiMetricsReader.Read(
+                    new List<SessionSnapshot> { officialSnapshot }, officialProfile,
+                    CodexUsageDataStatus.Fresh).IsCustomApi,
+                    "official OAuth remains quota mode");
+                Assert(CodexCustomApiMetricsReader.Read(
+                    new List<SessionSnapshot> { officialSnapshot }, officialProfile,
+                    CodexUsageDataStatus.ApiKey).IsCustomApi,
+                    "API key auth uses custom API panel");
+
+                string configTemp = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-codex-config-" + Guid.NewGuid().ToString("N") + ".toml");
+                File.WriteAllText(configTemp,
+                    "model = \"deepseek-v4\"\nmodel_provider = \"ccswitch\"\n" +
+                    "[model_providers.ccswitch]\nname = \"Private API\"\n" +
+                    "base_url = \"http://127.0.0.1:8317/v1\"\n",
+                    new UTF8Encoding(false));
+                CodexProviderProfile parsedProfile = CodexProviderProfileReader.Read(configTemp);
+                File.Delete(configTemp);
+                Assert(parsedProfile.IsCustomApi && parsedProfile.Model == "deepseek-v4" &&
+                    parsedProfile.ProviderName == "Private API",
+                    "Codex custom provider config detection");
 
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\"}}\n",
@@ -61,18 +194,61 @@ public static class Diagnostics
                     "\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\"}}\n",
                     Encoding.UTF8);
                 tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Thinking,
+                    "tool output returns business state to thinking immediately");
+                Assert(tracker.Snapshot.TurnPhase == AgentTurnPhase.Thinking &&
+                    tracker.Snapshot.Activity == AgentActivityKind.ReviewingResult,
+                    "tool output records reviewing-result business dimensions");
+
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+                    Encoding.UTF8);
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\"," +
+                    "\"call_id\":\"tool-a\",\"name\":\"shell_command\"}}\n",
+                    Encoding.UTF8);
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\"," +
+                    "\"call_id\":\"tool-b\",\"name\":\"apply_patch\"}}\n",
+                    Encoding.UTF8);
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\"," +
+                    "\"call_id\":\"tool-a\"}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
                 Assert(tracker.Snapshot.State == HaloState.Working,
-                    "tool output keeps working visible");
-                System.Threading.Thread.Sleep(1900);
+                    "one completed parallel tool does not close another active tool");
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\"}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Working,
+                    "reasoning does not override a different active tool id");
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\"," +
+                    "\"call_id\":\"tool-b\"}}\n",
+                    Encoding.UTF8);
                 tracker.Refresh();
                 Assert(tracker.Snapshot.State == HaloState.Thinking,
-                    "working visibility expires to thinking");
+                    "last parallel tool completion returns to thinking");
+
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+                    Encoding.UTF8);
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"reasoning_start\"}}\n",
+                    Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.State == HaloState.Thinking,
+                    "generic reasoning_start is not misclassified as tool execution");
 
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"tool_failed\"}}\n",
                     Encoding.UTF8);
                 tracker.Refresh();
-                Assert(tracker.Snapshot.State == HaloState.Thinking,
+                Assert(tracker.Snapshot.State == HaloState.Thinking &&
+                    tracker.Snapshot.FailureSeverity ==
+                        AgentFailureSeverity.RecoverableTool,
                     "recoverable tool failure does not become fatal error");
 
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
@@ -114,8 +290,8 @@ public static class Diagnostics
                 Assert(realtime.FindActive(new[] { realtimeMessageAdded },
                     out realtimeState, out realtimeAction) &&
                     realtimeState == HaloState.Working &&
-                    realtimeAction == "Writing answer",
-                    "live final answer message -> working");
+                    realtimeAction == "Generating response",
+                    "live unphased message -> generic working response");
                 Assert(!realtime.FindActive(new[] { realtimeMessageDone, realtimeMessageAdded },
                     out realtimeState, out realtimeAction),
                     "live final answer done clears realtime working");
@@ -131,7 +307,7 @@ public static class Diagnostics
                 Assert(realtime.FindActive(new[] { realtimeTextDelta },
                     out realtimeState, out realtimeAction, out answerStreaming) &&
                     realtimeState == HaloState.Working &&
-                    realtimeAction == "Writing answer" &&
+                    realtimeAction == "Generating response" &&
                     !answerStreaming,
                     "live text delta -> working without answer streaming");
                 string realtimeContextCompactDelta =
@@ -187,32 +363,38 @@ public static class Diagnostics
                     "\",\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call_output\"}}\n",
                     Encoding.UTF8);
                 tracker.Refresh();
-                Assert(tracker.Snapshot.State == HaloState.Working,
-                    "custom tool output keeps working visible");
+                Assert(tracker.Snapshot.State == HaloState.Thinking,
+                    "completed custom tool returns business state to thinking");
 
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\"," +
                     "\"name\":\"request_user_input\"}}\n",
                     Encoding.UTF8);
                 tracker.Refresh();
-                Assert(tracker.Snapshot.State == HaloState.Attention,
+                Assert(tracker.Snapshot.State == HaloState.Attention &&
+                    tracker.Snapshot.AttentionReason == AgentAttentionReason.UserInput,
                     "request_user_input -> attention");
 
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\"," +
                     "\"name\":\"exec_command\",\"arguments\":\"{" +
-                    "\\\\\"sandbox_permissions\\\\\":\\\\\"require_escalated\\\\\"," +
-                    "\\\\\"justification\\\\\":\\\\\"approve\\\\\"}\"}}\n",
+                    "\\\"sandbox_permissions\\\":\\\"require_escalated\\\"," +
+                    "\\\"justification\\\":\\\"approve\\\"}\"}}\n",
                     Encoding.UTF8);
                 tracker.Refresh();
-                Assert(tracker.Snapshot.State == HaloState.Attention,
-                    "escalated exec command -> attention");
+                Assert(tracker.Snapshot.State == HaloState.Attention &&
+                    tracker.Snapshot.AttentionReason ==
+                        AgentAttentionReason.CommandConfirmation,
+                    "escalated exec command -> attention, got " +
+                    tracker.Snapshot.State + " / " + tracker.Snapshot.AttentionReason +
+                    " / " + tracker.Snapshot.Action);
 
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"approval_requested\"}}\n",
                     Encoding.UTF8);
                 tracker.Refresh();
-                Assert(tracker.Snapshot.State == HaloState.Attention,
+                Assert(tracker.Snapshot.State == HaloState.Attention &&
+                    tracker.Snapshot.AttentionReason == AgentAttentionReason.Approval,
                     "approval request -> attention");
 
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
@@ -222,7 +404,8 @@ public static class Diagnostics
                     "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"turn_failed\"}}\n",
                     Encoding.UTF8);
                 tracker.Refresh();
-                Assert(tracker.Snapshot.State == HaloState.Error,
+                Assert(tracker.Snapshot.State == HaloState.Error &&
+                    tracker.Snapshot.FailureSeverity == AgentFailureSeverity.FatalTurn,
                     "terminal turn failure -> error");
 
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
@@ -235,7 +418,8 @@ public static class Diagnostics
                     Encoding.UTF8);
                 tracker.Refresh();
                 Assert(tracker.Snapshot.State == HaloState.Working &&
-                    tracker.Snapshot.Action == "Writing answer",
+                    tracker.Snapshot.Action == "Writing answer" &&
+                    tracker.Snapshot.TurnPhase == AgentTurnPhase.Answering,
                     "normal final answer outputs as working");
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\"," +
@@ -559,6 +743,68 @@ public static class Diagnostics
                     parsedUsage.HasMonthly &&
                     Math.Abs(parsedUsage.MonthlyUsedPercent - 41) < 0.001,
                     "single long-window primary quota becomes monthly");
+
+                string liveUsage = "{\"plan_type\":\"plus\",\"rate_limit\":{" +
+                    "\"primary_window\":{\"used_percent\":24," +
+                    "\"limit_window_seconds\":18000,\"reset_after_seconds\":900}," +
+                    "\"secondary_window\":{\"used_percent\":61," +
+                    "\"limit_window_seconds\":604800,\"reset_after_seconds\":7200}}}";
+                Assert(CodexUsageResponseMapper.TryMapForTest(liveUsage,
+                    DateTime.UtcNow, out parsedUsage) &&
+                    parsedUsage.HasFiveHour && parsedUsage.HasWeekly,
+                    "OAuth usage response maps both quota windows");
+                Assert(Math.Abs(parsedUsage.FiveHourUsedPercent - 24) < 0.001 &&
+                    Math.Abs(parsedUsage.WeeklyUsedPercent - 61) < 0.001,
+                    "OAuth quota percentages retain their window identity");
+
+                string weeklyPrimaryUsage = "{\"rate_limit\":{" +
+                    "\"primary_window\":{\"used_percent\":17," +
+                    "\"limit_window_seconds\":604800," +
+                    "\"reset_after_seconds\":3600},\"secondary_window\":null}}";
+                Assert(CodexUsageResponseMapper.TryMapForTest(weeklyPrimaryUsage,
+                    DateTime.UtcNow, out parsedUsage) && parsedUsage.HasWeekly &&
+                    !parsedUsage.HasFiveHour &&
+                    Math.Abs(parsedUsage.WeeklyUsedPercent - 17) < 0.001,
+                    "OAuth weekly primary is not misclassified as five-hour quota");
+
+                DateTime mergeNow = DateTime.UtcNow;
+                UsageMetrics localQuota = new UsageMetrics
+                {
+                    HasFiveHour = true,
+                    FiveHourUsedPercent = 80,
+                    FiveHourResetUtc = mergeNow.AddHours(2),
+                    HasWeekly = true,
+                    WeeklyUsedPercent = 70,
+                    WeeklyResetUtc = mergeNow.AddDays(2),
+                    ContextInputTokens = 50,
+                    ContextWindowTokens = 100
+                };
+                UsageMetrics remoteQuota = new UsageMetrics
+                {
+                    HasFiveHour = true,
+                    FiveHourUsedPercent = 20,
+                    FiveHourResetUtc = mergeNow.AddHours(3),
+                    HasWeekly = true,
+                    WeeklyUsedPercent = 30,
+                    WeeklyResetUtc = mergeNow.AddDays(3),
+                    ContextInputTokens = -1
+                };
+                UsageMetrics mergedQuota = CodexUsageMonitor.MergeForTest(
+                    localQuota, remoteQuota, mergeNow);
+                Assert(Math.Abs(mergedQuota.FiveHourUsedPercent - 20) < 0.001 &&
+                    Math.Abs(mergedQuota.WeeklyUsedPercent - 30) < 0.001 &&
+                    Math.Abs(mergedQuota.ContextUsedPercent - 50) < 0.001,
+                    "live OAuth quota overrides JSONL while JSONL supplies context");
+                UsageMetrics fallbackQuota = CodexUsageMonitor.MergeForTest(
+                    localQuota, null, mergeNow);
+                Assert(Math.Abs(fallbackQuota.FiveHourUsedPercent - 80) < 0.001 &&
+                    Math.Abs(fallbackQuota.WeeklyUsedPercent - 70) < 0.001,
+                    "JSONL quota remains available when OAuth has no snapshot");
+                remoteQuota.FiveHourResetUtc = mergeNow.AddMinutes(-1);
+                UsageMetrics expiredRemoteQuota = CodexUsageMonitor.MergeForTest(
+                    localQuota, remoteQuota, mergeNow);
+                Assert(Math.Abs(expiredRemoteQuota.FiveHourUsedPercent - 80) < 0.001,
+                    "expired OAuth window does not replace a current JSONL fallback");
 
                 ClaudeHookStatusReducer claude =
                     new ClaudeHookStatusReducer("claude-test");
@@ -942,6 +1188,74 @@ public static class Diagnostics
                     return snapshot.ThreadId == "old-error";
                 }), "metadata-only Windows session does not suppress old error");
 
+                HaloSettings presenceSettings = new HaloSettings();
+                using (CodexSessionMonitor presenceMonitor = new CodexSessionMonitor())
+                {
+                    AggregateSnapshot standby = presenceMonitor.GetAggregate(
+                        presenceSettings, true);
+                    Assert(standby.State == HaloState.Done &&
+                        standby.Presence == AgentPresenceState.Standby &&
+                        standby.TurnPhase == AgentTurnPhase.None &&
+                        standby.Label == "STANDBY",
+                        "running Codex without an active turn becomes normalized standby");
+                    AggregateSnapshot offline = presenceMonitor.GetAggregate(
+                        presenceSettings, false);
+                    Assert(offline.State == HaloState.Idle &&
+                        offline.Presence == AgentPresenceState.Offline &&
+                        offline.TurnPhase == AgentTurnPhase.None,
+                        "stopped Codex becomes normalized offline");
+                }
+                SessionSnapshot recentActive = new SessionSnapshot
+                {
+                    ThreadId = "recent-active",
+                    State = HaloState.Working,
+                    Active = true,
+                    LastEventUtc = supersessionNow.AddMinutes(-1)
+                };
+                Assert(CodexSessionMonitor.IsSessionVisible(recentActive,
+                    presenceSettings, true, supersessionNow),
+                    "recent active session remains visible while Codex runs");
+                Assert(!CodexSessionMonitor.IsSessionVisible(recentActive,
+                    presenceSettings, false, supersessionNow),
+                    "active session cannot keep Codex online after its process exits");
+                recentActive.LastEventUtc = supersessionNow.AddMinutes(-11);
+                Assert(!CodexSessionMonitor.IsSessionVisible(recentActive,
+                    presenceSettings, true, supersessionNow),
+                    "stale active session cannot leave the halo permanently working");
+
+                string watcherRoot = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-session-watch-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(watcherRoot);
+                using (CodexSessionMonitor watcherMonitor =
+                    new CodexSessionMonitor(watcherRoot, false))
+                {
+                    watcherMonitor.Start();
+                    string watcherSession = Path.Combine(watcherRoot,
+                        "rollout-" + Guid.NewGuid().ToString() + ".jsonl");
+                    File.WriteAllText(watcherSession,
+                        "{\"timestamp\":\"" + DateTime.UtcNow.ToString("o") +
+                        "\",\"type\":\"session_meta\",\"payload\":{\"id\":\"watcher-test\"," +
+                        "\"cwd\":\"C:\\\\work\\\\watcher\"}}\n" +
+                        "{\"timestamp\":\"" + DateTime.UtcNow.ToString("o") +
+                        "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+                        Encoding.UTF8);
+                    DateTime watcherDeadline = DateTime.UtcNow.AddSeconds(3);
+                    AggregateSnapshot watcherAggregate = null;
+                    while (DateTime.UtcNow < watcherDeadline)
+                    {
+                        watcherAggregate = watcherMonitor.GetAggregate(
+                            presenceSettings, true);
+                        if (watcherAggregate.State == HaloState.Thinking) break;
+                        Thread.Sleep(50);
+                    }
+                    Assert(watcherAggregate != null &&
+                        watcherAggregate.State == HaloState.Thinking &&
+                        watcherAggregate.EvidenceSource ==
+                            AgentEvidenceSource.SessionJsonl,
+                        "session watcher discovers a new active turn incrementally");
+                }
+                Directory.Delete(watcherRoot, true);
+
                 File.Delete(temp);
                 File.WriteAllText(outputPath,
                     "PASS\nLifecycle, usage metrics, panel formatting, and animation checks passed.\n",
@@ -964,16 +1278,16 @@ public static class Diagnostics
                 {
                     monitor.Start();
                     AggregateSnapshot aggregate = monitor.GetAggregate(settings);
-                    if (!settings.Paused && aggregate.State == HaloState.Idle &&
-                        CodexRuntimeReader.IsRunning())
-                    {
-                        aggregate.State = HaloState.Done;
-                        aggregate.Label = "STANDBY";
-                        aggregate.Detail = "Codex 正在待命";
-                    }
                     StringBuilder report = new StringBuilder();
                     report.AppendLine(aggregate.Label);
                     report.AppendLine(aggregate.Detail);
+                    report.AppendLine("Presence: " + aggregate.Presence);
+                    report.AppendLine("Turn: " + aggregate.TurnPhase);
+                    report.AppendLine("Activity: " + aggregate.Activity);
+                    report.AppendLine("Attention: " + aggregate.AttentionReason);
+                    report.AppendLine("Failure: " + aggregate.FailureSeverity);
+                    report.AppendLine("Evidence: " + aggregate.EvidenceSource +
+                        " / " + aggregate.EvidenceKind);
                     report.AppendLine("Sessions: " + aggregate.Sessions.Count.ToString(
                         CultureInfo.InvariantCulture));
                     foreach (SessionSnapshot session in aggregate.Sessions)
@@ -1344,6 +1658,54 @@ public static class Diagnostics
                 encoder.Save(stream);
             }
             panel.Close();
+
+            DetailsWindow customCodexPanel = new DetailsWindow();
+            customCodexPanel.SetPreviewCodexCustomMetrics(new CodexCustomApiMetrics
+            {
+                IsCustomApi = true,
+                ProjectName = "AgentHalo",
+                Model = "glm-5.2",
+                InputTokens = 14200,
+                OutputTokens = 730,
+                ContextTokens = 14200,
+                ContextWindowTokens = 128000
+            });
+            customCodexPanel.UpdateContent(aggregate, sessions);
+            FrameworkElement customCodexContent =
+                customCodexPanel.Content as FrameworkElement;
+            customCodexPanel.Content = null;
+            Grid customCodexStage = new Grid();
+            customCodexStage.Width = 380;
+            customCodexStage.Background = new SolidColorBrush(
+                MediaColor.FromRgb(7, 10, 15));
+            customCodexContent.Width = 324;
+            customCodexContent.Margin = new Thickness(28);
+            customCodexStage.Children.Add(customCodexContent);
+            customCodexStage.Measure(new System.Windows.Size(380, 1000));
+            double customCodexHeight = Math.Ceiling(
+                customCodexStage.DesiredSize.Height);
+            if (Math.Abs(height - customCodexHeight) > 0.001)
+            {
+                throw new InvalidOperationException(
+                    "Panel preview height mismatch: official Codex=" +
+                    height.ToString(CultureInfo.InvariantCulture) +
+                    ", custom Codex=" +
+                    customCodexHeight.ToString(CultureInfo.InvariantCulture));
+            }
+            customCodexStage.Height = customCodexHeight;
+            customCodexStage.Arrange(new Rect(0, 0, 380, customCodexHeight));
+            customCodexStage.UpdateLayout();
+            RenderTargetBitmap customCodexBitmap = new RenderTargetBitmap(760,
+                (int)(customCodexHeight * 2), 192, 192, PixelFormats.Pbgra32);
+            customCodexBitmap.Render(customCodexStage);
+            PngBitmapEncoder customCodexEncoder = new PngBitmapEncoder();
+            customCodexEncoder.Frames.Add(BitmapFrame.Create(customCodexBitmap));
+            using (FileStream stream = File.Create(Path.Combine(outputDirectory,
+                "panel-codex-custom.png")))
+            {
+                customCodexEncoder.Save(stream);
+            }
+            customCodexPanel.Close();
 
             List<SessionSnapshot> claudeSessions = new List<SessionSnapshot>();
             claudeSessions.Add(new SessionSnapshot
