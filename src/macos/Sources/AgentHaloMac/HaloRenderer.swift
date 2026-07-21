@@ -78,13 +78,9 @@ enum HaloRenderer {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         for (layer, style) in zip(layers, styles) {
-            layer.frame = bounds
             layer.path = path
-            layer.fillColor = NSColor.clear.cgColor
             layer.strokeColor = style.color.cgColor
             layer.lineWidth = style.width
-            layer.lineCap = .round
-            layer.lineJoin = .round
         }
         CATransaction.commit()
     }

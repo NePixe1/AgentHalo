@@ -5,12 +5,6 @@ private let haloSizeMenuWidth: CGFloat = 252
 private let haloSizeMenuHeight: CGFloat = 44
 private let haloSizeMenuTextInset: CGFloat = 21
 
-struct DetailsPresentation: Equatable {
-    var sessionDetails: SessionDetailsSnapshot
-    var showsQuota: Bool
-    var contextUsedPercent: Double?
-}
-
 struct LiveErrorPresentationUpdate: Equatable {
     var presentation: ErrorPresentation
     var acknowledgeErrorAt: Date?
@@ -27,6 +21,41 @@ struct PreviewPayload: Equatable {
 
     let state: HaloState?
     let presentation: ErrorPresentation?
+}
+
+struct UsageTerminationHandshake {
+    private enum Phase {
+        case running
+        case cancelling
+        case completed
+    }
+
+    private var phase = Phase.running
+
+    var hasCompleted: Bool {
+        phase == .completed
+    }
+
+    mutating func beginCancellation() -> Bool {
+        guard phase == .running else {
+            return false
+        }
+        phase = .cancelling
+        return true
+    }
+
+    mutating func finishCancellation() -> Bool {
+        guard phase == .cancelling else {
+            return false
+        }
+        phase = .completed
+        return true
+    }
+}
+
+struct UsageRequestRecord {
+    let token: UUID
+    let task: Task<Void, Never>
 }
 
 struct LiveErrorPresentationState {
@@ -108,7 +137,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsSaveTimer: Timer?
     private var systemOverlaySuspended = false
     private var placementState = HaloPlacementRuntimeState()
-    private let rateLimitReader = RateLimitReader()
+    private let usageCoordinator: UsageMonitoringCoordinator
+    private var usageStates: [UsageProviderID: UsageMonitorState] = [:]
+    private var usageRefreshLoopTask: Task<Void, Never>?
+    private var usageRequestTasks: [UsageProviderID: UsageRequestRecord] = [:]
+    private let usageRefreshInterval: TimeInterval = 5 * 60
+    private var usageTerminationHandshake = UsageTerminationHandshake()
     private let claudeContextUsageReader = ClaudeContextUsageReader()
     private let contextReaderQueue = DispatchQueue(
         label: "com.agenthalo.context-reader",
@@ -117,6 +151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let instanceLock = InstanceLock()
     private let codexActivator: @MainActor () -> Void
     private var liveErrorPresentationState = LiveErrorPresentationState()
+    private var codexIsForeground = false
     private var codexWasForeground = false
     private var lastStatusMenuSignature: StatusMenuSignature?
     private var lastStatusIconState: HaloState?
@@ -131,10 +166,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     init(
         settingsStore: SettingsStore = SettingsStore(),
-        codexActivator: @escaping @MainActor () -> Void = CodexAppDetector.activateCodex
+        codexActivator: @escaping @MainActor () -> Void = CodexAppDetector.activateCodex,
+        usageCoordinator: UsageMonitoringCoordinator = .live()
     ) {
         self.settingsStore = settingsStore
         self.codexActivator = codexActivator
+        self.usageCoordinator = usageCoordinator
         self.settings = settingsStore.load()
         self.aggregate = SessionAggregator.aggregate(
             snapshots: [],
@@ -156,7 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         createHaloPanel()
         reconcileHaloPlacement()
         registerSystemOverlayObservers()
-        updateSystemOverlaySuspension(for: NSWorkspace.shared.frontmostApplication)
+        updateFrontmostApplication(NSWorkspace.shared.frontmostApplication)
         codexActivitySnapshot = codexActivityMonitor.snapshot()
         codexActivityMonitor.start { [weak self] snapshot in
             Task { @MainActor in
@@ -172,6 +209,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Initialize L10n with user's saved preference
         L10n.shared.setLanguage(settings.language)
         currentLanguage = L10n.shared.currentLanguage
+        startUsageRefreshLoop()
+        requestUsageRefresh(for: Self.usageProviderID(for: settings.focusedAgent))
 
         // Observe language changes
         languageObserver = NotificationCenter.default.addObserver(
@@ -190,13 +229,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // Rebuild menu so all items show new language
                 self.lastStatusMenuSignature = nil
                 self.tick()
+                self.refreshVisibleDetailsPanel()
             }
         }
         tick()
         timer = Timer.scheduledTimer(timeInterval: 0.3, target: self, selector: #selector(timerDidFire), userInfo: nil, repeats: true)
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if usageTerminationHandshake.hasCompleted {
+            return .terminateNow
+        }
+        guard usageTerminationHandshake.beginCancellation() else {
+            return .terminateLater
+        }
+        cancelLocalUsageTasks()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.usageCoordinator.cancelAll()
+            guard self.usageTerminationHandshake.finishCancellation() else {
+                return
+            }
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
+        cancelLocalUsageTasks()
         codexActivityMonitor.stop()
         claudeActivityMonitor.stop()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
@@ -205,6 +265,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             commitPreferredPlacement(frame: panel.frame, persist: false)
         }
         settingsStore.save(settings)
+    }
+
+    private func cancelLocalUsageTasks() {
+        usageRefreshLoopTask?.cancel()
+        usageRefreshLoopTask = nil
+        usageRequestTasks.values.forEach { $0.task.cancel() }
+        usageRequestTasks.removeAll()
     }
 
     func applicationDidChangeScreenParameters(_ notification: Notification) {
@@ -221,7 +288,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let now = Date()
         reconcileClaudeStatusLineConfiguration(now: now)
-        updateSystemOverlaySuspension(for: NSWorkspace.shared.frontmostApplication)
         acknowledgeCompletedIfCodexIsForeground()
         let codexRunning = CodexAppDetector.isCodexRunning()
         codexActivityMonitor.updatePollingContext(
@@ -274,7 +340,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 : claudeActivitySnapshot.preferredStandbySession != nil
         )
         applyRealtimeCodexActivity(codexActivitySnapshot.realtimeActivity)
-        let codexIsForeground = CodexAppDetector.isCodexForeground()
         let errorUpdate = liveErrorPresentationState.update(
             aggregate: aggregate,
             codexIsForeground: codexIsForeground,
@@ -305,9 +370,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             errorPresentation: errorUpdate.presentation
         )
         refreshVisibleDetailsStatus()
-        if !systemOverlaySuspended {
-            haloView?.redrawRing()
-        }
         if statusItem != nil {
             updateStatusMenu()
         }
@@ -364,6 +426,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let center = NSWorkspace.shared.notificationCenter
         center.addObserver(
             self,
+            selector: #selector(workspaceApplicationDidLaunch(_:)),
+            name: NSWorkspace.didLaunchApplicationNotification,
+            object: nil
+        )
+        center.addObserver(
+            self,
+            selector: #selector(workspaceApplicationDidTerminate(_:)),
+            name: NSWorkspace.didTerminateApplicationNotification,
+            object: nil
+        )
+        center.addObserver(
+            self,
             selector: #selector(workspaceApplicationDidActivate(_:)),
             name: NSWorkspace.didActivateApplicationNotification,
             object: nil
@@ -376,13 +450,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
+    @objc private func workspaceApplicationDidLaunch(_ notification: Notification) {
+        let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+        if CodexAppDetector.noteApplicationDidLaunch(app) {
+            tick()
+        }
+    }
+
+    @objc private func workspaceApplicationDidTerminate(_ notification: Notification) {
+        let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+        guard CodexAppDetector.noteApplicationDidTerminate(app) else { return }
+        updateFrontmostApplication(NSWorkspace.shared.frontmostApplication)
+        tick()
+    }
+
     @objc private func workspaceApplicationDidActivate(_ notification: Notification) {
         let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-        updateSystemOverlaySuspension(for: app)
+        updateFrontmostApplication(app)
     }
 
     @objc private func workspaceActiveSpaceDidChange(_ notification: Notification) {
-        updateSystemOverlaySuspension(for: NSWorkspace.shared.frontmostApplication)
+        updateFrontmostApplication(NSWorkspace.shared.frontmostApplication)
+    }
+
+    private func updateFrontmostApplication(_ app: NSRunningApplication?) {
+        codexIsForeground = CodexAppDetector.isCodexForeground(app)
+        updateSystemOverlaySuspension(for: app)
     }
 
     private func updateSystemOverlaySuspension(for app: NSRunningApplication?) {
@@ -591,6 +684,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard settings.focusedAgent != agent else {
             tick()
             refreshVisibleDetailsPanel()
+            requestUsageRefresh(for: Self.usageProviderID(for: agent))
             return
         }
         settings.focusedAgent = agent
@@ -600,6 +694,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         tick()
         refreshVisibleDetailsPanel()
+        requestUsageRefresh(for: Self.usageProviderID(for: agent))
     }
 
     @objc private func quit() {
@@ -704,7 +799,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let updated = settings.acknowledgingCompletedSessions(
-            CodexAppDetector.isCodexForeground() ? codexSnapshots() : []
+            codexIsForeground ? codexSnapshots() : []
         )
         if updated.acknowledged != settings.acknowledged {
             settings = updated
@@ -775,13 +870,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         positionDetailsPanel()
         detailsPanel.orderFrontRegardless()
+        requestUsageRefresh(for: Self.usageProviderID(for: settings.focusedAgent))
     }
 
     private func updateDetailsPanelContent(rawClaudeSnapshots: [SessionSnapshot]? = nil) {
         let rawClaudeSnapshots = rawClaudeSnapshots
             ?? (settings.focusedAgent == .claudeCode ? claudeSnapshots() : [])
         let displayedAggregate = displayAggregate()
-        let quota = settings.focusedAgent == .codex ? rateLimitReader.read() : nil
+        let providerID = Self.usageProviderID(for: settings.focusedAgent)
+        let monitorState = usageStates[providerID]
+            ?? UsageMonitorState(providerID: providerID, accessMode: .apiKey)
         let claudeMainSessionId = settings.focusedAgent == .claudeCode
             ? Self.claudeMainSessionIdForDetails(
                 displayedAggregate: displayedAggregate,
@@ -801,22 +899,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 )
             }
         }
-        let presentation = Self.detailsPresentationForDetails(
-            focusedAgent: settings.focusedAgent,
-            displayedAggregate: displayedAggregate,
-            claudeMainSessionId: claudeMainSessionId,
-            mainClaudeSessions: claudeActivitySnapshot.transcriptSnapshots,
-            liveClaudeSession: claudeActivitySnapshot.preferredStandbySession,
-            quota: quota,
-            claudeUsage: claudeUsage
+        let exactSessionDetails: SessionDetailsSnapshot
+        let exactContextUsedPercent: Double?
+        switch settings.focusedAgent {
+        case .codex:
+            let session = displayedAggregate.sessions.first
+            exactSessionDetails = SessionDetailsSnapshot(
+                projectName: session?.projectName,
+                sessionTitle: session?.sessionTitle,
+                modelName: session?.modelName,
+                inputTokens: session?.inputTokens,
+                outputTokens: session?.outputTokens
+            )
+            exactContextUsedPercent = session?.contextUsedPercent
+        case .claudeCode:
+            let resolved = ClaudeMainSessionDetailsResolver.resolve(
+                mainSessionId: claudeMainSessionId,
+                mainSessions: claudeActivitySnapshot.transcriptSnapshots,
+                liveSession: claudeActivitySnapshot.preferredStandbySession,
+                usage: claudeUsage
+            )
+            exactSessionDetails = resolved.sessionDetails
+            exactContextUsedPercent = resolved.contextUsedPercent
+        }
+        let model = DetailsContentResolver.resolve(
+            providerID: providerID,
+            monitorState: monitorState,
+            isOffline: displayedAggregate.state == .idle && displayedAggregate.label == "OFFLINE",
+            sessionDetails: exactSessionDetails,
+            contextUsedPercent: exactContextUsedPercent,
+            now: Date()
         )
-        detailsPanel.update(
-            aggregate: displayedAggregate,
-            quota: quota,
-            contextUsedPercent: presentation.contextUsedPercent,
-            sessionDetails: presentation.sessionDetails,
-            showsQuota: presentation.showsQuota
-        )
+        detailsPanel.render(aggregate: displayedAggregate, model: model)
     }
 
     static func claudeMainSessionIdForDetails(
@@ -847,43 +961,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .whileSessionIsLive
     }
 
-    static func detailsPresentationForDetails(
-        focusedAgent: AgentKind,
-        displayedAggregate: AggregateSnapshot,
-        claudeMainSessionId: String?,
-        mainClaudeSessions: [SessionSnapshot],
-        liveClaudeSession: ClaudeLiveSessionSnapshot?,
-        quota: RateLimitSnapshot?,
-        claudeUsage: ClaudeContextUsageSnapshot?
-    ) -> DetailsPresentation {
-        switch focusedAgent {
+    static func usageProviderID(for agent: AgentKind) -> UsageProviderID {
+        switch agent {
         case .codex:
-            let session = displayedAggregate.sessions.first
-            let showsQuota = session?.hasRateLimits ?? (quota != nil)
-            return DetailsPresentation(
-                sessionDetails: SessionDetailsSnapshot(
-                    projectName: session?.projectName,
-                    modelName: session?.modelName,
-                    inputTokens: session?.inputTokens,
-                    outputTokens: session?.outputTokens
-                ),
-                showsQuota: showsQuota,
-                contextUsedPercent: session?.contextUsedPercent
-                    ?? (showsQuota ? quota?.contextUsedPercent : nil)
-            )
+            return .codex
         case .claudeCode:
-            let resolved = ClaudeMainSessionDetailsResolver.resolve(
-                mainSessionId: claudeMainSessionId,
-                mainSessions: mainClaudeSessions,
-                liveSession: liveClaudeSession,
-                usage: claudeUsage
-            )
-            return DetailsPresentation(
-                sessionDetails: resolved.sessionDetails,
-                showsQuota: false,
-                contextUsedPercent: resolved.contextUsedPercent
-            )
+            return .claude
         }
+    }
+
+    private func startUsageRefreshLoop() {
+        usageRefreshLoopTask?.cancel()
+        let sleepNanoseconds = UInt64(usageRefreshInterval * 1_000_000_000)
+        usageRefreshLoopTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: sleepNanoseconds)
+                } catch {
+                    return
+                }
+                guard let self, !Task.isCancelled else {
+                    return
+                }
+                requestUsageRefresh(for: Self.usageProviderID(for: settings.focusedAgent))
+            }
+        }
+    }
+
+    private func requestUsageRefresh(for providerID: UsageProviderID) {
+        guard usageRequestTasks[providerID] == nil else {
+            return
+        }
+        let token = UUID()
+        let coordinator = usageCoordinator
+        let task = Task { @MainActor [weak self] in
+            defer { self?.clearUsageRequest(for: providerID, token: token) }
+            let prepared = await coordinator.prepare(providerID)
+            guard !Task.isCancelled else { return }
+            self?.publishUsageState(prepared, for: providerID)
+
+            let refreshed = await coordinator.ensureFresh(providerID)
+            guard !Task.isCancelled else { return }
+            self?.publishUsageState(refreshed, for: providerID)
+        }
+        usageRequestTasks[providerID] = UsageRequestRecord(token: token, task: task)
+    }
+
+    private func clearUsageRequest(for providerID: UsageProviderID, token: UUID) {
+        guard usageRequestTasks[providerID]?.token == token else {
+            return
+        }
+        usageRequestTasks[providerID] = nil
+    }
+
+    private func publishUsageState(_ state: UsageMonitorState, for providerID: UsageProviderID) {
+        usageStates[providerID] = state
+        guard providerID == Self.usageProviderID(for: settings.focusedAgent),
+              detailsPanel.isVisible else {
+            return
+        }
+        updateDetailsPanelContent()
     }
 
     private func refreshVisibleDetailsPanel() {
@@ -939,6 +1076,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let screen = NSScreen.screens.first { $0.visibleFrame.intersects(panel.frame) } ?? NSScreen.main
         let area = screen?.visibleFrame ?? panel.frame
         let gap: CGFloat = 10
+        let scale = screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+        let normalizedHeight = DetailsPanel.evenPanelHeight(
+            for: detailsPanel.frame.height,
+            backingScaleFactor: scale
+        )
+        if normalizedHeight != detailsPanel.frame.height {
+            let currentFrame = detailsPanel.frame
+            detailsPanel.applyResizeFrame(
+                NSRect(
+                    x: currentFrame.minX,
+                    y: currentFrame.maxY - normalizedHeight,
+                    width: currentFrame.width,
+                    height: normalizedHeight
+                ),
+                display: false,
+                animate: false
+            )
+        }
         var x = panel.frame.minX - detailsPanel.frame.width - gap
         if x < area.minX + 8 {
             x = panel.frame.maxX + gap
@@ -948,7 +1103,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             x: max(area.minX + 8, min(x, area.maxX - detailsPanel.frame.width - 8)),
             y: y
         )
-        let scale = screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
         detailsPanel.setFrameOrigin(Self.pixelAlignedOrigin(clampedOrigin, backingScaleFactor: scale))
         detailsPanel.contentView?.layoutSubtreeIfNeeded()
         detailsPanel.contentView?.displayIfNeeded()
