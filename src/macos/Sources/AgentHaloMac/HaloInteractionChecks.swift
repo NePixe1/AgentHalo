@@ -17,6 +17,7 @@ private func expect<T: Equatable>(_ actual: T, _ expected: T, _ message: String)
 func runHaloInteractionChecks() {
     L10n.shared.setLanguage("zh")
     testDetailsPanelUsesEvenPointHeight()
+    testDetailsPanelNormalizesDynamicHeightForTargetScale()
     testDetailsPanelPixelAlignmentUsesBackingScale()
     testDetailsPanelPositioningSnapsToBackingPixels()
     testL10nEnglishSwitchProducesEnglishStrings()
@@ -56,43 +57,75 @@ func runHaloInteractionChecks() {
     testCodexRunningIdleUsesStableGreenAggregate()
     testPausedAgentDoesNotUseStableGreenStandby()
     testLiveCodexErrorCyclesThroughBrightAndDimPresentations()
-    testDetailsPanelShowsCodexQuotaAndIdleCopy()
-    testDetailsPanelPrefersMonthlyQuotaWhenPresent()
-    testDetailsPanelShowsPendingMonthlyQuotaForMonthlyPlan()
-    testDetailsPanelCentersSingleMonthlyQuotaRow()
-    testDetailsPanelPrefersPlusQuotaWhenPrimaryAndSecondaryArePresent()
+    testDetailsPanelHidesProviderPlanAndWarning()
+    testDetailsPanelShowsFiveHourAndWeeklyRemainingUsage()
+    testQuotaMeterUsesApprovedSoftFadePalette()
+    testQuotaMeterRendersApprovedSoftFadeOutput()
+    testDetailsPanelShowsMissingAndExpiredUsageWindows()
+    testDetailsPanelShowsThreeIndependentSessionRows()
+    testDetailsPanelLeavesMissingSessionTitleEmpty()
+    testDetailsPanelKeepsUsageAndSessionBodiesMutuallyExclusive()
+    testDetailsPanelKeepsContextIndependentFromUsageFailure()
+    testDetailsPanelClearsContextAndSessionRowsOffline()
+    testDetailsPanelKeepsFixedWidthForLongProviderContent()
+    testDetailsPanelResizesHeightWithoutAnimation()
+    testDetailsPanelMovesTitleGapIntoBodySpacing()
     testDetailsPanelShowsCodexStandbyCopy()
-    testDetailsPanelShowsSessionMetadataForCodexAndClaudeCode()
     testDetailsPanelUsesCompactContextPercent()
     testDetailsPanelKeepsContextPillWidthStable()
-    testDetailsPanelPrefersClaudeSessionTitle()
-    testDetailsPanelKeepsFixedWidthForLongClaudeSessionTitle()
-    testDetailsPanelUsesCompactMetadataLayout()
     testVisibleDetailsPanelStatusRefreshIsWiredToTick()
+    testUsageTerminationWaitsForCoordinatorCancellation()
+    testUsageTerminationHandshakeRejectsDuplicateWork()
+    testUsageMonitoringLifecycleWiring()
+    testPackagedVerificationRuntimeSelectionIsExplicit()
     testStatusLineConfigurationReconciliationIsWiredToTick()
     testCodexPollingWorkIsNotPerformedOnMainTick()
     testCodexActivityDispatchIsThrottled()
     testCodexSQLiteReadersUseInProcessSQLite()
     testCodexSQLiteReadersUseRecentRowWindows()
-    testCodexAppDetectorCachesRunningApplicationScans()
+    testCodexAppDetectorUsesWorkspaceEvents()
     testSessionMonitorsUseFastFileMetadata()
     testClaudePollingIsThrottledWhenCodexFocused()
     testClaudeLiveSessionsRefreshIsThrottled()
     testHaloUsesShapeLayersNotCpuRasterization()
+    testRingSubmissionsAvoidConstantWork()
+    testRuntimeRingLayerPixelsMatchBaseline()
+    testRuntimeRingLayerModelMatchesVisualModel()
     testIdleAnimationUsesLowPowerCadence()
-    testDetailsPresentationUsesFocusedSessionAndRejectsStaleQuota()
+    testUsageProviderMappingIsTotal()
     testClaudeStandbyDetailsPreferLiveSessionIdentity()
     testClaudeUsageFreshnessTracksExactLiveSession()
     testDetailsPanelUsesTightBottomInset()
-    testDetailsPanelShowsExpiredQuotaAsWaitingForRefresh()
     testDetailsPanelShowsAnswerStreamingCopy()
     testDetailsPanelRefreshesStatusFromLatestAggregate()
+    testDetailsPanelShowsContextWhenLiveCodexUsageArrives()
     testDetailsPanelLocalizesClaudeActivityDetails()
-    testDetailsPanelShowsContextAndHidesQuotaForClaudeCode()
     testAgentToggleUsesSharedSVGAssets()
     testAgentToggleUsesCodexAndClaudeIcons()
+    testAgentToggleDimsInactiveIconMoreStrongly()
+    testAgentToggleSelectionPillFitsItsIconWidth()
     testAgentToggleKeepsWholeControlClickable()
     testDetailsPanelSwitchCallbackSelectsClaudeCode()
+}
+
+private func testPackagedVerificationRuntimeSelectionIsExplicit() {
+    let mainURL = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("main.swift")
+    guard let source = try? String(contentsOf: mainURL, encoding: .utf8) else {
+        fatalError("main.swift should be readable")
+    }
+    expect(
+        source.contains("let packagedVerificationArgument = \"--packaged-verification\"")
+            && source.contains("? .packagedVerification")
+            && source.contains(": .production")
+            && source.contains("UsageMonitoringCoordinator.live(mode: runtimeMode)"),
+        "only the explicit packaged marker should select disabled-Keychain assembly"
+    )
+    expect(
+        source.contains("PACKAGED_VERIFICATION_KEYCHAIN_DISABLED"),
+        "packaged verification should emit an auditable runtime marker"
+    )
 }
 
 @MainActor
@@ -797,149 +830,533 @@ private func menuItem(titled title: String, in menu: NSMenu) -> NSMenuItem {
 }
 
 @MainActor
-private func testDetailsPanelShowsCodexQuotaAndIdleCopy() {
+private func testDetailsPanelHidesProviderPlanAndWarning() {
     let panel = DetailsPanel()
-    let aggregate = AggregateSnapshot(
-        state: .idle,
-        label: "OFFLINE",
-        detail: AgentKind.codex.offlineDetail,
-        sessions: [],
-        focusedAgent: .codex
+    let warning = L10n.shared["usage.warning.network"]
+    let expectedOrder: [DetailsPanelContentRole] = [
+        .agentSwitcher, .statusTitle, .statusDetail, .usageBody, .sessionBody
+    ]
+
+    panel.render(
+        aggregate: detailsAggregate(),
+        model: usageDetailsModel(provider: "Codex", plan: "Plus", warning: warning)
     )
 
-    panel.update(
-        aggregate: aggregate,
-        quota: RateLimitSnapshot(primaryUsedPercent: 30, secondaryUsedPercent: 60, contextUsedPercent: 42),
-        contextUsedPercent: 42
+    expect(panel.contentOrderForTesting, expectedOrder, "details panel should omit the provider header")
+    expect(!panel.usageGroupHiddenForTesting, "OAuth usage body should remain visible")
+    let usageLabels = allDescendants(of: panel.contentView!).compactMap { ($0 as? NSTextField)?.stringValue }
+    expect(!usageLabels.contains("Codex"), "details panel should not display the provider name")
+    expect(!usageLabels.contains("Plus"), "details panel should not display the plan name")
+    let usageWarningImages = allDescendants(of: panel.contentView!).compactMap { $0 as? NSImageView }
+        .filter { $0.image?.accessibilityDescription == "exclamationmark.triangle.fill" }
+    expect(usageWarningImages.isEmpty, "details panel should not display a usage warning icon")
+
+    panel.render(
+        aggregate: detailsAggregate(state: .idle, label: "OFFLINE"),
+        model: sessionDetailsModel(provider: "Claude Code", plan: nil)
     )
 
-    expect(panel.focusedAgentForTesting == .codex, "details panel should select Codex")
-    expect(panel.detailTextForTesting == L10n.shared["status.offline_codex"], "Codex offline copy should be localized")
-    // OFFLINE has no live session, so the context pill should drop out
-    // entirely rather than echo a stale percentage from a prior session.
-    expect(panel.contextPillHiddenForTesting == true, "Codex context pill should be hidden when OFFLINE")
-    expect(panel.primaryQuotaHiddenForTesting == false, "Codex primary quota should be visible")
-    expect(panel.secondaryQuotaHiddenForTesting == false, "Codex secondary quota should be visible")
+    expect(panel.contentOrderForTesting, expectedOrder, "API details should also omit the provider header")
+    expect(!panel.sessionGroupHiddenForTesting, "API session body should remain visible")
 }
 
 @MainActor
-private func testDetailsPanelPrefersMonthlyQuotaWhenPresent() {
+private func testDetailsPanelShowsFiveHourAndWeeklyRemainingUsage() {
     let panel = DetailsPanel()
-    let aggregate = AggregateSnapshot(
-        state: .done,
-        label: "STANDBY",
-        detail: AgentKind.codex.localizedStandbyDetail,
-        sessions: [],
-        focusedAgent: .codex
+    let reset = Date().addingTimeInterval(3_600)
+    panel.render(
+        aggregate: detailsAggregate(),
+        model: usageDetailsModel(windows: [
+            UsageWindow(kind: .weekly, usedPercent: 60, resetsAt: reset, duration: 604_800),
+            UsageWindow(kind: .session, usedPercent: 30, resetsAt: reset, duration: 18_000),
+        ])
     )
 
-    panel.update(
-        aggregate: aggregate,
-        quota: RateLimitSnapshot(
-            primaryUsedPercent: 30,
-            secondaryUsedPercent: 60,
-            contextUsedPercent: 9,
-            monthlyUsedPercent: 5
-        ),
-        contextUsedPercent: 9
-    )
-
-    expect(panel.primaryQuotaHiddenForTesting == false, "monthly quota should be visible")
-    expect(panel.secondaryQuotaHiddenForTesting == true, "weekly quota should be hidden for monthly accounts")
-    expect(panel.primaryQuotaValueForTesting == L10n.shared.format("quota.remaining", 95), "monthly quota should drive remaining percent")
+    expect(panel.primaryQuotaTitleForTesting, L10n.shared["quota.5h"], "short window title")
+    expect(panel.secondaryQuotaTitleForTesting, L10n.shared["quota.weekly"], "weekly window title")
+    expect(panel.primaryQuotaValueForTesting, L10n.shared.format("quota.remaining", 70), "short window remaining value")
+    expect(panel.secondaryQuotaValueForTesting, L10n.shared.format("quota.remaining", 40), "weekly remaining value")
+    expect(panel.primaryQuotaMeterFillForTesting, 70, "short window meter should use remaining percent")
+    expect(panel.secondaryQuotaMeterFillForTesting, 40, "weekly meter should use remaining percent")
+    panel.contentView?.layoutSubtreeIfNeeded()
+    let meters = panel.contentView.map(allDescendants(of:))?.compactMap { $0 as? RoundedMeterView } ?? []
+    expect(meters.count, 2, "usage panel quota meter count")
+    expect(meters.allSatisfy { abs($0.frame.height - 4) < 0.001 }, "usage panel quota meters should remain 4pt high")
+    expect(!panel.primaryQuotaResetHiddenForTesting, "future short-window reset should be visible")
+    expect(!panel.secondaryQuotaResetHiddenForTesting, "future weekly reset should be visible")
 }
 
 @MainActor
-private func testDetailsPanelShowsPendingMonthlyQuotaForMonthlyPlan() {
-    let panel = DetailsPanel()
-    let aggregate = AggregateSnapshot(
-        state: .done,
-        label: "STANDBY",
-        detail: AgentKind.codex.localizedStandbyDetail,
-        sessions: [],
-        focusedAgent: .codex
-    )
+private func testQuotaMeterUsesApprovedSoftFadePalette() {
+    expectQuotaColor(QuotaMeterPalette.fillColor(for: 100), red: 64, green: 105, blue: 132, "100% quota color")
+    expectQuotaColor(QuotaMeterPalette.fillColor(for: 75), red: 82, green: 121, blue: 146, "75% quota color")
+    expectQuotaColor(QuotaMeterPalette.fillColor(for: 50), red: 112, green: 148, blue: 169, "50% quota color")
+    expectQuotaColor(QuotaMeterPalette.fillColor(for: 25), red: 168, green: 191, blue: 202, "25% quota color")
+    expectQuotaColor(QuotaMeterPalette.fillColor(for: 0), red: 202, green: 217, blue: 224, "0% quota color")
 
-    panel.update(
-        aggregate: aggregate,
-        quota: RateLimitSnapshot(
-            primaryUsedPercent: 0,
-            secondaryUsedPercent: 0,
-            contextUsedPercent: 9,
-            hasPrimary: false,
-            hasSecondary: false,
-            hasMonthlyPlan: true
-        ),
-        contextUsedPercent: 9
-    )
+    expectQuotaColor(QuotaMeterPalette.fillColor(for: 62.5), red: 97, green: 134.5, blue: 157.5, "interpolated quota color")
+    expectQuotaColor(QuotaMeterPalette.fillColor(for: 120), red: 64, green: 105, blue: 132, "quota color upper clamp")
+    expectQuotaColor(QuotaMeterPalette.fillColor(for: -20), red: 202, green: 217, blue: 224, "quota color lower clamp")
 
-    expect(panel.primaryQuotaHiddenForTesting == false, "monthly plan pending quota should be visible")
-    expect(panel.secondaryQuotaHiddenForTesting == true, "weekly quota should stay hidden while monthly data is pending")
-    expect(panel.primaryQuotaValueForTesting == L10n.shared["quota.waiting_refresh"], "monthly plan without usage should wait for refresh")
+    let fuller = quotaColorBytes(QuotaMeterPalette.fillColor(for: 75))
+    let lower = quotaColorBytes(QuotaMeterPalette.fillColor(for: 25))
+    expect(lower.red >= fuller.red && lower.green >= fuller.green && lower.blue >= fuller.blue,
+           "lower remaining quota should use a lighter RGB color")
 }
 
 @MainActor
-private func testDetailsPanelCentersSingleMonthlyQuotaRow() {
-    let plusPanel = DetailsPanel()
-    let monthlyPanel = DetailsPanel()
-    let aggregate = AggregateSnapshot(
-        state: .done,
-        label: "STANDBY",
-        detail: AgentKind.codex.localizedStandbyDetail,
-        sessions: [],
-        focusedAgent: .codex
-    )
+private func testQuotaMeterRendersApprovedSoftFadeOutput() {
+    let full = renderQuotaMeter(remainingPercent: 100)
+    expectRenderedQuotaColor(full, x: 50, y: 2, red: 64, green: 105, blue: 132, "100% rendered fill")
 
-    plusPanel.update(
-        aggregate: aggregate,
-        quota: RateLimitSnapshot(primaryUsedPercent: 30, secondaryUsedPercent: 60, contextUsedPercent: 9),
-        contextUsedPercent: 9
-    )
-    monthlyPanel.update(
-        aggregate: aggregate,
-        quota: RateLimitSnapshot(
-            primaryUsedPercent: 0,
-            secondaryUsedPercent: 0,
-            contextUsedPercent: 9,
-            monthlyUsedPercent: 5
-        ),
-        contextUsedPercent: 9
-    )
+    let quarter = renderQuotaMeter(remainingPercent: 25)
+    expectRenderedQuotaColor(quarter, x: 20, y: 2, red: 168, green: 191, blue: 202, "25% rendered fill")
+    expect(quotaPixel(quarter, x: 30, y: 2).alpha < 0.5, "25% meter should show track after the remaining-width fill")
 
+    let threeQuarters = renderQuotaMeter(remainingPercent: 75)
+    expectRenderedQuotaColor(threeQuarters, x: 70, y: 2, red: 82, green: 121, blue: 146, "75% rendered fill")
+    expect(quotaPixel(threeQuarters, x: 80, y: 2).alpha < 0.5, "75% meter should show track after the remaining-width fill")
+
+    let empty = renderQuotaMeter(remainingPercent: 0)
+    expect(empty.pixelsHigh, 4, "rendered quota meter height")
+    expect(quotaPixel(empty, x: 50, y: 2).alpha < 0.5, "0% meter should render only the translucent track")
     expect(
-        monthlyPanel.quotaTopSpacingForTesting > plusPanel.quotaTopSpacingForTesting,
-        "single monthly quota row should sit lower than the compact two-row quota layout"
+        quotaPixel(empty, x: 0, y: 0).alpha < quotaPixel(empty, x: 50, y: 2).alpha,
+        "0% track should retain rounded corners"
+    )
+    expect(
+        (0..<empty.pixelsHigh).allSatisfy { y in
+            (0..<empty.pixelsWide).allSatisfy { x in quotaPixel(empty, x: x, y: y).alpha < 0.5 }
+        },
+        "0% meter should not render an opaque fill"
     )
 }
 
 @MainActor
-private func testDetailsPanelPrefersPlusQuotaWhenPrimaryAndSecondaryArePresent() {
+private func renderQuotaMeter(remainingPercent: Double) -> NSBitmapImageRep {
+    let width = 100
+    let height = 4
+    guard let bitmap = NSBitmapImageRep(
+        bitmapDataPlanes: nil,
+        pixelsWide: width,
+        pixelsHigh: height,
+        bitsPerSample: 8,
+        samplesPerPixel: 4,
+        hasAlpha: true,
+        isPlanar: false,
+        colorSpaceName: .deviceRGB,
+        bitmapFormat: [],
+        bytesPerRow: 0,
+        bitsPerPixel: 0
+    ), let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
+        fatalError("quota meter bitmap context should be available")
+    }
+
+    let meter = RoundedMeterView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+    meter.value = remainingPercent
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = context
+    meter.draw(meter.bounds)
+    NSGraphicsContext.restoreGraphicsState()
+    return bitmap
+}
+
+@MainActor
+private func expectRenderedQuotaColor(
+    _ bitmap: NSBitmapImageRep,
+    x: Int,
+    y: Int,
+    red: Double,
+    green: Double,
+    blue: Double,
+    _ message: String
+) {
+    let actual = quotaPixel(bitmap, x: x, y: y)
+    let tolerance = 1.1
+    expect(actual.alpha > 0.99, "\(message) should be opaque")
+    expect(abs(actual.red - red) < tolerance, "\(message) red")
+    expect(abs(actual.green - green) < tolerance, "\(message) green")
+    expect(abs(actual.blue - blue) < tolerance, "\(message) blue")
+}
+
+@MainActor
+private func quotaPixel(
+    _ bitmap: NSBitmapImageRep,
+    x: Int,
+    y: Int
+) -> (red: Double, green: Double, blue: Double, alpha: Double) {
+    guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else {
+        fatalError("quota meter pixel should be readable in device RGB")
+    }
+    return (
+        Double(color.redComponent) * 255,
+        Double(color.greenComponent) * 255,
+        Double(color.blueComponent) * 255,
+        Double(color.alphaComponent)
+    )
+}
+
+@MainActor
+private func expectQuotaColor(
+    _ color: NSColor,
+    red: Double,
+    green: Double,
+    blue: Double,
+    _ message: String
+) {
+    let actual = quotaColorBytes(color)
+    let tolerance = 0.001
+    expect(abs(actual.red - red) < tolerance, "\(message) red")
+    expect(abs(actual.green - green) < tolerance, "\(message) green")
+    expect(abs(actual.blue - blue) < tolerance, "\(message) blue")
+}
+
+@MainActor
+private func quotaColorBytes(_ color: NSColor) -> (red: Double, green: Double, blue: Double) {
+    guard let rgb = color.usingColorSpace(.deviceRGB) else {
+        fatalError("quota color should convert to device RGB")
+    }
+    return (
+        Double(rgb.redComponent) * 255,
+        Double(rgb.greenComponent) * 255,
+        Double(rgb.blueComponent) * 255
+    )
+}
+
+@MainActor
+private func testDetailsPanelShowsMissingAndExpiredUsageWindows() {
+    let panel = DetailsPanel()
+    panel.render(
+        aggregate: detailsAggregate(),
+        model: usageDetailsModel(windows: [
+            UsageWindow(kind: .weekly, usedPercent: 15, resetsAt: Date().addingTimeInterval(-1), duration: 604_800),
+        ])
+    )
+
+    expect(panel.primaryQuotaValueForTesting, L10n.shared["quota.no_data"], "missing short window should show no data")
+    expect(panel.primaryQuotaResetHiddenForTesting, "missing short-window reset should be hidden")
+    expect(panel.primaryQuotaMeterFillForTesting, 0, "missing short-window meter should be empty")
+    expect(panel.secondaryQuotaValueForTesting, L10n.shared["quota.waiting_refresh"], "expired weekly window should wait for refresh")
+    expect(panel.secondaryQuotaResetHiddenForTesting, "expired weekly reset should be hidden")
+    expect(panel.secondaryQuotaMeterFillForTesting, 0, "expired weekly meter should be empty")
+
+    panel.render(
+        aggregate: detailsAggregate(),
+        model: usageDetailsModel(windows: [
+            UsageWindow(kind: .session, usedPercent: 25, resetsAt: nil, duration: 18_000),
+        ])
+    )
+    expect(panel.primaryQuotaValueForTesting, L10n.shared.format("quota.remaining", 75), "nil reset should preserve remaining usage")
+    expect(panel.primaryQuotaResetHiddenForTesting, "nil reset should not show a placeholder reset")
+}
+
+@MainActor
+private func testDetailsPanelShowsThreeIndependentSessionRows() {
+    let panel = DetailsPanel()
+    panel.render(
+        aggregate: detailsAggregate(),
+        model: sessionDetailsModel(session: SessionDetailsSnapshot(
+            projectName: "AgentHalo",
+            sessionTitle: "Redesign details",
+            modelName: "gpt-5.5",
+            inputTokens: 38_000,
+            outputTokens: 1_200
+        ))
+    )
+
+    expect(panel.sessionTitleValueForTesting, "Redesign details", "session title row")
+    expect(panel.modelValueForTesting, "gpt-5.5", "model row")
+    expect(panel.tokenValueForTesting, "↑ 38k  ·  ↓ 1.2k", "token row")
+    expect(panel.sessionTitleToolTipForTesting, "Redesign details", "session title tooltip")
+    expect(panel.modelToolTipForTesting, "gpt-5.5", "model tooltip")
+    expect(
+        panel.sessionBodyOrderForTesting,
+        [.sessionTitle, .separator, .model, .separator, .tokens],
+        "API rows should omit the project row"
+    )
+    expect(panel.sessionBodyOrderForTesting.count, 5, "API body should contain exactly five arranged subviews")
+    expect(!panel.sessionBodyOrderForTesting.contains(.unknown), "API body should reject unknown rows or titles")
+    expect(
+        panel.sessionBodyOrderForTesting.filter { $0 == .separator }.count,
+        2,
+        "API rows should contain two separators"
+    )
+    expect(
+        panel.sessionRowHeightsForTesting,
+        [24, 24, 24],
+        "all API metadata rows should use the same 24pt height"
+    )
+}
+
+@MainActor
+private func testDetailsPanelLeavesMissingSessionTitleEmpty() {
+    let panel = DetailsPanel()
+    panel.render(
+        aggregate: detailsAggregate(),
+        model: sessionDetailsModel(session: SessionDetailsSnapshot(projectName: "AgentHalo"))
+    )
+
+    expect(panel.sessionTitleValueForTesting, "--", "missing title should not fall back to projectName")
+}
+
+@MainActor
+private func testDetailsPanelKeepsUsageAndSessionBodiesMutuallyExclusive() {
+    let panel = DetailsPanel()
+    panel.render(aggregate: detailsAggregate(), model: usageDetailsModel())
+    expect(!panel.usageGroupHiddenForTesting, "OAuth body should show usage")
+    expect(panel.sessionGroupHiddenForTesting, "OAuth body should hide session rows")
+
+    panel.render(aggregate: detailsAggregate(), model: sessionDetailsModel())
+    expect(panel.usageGroupHiddenForTesting, "API body should hide usage")
+    expect(!panel.sessionGroupHiddenForTesting, "API body should show session rows")
+}
+
+@MainActor
+private func testDetailsPanelKeepsContextIndependentFromUsageFailure() {
+    let panel = DetailsPanel()
+    panel.render(
+        aggregate: detailsAggregate(),
+        model: usageDetailsModel(warning: L10n.shared["usage.warning.network"], context: 42)
+    )
+
+    expect(!panel.contextPillHiddenForTesting, "usage failure should not hide live context")
+    expect(panel.contextValueForTesting, "42%", "usage failure should not overwrite context")
+}
+
+@MainActor
+private func testDetailsPanelClearsContextAndSessionRowsOffline() {
+    let panel = DetailsPanel()
+    panel.render(
+        aggregate: detailsAggregate(state: .idle, label: "OFFLINE"),
+        model: sessionDetailsModel(
+            context: 58,
+            session: SessionDetailsSnapshot(
+                projectName: "AgentHalo",
+                sessionTitle: "Stale title",
+                modelName: "gpt-5.5",
+                inputTokens: 100,
+                outputTokens: 20
+            )
+        )
+    )
+
+    expect(panel.contextPillHiddenForTesting, "offline should clear context")
+    expect(panel.sessionTitleValueForTesting, "--", "offline should clear session title")
+    expect(panel.modelValueForTesting, "--", "offline should clear model")
+    expect(panel.tokenValueForTesting, "--", "offline should clear tokens")
+}
+
+@MainActor
+private func testDetailsPanelKeepsFixedWidthForLongProviderContent() {
+    let panel = DetailsPanel()
+    let initialWidth = panel.frame.width
+    panel.render(
+        aggregate: detailsAggregate(),
+        model: usageDetailsModel(
+            provider: String(repeating: "Very Long Provider ", count: 8),
+            plan: String(repeating: "Very Long Plan ", count: 8)
+        )
+    )
+    panel.contentView?.layoutSubtreeIfNeeded()
+
+    expect(panel.frameWidthForTesting, initialWidth, "long provider content should not widen the panel")
+    expect(panel.frameWidthForTesting, 278, "details panel should keep the expanded fixed width")
+    expect((panel.contentView?.fittingSize.width ?? 0) <= 278.5, "content should fit the expanded fixed width")
+}
+
+@MainActor
+private func testDetailsPanelResizesHeightWithoutAnimation() {
+    let panel = RecordingDetailsPanel()
+    panel.setFrameOrigin(NSPoint(x: 100, y: 500))
+    panel.resetResizeCalls()
+    let initialTopEdge = panel.frame.maxY
+    panel.render(aggregate: detailsAggregate(), model: usageDetailsModel())
+    guard let usageCall = panel.resizeCalls.last else {
+        fatalError("usage render should apply a resize frame")
+    }
+    let usageExpectedHeight = DetailsPanel.evenPanelHeight(
+        for: panel.stackFittingHeightForTesting,
+        backingScaleFactor: panel.backingScaleForTesting
+    )
+    expect(!usageCall.display, "usage resize should not request immediate display")
+    expect(!usageCall.animate, "usage resize should not animate")
+    expect(usageCall.frame.height, usageExpectedHeight, "usage height should be an even, pixel-aligned stack fitting height")
+    expect(usageCall.frame.height, 172, "hiding the provider header should reduce the established panel height")
+    expect(usageCall.frame.maxY, initialTopEdge, "usage resize should preserve the prior top edge")
+    expect(panel.frame, usageCall.frame, "window should apply the observed usage resize frame")
+
+    let usageHeight = usageCall.frame.height
+    let usageTopEdge = panel.frame.maxY
+    panel.resetResizeCalls()
+    panel.render(aggregate: detailsAggregate(), model: sessionDetailsModel())
+    guard let sessionCall = panel.resizeCalls.last else {
+        fatalError("session render should apply a resize frame")
+    }
+    expect(panel.metadataTopInsetForTesting, 0, "session metadata should start immediately after the subtitle")
+    let sessionExpectedHeight = DetailsPanel.evenPanelHeight(
+        for: panel.stackFittingHeightForTesting,
+        backingScaleFactor: panel.backingScaleForTesting
+    )
+    expect(!sessionCall.display, "session resize should not request immediate display")
+    expect(!sessionCall.animate, "session resize should not animate")
+    expect(sessionCall.frame.height, sessionExpectedHeight, "session height should be an even, pixel-aligned stack fitting height")
+    expect(sessionCall.frame.height, usageHeight, "switching bodies should keep the same panel height")
+    expect(sessionCall.frame.maxY, usageTopEdge, "session resize should preserve the prior top edge")
+    expect(panel.frame, sessionCall.frame, "window should apply the observed session resize frame")
+}
+
+@MainActor
+private func testDetailsPanelMovesTitleGapIntoBodySpacing() {
     let panel = DetailsPanel()
     let aggregate = AggregateSnapshot(
         state: .done,
         label: "STANDBY",
-        detail: AgentKind.codex.localizedStandbyDetail,
+        detail: "Codex Standing By",
         sessions: [],
         focusedAgent: .codex
     )
-
-    panel.update(
+    panel.render(
         aggregate: aggregate,
-        quota: RateLimitSnapshot(
-            primaryUsedPercent: 30,
-            secondaryUsedPercent: 60,
-            contextUsedPercent: 27,
-            hasPrimary: true,
-            hasSecondary: true,
-            hasMonthlyPlan: true
-        ),
-        contextUsedPercent: 27
+        model: usageDetailsModel(
+            windows: [
+                UsageWindow(kind: .session, usedPercent: 25, resetsAt: nil, duration: 18_000),
+                UsageWindow(kind: .weekly, usedPercent: 10, resetsAt: nil, duration: 604_800)
+            ]
+        )
     )
+    guard let contentView = panel.contentView else {
+        fatalError("details panel should expose its content view")
+    }
+    contentView.layoutSubtreeIfNeeded()
 
-    expect(panel.primaryQuotaHiddenForTesting == false, "Plus primary quota should be visible")
-    expect(panel.secondaryQuotaHiddenForTesting == false, "Plus weekly quota should stay visible when both Plus buckets are present")
-    expect(panel.primaryQuotaValueForTesting == L10n.shared.format("quota.remaining", 70), "Plus primary should drive the 5-hour quota value")
-    expect(panel.secondaryQuotaValueForTesting == L10n.shared.format("quota.remaining", 40), "Plus secondary should drive the weekly quota value")
+    func field(of value: String) -> NSTextField {
+        guard let field = allDescendants(of: contentView)
+            .compactMap({ $0 as? NSTextField })
+            .first(where: { $0.stringValue == value }) else {
+            fatalError("details panel should expose text field: \(value)")
+        }
+        return field
+    }
+
+    func frame(of value: String) -> NSRect {
+        let field = field(of: value)
+        return field.convert(field.bounds, to: contentView)
+    }
+
+    func containingFrame(of value: String) -> NSRect {
+        guard let field = allDescendants(of: contentView)
+            .compactMap({ $0 as? NSTextField })
+            .first(where: { $0.stringValue == value }),
+              let container = field.superview else {
+            fatalError("details panel should expose container for text field: \(value)")
+        }
+        return container.convert(container.bounds, to: contentView)
+    }
+
+    guard let agentToggle = allDescendants(of: contentView)
+        .first(where: { $0 is AgentToggleView }),
+          let topRow = agentToggle.superview else {
+        fatalError("details panel should expose top row")
+    }
+    let topRowFrame = topRow.convert(topRow.bounds, to: contentView)
+    let titleField = field(of: "STANDBY")
+    let detailField = field(of: "Codex Standing By")
+    let titleFrame = titleField.convert(titleField.bounds, to: contentView)
+    let detailFrame = detailField.convert(detailField.bounds, to: contentView)
+    let quotaRow = containingFrame(of: L10n.shared["quota.5h"])
+    let weeklyQuotaRow = containingFrame(of: L10n.shared["quota.weekly"])
+
+    expect(titleField.font?.pointSize, 22, "status title should use the smaller font")
+    expect(detailField.font?.pointSize, 12, "status detail should use the smaller font")
+    expect(topRowFrame.minY - titleFrame.maxY, 0, "status title should start immediately below the agent switcher")
+    expect(detailFrame.minY - quotaRow.maxY, 16, "usage body should keep a clear gap below the subtitle")
+    expect(quotaRow.minY - weeklyQuotaRow.maxY, 4, "quota rows should be compact")
+
+    panel.render(
+        aggregate: aggregate,
+        model: sessionDetailsModel(
+            provider: "Claude Code",
+            plan: nil,
+            session: SessionDetailsSnapshot(
+                sessionTitle: "Layout spacing",
+                modelName: "gpt-5.5",
+                inputTokens: 100,
+                outputTokens: 20
+            )
+        )
+    )
+    contentView.layoutSubtreeIfNeeded()
+    let sessionTopRowFrame = topRow.convert(topRow.bounds, to: contentView)
+    let sessionTitleFrame = frame(of: "STANDBY")
+    let sessionDetailFrame = frame(of: "Codex Standing By")
+    let sessionTitleRow = containingFrame(of: L10n.shared["metadata.session_title"])
+    expect(sessionTopRowFrame.minY - sessionTitleFrame.maxY, 0, "session title should start immediately below the agent switcher")
+    expect(sessionDetailFrame.minY - sessionTitleRow.maxY, 11, "session body should receive the released title spacing")
+}
+
+@MainActor
+private final class RecordingDetailsPanel: DetailsPanel {
+    struct ResizeCall {
+        var frame: NSRect
+        var display: Bool
+        var animate: Bool
+    }
+
+    private(set) var resizeCalls: [ResizeCall] = []
+
+    override func applyResizeFrame(_ frame: NSRect, display: Bool, animate: Bool) {
+        resizeCalls.append(ResizeCall(frame: frame, display: display, animate: animate))
+        super.applyResizeFrame(frame, display: display, animate: animate)
+    }
+
+    func resetResizeCalls() {
+        resizeCalls.removeAll()
+    }
+}
+
+private func detailsAggregate(
+    state: HaloState = .working,
+    label: String = "EXECUTING",
+    agent: AgentKind = .codex
+) -> AggregateSnapshot {
+    AggregateSnapshot(
+        state: state,
+        label: label,
+        detail: "AgentHalo - Running command",
+        sessions: [],
+        focusedAgent: agent
+    )
+}
+
+private func usageDetailsModel(
+    provider: String = "Codex",
+    plan: String? = "Plus",
+    warning: String? = nil,
+    context: Double? = nil,
+    windows: [UsageWindow] = []
+) -> DetailsPanelViewModel {
+    DetailsPanelViewModel(
+        providerName: provider,
+        planName: plan,
+        usageWarning: warning,
+        contextUsedPercent: context,
+        body: .usage(UsageDetailsModel(windows: windows, status: .noData))
+    )
+}
+
+private func sessionDetailsModel(
+    provider: String = "Claude Code",
+    plan: String? = nil,
+    context: Double? = nil,
+    session: SessionDetailsSnapshot = SessionDetailsSnapshot()
+) -> DetailsPanelViewModel {
+    DetailsPanelViewModel(
+        providerName: provider,
+        planName: plan,
+        usageWarning: nil,
+        contextUsedPercent: context,
+        body: .session(session)
+    )
 }
 
 @MainActor
@@ -955,60 +1372,9 @@ private func testDetailsPanelShowsCodexStandbyCopy() {
         focusedAgent: .codex
     )
 
-    panel.update(aggregate: aggregate, quota: nil, contextUsedPercent: nil)
+    panel.render(aggregate: aggregate, model: usageDetailsModel())
 
     expect(panel.detailTextForTesting == L10n.shared["status.standby_codex"], "Codex standby copy should be localized")
-}
-
-@MainActor
-private func testDetailsPanelShowsSessionMetadataForCodexAndClaudeCode() {
-    let panel = DetailsPanel()
-    let codex = AggregateSnapshot(
-        state: .working,
-        label: "EXECUTING",
-        detail: "AgentHalo - Running command",
-        sessions: [],
-        focusedAgent: .codex
-    )
-    let details = SessionDetailsSnapshot(
-        projectName: "AgentHalo",
-        modelName: "gpt-5.5",
-        inputTokens: 38_000,
-        outputTokens: 1_200
-    )
-
-    panel.update(
-        aggregate: codex,
-        quota: nil,
-        contextUsedPercent: 42,
-        sessionDetails: details,
-        showsQuota: false
-    )
-
-    expect(panel.primaryQuotaHiddenForTesting, "third-party Codex quota should be hidden")
-    expect(!panel.metadataGroupHiddenForTesting, "third-party Codex metadata should be visible")
-    expect(panel.projectValueForTesting, "AgentHalo", "details project value")
-    expect(panel.modelValueForTesting, "gpt-5.5", "details model value")
-    expect(panel.tokenValueForTesting, "↑ 38k  ·  ↓ 1.2k", "details token value")
-
-    let claude = AggregateSnapshot(
-        state: .working,
-        label: "EXECUTING",
-        detail: "AgentHalo - Running command",
-        sessions: [],
-        focusedAgent: .claudeCode
-    )
-    panel.update(
-        aggregate: claude,
-        quota: nil,
-        contextUsedPercent: 58,
-        sessionDetails: details,
-        showsQuota: false
-    )
-
-    expect(panel.focusedAgentForTesting == .claudeCode, "details panel should select Claude Code")
-    expect(!panel.metadataGroupHiddenForTesting, "Claude Code metadata should be visible")
-    expect(panel.tokenValueForTesting, "↑ 38k  ·  ↓ 1.2k", "Claude Code token value")
 }
 
 @MainActor
@@ -1022,18 +1388,10 @@ private func testDetailsPanelUsesCompactContextPercent() {
         focusedAgent: .codex
     )
 
-    panel.update(
-        aggregate: aggregate,
-        quota: RateLimitSnapshot(primaryUsedPercent: 30, secondaryUsedPercent: 60, contextUsedPercent: 58.4),
-        contextUsedPercent: 58.4
-    )
+    panel.render(aggregate: aggregate, model: usageDetailsModel(context: 58.4))
     expect(panel.contextValueForTesting, "58%", "context block should use compact percentage-only copy")
 
-    panel.update(
-        aggregate: aggregate,
-        quota: RateLimitSnapshot(primaryUsedPercent: 30, secondaryUsedPercent: 60, contextUsedPercent: 100),
-        contextUsedPercent: 100
-    )
+    panel.render(aggregate: aggregate, model: usageDetailsModel(context: 100))
     expect(panel.contextValueForTesting, "99%", "context block should cap the visible percentage at 99%")
 }
 
@@ -1048,21 +1406,11 @@ private func testDetailsPanelKeepsContextPillWidthStable() {
         focusedAgent: .claudeCode
     )
 
-    panel.update(
-        aggregate: aggregate,
-        quota: nil,
-        contextUsedPercent: 9,
-        showsQuota: false
-    )
+    panel.render(aggregate: aggregate, model: sessionDetailsModel(context: 9))
     panel.contentView?.layoutSubtreeIfNeeded()
     let singleDigitWidth = panel.contextPillWidthForTesting
 
-    panel.update(
-        aggregate: aggregate,
-        quota: nil,
-        contextUsedPercent: 99,
-        showsQuota: false
-    )
+    panel.render(aggregate: aggregate, model: sessionDetailsModel(context: 99))
     panel.contentView?.layoutSubtreeIfNeeded()
     let doubleDigitWidth = panel.contextPillWidthForTesting
 
@@ -1076,119 +1424,6 @@ private func testDetailsPanelKeepsContextPillWidthStable() {
         panel.contextValueIntrinsicWidthForTesting <= panel.contextValueWidthForTesting + 0.5,
         "context pill should still fit a two-digit percent without truncation"
     )
-}
-
-@MainActor
-private func testDetailsPanelPrefersClaudeSessionTitle() {
-    let panel = DetailsPanel()
-    let aggregate = AggregateSnapshot(
-        state: .working,
-        label: "EXECUTING",
-        detail: "AgentHalo - Running command",
-        sessions: [],
-        focusedAgent: .claudeCode
-    )
-
-    panel.update(
-        aggregate: aggregate,
-        quota: nil,
-        contextUsedPercent: 42,
-        sessionDetails: SessionDetailsSnapshot(
-            projectName: "AgentHalo",
-            sessionTitle: "整理归档 2026q3 测试",
-            modelName: "claude-sonnet-4",
-            inputTokens: 12_000,
-            outputTokens: 900
-        ),
-        showsQuota: false
-    )
-
-    expect(panel.projectValueForTesting, "整理归档 2026q3 测试", "Claude Code details should prefer the AI-generated session title")
-    expect(panel.tokenValueForTesting, "↑ 12k  ·  ↓ 900", "Claude Code token row should keep the compact arrow format")
-}
-
-@MainActor
-private func testDetailsPanelKeepsFixedWidthForLongClaudeSessionTitle() {
-    let panel = DetailsPanel()
-    let initialWidth = panel.frame.width
-    let aggregate = AggregateSnapshot(
-        state: .working,
-        label: "EXECUTING",
-        detail: "AgentHalo - Running command",
-        sessions: [],
-        focusedAgent: .claudeCode
-    )
-
-    panel.update(
-        aggregate: aggregate,
-        quota: nil,
-        contextUsedPercent: 42,
-        sessionDetails: SessionDetailsSnapshot(
-            projectName: "AgentHalo",
-            sessionTitle: String(repeating: "整理归档超长项目标题", count: 12),
-            modelName: "claude-sonnet-4",
-            inputTokens: 12_000,
-            outputTokens: 900
-        ),
-        showsQuota: false
-    )
-    panel.contentView?.layoutSubtreeIfNeeded()
-
-    expect(panel.frame.width, initialWidth, "details panel frame width should stay fixed")
-    expect(
-        (panel.contentView?.fittingSize.width ?? 0) <= initialWidth + 0.5,
-        "details panel content should not request a wider frame for long AI titles"
-    )
-}
-
-@MainActor
-private func testDetailsPanelUsesCompactMetadataLayout() {
-    let panel = DetailsPanel()
-    guard let contentView = panel.contentView else {
-        fatalError("details panel should have a content view")
-    }
-    let metadataGroup = allDescendants(of: contentView)
-        .compactMap { $0 as? NSStackView }
-        .first { stack in
-            let labels = allDescendants(of: stack)
-                .compactMap { $0 as? NSTextField }
-                .map(\.stringValue)
-            let firstLabels = stack.arrangedSubviews.first.map {
-                ([$0] + allDescendants(of: $0))
-                    .compactMap { $0 as? NSTextField }
-                    .map(\.stringValue)
-            } ?? []
-            return labels.contains(L10n.shared["metadata.project"]) && labels.contains(L10n.shared["metadata.model"]) && labels.contains(L10n.shared["metadata.tokens"])
-                && firstLabels.contains(L10n.shared["metadata.project"])
-        }
-
-    guard let metadataGroup else {
-        fatalError("details panel should expose its metadata group")
-    }
-    expect(
-        metadataGroup.arrangedSubviews.count,
-        5,
-        "metadata should separate project from model and model from token"
-    )
-    let arranged = metadataGroup.arrangedSubviews
-    for item in arranged.dropLast() {
-        expect(
-            metadataGroup.customSpacing(after: item) == NSStackView.useDefaultSpacing,
-            "metadata rows and separators should not use asymmetric custom spacing"
-        )
-    }
-    for row in [arranged[0], arranged[2], arranged[4]] {
-        expect(
-            row.constraints.contains { $0.firstAttribute == .height && $0.constant == 28 },
-            "each metadata row should use the same 28pt height"
-        )
-    }
-    for separator in [arranged[1], arranged[3]] {
-        expect(
-            separator.constraints.contains { $0.firstAttribute == .height && $0.constant == 1 },
-            "each metadata separator should be a standalone 1pt rule"
-        )
-    }
 }
 
 @MainActor
@@ -1208,6 +1443,20 @@ private func testDetailsPanelUsesTightBottomInset() {
 private func testDetailsPanelUsesEvenPointHeight() {
     let panel = DetailsPanel()
     expect(Int(panel.frame.height) % 2 == 0, "details panel height should avoid half-point vertical centering")
+}
+
+@MainActor
+private func testDetailsPanelNormalizesDynamicHeightForTargetScale() {
+    expect(
+        DetailsPanel.evenPanelHeight(for: 191.5, backingScaleFactor: 1),
+        192,
+        "1x target screens should not display a half-point details-panel height"
+    )
+    expect(
+        DetailsPanel.evenPanelHeight(for: 192.5, backingScaleFactor: 2),
+        194,
+        "dynamic details-panel heights should remain even when moving between backing scales"
+    )
 }
 
 @MainActor
@@ -1246,33 +1495,10 @@ private func testDetailsPanelPositioningSnapsToBackingPixels() {
         positionSource.contains("layoutSubtreeIfNeeded()") && positionSource.contains("displayIfNeeded()"),
         "details panel should flush layout and drawing before orderFront"
     )
-}
-
-@MainActor
-private func testDetailsPanelShowsExpiredQuotaAsWaitingForRefresh() {
-    let panel = DetailsPanel()
-    let aggregate = AggregateSnapshot(
-        state: .idle,
-        label: "OFFLINE",
-        detail: AgentKind.codex.offlineDetail,
-        sessions: [],
-        focusedAgent: .codex
+    expect(
+        positionSource.contains("evenPanelHeight"),
+        "details panel height should be normalized for the target screen before first display"
     )
-
-    panel.update(
-        aggregate: aggregate,
-        quota: RateLimitSnapshot(
-            primaryUsedPercent: 30,
-            secondaryUsedPercent: 60,
-            primaryResetAt: Date().addingTimeInterval(-5),
-            secondaryResetAt: Date().addingTimeInterval(300),
-            contextUsedPercent: 42
-        ),
-        contextUsedPercent: 42
-    )
-
-    expect(panel.primaryQuotaValueForTesting == L10n.shared["quota.waiting_refresh"], "expired primary quota should wait for Codex refresh")
-    expect(panel.secondaryQuotaValueForTesting == L10n.shared.format("quota.remaining", 40), "valid secondary quota should keep remaining percent")
 }
 
 @MainActor
@@ -1287,7 +1513,7 @@ private func testDetailsPanelShowsAnswerStreamingCopy() {
         answerStreaming: true
     )
 
-    panel.update(aggregate: aggregate, quota: nil, contextUsedPercent: nil)
+    panel.render(aggregate: aggregate, model: usageDetailsModel())
 
     expect(panel.detailTextForTesting == L10n.shared["status.writing_answer"], "answer streaming should use localized copy")
 }
@@ -1295,7 +1521,7 @@ private func testDetailsPanelShowsAnswerStreamingCopy() {
 @MainActor
 private func testDetailsPanelRefreshesStatusFromLatestAggregate() {
     let panel = DetailsPanel()
-    panel.update(
+    panel.render(
         aggregate: AggregateSnapshot(
             state: .thinking,
             label: "THINKING",
@@ -1303,8 +1529,7 @@ private func testDetailsPanelRefreshesStatusFromLatestAggregate() {
             sessions: [],
             focusedAgent: .claudeCode
         ),
-        quota: nil,
-        contextUsedPercent: 27
+        model: sessionDetailsModel(context: 27)
     )
 
     panel.updateStatus(aggregate: AggregateSnapshot(
@@ -1318,6 +1543,46 @@ private func testDetailsPanelRefreshesStatusFromLatestAggregate() {
     expect(panel.titleTextForTesting == "EXECUTING", "visible details should use the latest status label")
     expect(panel.detailTextForTesting == L10n.shared["status.running_command"], "visible details should use the latest activity detail")
     expect(panel.contextValueForTesting == "27%", "status refresh should preserve existing metadata")
+}
+
+@MainActor
+private func testDetailsPanelShowsContextWhenLiveCodexUsageArrives() {
+    let panel = DetailsPanel()
+    panel.render(
+        aggregate: AggregateSnapshot(
+            state: .thinking,
+            label: "THINKING",
+            detail: "AgentHalo - Planning",
+            sessions: [],
+            focusedAgent: .codex
+        ),
+        model: usageDetailsModel(context: nil)
+    )
+
+    expect(panel.contextPillHiddenForTesting, "missing context should keep the pill hidden")
+
+    let session = SessionSnapshot(
+        threadId: "codex-thinking",
+        projectName: "AgentHalo",
+        workingDirectory: "/tmp/AgentHalo",
+        state: .thinking,
+        action: "Thinking",
+        lastEventAt: Date(),
+        completedAt: nil,
+        active: true,
+        agent: .codex,
+        contextUsedPercent: 42
+    )
+    panel.updateStatus(aggregate: AggregateSnapshot(
+        state: .thinking,
+        label: "THINKING",
+        detail: "AgentHalo - Planning",
+        sessions: [session],
+        focusedAgent: .codex
+    ))
+
+    expect(!panel.contextPillHiddenForTesting, "live Codex context should reveal the pill without reopening details")
+    expect(panel.contextValueForTesting == "42%", "live Codex context should show its real percentage")
 }
 
 private func testVisibleDetailsPanelStatusRefreshIsWiredToTick() {
@@ -1345,6 +1610,263 @@ private func testVisibleDetailsPanelStatusRefreshIsWiredToTick() {
     expect(
         source.contains("detailsPanel.updateStatus(aggregate: displayAggregate())"),
         "status-only refresh should preserve existing details metadata and layout"
+    )
+}
+
+private func testUsageTerminationWaitsForCoordinatorCancellation() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let appDelegateURL = sourceDirectory.appendingPathComponent("AppDelegate.swift")
+    guard let source = try? String(contentsOf: appDelegateURL, encoding: .utf8),
+          let shouldStart = source.range(of: "    func applicationShouldTerminate")?.lowerBound,
+          let willStart = source.range(
+            of: "    func applicationWillTerminate",
+            range: shouldStart..<source.endIndex
+          )?.lowerBound,
+          let willEnd = source.range(
+            of: "    private func cancelLocalUsageTasks",
+            range: willStart..<source.endIndex
+          )?.lowerBound,
+          let cleanupEnd = source.range(
+            of: "    func applicationDidChangeScreenParameters",
+            range: willEnd..<source.endIndex
+          )?.lowerBound else {
+        fatalError("AppDelegate termination source should be readable")
+    }
+
+    let shouldSource = source[shouldStart..<willStart]
+    let willSource = source[willStart..<willEnd]
+    let cleanupSource = source[willEnd..<cleanupEnd]
+    expect(
+        shouldSource.contains("func applicationShouldTerminate(_ sender: NSApplication)")
+            && shouldSource.contains("if usageTerminationHandshake.hasCompleted")
+            && shouldSource.contains("return .terminateNow")
+            && shouldSource.contains("guard usageTerminationHandshake.beginCancellation() else")
+            && shouldSource[
+                shouldSource.range(
+                    of: "guard usageTerminationHandshake.beginCancellation() else"
+                )!.lowerBound..<shouldSource.range(of: "cancelLocalUsageTasks()")!.lowerBound
+            ].contains("return .terminateLater")
+            && shouldSource.contains("cancelLocalUsageTasks()")
+            && shouldSource.contains("Task { @MainActor [weak self] in")
+            && shouldSource.contains("await self.usageCoordinator.cancelAll()")
+            && shouldSource.contains("usageTerminationHandshake.finishCancellation()")
+            && shouldSource.contains("NSApp.reply(toApplicationShouldTerminate: true)"),
+        "termination should use AppKit's asynchronous termination handshake"
+    )
+    expect(
+        shouldSource.range(of: "usageTerminationHandshake.hasCompleted")!.lowerBound
+            < shouldSource.range(of: "return .terminateNow")!.lowerBound
+            && shouldSource.range(of: "return .terminateNow")!.lowerBound
+                < shouldSource.range(of: "usageTerminationHandshake.beginCancellation()")!.lowerBound
+            && shouldSource.range(of: "usageTerminationHandshake.beginCancellation()")!.lowerBound
+                < shouldSource.range(of: "cancelLocalUsageTasks()")!.lowerBound
+            && shouldSource.range(of: "cancelLocalUsageTasks()")!.lowerBound
+            < shouldSource.range(of: "await self.usageCoordinator.cancelAll()")!.lowerBound
+            && shouldSource.range(of: "await self.usageCoordinator.cancelAll()")!.lowerBound
+                < shouldSource.range(of: "usageTerminationHandshake.finishCancellation()")!.lowerBound
+            && shouldSource.range(of: "usageTerminationHandshake.finishCancellation()")!.lowerBound
+                < shouldSource.range(of: "NSApp.reply(toApplicationShouldTerminate: true)")!.lowerBound,
+        "termination should await coordinator cancellation before its single MainActor reply"
+    )
+    expect(
+        willSource.contains("cancelLocalUsageTasks()")
+            && !willSource.contains("Task {")
+            && !willSource.contains("usageCoordinator.cancelAll"),
+        "applicationWillTerminate should only repeat idempotent local Usage cleanup"
+    )
+    expect(
+        cleanupSource.contains("usageRefreshLoopTask?.cancel()")
+            && cleanupSource.contains("usageRequestTasks.values.forEach { $0.task.cancel() }"),
+        "local Usage cleanup should synchronously cancel the loop and wrapper tasks"
+    )
+}
+
+private func testUsageTerminationHandshakeRejectsDuplicateWork() {
+    var handshake = UsageTerminationHandshake()
+
+    expect(!handshake.hasCompleted, "termination handshake should start incomplete")
+    expect(handshake.beginCancellation(), "first termination request should start cancellation")
+    expect(!handshake.beginCancellation(), "repeated termination requests must not start another Task")
+    expect(handshake.finishCancellation(), "the in-flight cancellation should complete once")
+    expect(handshake.hasCompleted, "completed cancellation should allow immediate termination")
+    expect(!handshake.finishCancellation(), "completion must not send a second termination reply")
+    expect(!handshake.beginCancellation(), "completed termination must not restart cancellation")
+}
+
+private func testUsageMonitoringLifecycleWiring() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let appDelegateURL = sourceDirectory.appendingPathComponent("AppDelegate.swift")
+    guard let source = try? String(contentsOf: appDelegateURL, encoding: .utf8),
+          let launchStart = source.range(
+            of: "    func applicationDidFinishLaunching"
+          )?.lowerBound,
+          let launchEnd = source.range(
+            of: "    func applicationShouldTerminate",
+            range: launchStart..<source.endIndex
+          )?.lowerBound,
+          let willTerminationStart = source.range(
+            of: "    func applicationWillTerminate",
+            range: launchEnd..<source.endIndex
+          )?.lowerBound,
+          let terminationEnd = source.range(
+            of: "    func applicationDidChangeScreenParameters",
+            range: willTerminationStart..<source.endIndex
+          )?.lowerBound,
+          let tickStart = source.range(of: "    private func tick() {")?.lowerBound,
+          let tickEnd = source.range(
+            of: "    private func createStatusItem()",
+            range: tickStart..<source.endIndex
+          )?.lowerBound,
+          let showStart = source.range(of: "    private func showDetails() {")?.lowerBound,
+          let showEnd = source.range(
+            of: "    private func updateDetailsPanelContent",
+            range: showStart..<source.endIndex
+          )?.lowerBound,
+          let updateStart = source.range(
+            of: "    private func updateDetailsPanelContent"
+          )?.lowerBound,
+          let updateEnd = source.range(
+            of: "    static func claudeMainSessionIdForDetails",
+            range: updateStart..<source.endIndex
+          )?.lowerBound,
+          let selectionStart = source.range(of: "    func setFocusedAgent(")?.lowerBound,
+          let selectionEnd = source.range(
+            of: "    @objc private func quit()",
+            range: selectionStart..<source.endIndex
+          )?.lowerBound,
+          let loopStart = source.range(of: "    private func startUsageRefreshLoop()")?.lowerBound,
+          let requestStart = source.range(
+            of: "    private func requestUsageRefresh",
+            range: loopStart..<source.endIndex
+          )?.lowerBound,
+          let publishStart = source.range(
+            of: "    private func publishUsageState",
+            range: requestStart..<source.endIndex
+          )?.lowerBound,
+          let publishEnd = source.range(
+            of: "    private func refreshVisibleDetailsPanel",
+            range: publishStart..<source.endIndex
+          )?.lowerBound else {
+        fatalError("AppDelegate usage-monitoring source should be readable")
+    }
+
+    let launchSource = source[launchStart..<launchEnd]
+    let terminationSource = source[willTerminationStart..<terminationEnd]
+    let tickSource = source[tickStart..<tickEnd]
+    let showSource = source[showStart..<showEnd]
+    let updateSource = source[updateStart..<updateEnd]
+    let selectionSource = source[selectionStart..<selectionEnd]
+    let loopSource = source[loopStart..<requestStart]
+    let requestSource = source[requestStart..<publishStart]
+    let publishSource = source[publishStart..<publishEnd]
+
+    expect(
+        source.contains("private let usageCoordinator: UsageMonitoringCoordinator")
+            && source.contains("usageCoordinator: UsageMonitoringCoordinator = .live()")
+            && source.contains("self.usageCoordinator = usageCoordinator"),
+        "AppDelegate should own an injectable Usage coordinator with a production default"
+    )
+    expect(
+        source.contains("private var usageRefreshLoopTask: Task<Void, Never>?")
+            && source.contains("private var usageRequestTasks: [UsageProviderID: UsageRequestRecord] = [:]")
+            && source.contains("private let usageRefreshInterval: TimeInterval = 5 * 60"),
+        "Usage refresh should have a dedicated five-minute Task"
+    )
+    expect(
+        launchSource.contains("startUsageRefreshLoop()")
+            && launchSource.contains(
+                "requestUsageRefresh(for: Self.usageProviderID(for: settings.focusedAgent))"
+            )
+            && launchSource.range(of: "L10n.shared.setLanguage")!.lowerBound
+                < launchSource.range(of: "startUsageRefreshLoop()")!.lowerBound,
+        "launch should start the Usage loop and refresh the current Provider"
+    )
+    expect(
+        launchSource.contains("self.refreshVisibleDetailsPanel()"),
+        "language changes should redraw visible Provider details"
+    )
+    expect(
+        !tickSource.contains("usageCoordinator")
+            && !tickSource.contains("requestUsageRefresh")
+            && !tickSource.contains("refreshUsage"),
+        "Usage requests must stay out of tick and the 0.3-second timer path"
+    )
+    expect(
+        showSource.contains("updateDetailsPanelContent")
+            && showSource.contains("requestUsageRefresh")
+            && showSource.range(of: "updateDetailsPanelContent")!.lowerBound
+                < showSource.range(of: "requestUsageRefresh")!.lowerBound,
+        "showDetails should render current state before preparing and refreshing Usage"
+    )
+    expect(
+        selectionSource.contains("requestUsageRefresh(for: Self.usageProviderID(for: agent))"),
+        "agent selection should prepare and refresh the target Provider"
+    )
+    expect(
+        !selectionSource.contains("cancel()"),
+        "agent selection must not cancel another Provider's safe request"
+    )
+    expect(
+        requestSource.contains("guard usageRequestTasks[providerID] == nil")
+            && requestSource.contains("let token = UUID()")
+            && requestSource.contains("let coordinator = usageCoordinator")
+            && requestSource.contains("Task { @MainActor [weak self] in")
+            && requestSource.contains("defer { self?.clearUsageRequest(for: providerID, token: token) }")
+            && requestSource.contains("let prepared = await coordinator.prepare(providerID)")
+            && requestSource.contains("self?.publishUsageState(prepared, for: providerID)")
+            && requestSource.contains("let refreshed = await coordinator.ensureFresh(providerID)")
+            && requestSource.contains("self?.publishUsageState(refreshed, for: providerID)")
+            && !requestSource.contains("guard let self")
+            && requestSource.contains("guard usageRequestTasks[providerID]?.token == token else")
+            && requestSource.contains("usageRequestTasks[providerID] = nil"),
+        "Usage requests should publish prepare and ensureFresh results in two phases"
+    )
+    expect(
+        requestSource.contains("UsageRequestRecord(token: token, task: task)"),
+        "wrapper cleanup must use token identity so an old task cannot remove its replacement"
+    )
+    expect(
+        publishSource.contains("usageStates[providerID] = state")
+            && publishSource.contains(
+                "guard providerID == Self.usageProviderID(for: settings.focusedAgent)"
+            )
+            && publishSource.contains("detailsPanel.isVisible")
+            && publishSource.range(of: "usageStates[providerID] = state")!.lowerBound
+                < publishSource.range(of: "guard providerID ==")!.lowerBound,
+        "async Usage publication should store by Provider before focus and visibility revalidation"
+    )
+    expect(
+        loopSource.contains("Task.sleep(nanoseconds:")
+            && loopSource.contains(
+                "requestUsageRefresh(for: Self.usageProviderID(for: settings.focusedAgent))"
+            ),
+        "the dedicated low-frequency loop should refresh the currently focused Provider"
+    )
+    expect(
+        source.contains("case .codex:") && source.contains("return .codex")
+            && source.contains("case .claudeCode:") && source.contains("return .claude"),
+        "AgentKind should map totally to its Usage Provider"
+    )
+    expect(
+        terminationSource.contains("cancelLocalUsageTasks()")
+            && !terminationSource.contains("Task {")
+            && !terminationSource.contains("usageCoordinator.cancelAll"),
+        "applicationWillTerminate should only repeat local Usage cleanup"
+    )
+    expect(
+        updateSource.contains("DetailsContentResolver.resolve(")
+            && updateSource.contains("detailsPanel.render(aggregate: displayedAggregate, model: model)")
+            && updateSource.contains("sessionTitle: session?.sessionTitle")
+            && updateSource.contains("ClaudeMainSessionDetailsResolver.resolve("),
+        "details content should resolve a view model and render it"
+    )
+    expect(
+        !updateSource.contains("rateLimitReader")
+            && !updateSource.contains("RateLimitReader")
+            && !updateSource.contains("showsQuota")
+            && !updateSource.contains("quota")
+            && !updateSource.contains("DetailsPresentation"),
+        "the new details path must not retain legacy quota assembly"
     )
 }
 
@@ -1468,17 +1990,48 @@ private func testCodexSQLiteReadersUseRecentRowWindows() {
     )
 }
 
-private func testCodexAppDetectorCachesRunningApplicationScans() {
+private func testCodexAppDetectorUsesWorkspaceEvents() {
     let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
     let detectorURL = sourceDirectory.appendingPathComponent("CodexAppDetector.swift")
-    guard let source = try? String(contentsOf: detectorURL, encoding: .utf8) else {
-        fatalError("CodexAppDetector source should be readable")
+    let appDelegateURL = sourceDirectory.appendingPathComponent("AppDelegate.swift")
+    guard let detectorSource = try? String(contentsOf: detectorURL, encoding: .utf8),
+          let appDelegateSource = try? String(contentsOf: appDelegateURL, encoding: .utf8),
+          let tickStart = appDelegateSource.range(of: "    private func tick() {")?.lowerBound,
+          let tickEnd = appDelegateSource.range(
+            of: "    private func claudeActivityDidChange",
+            range: tickStart..<appDelegateSource.endIndex
+          )?.lowerBound,
+          let refreshStart = appDelegateSource.range(of: "    private func refreshAggregateAndUI")?.lowerBound,
+          let refreshEnd = appDelegateSource.range(
+            of: "    private func createStatusItem()",
+            range: refreshStart..<appDelegateSource.endIndex
+          )?.lowerBound,
+          let terminateStart = appDelegateSource.range(of: "    @objc private func workspaceApplicationDidTerminate")?.lowerBound,
+          let terminateEnd = appDelegateSource.range(
+            of: "    @objc private func workspaceApplicationDidActivate",
+            range: terminateStart..<appDelegateSource.endIndex
+          )?.lowerBound else {
+        fatalError("Codex application-state sources should be readable")
     }
 
-    expect(source.contains("runningCacheExpiresAt"), "Codex running detection should cache app scans")
-    expect(source.contains("runningCacheInterval"), "Codex running detection should throttle LaunchServices work")
-    expect(source.contains("executableURL"), "Codex app detection should prefer cheap executable metadata before localizedName")
-    expect(source.contains("allowLocalizedName: false"), "Codex running scans should skip localizedName fallback")
+    let tickSource = appDelegateSource[tickStart..<tickEnd]
+    let refreshSource = appDelegateSource[refreshStart..<refreshEnd]
+    let terminateSource = appDelegateSource[terminateStart..<terminateEnd]
+    expect(detectorSource.contains("noteApplicationDidLaunch"), "Codex launch events should update the running cache")
+    expect(detectorSource.contains("noteApplicationDidTerminate"), "Codex termination events should invalidate the running cache")
+    expect(detectorSource.contains("static func isCodexForeground(_ app: NSRunningApplication?)"), "Codex foreground detection should consume the application supplied by workspace events")
+    expect(detectorSource.contains("executableURL"), "Codex app detection should preserve executable metadata matching")
+    expect(detectorSource.contains("allowLocalizedName: false"), "Codex running scans should preserve the localized-name exclusion")
+    expect(detectorSource.contains("guard runningCacheValue == true"), "termination events should invalidate a positive cache even when terminated-process metadata is unavailable")
+    expect(!detectorSource.contains("runningCacheExpiresAt"), "event-driven Codex running state should not expire on a timer")
+    expect(!detectorSource.contains("runningCacheInterval"), "event-driven Codex running state should not poll LaunchServices")
+    expect(appDelegateSource.contains("NSWorkspace.didLaunchApplicationNotification"), "AppDelegate should observe application launches")
+    expect(appDelegateSource.contains("NSWorkspace.didTerminateApplicationNotification"), "AppDelegate should observe application termination")
+    expect(appDelegateSource.contains("private var codexIsForeground = false"), "AppDelegate should cache Codex foreground state")
+    expect(!tickSource.contains("frontmostApplication"), "the 0.3-second tick should not query the frontmost application")
+    expect(!tickSource.contains("CodexAppDetector.isCodexForeground()"), "the 0.3-second tick should consume cached foreground state")
+    expect(!refreshSource.contains("CodexAppDetector.isCodexForeground()"), "aggregate refresh should consume cached foreground state")
+    expect(terminateSource.contains("updateFrontmostApplication(NSWorkspace.shared.frontmostApplication)"), "termination events that invalidate running state should also recalibrate foreground state once")
 }
 
 private func testSessionMonitorsUseFastFileMetadata() {
@@ -1545,6 +2098,255 @@ private func testHaloUsesShapeLayersNotCpuRasterization() {
     expect(rendererSource.contains("ringLayerCount"), "HaloRenderer should declare the fixed ring layer count")
     expect(rendererSource.contains("CATransaction.setDisableActions(true)"), "HaloRenderer should disable implicit animations so per-frame updates snap instead of smoothing")
     expect(rendererSource.contains("path.move(to: startPoint)"), "HaloRenderer should start each ring arc as a fresh subpath so the two gaps are not bridged by a connecting chord")
+}
+
+private func testRingSubmissionsAvoidConstantWork() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let appDelegateURL = sourceDirectory.appendingPathComponent("AppDelegate.swift")
+    let rendererURL = sourceDirectory.appendingPathComponent("HaloRenderer.swift")
+    let haloViewURL = sourceDirectory.appendingPathComponent("HaloView.swift")
+    guard let appDelegateSource = try? String(contentsOf: appDelegateURL, encoding: .utf8),
+          let rendererSource = try? String(contentsOf: rendererURL, encoding: .utf8),
+          let haloViewSource = try? String(contentsOf: haloViewURL, encoding: .utf8),
+          let refreshStart = appDelegateSource.range(of: "    private func refreshAggregateAndUI")?.lowerBound,
+          let refreshEnd = appDelegateSource.range(
+            of: "    private func createStatusItem()",
+            range: refreshStart..<appDelegateSource.endIndex
+          )?.lowerBound,
+          let applyStart = rendererSource.range(of: "    static func applyRingLayers")?.lowerBound,
+          let applyEnd = rendererSource.range(
+            of: "    private static func ringPath",
+            range: applyStart..<rendererSource.endIndex
+          )?.lowerBound else {
+        fatalError("ring submission sources should be readable")
+    }
+
+    let refreshSource = appDelegateSource[refreshStart..<refreshEnd]
+    let applySource = rendererSource[applyStart..<applyEnd]
+    expect(!refreshSource.contains("haloView?.redrawRing()"), "aggregate refresh should not redraw the same ring state twice")
+    expect(!applySource.contains("layer.fillColor ="), "fillColor should be initialized once instead of assigned every frame")
+    expect(!applySource.contains("layer.lineCap ="), "lineCap should be initialized once instead of assigned every frame")
+    expect(!applySource.contains("layer.lineJoin ="), "lineJoin should be initialized once instead of assigned every frame")
+    expect(!applySource.contains("layer.frame = bounds"), "ring-layer frames should change only during setup or resize")
+    expect(applySource.contains("layer.path = path"), "the current ring path must still be submitted every frame")
+    expect(applySource.contains("layer.strokeColor = style.color.cgColor"), "the current stroke color must still be submitted every frame")
+    expect(applySource.contains("layer.lineWidth = style.width"), "the current line width must still be submitted every frame")
+    expect(haloViewSource.contains("shape.fillColor = NSColor.clear.cgColor"), "ring setup must retain the transparent fill")
+    expect(haloViewSource.contains("shape.lineCap = .round"), "ring setup must retain round line caps")
+    expect(haloViewSource.contains("shape.lineJoin = .round"), "ring setup must retain round line joins")
+    expect(haloViewSource.contains("shape.frame = bounds"), "ring setup must initialize every layer frame")
+    expect(haloViewSource.contains("shape.frame = resizedBounds"), "ring resize must update every layer frame")
+}
+
+private struct RuntimeRingPixelBaseline: Equatable, CustomStringConvertible {
+    let name: String
+    let scale1x: UInt64
+    let scale2x: UInt64
+
+    var description: String {
+        "\(name)=\(scale1x)/\(scale2x)"
+    }
+}
+
+private func testRuntimeRingLayerPixelsMatchBaseline() {
+    let actual = runtimeRingBaselineInputs().map { name, input in
+        RuntimeRingPixelBaseline(
+            name: name,
+            scale1x: runtimeRingPixelDigest(input: input, scale: 1),
+            scale2x: runtimeRingPixelDigest(input: input, scale: 2)
+        )
+    }
+    let expected = actual.map {
+        switch $0.name {
+        case "idle": RuntimeRingPixelBaseline(name: $0.name, scale1x: 9_157_935_398_303_114_304, scale2x: 792_215_409_298_594_995)
+        case "thinking-transition": RuntimeRingPixelBaseline(name: $0.name, scale1x: 18_263_668_307_828_975_996, scale2x: 16_554_340_612_245_316_771)
+        case "working-transition": RuntimeRingPixelBaseline(name: $0.name, scale1x: 12_993_536_598_127_623_339, scale2x: 2_392_339_819_924_786_549)
+        case "done-flash": RuntimeRingPixelBaseline(name: $0.name, scale1x: 9_769_252_484_924_121_485, scale2x: 1_225_950_950_426_213_083)
+        case "steady-done": RuntimeRingPixelBaseline(name: $0.name, scale1x: 17_978_034_851_077_033_543, scale2x: 1_457_001_038_851_966_828)
+        case "attention": RuntimeRingPixelBaseline(name: $0.name, scale1x: 10_501_950_660_515_111_630, scale2x: 4_937_630_093_659_706_074)
+        case "error-bright": RuntimeRingPixelBaseline(name: $0.name, scale1x: 8_644_262_692_397_123_069, scale2x: 9_421_780_012_299_167_297)
+        case "error-flashing": RuntimeRingPixelBaseline(name: $0.name, scale1x: 18_303_220_726_574_026_612, scale2x: 5_015_660_681_156_215_522)
+        case "answer-streaming": RuntimeRingPixelBaseline(name: $0.name, scale1x: 6_822_724_794_953_432_050, scale2x: 6_664_607_458_272_913_376)
+        default: RuntimeRingPixelBaseline(name: $0.name, scale1x: 0, scale2x: 0)
+        }
+    }
+
+    expect(
+        actual,
+        expected,
+        "runtime CAShapeLayer ring pixels must match the pre-optimization baseline"
+    )
+}
+
+private func testRuntimeRingLayerModelMatchesVisualModel() {
+    let bounds = CGRect(x: 0, y: 0, width: 112, height: 112)
+    for (name, input) in runtimeRingBaselineInputs() {
+        let (_, layers) = makeRuntimeRingLayers(input: input, bounds: bounds, scale: 2)
+        let styles = expectedRuntimeRingStyles(input: input, bounds: bounds)
+
+        expect(layers.count, HaloRenderer.ringLayerCount, "\(name) must keep the fixed runtime ring layer count")
+        expect(styles.count, HaloRenderer.ringLayerCount, "\(name) visual model must produce one style per runtime ring layer")
+        for (index, pair) in zip(layers, styles).enumerated() {
+            let (layer, style) = pair
+            expect(layer.frame, bounds, "\(name) layer \(index) frame must match HaloView bounds")
+            expect(layer.path != nil, true, "\(name) layer \(index) must receive the current path")
+            expect(layer.fillColor, NSColor.clear.cgColor, "\(name) layer \(index) fill must remain transparent")
+            expect(layer.lineCap, CAShapeLayerLineCap.round, "\(name) layer \(index) line cap must remain round")
+            expect(layer.lineJoin, CAShapeLayerLineJoin.round, "\(name) layer \(index) line join must remain round")
+            expect(layer.lineWidth, style.width, "\(name) layer \(index) width must match HaloVisualModel")
+            expect(layer.strokeColor, style.color.cgColor, "\(name) layer \(index) color must match HaloVisualModel")
+        }
+    }
+}
+
+private func expectedRuntimeRingStyles(
+    input: HaloRenderInput,
+    bounds: CGRect
+) -> [(width: CGFloat, color: NSColor)] {
+    let visualState: HaloState = input.answerStreaming ? .done : input.state
+    let target = HaloVisualModel.targetVisual(
+        state: visualState,
+        time: input.sinceState,
+        errorPresentation: input.errorPresentation,
+        steadyDone: input.steadyDone
+    )
+    var visual = HaloVisualModel.transitionVisual(
+        from: input.transitionFrom,
+        to: target,
+        progress: input.transition
+    )
+    let color = HaloVisualModel.animatedColor(
+        from: input.transitionFrom.color,
+        to: target.color,
+        progress: input.transition
+    )
+    let streamingFlash = input.answerStreaming
+        ? HaloVisualModel.completionDoubleFlash(
+            sinceState: HaloMath.positiveModulo(input.sinceState, 1.8)
+        )
+        : 0
+    let doneFlash = input.state == .done && !input.steadyDone && input.transition >= 0.999
+        ? HaloVisualModel.completionDoubleFlash(sinceState: input.sinceState)
+        : 0
+    let completionFlash = max(doneFlash, streamingFlash)
+    visual.powered = HaloMath.clamp(visual.powered + completionFlash * 0.82, 0, 1)
+    let scale = HaloGeometry.scale(in: bounds)
+    let intensity = HaloMath.clamp(
+        visual.intensity
+            + HaloMath.stateBreath(visualState, time: input.time) * 0.18
+            + completionFlash * 0.5,
+        0,
+        1.32
+    )
+    let bodyWidth = scale * (visual.bodyWidth + completionFlash * 0.65)
+    let material = HaloVisualModel.materialSnapshot(color: color, visual: visual, intensity: intensity)
+    return [
+        (scale * HaloGeometry.widestGlowWidth, runtimeRingColor(material.emissionColor, alpha: material.glowAlphas[0])),
+        (scale * 14.5, runtimeRingColor(material.emissionColor, alpha: material.glowAlphas[1])),
+        (scale * 11.2, runtimeRingColor(material.emissionColor, alpha: material.glowAlphas[2])),
+        (scale * 9.8, runtimeRingColor(material.glowColor, alpha: material.glowAlphas[3])),
+        (bodyWidth + scale * 1.15, runtimeRingColor(material.darkMaterial, alpha: material.darkAlpha)),
+        (bodyWidth, runtimeRingColor(material.poweredMaterial, alpha: material.materialAlpha)),
+        (max(scale * 0.9, bodyWidth - scale * 2.25), runtimeRingColor(material.poweredCore, alpha: material.coreAlpha)),
+        (scale * 1.65, runtimeRingColor(HaloRGB(red: 255, green: 255, blue: 255), alpha: material.whiteSparkAlpha))
+    ]
+}
+
+private func runtimeRingColor(_ rgb: HaloRGB, alpha: Double) -> NSColor {
+    NSColor(
+        calibratedRed: HaloMath.clamp(rgb.red, 0, 255) / 255,
+        green: HaloMath.clamp(rgb.green, 0, 255) / 255,
+        blue: HaloMath.clamp(rgb.blue, 0, 255) / 255,
+        alpha: HaloMath.clamp(alpha, 0, 255) / 255
+    )
+}
+
+private func runtimeRingBaselineInputs() -> [(String, HaloRenderInput)] {
+    let idle = HaloVisualModel.targetVisual(
+        state: .idle,
+        time: 0,
+        errorPresentation: .flashing,
+        steadyDone: false
+    )
+    let thinking = HaloVisualModel.targetVisual(
+        state: .thinking,
+        time: 0,
+        errorPresentation: .flashing,
+        steadyDone: false
+    )
+    let working = HaloVisualModel.targetVisual(
+        state: .working,
+        time: 0,
+        errorPresentation: .flashing,
+        steadyDone: false
+    )
+    return [
+        ("idle", HaloRenderInput(state: .idle, errorPresentation: .flashing, steadyDone: false, answerStreaming: false, transitionFrom: idle, time: 2.4, sinceState: 2.4, transition: 1, gapA: 97, gapB: 247)),
+        ("thinking-transition", HaloRenderInput(state: .thinking, errorPresentation: .flashing, steadyDone: false, answerStreaming: false, transitionFrom: idle, time: 0.42, sinceState: 0.42, transition: 0.37, gapA: 112.96, gapB: 262.96)),
+        ("working-transition", HaloRenderInput(state: .working, errorPresentation: .flashing, steadyDone: false, answerStreaming: false, transitionFrom: thinking, time: 1.1, sinceState: 0.45, transition: 0.6, gapA: 138.8, gapB: 288.8)),
+        ("done-flash", HaloRenderInput(state: .done, errorPresentation: .flashing, steadyDone: false, answerStreaming: false, transitionFrom: working, time: 1.2, sinceState: 0.55, transition: 1, gapA: 142.6, gapB: 292.6)),
+        ("steady-done", HaloRenderInput(state: .done, errorPresentation: .flashing, steadyDone: true, answerStreaming: false, transitionFrom: working, time: 2.4, sinceState: 2.4, transition: 1, gapA: 188.2, gapB: 338.2)),
+        ("attention", HaloRenderInput(state: .attention, errorPresentation: .flashing, steadyDone: false, answerStreaming: false, transitionFrom: idle, time: 0.8, sinceState: 0.8, transition: 1, gapA: 127.4, gapB: 277.4)),
+        ("error-bright", HaloRenderInput(state: .error, errorPresentation: .bright, steadyDone: false, answerStreaming: false, transitionFrom: working, time: 1.3, sinceState: 1.3, transition: 1, gapA: 146.4, gapB: 296.4)),
+        ("error-flashing", HaloRenderInput(state: .error, errorPresentation: .flashing, steadyDone: false, answerStreaming: false, transitionFrom: working, time: 1.65, sinceState: 1.65, transition: 1, gapA: 159.7, gapB: 309.7)),
+        ("answer-streaming", HaloRenderInput(state: .working, errorPresentation: .flashing, steadyDone: false, answerStreaming: true, transitionFrom: working, time: 0.72, sinceState: 0.72, transition: 1, gapA: 124.36, gapB: 274.36))
+    ]
+}
+
+private func runtimeRingPixelDigest(input: HaloRenderInput, scale: CGFloat) -> UInt64 {
+    let size = CGSize(width: 112, height: 112)
+    let (root, _) = makeRuntimeRingLayers(
+        input: input,
+        bounds: CGRect(origin: .zero, size: size),
+        scale: scale
+    )
+
+    let width = Int(size.width * scale)
+    let height = Int(size.height * scale)
+    var pixels = [UInt8](repeating: 0, count: width * height * 4)
+    pixels.withUnsafeMutableBytes { bytes in
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(
+                data: bytes.baseAddress,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width * 4,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              ) else {
+            return
+        }
+        context.scaleBy(x: scale, y: scale)
+        root.render(in: context)
+    }
+    return pixels.reduce(1_469_598_103_934_665_603) { hash, byte in
+        (hash ^ UInt64(byte)) &* 1_099_511_628_211
+    }
+}
+
+private func makeRuntimeRingLayers(
+    input: HaloRenderInput,
+    bounds: CGRect,
+    scale: CGFloat
+) -> (CALayer, [CAShapeLayer]) {
+    let root = CALayer()
+    root.bounds = bounds
+    root.anchorPoint = .zero
+    root.position = .zero
+    root.contentsScale = scale
+    let layers = (0..<HaloRenderer.ringLayerCount).map { _ in
+        let layer = CAShapeLayer()
+        layer.fillColor = NSColor.clear.cgColor
+        layer.lineCap = .round
+        layer.lineJoin = .round
+        layer.frame = bounds
+        layer.contentsScale = scale
+        root.addSublayer(layer)
+        return layer
+    }
+    HaloRenderer.applyRingLayers(layers, bounds: bounds, input: input)
+    return (root, layers)
 }
 
 private func testClaudeLiveSessionsRefreshIsThrottled() {
@@ -1717,165 +2519,9 @@ private func testDetailsPanelLocalizesClaudeActivityDetails() {
 }
 
 @MainActor
-private func testDetailsPanelShowsContextAndHidesQuotaForClaudeCode() {
-    let panel = DetailsPanel()
-    let aggregate = AggregateSnapshot(
-        state: .idle,
-        label: "OFFLINE",
-        detail: AgentKind.claudeCode.offlineDetail,
-        sessions: [],
-        focusedAgent: .claudeCode
-    )
-
-    panel.update(aggregate: aggregate, quota: nil, contextUsedPercent: 58.4)
-
-    expect(panel.focusedAgentForTesting == .claudeCode, "details panel should select Claude Code")
-    expect(panel.detailTextForTesting == L10n.shared["status.offline_claude"], "Claude Code offline copy should be localized")
-    // OFFLINE drops the context pill so the panel doesn't carry over a
-    // percentage from a session that's no longer live.
-    expect(panel.contextPillHiddenForTesting == true, "Claude Code context pill should be hidden when OFFLINE")
-    expect(panel.projectValueForTesting == "--", "Claude Code project should be placeholder when OFFLINE")
-    expect(panel.modelValueForTesting == "--", "Claude Code model should be placeholder when OFFLINE")
-    expect(panel.tokenValueForTesting == "--", "Claude Code tokens should be placeholder when OFFLINE")
-    expect(panel.primaryQuotaHiddenForTesting == true, "Claude Code primary quota should be hidden")
-    expect(panel.secondaryQuotaHiddenForTesting == true, "Claude Code secondary quota should be hidden")
-}
-
-@MainActor
-private func testDetailsPresentationUsesFocusedSessionAndRejectsStaleQuota() {
-    let now = Date()
-    let thirdPartySession = SessionSnapshot(
-        threadId: "codex-third-party",
-        projectName: "AgentHalo",
-        workingDirectory: "/tmp/AgentHalo",
-        state: .working,
-        action: "Running command",
-        lastEventAt: now,
-        completedAt: nil,
-        active: true,
-        modelName: "gpt-5.5",
-        inputTokens: 38_000,
-        outputTokens: 1_200,
-        hasRateLimits: false,
-        contextUsedPercent: 20
-    )
-    let staleQuota = RateLimitSnapshot(
-        primaryUsedPercent: 20,
-        secondaryUsedPercent: 80,
-        contextUsedPercent: 42
-    )
-    let codexAggregate = AggregateSnapshot(
-        state: .working,
-        label: "EXECUTING",
-        detail: "AgentHalo - Running command",
-        sessions: [thirdPartySession],
-        focusedAgent: .codex
-    )
-
-    let thirdParty = AppDelegate.detailsPresentationForDetails(
-        focusedAgent: .codex,
-        displayedAggregate: codexAggregate,
-        claudeMainSessionId: nil,
-        mainClaudeSessions: [],
-        liveClaudeSession: nil,
-        quota: staleQuota,
-        claudeUsage: nil
-    )
-    expect(!thirdParty.showsQuota, "stale global quota must not override current third-party Codex session")
-    expect(thirdParty.sessionDetails.modelName, "gpt-5.5", "Codex details should use focused session model")
-    expect(thirdParty.contextUsedPercent, 20, "Codex context should use the focused session rather than stale quota")
-
-    var subscriptionSession = thirdPartySession
-    subscriptionSession.hasRateLimits = true
-    let subscriptionAggregate = AggregateSnapshot(
-        state: .working,
-        label: "EXECUTING",
-        detail: "AgentHalo - Running command",
-        sessions: [subscriptionSession],
-        focusedAgent: .codex
-    )
-    let subscription = AppDelegate.detailsPresentationForDetails(
-        focusedAgent: .codex,
-        displayedAggregate: subscriptionAggregate,
-        claudeMainSessionId: nil,
-        mainClaudeSessions: [],
-        liveClaudeSession: nil,
-        quota: staleQuota,
-        claudeUsage: nil
-    )
-    expect(subscription.showsQuota, "Codex session with rate limits should keep quota UI")
-
-    let claudeSession = SessionSnapshot(
-        threadId: "cc-current",
-        projectName: "agent-a47ee146bdd2ba852",
-        workingDirectory: "/tmp/AgentHalo/.claude/worktrees/agent-a47ee146bdd2ba852",
-        state: .working,
-        action: "Thinking",
-        lastEventAt: now,
-        completedAt: nil,
-        active: true,
-        agent: .claudeCode
-    )
-    let claudeAggregate = AggregateSnapshot(
-        state: .working,
-        label: "THINKING",
-        detail: "AgentHalo - Thinking",
-        sessions: [claudeSession],
-        focusedAgent: .claudeCode
-    )
-    let matchingUsage = ClaudeContextUsageSnapshot(
-        sessionId: "cc-current",
-        usedPercent: 58,
-        modelName: "claude-sonnet-4",
-        inputTokens: 38_000,
-        outputTokens: 1_200,
-        updatedAt: now
-    )
-    let mainTranscript = SessionSnapshot(
-        threadId: "cc-current",
-        projectName: "AgentHalo",
-        workingDirectory: "/tmp/AgentHalo",
-        state: .idle,
-        action: "Ready",
-        lastEventAt: now,
-        completedAt: nil,
-        active: false,
-        agent: .claudeCode
-    )
-    let liveSession = ClaudeLiveSessionSnapshot(
-        sessionId: "cc-current",
-        workingDirectory: "/tmp/AgentHalo",
-        processId: 1,
-        status: "idle",
-        updatedAt: now
-    )
-    let claude = AppDelegate.detailsPresentationForDetails(
-        focusedAgent: .claudeCode,
-        displayedAggregate: claudeAggregate,
-        claudeMainSessionId: "cc-current",
-        mainClaudeSessions: [mainTranscript],
-        liveClaudeSession: liveSession,
-        quota: nil,
-        claudeUsage: matchingUsage
-    )
-    expect(!claude.showsQuota, "Claude Code should use metadata UI")
-    expect(claude.contextUsedPercent, 58, "Claude Code should retain context usage")
-    expect(claude.sessionDetails.projectName, "AgentHalo", "standby details should use the main project")
-    expect(claude.sessionDetails.modelName, "claude-sonnet-4", "Claude details should use matching statusline model")
-
-    var mismatchedUsage = matchingUsage
-    mismatchedUsage.sessionId = "cc-other"
-    let mismatched = AppDelegate.detailsPresentationForDetails(
-        focusedAgent: .claudeCode,
-        displayedAggregate: claudeAggregate,
-        claudeMainSessionId: "cc-current",
-        mainClaudeSessions: [mainTranscript],
-        liveClaudeSession: liveSession,
-        quota: nil,
-        claudeUsage: mismatchedUsage
-    )
-    expect(mismatched.sessionDetails.modelName == nil, "Claude details must reject another session's model")
-    expect(mismatched.contextUsedPercent == nil, "Claude details must reject another session's context usage")
+private func testUsageProviderMappingIsTotal() {
+    expect(AppDelegate.usageProviderID(for: .codex), .codex, "Codex Provider mapping")
+    expect(AppDelegate.usageProviderID(for: .claudeCode), .claude, "Claude Provider mapping")
 }
 
 @MainActor
@@ -1923,6 +2569,36 @@ private func testAgentToggleUsesCodexAndClaudeIcons() {
 }
 
 @MainActor
+private func testAgentToggleDimsInactiveIconMoreStrongly() {
+    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 110, height: 24))
+    let icons = allDescendants(of: toggle).compactMap { $0 as? NSImageView }
+
+    expect(icons.count == 2, "agent toggle should expose both agent icons for opacity checks")
+    guard icons.count == 2 else { return }
+
+    expect(icons[0].alphaValue, 1, "selected Codex icon should remain fully opaque")
+    expect(icons[1].alphaValue, 0.40, "inactive Claude Code icon should use stronger dimming")
+
+    toggle.setAgent(.claudeCode)
+
+    expect(icons[0].alphaValue, 0.40, "inactive Codex icon should use stronger dimming")
+    expect(icons[1].alphaValue, 1, "selected Claude Code icon should remain fully opaque")
+}
+
+@MainActor
+private func testAgentToggleSelectionPillFitsItsIconWidth() {
+    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 110, height: 24))
+    toggle.layoutSubtreeIfNeeded()
+
+    let selectionPill = toggle.subviews.first?.subviews.first
+    expect(
+        selectionPill?.frame.width ?? 0,
+        51,
+        "selected agent pill should fit the icon width without extra horizontal expansion"
+    )
+}
+
+@MainActor
 private func testAgentToggleKeepsWholeControlClickable() {
     let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 110, height: 24))
     toggle.layoutSubtreeIfNeeded()
@@ -1943,7 +2619,7 @@ private func testDetailsPanelSwitchCallbackSelectsClaudeCode() {
     let panel = DetailsPanel()
     var selected: AgentKind?
     panel.onAgentSelected = { selected = $0 }
-    panel.update(
+    panel.render(
         aggregate: AggregateSnapshot(
             state: .idle,
             label: "OFFLINE",
@@ -1951,8 +2627,7 @@ private func testDetailsPanelSwitchCallbackSelectsClaudeCode() {
             sessions: [],
             focusedAgent: .codex
         ),
-        quota: nil,
-        contextUsedPercent: nil
+        model: usageDetailsModel()
     )
 
     panel.selectAgentForTesting(.claudeCode)

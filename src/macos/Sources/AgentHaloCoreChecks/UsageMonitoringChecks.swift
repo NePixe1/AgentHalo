@@ -1,0 +1,4465 @@
+import Foundation
+import AgentHaloCore
+
+func runUsageModelChecks() async {
+    testUsageMonitoringLocalization()
+
+    let key = AccountCacheKey(providerID: .codex, digest: "abc")
+    let snapshot = UsageSnapshot(
+        providerID: .codex,
+        accountKey: key,
+        planName: "Pro 20x",
+        windows: [UsageWindow(kind: .session, usedPercent: 4, resetsAt: nil, duration: 18_000)],
+        refreshedAt: Date(timeIntervalSince1970: 100)
+    )
+    expect(snapshot.windows.first?.kind, .session, "usage window kind")
+    expect(UsageDigest.sha256("secret").count, 64, "SHA256 must use lowercase hex")
+
+    let response = UsageHTTPResponse(
+        statusCode: 429,
+        headers: ["Retry-After": "120"],
+        body: Data()
+    )
+    expect(response.header("retry-after"), "120", "headers must be case insensitive")
+
+    testDetailsContentResolverSeparatesOAuthUsageAndAPISessionDetails()
+    testDetailsContentResolverKeepsOfflineAndContextDataIndependent()
+    testDetailsContentResolverWarningPriorityAndRedaction()
+
+    do {
+        try testFilesystemUsageFilesWritesEmptyAndNonEmptyDataWithMode0600()
+    } catch {
+        fatalError("filesystem usage files checks failed: \(error)")
+    }
+
+    do {
+        try await runUsageSnapshotCacheChecks()
+    } catch {
+        fatalError("usage snapshot cache checks failed: \(error)")
+    }
+
+    await runUsageMonitoringCoordinatorChecks()
+
+    await runCodexAuthChecks()
+    runClaudeAuthChecks()
+    await runCodexUsageChecks()
+    await runClaudeUsageChecks()
+}
+
+func testUsageMonitoringLocalization() {
+    let originalLanguage = L10n.shared.currentLanguage
+    defer { L10n.shared.setLanguage(originalLanguage) }
+
+    let translations: [(String, [(String, String)])] = [
+        (
+            "en",
+            [
+                ("quota.5h", "5-Hour"),
+                ("quota.weekly", "Weekly"),
+                ("quota.waiting_refresh", "Waiting for Refresh"),
+                ("metadata.session_title", "Session title"),
+                ("usage.warning.sign_in_codex", "Sign in to Codex again to refresh usage."),
+                ("usage.warning.sign_in_claude", "Sign in to Claude Code again to refresh usage."),
+                ("usage.warning.rate_limited", "Usage requests are limited. AgentHalo will retry later."),
+                ("usage.warning.stale", "Usage may be outdated. Last updated {0}."),
+                ("usage.warning.network", "Usage could not be refreshed because of a network error."),
+                ("usage.warning.service", "The usage service is temporarily unavailable."),
+                ("usage.warning.invalid", "The usage service returned unavailable data."),
+            ]
+        ),
+        (
+            "zh",
+            [
+                ("quota.5h", "五小时"),
+                ("quota.weekly", "每周"),
+                ("quota.waiting_refresh", "等待刷新"),
+                ("metadata.session_title", "会话标题"),
+                ("usage.warning.sign_in_codex", "请重新登录 Codex 以刷新使用情况。"),
+                ("usage.warning.sign_in_claude", "请重新登录 Claude Code 以刷新使用情况。"),
+                ("usage.warning.rate_limited", "使用情况请求过于频繁，AgentHalo 将稍后重试。"),
+                ("usage.warning.stale", "使用情况可能已过期，上次更新于 {0}。"),
+                ("usage.warning.network", "网络异常，暂时无法刷新使用情况。"),
+                ("usage.warning.service", "使用情况服务暂时不可用。"),
+                ("usage.warning.invalid", "使用情况服务暂未返回可用数据。"),
+            ]
+        ),
+    ]
+
+    for (language, expectedTranslations) in translations {
+        L10n.shared.setLanguage(language)
+        for (key, expectedValue) in expectedTranslations {
+            expect(L10n.shared[key], expectedValue, "\(language) localization for \(key)")
+        }
+    }
+}
+
+func testDetailsContentResolverSeparatesOAuthUsageAndAPISessionDetails() {
+    let now = Date(timeIntervalSince1970: 2_100_000_000)
+    let codexKey = AccountCacheKey(providerID: .codex, digest: "codex-account")
+    let codexWindow = UsageWindow(
+        kind: .session,
+        usedPercent: 23,
+        resetsAt: now.addingTimeInterval(1_800),
+        duration: 18_000
+    )
+    let codexSnapshot = UsageSnapshot(
+        providerID: .codex,
+        accountKey: codexKey,
+        planName: "Plus",
+        windows: [codexWindow],
+        refreshedAt: now
+    )
+    let exactSession = SessionDetailsSnapshot(
+        projectName: "AgentHalo",
+        sessionTitle: "Resolver work",
+        modelName: "gpt-5.5",
+        inputTokens: 12_345,
+        outputTokens: 678
+    )
+
+    let codexOAuth = DetailsContentResolver.resolve(
+        providerID: .codex,
+        monitorState: UsageMonitorState(
+            providerID: .codex,
+            accessMode: .oauth,
+            snapshot: codexSnapshot,
+            status: .fresh(updatedAt: now)
+        ),
+        isOffline: false,
+        sessionDetails: exactSession,
+        contextUsedPercent: 42,
+        now: now
+    )
+    expect(codexOAuth.providerName, "Codex", "Codex OAuth provider name")
+    expect(codexOAuth.planName, "Plus", "OAuth should preserve plan name")
+    expect(codexOAuth.contextUsedPercent, 42, "OAuth context remains exact-session data")
+    expect(
+        codexOAuth.body,
+        .usage(UsageDetailsModel(windows: [codexWindow], status: .fresh(updatedAt: now))),
+        "Codex OAuth should render usage"
+    )
+
+    let claudeOAuth = DetailsContentResolver.resolve(
+        providerID: .claude,
+        monitorState: UsageMonitorState(
+            providerID: .claude,
+            accessMode: .oauth,
+            status: .noData
+        ),
+        isOffline: false,
+        sessionDetails: exactSession,
+        contextUsedPercent: nil,
+        now: now
+    )
+    expect(claudeOAuth.providerName, "Claude Code", "Claude OAuth provider name")
+    expect(
+        claudeOAuth.body,
+        .usage(UsageDetailsModel(windows: [], status: .noData)),
+        "OAuth without a snapshot should still render usage"
+    )
+
+    for providerID in [UsageProviderID.codex, .claude] {
+        let api = DetailsContentResolver.resolve(
+            providerID: providerID,
+            monitorState: UsageMonitorState(providerID: providerID, accessMode: .apiKey),
+            isOffline: false,
+            sessionDetails: exactSession,
+            contextUsedPercent: 37,
+            now: now
+        )
+        expect(
+            api.providerName,
+            providerID == .codex ? "Codex" : "Claude Code",
+            "API provider name"
+        )
+        expect(api.planName == nil, "API mode must not expose an OAuth plan")
+        expect(api.usageWarning == nil, "API mode must not expose a Usage warning")
+        expect(api.contextUsedPercent, 37, "API mode keeps exact context")
+        expect(api.body, .session(exactSession), "API mode keeps session fields independent")
+    }
+}
+
+func testDetailsContentResolverKeepsOfflineAndContextDataIndependent() {
+    let now = Date(timeIntervalSince1970: 2_100_000_100)
+    let key = AccountCacheKey(providerID: .codex, digest: "same-account")
+    let snapshot = UsageSnapshot(
+        providerID: .codex,
+        accountKey: key,
+        planName: "Team",
+        windows: [UsageWindow(kind: .weekly, usedPercent: 64, resetsAt: nil, duration: 604_800)],
+        refreshedAt: now.addingTimeInterval(-700)
+    )
+    let exactSession = SessionDetailsSnapshot(
+        projectName: "SecretProject",
+        sessionTitle: "SecretTitle",
+        modelName: "SecretModel",
+        inputTokens: 1,
+        outputTokens: 2
+    )
+    let failedOAuthState = UsageMonitorState(
+        providerID: .codex,
+        accessMode: .oauth,
+        snapshot: snapshot,
+        status: .stale(updatedAt: snapshot.refreshedAt),
+        lastFailure: .network
+    )
+
+    let online = DetailsContentResolver.resolve(
+        providerID: .codex,
+        monitorState: failedOAuthState,
+        isOffline: false,
+        sessionDetails: exactSession,
+        contextUsedPercent: 71,
+        now: now
+    )
+    expect(online.contextUsedPercent, 71, "Usage failure must not clear exact context")
+
+    let offlineOAuth = DetailsContentResolver.resolve(
+        providerID: .codex,
+        monitorState: failedOAuthState,
+        isOffline: true,
+        sessionDetails: exactSession,
+        contextUsedPercent: 71,
+        now: now
+    )
+    expect(offlineOAuth.providerName, "Codex", "offline OAuth provider name")
+    expect(offlineOAuth.contextUsedPercent == nil, "offline must clear context")
+    expect(
+        offlineOAuth.body,
+        .usage(
+            UsageDetailsModel(
+                windows: snapshot.windows,
+                status: .stale(updatedAt: snapshot.refreshedAt)
+            )
+        ),
+        "offline OAuth should retain the same-account Usage snapshot"
+    )
+
+    let offlineAPI = DetailsContentResolver.resolve(
+        providerID: .claude,
+        monitorState: UsageMonitorState(providerID: .claude, accessMode: .apiKey),
+        isOffline: true,
+        sessionDetails: exactSession,
+        contextUsedPercent: 71,
+        now: now
+    )
+    expect(offlineAPI.providerName, "Claude Code", "offline API provider name")
+    expect(offlineAPI.contextUsedPercent == nil, "offline API must clear context")
+    expect(
+        offlineAPI.body,
+        .session(SessionDetailsSnapshot()),
+        "offline API must clear all four session values"
+    )
+}
+
+func testDetailsContentResolverWarningPriorityAndRedaction() {
+    let now = Date(timeIntervalSince1970: 2_100_000_200)
+    let updatedAt = now.addingTimeInterval(-900)
+    let syntheticToken = "token-super-secret"
+    let syntheticResponseBody = "response-body-super-secret"
+    let syntheticDigest = "digest-super-secret"
+    let key = AccountCacheKey(providerID: .codex, digest: syntheticDigest)
+    let snapshot = UsageSnapshot(
+        providerID: .codex,
+        accountKey: key,
+        planName: "\(syntheticToken) \(syntheticResponseBody)",
+        windows: [],
+        refreshedAt: updatedAt
+    )
+    let session = SessionDetailsSnapshot(sessionTitle: syntheticResponseBody)
+
+    func warning(
+        status: UsageDataStatus?,
+        failure: UsageFailureReason?
+    ) -> String? {
+        DetailsContentResolver.resolve(
+            providerID: .codex,
+            monitorState: UsageMonitorState(
+                providerID: .codex,
+                accessMode: .oauth,
+                snapshot: snapshot,
+                status: status,
+                lastFailure: failure
+            ),
+            isOffline: false,
+            sessionDetails: session,
+            contextUsedPercent: 55,
+            now: now
+        ).usageWarning
+    }
+
+    let signIn = warning(status: .signInAgain, failure: .rateLimited(retryAt: now))
+    expect(signIn, L10n.shared["usage.warning.sign_in_codex"], "sign-in warning has highest priority")
+
+    let claudeSignIn = DetailsContentResolver.resolve(
+        providerID: .claude,
+        monitorState: UsageMonitorState(
+            providerID: .claude,
+            accessMode: .oauth,
+            status: .signInAgain,
+            lastFailure: .signInAgain
+        ),
+        isOffline: false,
+        sessionDetails: session,
+        contextUsedPercent: nil,
+        now: now
+    ).usageWarning
+    expect(
+        claudeSignIn,
+        L10n.shared["usage.warning.sign_in_claude"],
+        "Claude sign-in warning should name the exact provider"
+    )
+
+    let rateLimited = warning(
+        status: .stale(updatedAt: updatedAt),
+        failure: .rateLimited(retryAt: now)
+    )
+    expect(rateLimited, L10n.shared["usage.warning.rate_limited"], "rate-limit warning precedes stale")
+
+    let stale = warning(status: .stale(updatedAt: updatedAt), failure: .network)
+    expect(
+        stale,
+        L10n.shared.format("usage.warning.stale", detailsResolverUpdateTime(updatedAt, now: now)),
+        "stale warning precedes failure classification"
+    )
+    let network = warning(status: .noData, failure: .network)
+    expect(
+        network,
+        L10n.shared["usage.warning.network"],
+        "failed noData should classify network safely"
+    )
+    let service = warning(status: .noData, failure: .serviceUnavailable)
+    expect(
+        service,
+        L10n.shared["usage.warning.service"],
+        "failed noData should classify service failure safely"
+    )
+    let invalid = warning(status: .noData, failure: .invalidResponse)
+    expect(
+        invalid,
+        L10n.shared["usage.warning.invalid"],
+        "failed noData should classify invalid response safely"
+    )
+    expect(warning(status: .fresh(updatedAt: now), failure: nil) == nil, "fresh Usage has no warning")
+    expect(warning(status: .noData, failure: nil) == nil, "initial noData has no warning")
+
+    for safeWarning in [signIn, claudeSignIn, rateLimited, stale, network, service, invalid]
+        .compactMap({ $0 }) {
+        expect(!safeWarning.contains(syntheticToken), "warning must redact token")
+        expect(!safeWarning.contains(syntheticResponseBody), "warning must redact response body")
+        expect(!safeWarning.contains(syntheticDigest), "warning must redact account digest")
+    }
+}
+
+private func detailsResolverUpdateTime(_ date: Date, now: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: L10n.shared["date.culture"])
+    if Calendar.current.isDate(date, inSameDayAs: now) {
+        formatter.dateFormat = L10n.shared["date.today_format"]
+    } else {
+        formatter.dateFormat = L10n.shared["date.other_format"]
+    }
+    return formatter.string(from: date)
+}
+
+/// Exercises the real `FilesystemUsageFiles.writeAtomically` path: an empty
+/// `Data` must not crash (force-unwrap regression) and must still create the
+/// file, and a non-empty buffer must persist exact bytes with mode 0600.
+func testFilesystemUsageFilesWritesEmptyAndNonEmptyDataWithMode0600() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-fs-files-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+    let files = FilesystemUsageFiles()
+
+    // Empty Data must not crash and must create a zero-byte file.
+    let emptyURL = root.appendingPathComponent("empty.json")
+    try files.writeAtomically(Data(), to: emptyURL.path, preservingModeOf: nil)
+    expect(FileManager.default.fileExists(atPath: emptyURL.path), "empty write should create the file")
+    let emptyAttrs = try FileManager.default.attributesOfItem(atPath: emptyURL.path)
+    expect(
+        (emptyAttrs[.posixPermissions] as? NSNumber)?.uint16Value == 0o600,
+        "empty write mode should be 0600"
+    )
+    expect((try Data(contentsOf: emptyURL)).count, 0, "empty write should produce zero bytes")
+
+    // Non-empty Data must persist the exact bytes with the same mode.
+    let payload = Data(#"{"hello":"world"}"#.utf8)
+    let dataURL = root.appendingPathComponent("data.json")
+    try files.writeAtomically(payload, to: dataURL.path, preservingModeOf: nil)
+    expect(FileManager.default.fileExists(atPath: dataURL.path), "non-empty write should create the file")
+    let dataAttrs = try FileManager.default.attributesOfItem(atPath: dataURL.path)
+    expect(
+        (dataAttrs[.posixPermissions] as? NSNumber)?.uint16Value == 0o600,
+        "non-empty write mode should be 0600"
+    )
+    expect((try Data(contentsOf: dataURL)), payload, "non-empty write should preserve bytes")
+}
+
+// MARK: - Usage snapshot cache checks
+
+func cacheCheckSnapshot(
+    key: AccountCacheKey,
+    refreshedAt: Date,
+    planName: String = "Pro"
+) -> UsageSnapshot {
+    UsageSnapshot(
+        providerID: key.providerID,
+        accountKey: key,
+        planName: planName,
+        windows: [
+            UsageWindow(
+                kind: .session,
+                usedPercent: 12,
+                resetsAt: refreshedAt.addingTimeInterval(18_000),
+                duration: 18_000
+            )
+        ],
+        refreshedAt: refreshedAt
+    )
+}
+
+func runUsageSnapshotCacheChecks() async throws {
+    try await testUsageSnapshotCacheRoundTripIsolationAndPrivacy()
+    try await testUsageSnapshotCacheMigrationMovesOnlyExactKey()
+    try await testUsageSnapshotCachePrunesLeastRecentlyUsedPerProvider()
+    try await testUsageSnapshotCacheRemovesEntriesOlderThanThirtyDays()
+    try await testUsageSnapshotCacheIgnoresCorruptAndUnknownPayloads()
+    try await testUsageSnapshotCacheRetriesTransientReadFailure()
+    try await testUsageSnapshotCacheCreatesPrivateParentAndFile()
+}
+
+// MARK: - Usage monitoring coordinator checks
+
+private func coordinatorOAuthAccess(_ key: AccountCacheKey) -> OAuthAccess {
+    OAuthAccess(
+        providerID: key.providerID,
+        accountKey: key,
+        source: .file(path: "/tmp/agent-halo-coordinator-\(key.digest).json"),
+        sourceVersion: "version-\(key.digest)",
+        accessToken: "access-\(key.digest)",
+        refreshToken: "refresh-\(key.digest)",
+        expiresAt: nil,
+        accountID: nil,
+        planHint: nil
+    )
+}
+
+private func coordinatorCache(
+    files: any UsageFileAccessing,
+    path: String,
+    now: LockedBox<Date>
+) -> UsageSnapshotCache {
+    UsageSnapshotCache(
+        cacheURL: URL(fileURLWithPath: path),
+        files: files,
+        now: { now.value }
+    )
+}
+
+private func coordinatorSnapshot(
+    _ key: AccountCacheKey,
+    at date: Date,
+    planName: String = "Pro"
+) -> UsageSnapshot {
+    cacheCheckSnapshot(key: key, refreshedAt: date, planName: planName)
+}
+
+private func waitForRefreshCount(
+    _ provider: FakeUsageProvider,
+    _ expectedCount: Int,
+    _ message: String
+) async {
+    for _ in 0..<10_000 {
+        if await provider.refreshCallCount >= expectedCount { return }
+        await Task.yield()
+    }
+    fatalError(message)
+}
+
+private actor SequencedCoordinatorProvider: UsageProvider {
+    struct ResolvePlan: Sendable {
+        let result: ResolvedProviderAccess
+        let isGated: Bool
+    }
+
+    struct RefreshPlan: Sendable {
+        let result: UsageRefreshResult
+        let isGated: Bool
+    }
+
+    nonisolated let providerID: UsageProviderID
+
+    private var resolvePlans: [ResolvePlan] = []
+    private var refreshPlans: [RefreshPlan] = []
+    private var resolveContinuations: [Int: CheckedContinuation<Void, Never>] = [:]
+    private var refreshContinuations: [Int: CheckedContinuation<Void, Never>] = [:]
+    private(set) var resolveCallCount = 0
+    private(set) var refreshCallCount = 0
+    private(set) var activeResolveCount = 0
+    private(set) var activeRefreshCount = 0
+    private(set) var resolvedAccountKeys: [AccountCacheKey?] = []
+
+    init(providerID: UsageProviderID) {
+        self.providerID = providerID
+    }
+
+    func enqueueResolve(_ result: ResolvedProviderAccess, gated: Bool = false) {
+        resolvePlans.append(ResolvePlan(result: result, isGated: gated))
+    }
+
+    func enqueueRefresh(_ result: UsageRefreshResult, gated: Bool = false) {
+        refreshPlans.append(RefreshPlan(result: result, isGated: gated))
+    }
+
+    func resumeResolve(call: Int) {
+        resolveContinuations.removeValue(forKey: call)?.resume()
+    }
+
+    func resumeRefresh(call: Int) {
+        refreshContinuations.removeValue(forKey: call)?.resume()
+    }
+
+    func resolveAccess(accountKey: AccountCacheKey?) async -> ResolvedProviderAccess {
+        resolveCallCount += 1
+        activeResolveCount += 1
+        defer { activeResolveCount -= 1 }
+        resolvedAccountKeys.append(accountKey)
+        let call = resolveCallCount
+        guard !resolvePlans.isEmpty else {
+            fatalError("missing resolve plan for call \(call)")
+        }
+        let plan = resolvePlans.removeFirst()
+        if plan.isGated {
+            await withCheckedContinuation { continuation in
+                resolveContinuations[call] = continuation
+            }
+        }
+        return plan.result
+    }
+
+    func refresh(using access: ResolvedProviderAccess) async -> UsageRefreshResult {
+        refreshCallCount += 1
+        activeRefreshCount += 1
+        defer { activeRefreshCount -= 1 }
+        let call = refreshCallCount
+        guard !refreshPlans.isEmpty else {
+            fatalError("missing refresh plan for call \(call)")
+        }
+        let plan = refreshPlans.removeFirst()
+        if plan.isGated {
+            await withCheckedContinuation { continuation in
+                refreshContinuations[call] = continuation
+            }
+        }
+        return plan.result
+    }
+}
+
+private func waitForResolveCount(
+    _ provider: SequencedCoordinatorProvider,
+    _ expectedCount: Int,
+    _ message: String
+) async {
+    for _ in 0..<10_000 {
+        if await provider.resolveCallCount >= expectedCount { return }
+        await Task.yield()
+    }
+    fatalError(message)
+}
+
+private func waitForRefreshCount(
+    _ provider: SequencedCoordinatorProvider,
+    _ expectedCount: Int,
+    _ message: String
+) async {
+    for _ in 0..<10_000 {
+        if await provider.refreshCallCount >= expectedCount { return }
+        await Task.yield()
+    }
+    fatalError(message)
+}
+
+private final class CoordinatorFailingWriteFiles: UsageFileAccessing, @unchecked Sendable {
+    func readDataIfPresent(at path: String) throws -> Data? { nil }
+    func ensureDirectory(at path: String, mode: mode_t) throws {}
+    func writeAtomically(_ data: Data, to path: String, preservingModeOf existingPath: String?) throws {
+        throw FakeUsageFilesError.transientRead
+    }
+}
+
+private actor BlockingSnapshotCache: UsageSnapshotCaching {
+    private var continuation: CheckedContinuation<CachedUsageSnapshot?, Never>?
+    private(set) var snapshotCallCount = 0
+    private(set) var storeCallCount = 0
+
+    func loadIfNeeded() async throws {}
+
+    func snapshot(for key: AccountCacheKey) async throws -> CachedUsageSnapshot? {
+        snapshotCallCount += 1
+        return await withCheckedContinuation { continuation = $0 }
+    }
+
+    func store(_ snapshot: UsageSnapshot) async throws { storeCallCount += 1 }
+    func migrate(from oldKey: AccountCacheKey, to newKey: AccountCacheKey) async throws {}
+
+    func releaseSnapshot() {
+        let pending = continuation
+        continuation = nil
+        pending?.resume(returning: nil)
+    }
+}
+
+func runUsageMonitoringCoordinatorChecks() async {
+    await testCoordinatorAPIKeyModeSkipsRefresh()
+    await testCoordinatorDiskSnapshotIsExactStaleAndDoesNotSuppressRefresh()
+    await testCoordinatorCurrentRunFreshnessAndTenMinuteStaleness()
+    await testCoordinatorLatestConcurrentPrepareWins()
+    await testCoordinatorSupersededFirstEnsureFreshAwaitsCommittedContext()
+    await testCoordinatorDeduplicatesOneProviderAndRefreshesProvidersIndependently()
+    await testCoordinatorAccountSwitchDoesNotJoinOrCommitOldRefresh()
+    await testCoordinatorNonOAuthPrepareInvalidatesOldRefresh()
+    await testCoordinatorInvalidatedMigrationHasNoCacheSideEffects()
+    await testCoordinatorSuccessAndFailureStatePriorities()
+    await testCoordinatorRateLimitCooldownsArePerAccount()
+    await testCoordinatorMigratesOnlyInternalRotation()
+    await testCoordinatorKeepsStableCacheWhenCodexRotationCannotPersist()
+    await testCoordinatorRecoversRealCodexProviderAfterExternalLogin()
+    await testCoordinatorRecoversRealClaudeProviderAfterExternalLogin()
+    await testCoordinatorCancelAllAwaitsRefreshQuiescence()
+    await testCoordinatorCancelAllAwaitsPrepareQuiescence()
+    await testCoordinatorCancelAllTracksBlockedCacheSnapshotThroughCommitBoundary()
+    await testCoordinatorCancellationAndCacheWriteFailure()
+}
+
+func testCoordinatorAPIKeyModeSkipsRefresh() async {
+    let now = LockedBox(Date(timeIntervalSince1970: 2_100_000_000))
+    let provider = FakeUsageProvider(providerID: .codex, resolveResult: .apiKey)
+    let cache = coordinatorCache(
+        files: FakeUsageFiles(),
+        path: "/tmp/agent-halo-coordinator-api.json",
+        now: now
+    )
+    let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now.value })
+
+    let state = await coordinator.ensureFresh(.codex)
+
+    expect(state.accessMode, .apiKey, "API-key access should publish API mode")
+    expect(state.status == nil, "API-key access should not publish OAuth usage status")
+    expect(state.snapshot == nil, "API-key access should clear OAuth snapshots")
+    expect(await provider.refreshCallCount, 0, "API-key access must never refresh usage")
+}
+
+func testCoordinatorDiskSnapshotIsExactStaleAndDoesNotSuppressRefresh() async {
+    let date = Date(timeIntervalSince1970: 2_100_001_000)
+    let now = LockedBox(date)
+    let files = FakeUsageFiles()
+    let path = "/tmp/agent-halo-coordinator-disk.json"
+    let key = AccountCacheKey(providerID: .codex, digest: "disk-account")
+    let otherKey = AccountCacheKey(providerID: .codex, digest: "other-account")
+    let seed = coordinatorCache(files: files, path: path, now: now)
+    try! await seed.store(coordinatorSnapshot(key, at: date.addingTimeInterval(-60), planName: "Exact"))
+    try! await seed.store(coordinatorSnapshot(otherKey, at: date, planName: "Other"))
+
+    let provider = FakeUsageProvider(providerID: .codex, resolveResult: .oauth(coordinatorOAuthAccess(key)))
+    await provider.setRefreshResult(
+        UsageRefreshResult(
+            providerID: .codex,
+            snapshot: coordinatorSnapshot(key, at: date, planName: "Network"),
+            failure: nil
+        )
+    )
+    let cache = coordinatorCache(files: files, path: path, now: now)
+    let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now.value })
+
+    let prepared = await coordinator.prepare(.codex)
+    expect(prepared.snapshot?.planName, "Exact", "prepare should load only the resolved account snapshot")
+    expect(prepared.status, .stale(updatedAt: date.addingTimeInterval(-60)), "disk snapshot must start stale")
+    expect(await provider.refreshCallCount, 0, "prepare must not perform network refresh")
+
+    let refreshed = await coordinator.ensureFresh(.codex)
+    expect(await provider.refreshCallCount, 1, "disk snapshot must not suppress first-run refresh")
+    expect(refreshed.snapshot?.planName, "Network", "refresh should replace disk snapshot")
+    expect(refreshed.status, .fresh(updatedAt: date), "successful refresh should be fresh")
+}
+
+func testCoordinatorCurrentRunFreshnessAndTenMinuteStaleness() async {
+    let date = Date(timeIntervalSince1970: 2_100_002_000)
+    let now = LockedBox(date)
+    let key = AccountCacheKey(providerID: .codex, digest: "fresh-account")
+    let provider = FakeUsageProvider(providerID: .codex, resolveResult: .oauth(coordinatorOAuthAccess(key)))
+    await provider.setRefreshResult(
+        UsageRefreshResult(
+            providerID: .codex,
+            snapshot: coordinatorSnapshot(key, at: date),
+            failure: nil
+        )
+    )
+    let cache = coordinatorCache(
+        files: FakeUsageFiles(),
+        path: "/tmp/agent-halo-coordinator-fresh.json",
+        now: now
+    )
+    let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now.value })
+
+    _ = await coordinator.ensureFresh(.codex)
+    _ = await coordinator.ensureFresh(.codex)
+    expect(await provider.refreshCallCount, 1, "current-run snapshot younger than five minutes should suppress refresh")
+
+    now.withValue { $0 = date.addingTimeInterval(300) }
+    _ = await coordinator.ensureFresh(.codex)
+    expect(await provider.refreshCallCount, 1, "snapshot exactly five minutes old should still be fresh")
+
+    now.withValue { $0 = date.addingTimeInterval(300.001) }
+    await provider.setRefreshResult(
+        UsageRefreshResult(
+            providerID: .codex,
+            snapshot: coordinatorSnapshot(key, at: now.value),
+            failure: nil
+        )
+    )
+    _ = await coordinator.ensureFresh(.codex)
+    expect(await provider.refreshCallCount, 2, "five-minute freshness expiry should allow refresh")
+
+    now.withValue { $0 = date.addingTimeInterval(902) }
+    let aged = await coordinator.state(for: .codex)
+    expect(aged.status, .stale(updatedAt: date.addingTimeInterval(300.001)), "snapshot older than ten minutes should become stale without an error")
+}
+
+func testCoordinatorLatestConcurrentPrepareWins() async {
+    let date = Date(timeIntervalSince1970: 2_100_002_500)
+    let now = LockedBox(date)
+    let accountA = AccountCacheKey(providerID: .codex, digest: "prepare-a")
+    let accountB = AccountCacheKey(providerID: .codex, digest: "prepare-b")
+    let provider = SequencedCoordinatorProvider(providerID: .codex)
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(accountA)), gated: true)
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(accountB)))
+    let coordinator = UsageMonitoringCoordinator(
+        providers: [provider],
+        cache: coordinatorCache(
+            files: FakeUsageFiles(),
+            path: "/tmp/agent-halo-coordinator-prepare-generation.json",
+            now: now
+        ),
+        now: { now.value }
+    )
+
+    let slowA = Task { await coordinator.prepare(.codex) }
+    await waitForResolveCount(provider, 1, "slow account A prepare did not enter access resolution")
+    let fastB = Task { await coordinator.prepare(.codex) }
+    let fastState = await fastB.value
+    expect(fastState.accessMode, .oauth, "newer account B prepare should publish OAuth mode")
+
+    await provider.resumeResolve(call: 1)
+    let slowState = await slowA.value
+    expect(slowState.accessMode, .oauth, "superseded prepare must return account B's real OAuth context")
+    let final = await coordinator.state(for: .codex)
+    expect(final.snapshot == nil, "late account A prepare must not restore an account A snapshot")
+
+    await provider.enqueueResolve(.oauthNeedsSignIn(accountKey: accountB))
+    let confirmedB = await coordinator.prepare(.codex)
+    expect(confirmedB.status, .signInAgain, "late account A prepare must leave account B as the active binding")
+    expect(
+        (await provider.resolvedAccountKeys)[2],
+        accountB,
+        "the next prepare should resolve from the latest committed account B binding"
+    )
+}
+
+func testCoordinatorSupersededFirstEnsureFreshAwaitsCommittedContext() async {
+    let date = Date(timeIntervalSince1970: 2_100_002_750)
+    let now = LockedBox(date)
+    let account = AccountCacheKey(providerID: .codex, digest: "first-concurrent")
+    let snapshot = coordinatorSnapshot(account, at: date, planName: "Shared OAuth")
+    let provider = SequencedCoordinatorProvider(providerID: .codex)
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(account)), gated: true)
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(account)), gated: true)
+    await provider.enqueueRefresh(
+        UsageRefreshResult(providerID: .codex, snapshot: snapshot, failure: nil),
+        gated: true
+    )
+    let coordinator = UsageMonitoringCoordinator(
+        providers: [provider],
+        cache: coordinatorCache(
+            files: FakeUsageFiles(),
+            path: "/tmp/agent-halo-coordinator-first-concurrent.json",
+            now: now
+        ),
+        now: { now.value }
+    )
+
+    let first = Task { await coordinator.ensureFresh(.codex) }
+    await waitForResolveCount(provider, 1, "first ensureFresh did not enter access resolution")
+    let second = Task { await coordinator.ensureFresh(.codex) }
+    await waitForResolveCount(provider, 2, "second ensureFresh did not enter access resolution")
+
+    // Let the superseded call return from its resolver while the latest call
+    // still has no committed context. It must suspend for that context rather
+    // than manufacture an API-key fallback.
+    await provider.resumeResolve(call: 1)
+    for _ in 0..<100 { await Task.yield() }
+    await provider.resumeResolve(call: 2)
+
+    await waitForRefreshCount(provider, 1, "latest OAuth context did not start refresh")
+    await provider.resumeRefresh(call: 1)
+    let firstState = await first.value
+    let secondState = await second.value
+
+    expect(firstState.accessMode, .oauth, "superseded first ensureFresh must not return API-key mode")
+    expect(secondState.accessMode, .oauth, "latest ensureFresh should retain OAuth mode")
+    expect(firstState.snapshot, snapshot, "superseded first ensureFresh should join the shared OAuth refresh")
+    expect(secondState.snapshot, snapshot, "latest ensureFresh should return the shared OAuth refresh")
+    expect(await provider.refreshCallCount, 1, "first concurrent ensureFresh calls must deduplicate refresh")
+}
+
+func testCoordinatorDeduplicatesOneProviderAndRefreshesProvidersIndependently() async {
+    let date = Date(timeIntervalSince1970: 2_100_003_000)
+    let now = LockedBox(date)
+    let codexKey = AccountCacheKey(providerID: .codex, digest: "dedupe-codex")
+    let claudeKey = AccountCacheKey(providerID: .claude, digest: "dedupe-claude")
+    let codex = FakeUsageProvider(providerID: .codex, resolveResult: .oauth(coordinatorOAuthAccess(codexKey)))
+    let claude = FakeUsageProvider(providerID: .claude, resolveResult: .oauth(coordinatorOAuthAccess(claudeKey)))
+    await codex.setRefreshResult(
+        UsageRefreshResult(providerID: .codex, snapshot: coordinatorSnapshot(codexKey, at: date), failure: nil)
+    )
+    await claude.setRefreshResult(
+        UsageRefreshResult(providerID: .claude, snapshot: coordinatorSnapshot(claudeKey, at: date), failure: nil)
+    )
+    await codex.installGate()
+    await claude.installGate()
+    let cache = coordinatorCache(
+        files: FakeUsageFiles(),
+        path: "/tmp/agent-halo-coordinator-dedupe.json",
+        now: now
+    )
+    let coordinator = UsageMonitoringCoordinator(providers: [codex, claude], cache: cache, now: { now.value })
+
+    let codexFirst = Task { await coordinator.ensureFresh(.codex) }
+    let codexSecond = Task { await coordinator.ensureFresh(.codex) }
+    let claudeFirst = Task { await coordinator.ensureFresh(.claude) }
+    await waitForRefreshCount(codex, 1, "Codex refresh did not start")
+    await waitForRefreshCount(claude, 1, "Claude refresh should start while Codex is gated")
+    expect(await codex.refreshCallCount, 1, "concurrent Codex calls should share one refresh")
+    expect(await claude.refreshCallCount, 1, "Claude should own an independent refresh")
+
+    await codex.resume()
+    await claude.resume()
+    _ = await (codexFirst.value, codexSecond.value, claudeFirst.value)
+    expect(await codex.refreshCallCount, 1, "joined Codex refresh should still call provider once")
+}
+
+func testCoordinatorAccountSwitchDoesNotJoinOrCommitOldRefresh() async {
+    let date = Date(timeIntervalSince1970: 2_100_003_500)
+    let now = LockedBox(date)
+    let accountA = AccountCacheKey(providerID: .codex, digest: "switch-a")
+    let accountB = AccountCacheKey(providerID: .codex, digest: "switch-b")
+    let provider = SequencedCoordinatorProvider(providerID: .codex)
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(accountA)))
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(accountB)))
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(accountA)))
+    await provider.enqueueRefresh(
+        UsageRefreshResult(
+            providerID: .codex,
+            snapshot: nil,
+            failure: .rateLimited(retryAt: date.addingTimeInterval(3_600))
+        ),
+        gated: true
+    )
+    let snapshotB = coordinatorSnapshot(accountB, at: date, planName: "Account B")
+    await provider.enqueueRefresh(
+        UsageRefreshResult(providerID: .codex, snapshot: snapshotB, failure: nil)
+    )
+    let snapshotA = coordinatorSnapshot(accountA, at: date, planName: "Account A retry")
+    await provider.enqueueRefresh(
+        UsageRefreshResult(providerID: .codex, snapshot: snapshotA, failure: nil)
+    )
+    let cache = coordinatorCache(
+        files: FakeUsageFiles(),
+        path: "/tmp/agent-halo-coordinator-account-switch.json",
+        now: now
+    )
+    let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now.value })
+
+    let requestA = Task { await coordinator.ensureFresh(.codex) }
+    await waitForRefreshCount(provider, 1, "account A refresh did not start")
+    let requestB = Task { await coordinator.ensureFresh(.codex) }
+    await waitForRefreshCount(provider, 2, "account B must start its own refresh instead of joining account A")
+    let stateB = await requestB.value
+    expect(stateB.snapshot, snapshotB, "account B refresh should publish account B data")
+
+    await provider.resumeRefresh(call: 1)
+    _ = await requestA.value
+    expect(
+        (await coordinator.state(for: .codex)).snapshot,
+        snapshotB,
+        "late account A rate-limit result must not overwrite account B state"
+    )
+    expect(try! await cache.snapshot(for: accountA) == nil, "invalidated account A result must not write cache")
+
+    let retriedA = await coordinator.ensureFresh(.codex)
+    expect(await provider.refreshCallCount, 3, "invalidated account A rate-limit must not install cooldown")
+    expect(retriedA.snapshot, snapshotA, "account A should refresh normally after switching back")
+}
+
+func testCoordinatorNonOAuthPrepareInvalidatesOldRefresh() async {
+    let date = Date(timeIntervalSince1970: 2_100_003_600)
+
+    do {
+        let now = LockedBox(date)
+        let accountA = AccountCacheKey(providerID: .codex, digest: "api-invalidate-a")
+        let provider = SequencedCoordinatorProvider(providerID: .codex)
+        await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(accountA)))
+        await provider.enqueueResolve(.apiKey)
+        await provider.enqueueRefresh(
+            UsageRefreshResult(
+                providerID: .codex,
+                snapshot: coordinatorSnapshot(accountA, at: date, planName: "Late OAuth"),
+                failure: nil
+            ),
+            gated: true
+        )
+        let cache = coordinatorCache(
+            files: FakeUsageFiles(),
+            path: "/tmp/agent-halo-coordinator-api-invalidates.json",
+            now: now
+        )
+        let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now.value })
+
+        let oauthRequest = Task { await coordinator.ensureFresh(.codex) }
+        await waitForRefreshCount(provider, 1, "OAuth refresh before API switch did not start")
+        let apiState = await coordinator.prepare(.codex)
+        expect(apiState.accessMode, .apiKey, "API prepare should switch mode immediately")
+        await provider.resumeRefresh(call: 1)
+        _ = await oauthRequest.value
+
+        let final = await coordinator.state(for: .codex)
+        expect(final.accessMode, .apiKey, "late OAuth result must not overwrite API mode")
+        expect(final.snapshot == nil, "late OAuth result must not restore API-mode snapshot")
+        expect(try! await cache.snapshot(for: accountA) == nil, "late OAuth result in API mode must not write cache")
+    }
+
+    do {
+        let now = LockedBox(date.addingTimeInterval(1))
+        let accountA = AccountCacheKey(providerID: .claude, digest: "signin-invalidate-a")
+        let accountB = AccountCacheKey(providerID: .claude, digest: "signin-invalidate-b")
+        let provider = SequencedCoordinatorProvider(providerID: .claude)
+        await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(accountA)))
+        await provider.enqueueResolve(.oauthNeedsSignIn(accountKey: accountB))
+        await provider.enqueueRefresh(
+            UsageRefreshResult(
+                providerID: .claude,
+                snapshot: coordinatorSnapshot(accountA, at: now.value, planName: "Late OAuth"),
+                failure: nil
+            ),
+            gated: true
+        )
+        let cache = coordinatorCache(
+            files: FakeUsageFiles(),
+            path: "/tmp/agent-halo-coordinator-signin-invalidates.json",
+            now: now
+        )
+        let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now.value })
+
+        let oauthRequest = Task { await coordinator.ensureFresh(.claude) }
+        await waitForRefreshCount(provider, 1, "OAuth refresh before sign-in switch did not start")
+        let signInState = await coordinator.prepare(.claude)
+        expect(signInState.status, .signInAgain, "needs-sign-in prepare should publish highest-priority status")
+        await provider.resumeRefresh(call: 1)
+        _ = await oauthRequest.value
+
+        let final = await coordinator.state(for: .claude)
+        expect(final.status, .signInAgain, "late OAuth result must not overwrite sign-in-again state")
+        expect(final.snapshot == nil, "different-account sign-in state must not retain late OAuth data")
+        expect(try! await cache.snapshot(for: accountA) == nil, "late OAuth result while signed out must not write cache")
+    }
+}
+
+func testCoordinatorInvalidatedMigrationHasNoCacheSideEffects() async {
+    let date = Date(timeIntervalSince1970: 2_100_003_700)
+    let now = LockedBox(date)
+    let oldKey = AccountCacheKey(providerID: .codex, digest: "stale-migration-old")
+    let rotatedKey = AccountCacheKey(providerID: .codex, digest: "stale-migration-rotated")
+    let accountB = AccountCacheKey(providerID: .codex, digest: "stale-migration-b")
+    let files = FakeUsageFiles()
+    let path = "/tmp/agent-halo-coordinator-stale-migration.json"
+    let seed = coordinatorCache(files: files, path: path, now: now)
+    let oldSnapshot = coordinatorSnapshot(oldKey, at: date.addingTimeInterval(-60), planName: "Old")
+    try! await seed.store(oldSnapshot)
+    let cache = coordinatorCache(files: files, path: path, now: now)
+
+    let provider = SequencedCoordinatorProvider(providerID: .codex)
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(oldKey)))
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(accountB)))
+    await provider.enqueueRefresh(
+        UsageRefreshResult(
+            providerID: .codex,
+            snapshot: coordinatorSnapshot(rotatedKey, at: date, planName: "Invalidated rotation"),
+            failure: nil,
+            migrateCacheFrom: oldKey
+        ),
+        gated: true
+    )
+    let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now.value })
+
+    let oldRequest = Task { await coordinator.ensureFresh(.codex) }
+    await waitForRefreshCount(provider, 1, "migration refresh did not start")
+    let stateB = await coordinator.prepare(.codex)
+    expect(stateB.snapshot == nil, "account B prepare must not adopt the old account cache")
+    await provider.resumeRefresh(call: 1)
+    _ = await oldRequest.value
+
+    expect(
+        try! await cache.snapshot(for: oldKey)?.snapshot,
+        oldSnapshot,
+        "invalidated migration must leave the old cache entry untouched"
+    )
+    expect(
+        try! await cache.snapshot(for: rotatedKey) == nil,
+        "invalidated migration must not create the rotated cache entry"
+    )
+    expect(
+        (await coordinator.state(for: .codex)).snapshot == nil,
+        "invalidated migration result must not overwrite account B state"
+    )
+}
+
+func testCoordinatorSuccessAndFailureStatePriorities() async {
+    let date = Date(timeIntervalSince1970: 2_100_004_000)
+    let failures: [UsageProviderFailure] = [.network, .serviceUnavailable, .invalidResponse]
+    for (index, failure) in failures.enumerated() {
+        let now = LockedBox(date.addingTimeInterval(Double(index)))
+        let key = AccountCacheKey(providerID: .codex, digest: "failure-\(index)")
+        let files = FakeUsageFiles()
+        let path = "/tmp/agent-halo-coordinator-failure-\(index).json"
+        let seed = coordinatorCache(files: files, path: path, now: now)
+        let snapshot = coordinatorSnapshot(key, at: now.value.addingTimeInterval(-30))
+        try! await seed.store(snapshot)
+        let provider = FakeUsageProvider(providerID: .codex, resolveResult: .oauth(coordinatorOAuthAccess(key)))
+        await provider.setRefreshError(failure)
+        let coordinator = UsageMonitoringCoordinator(
+            providers: [provider],
+            cache: coordinatorCache(files: files, path: path, now: now),
+            now: { now.value }
+        )
+        let retained = await coordinator.ensureFresh(.codex)
+        expect(retained.snapshot, snapshot, "refresh failure should retain same-account snapshot")
+        expect(retained.status, .stale(updatedAt: snapshot.refreshedAt), "refresh failure with data should be stale")
+
+        let emptyProvider = FakeUsageProvider(providerID: .claude, resolveResult: .oauth(coordinatorOAuthAccess(
+            AccountCacheKey(providerID: .claude, digest: "empty-\(index)")
+        )))
+        await emptyProvider.setRefreshError(failure)
+        let emptyCoordinator = UsageMonitoringCoordinator(
+            providers: [emptyProvider],
+            cache: coordinatorCache(
+                files: FakeUsageFiles(),
+                path: "/tmp/agent-halo-coordinator-empty-\(index).json",
+                now: now
+            ),
+            now: { now.value }
+        )
+        let empty = await emptyCoordinator.ensureFresh(.claude)
+        expect(empty.status, .noData, "refresh failure without snapshot should be noData")
+    }
+
+    let key = AccountCacheKey(providerID: .codex, digest: "recovery")
+    let now = LockedBox(date.addingTimeInterval(10))
+    let provider = FakeUsageProvider(providerID: .codex, resolveResult: .oauth(coordinatorOAuthAccess(key)))
+    await provider.setRefreshError(.network)
+    let cache = coordinatorCache(files: FakeUsageFiles(), path: "/tmp/agent-halo-coordinator-recovery.json", now: now)
+    let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now.value })
+    _ = await coordinator.ensureFresh(.codex)
+    await provider.setRefreshResult(
+        UsageRefreshResult(providerID: .codex, snapshot: coordinatorSnapshot(key, at: now.value), failure: nil)
+    )
+    let recovered = await coordinator.ensureFresh(.codex)
+    expect(recovered.lastFailure == nil, "success should clear the last failure")
+    expect(recovered.status, .fresh(updatedAt: now.value), "success after failure should be fresh")
+
+    let sameKey = AccountCacheKey(providerID: .claude, digest: "sign-in-same")
+    let otherKey = AccountCacheKey(providerID: .claude, digest: "sign-in-other")
+    let signInFiles = FakeUsageFiles()
+    let signInPath = "/tmp/agent-halo-coordinator-sign-in.json"
+    let seed = coordinatorCache(files: signInFiles, path: signInPath, now: now)
+    let sameSnapshot = coordinatorSnapshot(sameKey, at: now.value)
+    try! await seed.store(sameSnapshot)
+    let sameProvider = FakeUsageProvider(providerID: .claude, resolveResult: .oauthNeedsSignIn(accountKey: sameKey))
+    let sameCoordinator = UsageMonitoringCoordinator(
+        providers: [sameProvider],
+        cache: coordinatorCache(files: signInFiles, path: signInPath, now: now),
+        now: { now.value }
+    )
+    let signIn = await sameCoordinator.ensureFresh(.claude)
+    expect(signIn.status, .signInAgain, "sign-in-again should have highest status priority")
+    expect(signIn.snapshot, sameSnapshot, "sign-in-again may retain only the same account snapshot")
+    expect(await sameProvider.refreshCallCount, 0, "sign-in-required access must not refresh")
+
+    await sameProvider.setResolveResult(.oauthNeedsSignIn(accountKey: otherKey))
+    let changed = await sameCoordinator.prepare(.claude)
+    expect(changed.status, .signInAgain, "changed account still requires sign in")
+    expect(changed.snapshot == nil, "changed account must not retain old-account snapshot")
+}
+
+func testCoordinatorRateLimitCooldownsArePerAccount() async {
+    let date = Date(timeIntervalSince1970: 2_100_005_000)
+    let now = LockedBox(date)
+    let key = AccountCacheKey(providerID: .codex, digest: "rate-explicit")
+    let provider = FakeUsageProvider(providerID: .codex, resolveResult: .oauth(coordinatorOAuthAccess(key)))
+    await provider.setRefreshError(.rateLimited(retryAt: date.addingTimeInterval(120)))
+    let coordinator = UsageMonitoringCoordinator(
+        providers: [provider],
+        cache: coordinatorCache(files: FakeUsageFiles(), path: "/tmp/agent-halo-rate-explicit.json", now: now),
+        now: { now.value }
+    )
+    _ = await coordinator.ensureFresh(.codex)
+    now.withValue { $0 = date.addingTimeInterval(119) }
+    _ = await coordinator.ensureFresh(.codex)
+    expect(await provider.refreshCallCount, 1, "Retry-After cooldown should suppress repeated requests")
+    now.withValue { $0 = date.addingTimeInterval(121) }
+    _ = await coordinator.ensureFresh(.codex)
+    expect(await provider.refreshCallCount, 2, "request should resume after Retry-After")
+
+    let fallbackDate = date.addingTimeInterval(1_000)
+    let fallbackNow = LockedBox(fallbackDate)
+    let fallbackKey = AccountCacheKey(providerID: .claude, digest: "rate-default")
+    let fallback = FakeUsageProvider(providerID: .claude, resolveResult: .oauth(coordinatorOAuthAccess(fallbackKey)))
+    await fallback.setRefreshError(.rateLimited(retryAt: nil))
+    let fallbackCoordinator = UsageMonitoringCoordinator(
+        providers: [fallback],
+        cache: coordinatorCache(files: FakeUsageFiles(), path: "/tmp/agent-halo-rate-default.json", now: fallbackNow),
+        now: { fallbackNow.value }
+    )
+    _ = await fallbackCoordinator.ensureFresh(.claude)
+    fallbackNow.withValue { $0 = fallbackDate.addingTimeInterval(299) }
+    _ = await fallbackCoordinator.ensureFresh(.claude)
+    expect(await fallback.refreshCallCount, 1, "missing Retry-After should default to five-minute cooldown")
+    fallbackNow.withValue { $0 = fallbackDate.addingTimeInterval(301) }
+    _ = await fallbackCoordinator.ensureFresh(.claude)
+    expect(await fallback.refreshCallCount, 2, "default cooldown should expire after five minutes")
+}
+
+func testCoordinatorMigratesOnlyInternalRotation() async {
+    let date = Date(timeIntervalSince1970: 2_100_006_000)
+    let now = LockedBox(date)
+    let oldKey = AccountCacheKey(providerID: .codex, digest: "rotation-old")
+    let newKey = AccountCacheKey(providerID: .codex, digest: "rotation-new")
+    let files = FakeUsageFiles()
+    let path = "/tmp/agent-halo-coordinator-migration.json"
+    let seed = coordinatorCache(files: files, path: path, now: now)
+    try! await seed.store(coordinatorSnapshot(oldKey, at: date.addingTimeInterval(-60), planName: "Old"))
+    let cache = coordinatorCache(files: files, path: path, now: now)
+    let provider = FakeUsageProvider(providerID: .codex, resolveResult: .oauth(coordinatorOAuthAccess(oldKey)))
+    await provider.setRefreshResult(
+        UsageRefreshResult(
+            providerID: .codex,
+            snapshot: coordinatorSnapshot(newKey, at: date, planName: "Rotated"),
+            failure: nil,
+            migrateCacheFrom: oldKey
+        )
+    )
+    let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now.value })
+    let migrated = await coordinator.ensureFresh(.codex)
+    expect(migrated.snapshot?.accountKey, newKey, "internal rotation should publish the new key")
+    expect(try! await cache.snapshot(for: oldKey) == nil, "internal rotation should remove the old cache key")
+    expect(try! await cache.snapshot(for: newKey)?.snapshot.planName, "Rotated", "internal rotation stores new snapshot after migration")
+
+    let externalOld = AccountCacheKey(providerID: .claude, digest: "external-old")
+    let externalNew = AccountCacheKey(providerID: .claude, digest: "external-new")
+    let externalFiles = FakeUsageFiles()
+    let externalPath = "/tmp/agent-halo-coordinator-external.json"
+    let externalCache = coordinatorCache(files: externalFiles, path: externalPath, now: now)
+    try! await externalCache.store(coordinatorSnapshot(externalOld, at: date, planName: "Old External"))
+    let externalProvider = FakeUsageProvider(
+        providerID: .claude,
+        resolveResult: .oauth(coordinatorOAuthAccess(externalNew))
+    )
+    let externalCoordinator = UsageMonitoringCoordinator(
+        providers: [externalProvider],
+        cache: externalCache,
+        now: { now.value }
+    )
+    let external = await externalCoordinator.prepare(.claude)
+    expect(external.snapshot == nil, "external account change must not read old account cache")
+}
+
+func testCoordinatorKeepsStableCacheWhenCodexRotationCannotPersist() async {
+    let now = Date(timeIntervalSince1970: 2_100_006_100)
+    let authFiles = CodexCheckFailingFiles()
+    let expiring = codexCheckJWT(exp: now.addingTimeInterval(60).timeIntervalSince1970)
+    let fixture = makeCodexProviderFixture(token: expiring, now: now, files: authFiles)
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: codexUsageResponse(#"{"access_token":"memory-access","refresh_token":"memory-refresh"}"#))
+    await http.enqueue(response: codexUsageResponse(#"{"plan_type":"plus"}"#))
+    let provider = CodexUsageProvider(
+        authStore: fixture.0,
+        usageClient: CodexUsageClient(http: http),
+        now: { now }
+    )
+    let cacheFiles = FakeUsageFiles()
+    let cache = coordinatorCache(
+        files: cacheFiles,
+        path: "/tmp/agent-halo-unpersisted-rotation.json",
+        now: LockedBox(now)
+    )
+    try! await cache.store(coordinatorSnapshot(fixture.1.accountKey, at: now.addingTimeInterval(-600)))
+    let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now })
+
+    let refreshed = await coordinator.ensureFresh(.codex)
+    expect(refreshed.snapshot?.accountKey, fixture.1.accountKey, "failed writeback keeps Coordinator on the stable key")
+    let preparedAgain = await coordinator.prepare(.codex)
+    expect(preparedAgain.snapshot?.accountKey, fixture.1.accountKey, "next prepare from the old source finds the old-key cache")
+    expect(try! await cache.snapshot(for: fixture.1.accountKey) != nil, "old stable cache entry remains present")
+}
+
+func testCoordinatorRecoversRealCodexProviderAfterExternalLogin() async {
+    let date = Date(timeIntervalSince1970: 2_100_006_500)
+    let oldToken = codexCheckJWT(exp: date.addingTimeInterval(3_600).timeIntervalSince1970)
+    let fixture = makeCodexProviderFixture(token: oldToken, now: date)
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let http = GatedUsageHTTPClient(
+        outcomes: [
+            .response(codexUsageResponse(#"{"plan_type":"pro"}"#)),
+            .response(codexUsageResponse(#"{"plan_type":"plus"}"#)),
+        ],
+        gatedPath: "/backend-api/wham/usage"
+    )
+    let provider = CodexUsageProvider(
+        authStore: fixture.0,
+        usageClient: CodexUsageClient(http: http),
+        now: { date }
+    )
+    let now = LockedBox(date)
+    let cache = coordinatorCache(
+        files: FakeUsageFiles(),
+        path: "/tmp/agent-halo-coordinator-real-codex-external.json",
+        now: now
+    )
+    let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now.value })
+
+    let request = Task { await coordinator.ensureFresh(.codex) }
+    await waitForHTTPRequestCount(http, 1, "real Codex Provider did not enter gated Usage")
+    let externalToken = codexCheckJWT(exp: date.addingTimeInterval(7_200).timeIntervalSince1970)
+    try? files.writeAtomically(
+        codexExternalCredential(accessToken: externalToken, refreshToken: "new-codex-refresh"),
+        to: fixture.3,
+        preservingModeOf: fixture.3
+    )
+    guard case .oauth(let externalAccess) = fixture.0.resolveAccess() else {
+        fatalError("external Codex fixture should resolve")
+    }
+    await http.resume()
+    let recovered = await request.value
+
+    expect(recovered.snapshot?.accountKey, externalAccess.accountKey, "Coordinator should bind the external Codex account")
+    expect(recovered.snapshot?.planName, "Plus", "Coordinator should publish only the external Codex response")
+    expect(recovered.lastFailure == nil, "external Codex recovery should not publish an old-request failure")
+    expect(try! await cache.snapshot(for: fixture.1.accountKey) == nil, "old Codex request must have zero cache side effects")
+    expect(try! await cache.snapshot(for: externalAccess.accountKey)?.snapshot.planName, "Plus", "new Codex account should be cached independently")
+    let requests = await http.capturedRequests
+    expect(requests.count, 2, "Coordinator should re-prepare and refresh Codex in the same ensureFresh")
+    expect(requests[0].headers["authorization"], "Bearer \(oldToken)", "first Codex request uses old access")
+    expect(requests[1].headers["authorization"], "Bearer \(externalToken)", "recovery Codex request uses external access")
+}
+
+func testCoordinatorRecoversRealClaudeProviderAfterExternalLogin() async {
+    let date = Date(timeIntervalSince1970: 2_100_006_600)
+    let fixture = makeClaudeProviderFixture(
+        accessToken: "old-claude-access",
+        expiresAt: date.addingTimeInterval(3_600),
+        now: date
+    )
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let http = GatedUsageHTTPClient(
+        outcomes: [
+            .response(claudeUsageResponse(#"{"five_hour":{"utilization":91}}"#)),
+            .response(claudeUsageResponse(#"{"five_hour":{"utilization":8}}"#)),
+        ],
+        gatedPath: "/api/oauth/usage"
+    )
+    let provider = ClaudeUsageProvider(
+        authStore: fixture.0,
+        usageClient: ClaudeUsageClient(http: http),
+        now: { date }
+    )
+    let now = LockedBox(date)
+    let cache = coordinatorCache(
+        files: FakeUsageFiles(),
+        path: "/tmp/agent-halo-coordinator-real-claude-external.json",
+        now: now
+    )
+    let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now.value })
+
+    let request = Task { await coordinator.ensureFresh(.claude) }
+    await waitForHTTPRequestCount(http, 1, "real Claude Provider did not enter gated Usage")
+    try? files.writeAtomically(
+        claudeCheckCredential(
+            accessToken: "external-claude-access",
+            refreshToken: "external-claude-refresh",
+            expiresAtMilliseconds: date.addingTimeInterval(7_200).timeIntervalSince1970 * 1_000,
+            subscriptionType: "max",
+            rateLimitTier: "default_claude_max_5x"
+        ),
+        to: fixture.3,
+        preservingModeOf: fixture.3
+    )
+    guard case .oauth(let externalAccess) = fixture.0.resolveAccess() else {
+        fatalError("external Claude fixture should resolve")
+    }
+    await http.resume()
+    let recovered = await request.value
+
+    expect(recovered.snapshot?.accountKey, externalAccess.accountKey, "Coordinator should bind the external Claude account")
+    expect(recovered.snapshot?.planName, "Max 5x", "Coordinator should publish the external Claude plan")
+    expect(recovered.snapshot?.windows.first?.usedPercent, 8, "Coordinator must reject the old Claude response")
+    expect(recovered.lastFailure == nil, "external Claude recovery should not publish an old-request failure")
+    expect(try! await cache.snapshot(for: fixture.1.accountKey) == nil, "old Claude request must have zero cache side effects")
+    expect(try! await cache.snapshot(for: externalAccess.accountKey)?.snapshot.windows.first?.usedPercent, 8, "new Claude account should be cached independently")
+    let requests = await http.capturedRequests
+    expect(requests.count, 2, "Coordinator should re-prepare and refresh Claude in the same ensureFresh")
+    expect(requests[0].headers["authorization"], "Bearer old-claude-access", "first Claude request uses old access")
+    expect(requests[1].headers["authorization"], "Bearer external-claude-access", "recovery Claude request uses external access")
+}
+
+func testCoordinatorCancelAllAwaitsRefreshQuiescence() async {
+    let date = Date(timeIntervalSince1970: 2_100_006_700)
+    let now = LockedBox(date)
+    let key = AccountCacheKey(providerID: .codex, digest: "quiescent-refresh")
+    let provider = SequencedCoordinatorProvider(providerID: .codex)
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(key)))
+    await provider.enqueueRefresh(
+        UsageRefreshResult(
+            providerID: .codex,
+            snapshot: coordinatorSnapshot(key, at: date),
+            failure: nil
+        ),
+        gated: true
+    )
+    let cache = coordinatorCache(
+        files: FakeUsageFiles(),
+        path: "/tmp/agent-halo-coordinator-quiescent-refresh.json",
+        now: now
+    )
+    let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache, now: { now.value })
+    let request = Task { await coordinator.ensureFresh(.codex) }
+    await waitForRefreshCount(provider, 1, "quiescent refresh did not enter Provider")
+    expect(await provider.activeRefreshCount, 1, "gated refresh should be active before cancellation")
+
+    let didReturn = LockedBox(false)
+    let cancellation = Task {
+        await coordinator.cancelAll()
+        didReturn.withValue { $0 = true }
+    }
+    for _ in 0..<100 { await Task.yield() }
+    expect(!didReturn.value, "cancelAll must not return while tracked refresh work is still active")
+
+    await provider.resumeRefresh(call: 1)
+    await cancellation.value
+    _ = await request.value
+    expect(await provider.activeRefreshCount, 0, "cancelAll must return only after refresh exits")
+    expect(try! await cache.snapshot(for: key) == nil, "cancelled refresh must have zero cache side effects")
+}
+
+func testCoordinatorCancelAllAwaitsPrepareQuiescence() async {
+    let date = Date(timeIntervalSince1970: 2_100_006_800)
+    let now = LockedBox(date)
+    let key = AccountCacheKey(providerID: .claude, digest: "quiescent-prepare")
+    let provider = SequencedCoordinatorProvider(providerID: .claude)
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(key)), gated: true)
+    let coordinator = UsageMonitoringCoordinator(
+        providers: [provider],
+        cache: coordinatorCache(
+            files: FakeUsageFiles(),
+            path: "/tmp/agent-halo-coordinator-quiescent-prepare.json",
+            now: now
+        ),
+        now: { now.value }
+    )
+    let request = Task { await coordinator.ensureFresh(.claude) }
+    await waitForResolveCount(provider, 1, "quiescent prepare did not enter Provider")
+    expect(await provider.activeResolveCount, 1, "gated prepare should be active before cancellation")
+    request.cancel()
+
+    let didReturn = LockedBox(false)
+    let cancellation = Task {
+        await coordinator.cancelAll()
+        didReturn.withValue { $0 = true }
+    }
+    for _ in 0..<100 { await Task.yield() }
+    expect(!didReturn.value, "cancelAll must not return while tracked prepare work is still active")
+
+    await provider.resumeResolve(call: 1)
+    await cancellation.value
+    _ = await request.value
+    expect(await provider.activeResolveCount, 0, "cancelAll must return only after prepare exits")
+    expect(await provider.refreshCallCount, 0, "cancelled prepare must not start Provider refresh")
+}
+
+func testCoordinatorCancelAllTracksBlockedCacheSnapshotThroughCommitBoundary() async {
+    let key = AccountCacheKey(providerID: .codex, digest: "blocked-cache-prepare")
+    let provider = SequencedCoordinatorProvider(providerID: .codex)
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(key)))
+    let cache = BlockingSnapshotCache()
+    let coordinator = UsageMonitoringCoordinator(providers: [provider], cache: cache)
+    let request = Task { await coordinator.ensureFresh(.codex) }
+    for _ in 0..<10_000 {
+        if await cache.snapshotCallCount == 1 { break }
+        await Task.yield()
+    }
+    expect(await cache.snapshotCallCount, 1, "prepare must reach the blocking cache snapshot")
+
+    let didReturn = LockedBox(false)
+    let cancellation = Task {
+        await coordinator.cancelAll()
+        didReturn.withValue { $0 = true }
+    }
+    for _ in 0..<100 { await Task.yield() }
+    expect(!didReturn.value, "cancelAll must await a prepare blocked in cache.snapshot")
+
+    await cache.releaseSnapshot()
+    await cancellation.value
+    _ = await request.value
+    expect(await provider.refreshCallCount, 0, "late cancelled prepare must not start refresh")
+    expect(await cache.storeCallCount, 0, "late cancelled prepare must not write cache")
+    expect((await coordinator.state(for: .codex)).snapshot == nil, "late cancelled prepare must not commit")
+    await cache.releaseSnapshot()
+}
+
+func testCoordinatorCancellationAndCacheWriteFailure() async {
+    let date = Date(timeIntervalSince1970: 2_100_007_000)
+    let now = LockedBox(date)
+    let key = AccountCacheKey(providerID: .codex, digest: "cancel")
+    let provider = FakeUsageProvider(providerID: .codex, resolveResult: .oauth(coordinatorOAuthAccess(key)))
+    await provider.setRefreshResult(
+        UsageRefreshResult(providerID: .codex, snapshot: coordinatorSnapshot(key, at: date), failure: nil)
+    )
+    await provider.installGate()
+    let coordinator = UsageMonitoringCoordinator(
+        providers: [provider],
+        cache: coordinatorCache(files: FakeUsageFiles(), path: "/tmp/agent-halo-coordinator-cancel.json", now: now),
+        now: { now.value }
+    )
+    let request = Task { await coordinator.ensureFresh(.codex) }
+    await waitForRefreshCount(provider, 1, "cancellable refresh did not start")
+    await coordinator.cancelAll()
+    let cancelled = await request.value
+    expect(cancelled.isRefreshing == false, "cancelled refresh should return a non-refreshing state")
+    expect((await coordinator.state(for: .codex)).isRefreshing == false, "cancelAll should clear refreshing state")
+
+    let writeKey = AccountCacheKey(providerID: .claude, digest: "write-failure")
+    let writeProvider = FakeUsageProvider(
+        providerID: .claude,
+        resolveResult: .oauth(coordinatorOAuthAccess(writeKey))
+    )
+    await writeProvider.setRefreshResult(
+        UsageRefreshResult(
+            providerID: .claude,
+            snapshot: coordinatorSnapshot(writeKey, at: date),
+            failure: nil
+        )
+    )
+    let writeCoordinator = UsageMonitoringCoordinator(
+        providers: [writeProvider],
+        cache: coordinatorCache(
+            files: CoordinatorFailingWriteFiles(),
+            path: "/tmp/agent-halo-coordinator-write-failure.json",
+            now: now
+        ),
+        now: { now.value }
+    )
+    let memory = await writeCoordinator.ensureFresh(.claude)
+    expect(memory.status, .fresh(updatedAt: date), "cache write failure must not break fresh in-memory state")
+    _ = await writeCoordinator.ensureFresh(.claude)
+    expect(await writeProvider.refreshCallCount, 1, "failed disk write should retain current-run cache in memory")
+}
+
+func usageSnapshotPayloadPrivacyViolations(in payload: [String: Any]) -> [String] {
+    var violations: [String] = []
+    let forbiddenKeyNames: Set<String> = [
+        "accesstoken",
+        "refreshtoken",
+        "authorization",
+        "accountid",
+        "project",
+        "projecttitle",
+        "sessionid",
+        "sessiontitle",
+        "rawresponse",
+        "response",
+        "credential",
+        "credentials",
+        "apikey",
+    ]
+
+    func normalizedKey(_ key: String) -> String {
+        key.lowercased().filter { $0.isLetter || $0.isNumber }
+    }
+
+    func scanForbiddenKeys(_ value: Any, path: String) {
+        if let dictionary = value as? [String: Any] {
+            for (key, nestedValue) in dictionary {
+                if forbiddenKeyNames.contains(normalizedKey(key)) {
+                    violations.append("\(path).\(key): forbidden key")
+                }
+                scanForbiddenKeys(nestedValue, path: "\(path).\(key)")
+            }
+        } else if let array = value as? [Any] {
+            for (index, nestedValue) in array.enumerated() {
+                scanForbiddenKeys(nestedValue, path: "\(path)[\(index)]")
+            }
+        }
+    }
+
+    func validateKeys(
+        _ dictionary: [String: Any],
+        required: Set<String>,
+        allowed: Set<String>,
+        path: String
+    ) {
+        let actual = Set(dictionary.keys)
+        let missing = required.subtracting(actual).sorted()
+        let unexpected = actual.subtracting(allowed).sorted()
+        if !missing.isEmpty {
+            violations.append("\(path): missing keys \(missing)")
+        }
+        if !unexpected.isEmpty {
+            violations.append("\(path): unexpected keys \(unexpected)")
+        }
+    }
+
+    scanForbiddenKeys(payload, path: "payload")
+    validateKeys(
+        payload,
+        required: ["version", "entries"],
+        allowed: ["version", "entries"],
+        path: "payload"
+    )
+    if (payload["version"] as? NSNumber)?.intValue != 1 {
+        violations.append("payload.version: expected schema version 1")
+    }
+
+    guard let entries = payload["entries"] as? [Any] else {
+        violations.append("payload.entries: expected array")
+        return violations
+    }
+    for (entryIndex, rawEntry) in entries.enumerated() {
+        let entryPath = "payload.entries[\(entryIndex)]"
+        guard let entry = rawEntry as? [String: Any] else {
+            violations.append("\(entryPath): expected object")
+            continue
+        }
+        validateKeys(
+            entry,
+            required: ["snapshot", "lastAccessedAt"],
+            allowed: ["snapshot", "lastAccessedAt"],
+            path: entryPath
+        )
+        if !(entry["lastAccessedAt"] is NSNumber) {
+            violations.append("\(entryPath).lastAccessedAt: expected encoded date")
+        }
+
+        guard let snapshot = entry["snapshot"] as? [String: Any] else {
+            violations.append("\(entryPath).snapshot: expected object")
+            continue
+        }
+        let snapshotPath = "\(entryPath).snapshot"
+        validateKeys(
+            snapshot,
+            required: ["providerID", "accountKey", "windows", "refreshedAt"],
+            allowed: ["providerID", "accountKey", "planName", "windows", "refreshedAt"],
+            path: snapshotPath
+        )
+        if !(snapshot["providerID"] is String) {
+            violations.append("\(snapshotPath).providerID: expected string")
+        }
+        if let planName = snapshot["planName"], !(planName is String) {
+            violations.append("\(snapshotPath).planName: expected string")
+        }
+        if !(snapshot["refreshedAt"] is NSNumber) {
+            violations.append("\(snapshotPath).refreshedAt: expected encoded date")
+        }
+
+        if let accountKey = snapshot["accountKey"] as? [String: Any] {
+            let accountKeyPath = "\(snapshotPath).accountKey"
+            validateKeys(
+                accountKey,
+                required: ["providerID", "digest"],
+                allowed: ["providerID", "digest"],
+                path: accountKeyPath
+            )
+            if !(accountKey["providerID"] is String) {
+                violations.append("\(accountKeyPath).providerID: expected string")
+            }
+            if !(accountKey["digest"] is String) {
+                violations.append("\(accountKeyPath).digest: expected string")
+            }
+        } else {
+            violations.append("\(snapshotPath).accountKey: expected object")
+        }
+
+        guard let windows = snapshot["windows"] as? [Any] else {
+            violations.append("\(snapshotPath).windows: expected array")
+            continue
+        }
+        for (windowIndex, rawWindow) in windows.enumerated() {
+            let windowPath = "\(snapshotPath).windows[\(windowIndex)]"
+            guard let window = rawWindow as? [String: Any] else {
+                violations.append("\(windowPath): expected object")
+                continue
+            }
+            validateKeys(
+                window,
+                required: ["kind", "usedPercent", "duration"],
+                allowed: ["kind", "usedPercent", "resetsAt", "duration"],
+                path: windowPath
+            )
+            if !(window["kind"] is String) {
+                violations.append("\(windowPath).kind: expected string")
+            }
+            if !(window["usedPercent"] is NSNumber) {
+                violations.append("\(windowPath).usedPercent: expected number")
+            }
+            if !(window["duration"] is NSNumber) {
+                violations.append("\(windowPath).duration: expected number")
+            }
+            if let resetsAt = window["resetsAt"], !(resetsAt is NSNumber) {
+                violations.append("\(windowPath).resetsAt: expected encoded date")
+            }
+        }
+    }
+    return violations
+}
+
+func testUsageSnapshotCacheRoundTripIsolationAndPrivacy() async throws {
+    let cacheURL = URL(fileURLWithPath: "/tmp/agent-halo-cache-home/.agent-halo/usage-snapshots-v1.json")
+    let files = FakeUsageFiles()
+    let now = Date(timeIntervalSince1970: 10_000)
+    let codexFirst = AccountCacheKey(providerID: .codex, digest: UsageDigest.sha256("codex-first"))
+    let codexSecond = AccountCacheKey(providerID: .codex, digest: UsageDigest.sha256("codex-second"))
+    let claude = AccountCacheKey(providerID: .claude, digest: UsageDigest.sha256("claude-first"))
+    let snapshots = [
+        cacheCheckSnapshot(key: codexFirst, refreshedAt: now, planName: "Plus"),
+        cacheCheckSnapshot(key: codexSecond, refreshedAt: now, planName: "Team"),
+        cacheCheckSnapshot(key: claude, refreshedAt: now, planName: "Max 5x"),
+    ]
+    let cache = UsageSnapshotCache(cacheURL: cacheURL, files: files, now: { now })
+
+    // This compile-time store shape deliberately accepts successful snapshots only;
+    // UsageMonitorState failures and raw provider responses cannot enter the cache API.
+    let storeSuccessfulSnapshotOnly: @Sendable (UsageSnapshot) async throws -> Void = { snapshot in
+        try await cache.store(snapshot)
+    }
+    for snapshot in snapshots {
+        try await storeSuccessfulSnapshotOnly(snapshot)
+    }
+
+    let current = try await cache.snapshot(for: codexFirst)
+    expect(current?.snapshot, snapshots[0], "current-run cache should return the exact stored snapshot")
+    expect(current?.isFromCurrentRun, true, "a successful store should be marked current-run")
+
+    guard let write = files.capturedWrites().last else {
+        fatalError("snapshot cache should write a payload")
+    }
+    expect(write.path, cacheURL.path, "snapshot cache should use the configured v1 path")
+    guard let object = try JSONSerialization.jsonObject(with: write.data) as? [String: Any] else {
+        fatalError("snapshot cache payload should be a JSON object")
+    }
+    expect(object["version"] as? Int, 1, "snapshot cache payload should use schema version 1")
+    expect((object["entries"] as? [Any])?.count, 3, "snapshot cache should persist all isolated entries")
+    expect(
+        usageSnapshotPayloadPrivacyViolations(in: object),
+        [],
+        "snapshot cache payload must match the recursive privacy field whitelist"
+    )
+
+    // Prove the test gate is not vacuous: adding a credential-shaped field to
+    // an otherwise valid encoded payload must itself trigger a violation.
+    var mutatedObject = object
+    if var entries = mutatedObject["entries"] as? [[String: Any]],
+       var firstEntry = entries.first,
+       var encodedSnapshot = firstEntry["snapshot"] as? [String: Any] {
+        encodedSnapshot["accessToken"] = "synthetic-access-token"
+        firstEntry["snapshot"] = encodedSnapshot
+        entries[0] = firstEntry
+        mutatedObject["entries"] = entries
+    } else {
+        fatalError("snapshot cache payload should expose the expected nested shape")
+    }
+    expect(
+        !usageSnapshotPayloadPrivacyViolations(in: mutatedObject).isEmpty,
+        "privacy whitelist must reject an injected credential field"
+    )
+
+    let diskCache = UsageSnapshotCache(cacheURL: cacheURL, files: files, now: { now })
+    try await diskCache.loadIfNeeded()
+    expect(
+        try await diskCache.snapshot(for: codexFirst)?.snapshot,
+        snapshots[0],
+        "first Codex account should round-trip independently"
+    )
+    expect(
+        try await diskCache.snapshot(for: codexSecond)?.snapshot,
+        snapshots[1],
+        "second Codex account should stay isolated"
+    )
+    let diskClaude = try await diskCache.snapshot(for: claude)
+    expect(diskClaude?.snapshot, snapshots[2], "Claude and Codex keys should stay isolated")
+    expect(diskClaude?.isFromCurrentRun, false, "disk-loaded snapshots should not be marked current-run")
+}
+
+func testUsageSnapshotCacheMigrationMovesOnlyExactKey() async throws {
+    let cacheURL = URL(fileURLWithPath: "/tmp/agent-halo-cache-migration.json")
+    let files = FakeUsageFiles()
+    let now = Date(timeIntervalSince1970: 20_000)
+    let oldKey = AccountCacheKey(providerID: .codex, digest: "old-digest")
+    let newKey = AccountCacheKey(providerID: .codex, digest: "new-digest")
+    let untouchedKey = AccountCacheKey(providerID: .codex, digest: "untouched-digest")
+    let claudeKey = AccountCacheKey(providerID: .claude, digest: "old-digest")
+    let cache = UsageSnapshotCache(cacheURL: cacheURL, files: files, now: { now })
+    let oldSnapshot = cacheCheckSnapshot(key: oldKey, refreshedAt: now)
+    let untouchedSnapshot = cacheCheckSnapshot(key: untouchedKey, refreshedAt: now)
+    let claudeSnapshot = cacheCheckSnapshot(key: claudeKey, refreshedAt: now)
+    try await cache.store(oldSnapshot)
+    try await cache.store(untouchedSnapshot)
+    try await cache.store(claudeSnapshot)
+
+    try await cache.migrate(from: oldKey, to: newKey)
+
+    expect(try await cache.snapshot(for: oldKey) == nil, "migration should remove the exact old key")
+    let migrated = try await cache.snapshot(for: newKey)
+    expect(migrated?.snapshot.accountKey, newKey, "migration should rewrite the snapshot account key")
+    expect(migrated?.snapshot.providerID, .codex, "migration should preserve the provider")
+    expect(migrated?.isFromCurrentRun, true, "migration should preserve current-run membership")
+    expect(
+        try await cache.snapshot(for: untouchedKey)?.snapshot,
+        untouchedSnapshot,
+        "migration should not move a different account key"
+    )
+    expect(
+        try await cache.snapshot(for: claudeKey)?.snapshot,
+        claudeSnapshot,
+        "migration should not move another provider's matching digest"
+    )
+}
+
+func testUsageSnapshotCachePrunesLeastRecentlyUsedPerProvider() async throws {
+    let cacheURL = URL(fileURLWithPath: "/tmp/agent-halo-cache-lru.json")
+    let files = FakeUsageFiles()
+    let clock = LockedBox(Date(timeIntervalSince1970: 30_000))
+    let cache = UsageSnapshotCache(cacheURL: cacheURL, files: files, now: { clock.value })
+    let keys = (0..<4).map { AccountCacheKey(providerID: .codex, digest: "codex-\($0)") }
+    let claudeKey = AccountCacheKey(providerID: .claude, digest: "claude-0")
+
+    for index in 0..<3 {
+        clock.withValue { $0 = Date(timeIntervalSince1970: 30_000 + Double(index)) }
+        try await cache.store(cacheCheckSnapshot(key: keys[index], refreshedAt: clock.value))
+    }
+    try await cache.store(cacheCheckSnapshot(key: claudeKey, refreshedAt: clock.value))
+
+    // Touch the oldest Codex entry. The second entry is now the LRU candidate.
+    clock.withValue { $0 = Date(timeIntervalSince1970: 30_010) }
+    _ = try await cache.snapshot(for: keys[0])
+    clock.withValue { $0 = Date(timeIntervalSince1970: 30_011) }
+    try await cache.store(cacheCheckSnapshot(key: keys[3], refreshedAt: clock.value))
+
+    expect(try await cache.snapshot(for: keys[0]) != nil, "recently accessed account should survive pruning")
+    expect(try await cache.snapshot(for: keys[1]) == nil, "least recently used account should be pruned")
+    expect(try await cache.snapshot(for: keys[2]) != nil, "newer account should survive pruning")
+    expect(try await cache.snapshot(for: keys[3]) != nil, "new account should be retained")
+    expect(
+        try await cache.snapshot(for: claudeKey) != nil,
+        "per-provider limit should not prune another provider"
+    )
+}
+
+func testUsageSnapshotCacheRemovesEntriesOlderThanThirtyDays() async throws {
+    let cacheURL = URL(fileURLWithPath: "/tmp/agent-halo-cache-expiry.json")
+    let files = FakeUsageFiles()
+    let clock = LockedBox(Date(timeIntervalSince1970: 40_000))
+    let oldKey = AccountCacheKey(providerID: .codex, digest: "old")
+    let cache = UsageSnapshotCache(cacheURL: cacheURL, files: files, now: { clock.value })
+    try await cache.store(cacheCheckSnapshot(key: oldKey, refreshedAt: clock.value))
+
+    clock.withValue { $0 = $0.addingTimeInterval(30 * 24 * 60 * 60 + 1) }
+    let reloaded = UsageSnapshotCache(cacheURL: cacheURL, files: files, now: { clock.value })
+    try await reloaded.loadIfNeeded()
+    expect(try await reloaded.snapshot(for: oldKey) == nil, "entries older than 30 days should be removed")
+    expect(files.capturedWrites().count, 2, "expiry pruning should persist the cleaned payload")
+}
+
+func testUsageSnapshotCacheIgnoresCorruptAndUnknownPayloads() async throws {
+    let now = Date(timeIntervalSince1970: 50_000)
+    let key = AccountCacheKey(providerID: .codex, digest: "replacement")
+
+    let corruptURL = URL(fileURLWithPath: "/tmp/agent-halo-cache-corrupt.json")
+    let corruptFiles = FakeUsageFiles(contents: [corruptURL.path: Data("not-json".utf8)])
+    let corruptCache = UsageSnapshotCache(cacheURL: corruptURL, files: corruptFiles, now: { now })
+    try await corruptCache.loadIfNeeded()
+    expect(try await corruptCache.snapshot(for: key) == nil, "corrupt payload should be ignored safely")
+    try await corruptCache.store(cacheCheckSnapshot(key: key, refreshedAt: now))
+    expect(try await corruptCache.snapshot(for: key) != nil, "cache should recover after corrupt payload")
+
+    let unknownURL = URL(fileURLWithPath: "/tmp/agent-halo-cache-unknown.json")
+    let unknownPayload = try JSONSerialization.data(withJSONObject: ["version": 2, "entries": []])
+    let unknownFiles = FakeUsageFiles(contents: [unknownURL.path: unknownPayload])
+    let unknownCache = UsageSnapshotCache(cacheURL: unknownURL, files: unknownFiles, now: { now })
+    try await unknownCache.loadIfNeeded()
+    expect(try await unknownCache.snapshot(for: key) == nil, "unknown schema version should be ignored safely")
+}
+
+func testUsageSnapshotCacheRetriesTransientReadFailure() async throws {
+    let cacheURL = URL(fileURLWithPath: "/tmp/agent-halo-cache-read-retry.json")
+    let now = Date(timeIntervalSince1970: 55_000)
+    let firstKey = AccountCacheKey(providerID: .codex, digest: "existing-codex")
+    let secondKey = AccountCacheKey(providerID: .claude, digest: "existing-claude")
+    let newKey = AccountCacheKey(providerID: .codex, digest: "new-codex")
+
+    let seedFiles = FakeUsageFiles()
+    let seedCache = UsageSnapshotCache(cacheURL: cacheURL, files: seedFiles, now: { now })
+    try await seedCache.store(cacheCheckSnapshot(key: firstKey, refreshedAt: now))
+    try await seedCache.store(cacheCheckSnapshot(key: secondKey, refreshedAt: now))
+    guard let originalPayload = seedFiles.capturedWrites().last?.data else {
+        fatalError("read retry check requires a seeded cache payload")
+    }
+
+    let files = FakeUsageFiles(
+        contents: [cacheURL.path: originalPayload],
+        readFailures: 1
+    )
+    let cache = UsageSnapshotCache(cacheURL: cacheURL, files: files, now: { now })
+    var sawTransientReadFailure = false
+    do {
+        try await cache.loadIfNeeded()
+    } catch FakeUsageFilesError.transientRead {
+        sawTransientReadFailure = true
+    }
+    expect(sawTransientReadFailure, "first cache read should expose the transient error")
+
+    try await cache.loadIfNeeded()
+    expect(
+        try await cache.snapshot(for: firstKey)?.snapshot.accountKey,
+        firstKey,
+        "second load should recover the existing Codex entry"
+    )
+    expect(
+        try await cache.snapshot(for: secondKey)?.snapshot.accountKey,
+        secondKey,
+        "second load should recover the existing Claude entry"
+    )
+
+    try await cache.store(cacheCheckSnapshot(key: newKey, refreshedAt: now))
+    let reloaded = UsageSnapshotCache(cacheURL: cacheURL, files: files, now: { now })
+    try await reloaded.loadIfNeeded()
+    expect(try await reloaded.snapshot(for: firstKey) != nil, "retry must prevent overwriting first old entry")
+    expect(try await reloaded.snapshot(for: secondKey) != nil, "retry must prevent overwriting second old entry")
+    expect(try await reloaded.snapshot(for: newKey) != nil, "new entry should persist after recovered load")
+}
+
+func testUsageSnapshotCacheCreatesPrivateParentAndFile() async throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-snapshot-cache-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let cacheDirectory = root.appendingPathComponent(".agent-halo", isDirectory: true)
+    let cacheURL = cacheDirectory.appendingPathComponent("usage-snapshots-v1.json")
+    let now = Date(timeIntervalSince1970: 60_000)
+    let key = AccountCacheKey(providerID: .codex, digest: "mode-check")
+    let cache = UsageSnapshotCache(cacheURL: cacheURL, files: FilesystemUsageFiles(), now: { now })
+
+    try await cache.store(cacheCheckSnapshot(key: key, refreshedAt: now))
+
+    let directoryAttributes = try FileManager.default.attributesOfItem(atPath: cacheDirectory.path)
+    expect(
+        (directoryAttributes[.posixPermissions] as? NSNumber)?.uint16Value == 0o700,
+        "new snapshot cache directory should use mode 0700"
+    )
+    let attributes = try FileManager.default.attributesOfItem(atPath: cacheURL.path)
+    expect(
+        (attributes[.posixPermissions] as? NSNumber)?.uint16Value == 0o600,
+        "new snapshot cache file should use mode 0600"
+    )
+}
+
+// MARK: - Codex auth checks
+
+/// Build a synthetic JWT with a controlled `exp` claim. The signature segment
+/// is base64url-encoded but not cryptographically signed — only the payload
+/// `exp` is exercised. Never uses the developer machine's real auth file.
+func codexCheckJWT(exp: TimeInterval) -> String {
+    let header = #"{"alg":"HS256","typ":"JWT"}"#
+    let payload = #"{"exp":\#(exp)}"#
+    func base64URLEncode(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+    let headerB64 = base64URLEncode(Data(header.utf8))
+    let payloadB64 = base64URLEncode(Data(payload.utf8))
+    return "\(headerB64).\(payloadB64).sig"
+}
+
+/// Build JSON data for a Codex auth.json-shaped object from a dictionary.
+func codexCheckJSON(_ object: [String: Any]) -> Data {
+    try! JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+}
+
+func codexCheckAuthPath(home: String) -> String {
+    "\(home)/.codex/auth.json"
+}
+
+func codexCheckConfigPath(home: String) -> String {
+    "\(home)/.config/codex/auth.json"
+}
+
+func runCodexAuthChecks() async {
+    testCodexHomeWinsOverDefaultPaths()
+    testCodexDiscoveryOrderWithoutCodexHome()
+    testCodexOAuthWinsOverAPIKey()
+    testCodexAPIKeyOnlyAndNoCredentialReturnAPIKey()
+    testCodexAccountKeyDigest()
+    testCodexNeedsRefresh()
+    testCodexNeedsRefreshUsesStoredLastRefresh()
+    testCodexFileRotationPreservesCustomKeysAndMode()
+    testCodexKeychainRotationWritesToCodexAuth()
+    testCodexPersistRefusesOnVersionMismatch()
+    testCodexSourceVersionHashesRawDataBytes()
+}
+
+/// Case 1: `CODEX_HOME/auth.json` wins over default paths.
+func testCodexHomeWinsOverDefaultPaths() {
+    let codexHome = "/tmp/agent-halo-codex-home-\(UUID().uuidString)"
+    let home = "/tmp/agent-halo-fake-home-\(UUID().uuidString)"
+    let env = FakeUsageEnvironment(["CODEX_HOME": codexHome, "HOME": home])
+    let files = FakeUsageFiles(contents: [
+        "\(codexHome)/auth.json": codexCheckJSON([
+            "tokens": ["access_token": "codex-home-token", "refresh_token": "rt-home"]
+        ]),
+        codexCheckConfigPath(home: home): codexCheckJSON([
+            "tokens": ["access_token": "config-token"]
+        ]),
+        codexCheckAuthPath(home: home): codexCheckJSON([
+            "tokens": ["access_token": "codex-token"]
+        ]),
+    ])
+    let store = CodexAuthStore(environment: env, files: files, keychain: FakeUsageKeychain())
+
+    guard case .oauth(let access) = store.resolveAccess() else {
+        fatalError("CODEX_HOME should resolve to OAuth")
+    }
+    expect(access.accessToken, "codex-home-token", "CODEX_HOME auth.json should win over default paths")
+    if case .file(let path) = access.source {
+        expect(path, "\(codexHome)/auth.json", "source should point to CODEX_HOME/auth.json")
+    } else {
+        fatalError("CODEX_HOME source should be a file")
+    }
+}
+
+/// Case 2: Without `CODEX_HOME`, `.config/codex`, then `.codex`, then Keychain.
+func testCodexDiscoveryOrderWithoutCodexHome() {
+    let home = "/tmp/agent-halo-order-\(UUID().uuidString)"
+    let env = FakeUsageEnvironment(["HOME": home])
+
+    // .config/codex wins over .codex.
+    let filesConfig = FakeUsageFiles(contents: [
+        codexCheckConfigPath(home: home): codexCheckJSON(["tokens": ["access_token": "config-token"]]),
+        codexCheckAuthPath(home: home): codexCheckJSON(["tokens": ["access_token": "codex-token"]]),
+    ])
+    let storeConfig = CodexAuthStore(environment: env, files: filesConfig, keychain: FakeUsageKeychain())
+    guard case .oauth(let configAccess) = storeConfig.resolveAccess() else {
+        fatalError(".config/codex should resolve to OAuth")
+    }
+    expect(configAccess.accessToken, "config-token", ".config/codex/auth.json should win over .codex")
+
+    // Only .codex/auth.json exists.
+    let filesCodex = FakeUsageFiles(contents: [
+        codexCheckAuthPath(home: home): codexCheckJSON(["tokens": ["access_token": "codex-only-token"]]),
+    ])
+    let storeCodex = CodexAuthStore(environment: env, files: filesCodex, keychain: FakeUsageKeychain())
+    guard case .oauth(let codexAccess) = storeCodex.resolveAccess() else {
+        fatalError(".codex should resolve to OAuth")
+    }
+    expect(codexAccess.accessToken, "codex-only-token", ".codex/auth.json should be found when .config absent")
+
+    // Keychain fallback.
+    let keychain = FakeUsageKeychain()
+    try? keychain.write(
+        service: CodexAuthStore.keychainService,
+        account: "codex-account",
+        value: String(data: codexCheckJSON(["tokens": ["access_token": "key-token"]]), encoding: .utf8)!
+    )
+    let storeKey = CodexAuthStore(environment: env, files: FakeUsageFiles(), keychain: keychain)
+    guard case .oauth(let keyAccess) = storeKey.resolveAccess() else {
+        fatalError("keychain should resolve to OAuth")
+    }
+    expect(keyAccess.accessToken, "key-token", "keychain should be the last candidate")
+    if case .keychain(let service, let account) = keyAccess.source {
+        expect(service, CodexAuthStore.keychainService, "keychain service is Codex Auth")
+        expect(account, "codex-account", "keychain source keeps the discovered exact account")
+    } else {
+        fatalError("keychain source should be a keychain")
+    }
+}
+
+/// Case 3: Any nonempty `tokens.access_token` returns OAuth even when
+/// `OPENAI_API_KEY` is also present. Also verifies an earlier API-key-only file
+/// does not shadow a later OAuth login.
+func testCodexOAuthWinsOverAPIKey() {
+    let home = "/tmp/agent-halo-oauth-priority-\(UUID().uuidString)"
+    let env = FakeUsageEnvironment(["HOME": home])
+
+    // Same file has both OPENAI_API_KEY and tokens.access_token.
+    let filesSame = FakeUsageFiles(contents: [
+        codexCheckAuthPath(home: home): codexCheckJSON([
+            "OPENAI_API_KEY": "sk-keep",
+            "tokens": ["access_token": "oauth-token", "refresh_token": "rt"],
+        ]),
+    ])
+    let storeSame = CodexAuthStore(environment: env, files: filesSame, keychain: FakeUsageKeychain())
+    guard case .oauth(let access) = storeSame.resolveAccess() else {
+        fatalError("OAuth should win when both OAuth and API key are present")
+    }
+    expect(access.accessToken, "oauth-token", "OAuth token wins over OPENAI_API_KEY")
+
+    // Earlier file has only OPENAI_API_KEY; later file has OAuth tokens. The
+    // later OAuth login must not be shadowed by the earlier API-key-only file.
+    let filesShadow = FakeUsageFiles(contents: [
+        codexCheckConfigPath(home: home): codexCheckJSON(["OPENAI_API_KEY": "sk-shadow"]),
+        codexCheckAuthPath(home: home): codexCheckJSON(["tokens": ["access_token": "later-oauth"]]),
+    ])
+    let storeShadow = CodexAuthStore(environment: env, files: filesShadow, keychain: FakeUsageKeychain())
+    guard case .oauth(let shadowAccess) = storeShadow.resolveAccess() else {
+        fatalError("later OAuth login should not be shadowed by earlier API-key-only file")
+    }
+    expect(shadowAccess.accessToken, "later-oauth", "later OAuth file should win over earlier API-key-only file")
+}
+
+/// Case 4: API-key-only and no-recognized-credential cases both return API key.
+func testCodexAPIKeyOnlyAndNoCredentialReturnAPIKey() {
+    let home = "/tmp/agent-halo-apikey-\(UUID().uuidString)"
+    let env = FakeUsageEnvironment(["HOME": home])
+
+    // API-key-only file.
+    let filesAPIKey = FakeUsageFiles(contents: [
+        codexCheckAuthPath(home: home): codexCheckJSON(["OPENAI_API_KEY": "sk-only"]),
+    ])
+    let storeAPIKey = CodexAuthStore(environment: env, files: filesAPIKey, keychain: FakeUsageKeychain())
+    guard case .apiKey = storeAPIKey.resolveAccess() else {
+        fatalError("API-key-only file should resolve to API key mode")
+    }
+
+    // No recognized credential at all.
+    let storeNone = CodexAuthStore(environment: env, files: FakeUsageFiles(), keychain: FakeUsageKeychain())
+    guard case .apiKey = storeNone.resolveAccess() else {
+        fatalError("no credential should safely degrade to API key mode")
+    }
+}
+
+/// Case 5: `account_id` produces `SHA256(accountID)`; without it, source
+/// identity plus refresh/access-token digest is used.
+func testCodexAccountKeyDigest() {
+    let home = "/tmp/agent-halo-acctkey-\(UUID().uuidString)"
+    let env = FakeUsageEnvironment(["HOME": home])
+
+    // With account_id → SHA256(accountID).
+    let path = codexCheckAuthPath(home: home)
+    let filesWithID = FakeUsageFiles(contents: [
+        path: codexCheckJSON(["tokens": ["access_token": "tok", "account_id": "acct-123"]]),
+    ])
+    let storeWithID = CodexAuthStore(environment: env, files: filesWithID, keychain: FakeUsageKeychain())
+    guard case .oauth(let accessWithID) = storeWithID.resolveAccess() else {
+        fatalError("account_id case should resolve to OAuth")
+    }
+    expect(accessWithID.accountKey.digest, UsageDigest.sha256("acct-123"), "account_id digest is SHA256(accountID)")
+    expect(accessWithID.accountID, "acct-123", "accountID is exposed")
+
+    // Without account_id → source identity + refresh + access digest.
+    let filesNoID = FakeUsageFiles(contents: [
+        path: codexCheckJSON(["tokens": ["access_token": "tok", "refresh_token": "rt"]]),
+    ])
+    let storeNoID = CodexAuthStore(environment: env, files: filesNoID, keychain: FakeUsageKeychain())
+    guard case .oauth(let accessNoID) = storeNoID.resolveAccess() else {
+        fatalError("no-account_id case should resolve to OAuth")
+    }
+    let expectedDigest = UsageDigest.sha256("\(path)|rt|tok")
+    expect(accessNoID.accountKey.digest, expectedDigest, "fallback digest uses source identity plus refresh/access-token")
+    expect(accessNoID.accountID == nil, true, "accountID is nil when absent")
+}
+
+/// Case 6: JWT `exp` within 5 minutes requires refresh; unreadable JWT falls
+/// back to `last_refresh > 8 days`; a new login without either does not refresh.
+func testCodexNeedsRefresh() {
+    let now = Date(timeIntervalSince1970: 1_000_000)
+    let home = "/tmp/agent-halo-refresh-\(UUID().uuidString)"
+    let env = FakeUsageEnvironment(["HOME": home])
+    let store = CodexAuthStore(environment: env, files: FakeUsageFiles(), keychain: FakeUsageKeychain(), now: { now })
+
+    // JWT exp within 5 minutes → needs refresh. Also verify resolveAccess
+    // parsed exp into OAuthAccess.expiresAt.
+    let soonExp = now.addingTimeInterval(3 * 60).timeIntervalSince1970
+    let soonJWT = codexCheckJWT(exp: soonExp)
+    let filesSoon = FakeUsageFiles(contents: [
+        codexCheckAuthPath(home: home): codexCheckJSON(["tokens": ["access_token": soonJWT]]),
+    ])
+    let storeSoon = CodexAuthStore(environment: env, files: filesSoon, keychain: FakeUsageKeychain(), now: { now })
+    guard case .oauth(let soonAccess) = storeSoon.resolveAccess() else {
+        fatalError("soon-exp JWT should resolve to OAuth")
+    }
+    expect(soonAccess.expiresAt != nil, true, "resolveAccess should parse JWT exp into expiresAt")
+    expect(
+        soonAccess.expiresAt?.timeIntervalSince1970 ?? 0,
+        soonExp,
+        "expiresAt should match JWT exp"
+    )
+    expect(store.needsRefresh(soonAccess, lastRefresh: nil), true, "exp within 5 minutes needs refresh")
+
+    // JWT exp beyond 5 minutes → no refresh.
+    let farExp = now.addingTimeInterval(3600).timeIntervalSince1970
+    let farJWT = codexCheckJWT(exp: farExp)
+    let filesFar = FakeUsageFiles(contents: [
+        codexCheckAuthPath(home: home): codexCheckJSON(["tokens": ["access_token": farJWT]]),
+    ])
+    let storeFar = CodexAuthStore(environment: env, files: filesFar, keychain: FakeUsageKeychain(), now: { now })
+    guard case .oauth(let farAccess) = storeFar.resolveAccess() else {
+        fatalError("far-exp JWT should resolve to OAuth")
+    }
+    expect(store.needsRefresh(farAccess, lastRefresh: nil), false, "exp beyond 5 minutes does not refresh")
+
+    // Unreadable JWT → expiresAt is nil. Falls back to last_refresh.
+    let filesBad = FakeUsageFiles(contents: [
+        codexCheckAuthPath(home: home): codexCheckJSON(["tokens": ["access_token": "not-a-jwt"]]),
+    ])
+    let storeBad = CodexAuthStore(environment: env, files: filesBad, keychain: FakeUsageKeychain(), now: { now })
+    guard case .oauth(let badAccess) = storeBad.resolveAccess() else {
+        fatalError("unreadable JWT should still resolve to OAuth")
+    }
+    expect(badAccess.expiresAt == nil, true, "unreadable JWT should not produce expiresAt")
+
+    let eightDays: TimeInterval = 8 * 24 * 60 * 60
+    expect(
+        store.needsRefresh(badAccess, lastRefresh: now.addingTimeInterval(-eightDays - 60)),
+        true,
+        "unreadable JWT with last_refresh older than 8 days needs refresh"
+    )
+    expect(
+        store.needsRefresh(badAccess, lastRefresh: now.addingTimeInterval(-eightDays + 60)),
+        false,
+        "unreadable JWT with last_refresh newer than 8 days does not refresh"
+    )
+    // A new login with no exp and no last_refresh does not refresh.
+    expect(
+        store.needsRefresh(badAccess, lastRefresh: nil),
+        false,
+        "new login without exp or last_refresh does not refresh"
+    )
+}
+
+/// The convenience path used by the provider must parse `last_refresh` from
+/// the exact stored JSON instead of requiring the caller to reconstruct it.
+func testCodexNeedsRefreshUsesStoredLastRefresh() {
+    let now = Date(timeIntervalSince1970: 2_000_000)
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+    func storedResult(lastRefresh: Date?) -> Bool {
+        let home = "/tmp/agent-halo-stored-refresh-\(UUID().uuidString)"
+        let path = codexCheckAuthPath(home: home)
+        var object: [String: Any] = ["tokens": ["access_token": "not-a-jwt"]]
+        if let lastRefresh {
+            object["last_refresh"] = formatter.string(from: lastRefresh)
+        }
+        let store = CodexAuthStore(
+            environment: FakeUsageEnvironment(["HOME": home]),
+            files: FakeUsageFiles(contents: [path: codexCheckJSON(object)]),
+            keychain: FakeUsageKeychain(),
+            now: { now }
+        )
+        guard case .oauth(let access) = store.resolveAccess() else {
+            fatalError("stored last_refresh case should resolve to OAuth")
+        }
+        return store.needsRefresh(access)
+    }
+
+    let eightDays: TimeInterval = 8 * 24 * 60 * 60
+    expect(
+        storedResult(lastRefresh: now.addingTimeInterval(-eightDays - 60)),
+        true,
+        "stored last_refresh older than 8 days requires refresh"
+    )
+    expect(
+        storedResult(lastRefresh: now.addingTimeInterval(-eightDays + 60)),
+        false,
+        "stored last_refresh newer than 8 days does not require refresh"
+    )
+    expect(
+        storedResult(lastRefresh: nil),
+        false,
+        "stored login without exp or last_refresh does not require refresh"
+    )
+}
+
+/// Case 7: File rotation preserves a custom top-level key, a custom nested
+/// token key and the original mode.
+func testCodexFileRotationPreservesCustomKeysAndMode() {
+    let home = "/tmp/agent-halo-rotate-file-\(UUID().uuidString)"
+    let env = FakeUsageEnvironment(["HOME": home])
+    let path = codexCheckAuthPath(home: home)
+    let files = FakeUsageFiles(
+        contents: [
+            path: codexCheckJSON([
+                "OPENAI_API_KEY": "sk-keep",
+                "custom_top": "keep",
+                "tokens": [
+                    "access_token": "old-token",
+                    "refresh_token": "old-rt",
+                    "custom_nested": "keep",
+                ],
+            ])
+        ],
+        modes: [path: 0o644]
+    )
+    let store = CodexAuthStore(environment: env, files: files, keychain: FakeUsageKeychain())
+    guard case .oauth(let access) = store.resolveAccess() else {
+        fatalError("file rotation should start from OAuth")
+    }
+    expect(access.accessToken, "old-token", "initial token before rotation")
+
+    let refreshedAt = Date(timeIntervalSince1970: 2_000_000)
+    let rotation = CodexTokenRotation(
+        accessToken: "new-token",
+        refreshToken: "new-rt",
+        idToken: nil,
+        refreshedAt: refreshedAt
+    )
+    let result: OAuthAccess?
+    do {
+        result = try store.persist(rotation: rotation, replacing: access)
+    } catch {
+        fatalError("persist should not throw: \(error)")
+    }
+    guard let rotated = result else {
+        fatalError("persist should return a rotated OAuthAccess")
+    }
+    expect(rotated.accessToken, "new-token", "rotated access token")
+    expect(rotated.refreshToken, "new-rt", "rotated refresh token")
+    expect(rotated.sourceVersion != access.sourceVersion, true, "rotated source version should change")
+
+    let writes = files.capturedWrites()
+    expect(writes.count, 1, "exactly one file write")
+    expect(writes[0].path, path, "write path")
+    expect(writes[0].preservingModeOf, path, "write should preserve mode of original path")
+    expect(files.storedMode(for: path), 0o644, "original mode preserved")
+
+    guard let written = try? JSONSerialization.jsonObject(with: writes[0].data) as? [String: Any] else {
+        fatalError("written data should be a JSON object")
+    }
+    expect(written["custom_top"] as? String, "keep", "custom top-level key preserved")
+    expect(written["OPENAI_API_KEY"] as? String, "sk-keep", "OPENAI_API_KEY preserved")
+    let tokens = written["tokens"] as? [String: Any]
+    expect(tokens?["access_token"] as? String, "new-token", "access token rotated")
+    expect(tokens?["refresh_token"] as? String, "new-rt", "refresh token rotated")
+    expect(tokens?["custom_nested"] as? String, "keep", "custom nested token key preserved")
+    let lastRefresh = written["last_refresh"] as? String
+    expect(lastRefresh != nil, "last_refresh should be set")
+    // last_refresh should parse back to the refreshedAt date.
+    let parser = ISO8601DateFormatter()
+    parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    expect(parser.date(from: lastRefresh ?? ""), refreshedAt, "last_refresh should round-trip to refreshedAt")
+}
+
+/// Case 8: Keychain rotation writes to service `Codex Auth` with the same
+/// exact discovered account.
+func testCodexKeychainRotationWritesToCodexAuth() {
+    let env = FakeUsageEnvironment()
+    let keychain = FakeUsageKeychain()
+    let kcJSON = String(data: codexCheckJSON([
+        "tokens": ["access_token": "old-token", "account_id": "acct-1", "refresh_token": "old-rt"],
+    ]), encoding: .utf8)!
+    try? keychain.write(service: CodexAuthStore.keychainService, account: "codex-account", value: kcJSON)
+
+    let store = CodexAuthStore(environment: env, files: FakeUsageFiles(), keychain: keychain)
+    guard case .oauth(let access) = store.resolveAccess() else {
+        fatalError("keychain should resolve to OAuth")
+    }
+    expect(access.accessToken, "old-token", "initial keychain token")
+    if case .keychain(let service, _) = access.source {
+        expect(service, CodexAuthStore.keychainService, "source service is Codex Auth")
+    } else {
+        fatalError("keychain source should be a keychain")
+    }
+
+    let refreshedAt = Date(timeIntervalSince1970: 2_000_000)
+    let rotation = CodexTokenRotation(
+        accessToken: "new-token",
+        refreshToken: "new-rt",
+        idToken: "new-id",
+        refreshedAt: refreshedAt
+    )
+    let result: OAuthAccess?
+    do {
+        result = try store.persist(rotation: rotation, replacing: access)
+    } catch {
+        fatalError("keychain persist should not throw: \(error)")
+    }
+    guard let rotated = result else {
+        fatalError("keychain persist should return a rotated OAuthAccess")
+    }
+    expect(rotated.accessToken, "new-token", "rotated keychain access token")
+    expect(rotated.refreshToken, "new-rt", "rotated keychain refresh token")
+    expect(rotated.accountID, "acct-1", "account_id preserved")
+
+    // The keychain entry should be updated at the same service/account.
+    expect(keychain.contains(service: CodexAuthStore.keychainService, account: "codex-account"), "keychain entry present")
+    let written = try? keychain.read(service: CodexAuthStore.keychainService, account: "codex-account")
+    guard let writtenObj = try? JSONSerialization.jsonObject(
+        with: Data((written ?? "").utf8)
+    ) as? [String: Any] else {
+        fatalError("written keychain value should be a JSON object")
+    }
+    let tokens = writtenObj["tokens"] as? [String: Any]
+    expect(tokens?["access_token"] as? String, "new-token", "keychain access token rotated")
+    expect(tokens?["refresh_token"] as? String, "new-rt", "keychain refresh token rotated")
+    expect(tokens?["id_token"] as? String, "new-id", "keychain id token rotated")
+    expect(tokens?["account_id"] as? String, "acct-1", "keychain account_id preserved")
+}
+
+/// Case 9: If the source version changes before writeback, `persist` refuses
+/// to overwrite it.
+func testCodexPersistRefusesOnVersionMismatch() {
+    let home = "/tmp/agent-halo-version-\(UUID().uuidString)"
+    let env = FakeUsageEnvironment(["HOME": home])
+    let path = codexCheckAuthPath(home: home)
+    let files = FakeUsageFiles(contents: [
+        path: codexCheckJSON(["tokens": ["access_token": "old-token", "refresh_token": "old-rt"]]),
+    ])
+    let store = CodexAuthStore(environment: env, files: files, keychain: FakeUsageKeychain())
+    guard case .oauth(let access) = store.resolveAccess() else {
+        fatalError("version-mismatch check should start from OAuth")
+    }
+    let originalVersion = access.sourceVersion
+
+    // Simulate an external change: rewrite the file with different content
+    // through the same file accessor (updates the "disk" and the version).
+    try? files.writeAtomically(
+        codexCheckJSON(["tokens": ["access_token": "changed-externally", "refresh_token": "old-rt"]]),
+        to: path,
+        preservingModeOf: nil
+    )
+
+    let rotation = CodexTokenRotation(
+        accessToken: "new-token",
+        refreshToken: "new-rt",
+        idToken: nil,
+        refreshedAt: Date(timeIntervalSince1970: 2_000_000)
+    )
+    let result: OAuthAccess?
+    do {
+        result = try store.persist(rotation: rotation, replacing: access)
+    } catch {
+        fatalError("persist should not throw on version mismatch: \(error)")
+    }
+    expect(result == nil, "persist should refuse to write when the source version changed")
+    // No additional write beyond the external one.
+    expect(files.capturedWrites().count, 1, "persist must not write on version mismatch")
+    expect(originalVersion != UsageDigest.sha256(""), true, "original version is a real digest")
+}
+
+/// A source version must hash the exact bytes, not a lossy UTF-8 decoding.
+/// These UTF-16LE documents differ only by a non-ASCII custom value; both are
+/// valid JSON, while neither can be decoded as UTF-8.
+func testCodexSourceVersionHashesRawDataBytes() {
+    func utf16JSON(marker: String) -> Data {
+        var data = Data([0xFF, 0xFE])
+        data.append(
+            #"{"marker":"\#(marker)","tokens":{"access_token":"same-token","refresh_token":"same-rt"}}"#
+                .data(using: .utf16LittleEndian)!
+        )
+        return data
+    }
+
+    let home = "/tmp/agent-halo-raw-version-\(UUID().uuidString)"
+    let path = codexCheckAuthPath(home: home)
+    let originalData = utf16JSON(marker: "é")
+    let changedData = utf16JSON(marker: "ê")
+    expect(String(data: originalData, encoding: .utf8) == nil, true, "original UTF-16 JSON is not UTF-8")
+    expect(String(data: changedData, encoding: .utf8) == nil, true, "changed UTF-16 JSON is not UTF-8")
+    expect(
+        (try? JSONSerialization.jsonObject(with: originalData)) != nil,
+        true,
+        "original UTF-16 JSON remains parseable"
+    )
+    expect(
+        (try? JSONSerialization.jsonObject(with: changedData)) != nil,
+        true,
+        "changed UTF-16 JSON remains parseable"
+    )
+
+    let environment = FakeUsageEnvironment(["HOME": home])
+    let originalStore = CodexAuthStore(
+        environment: environment,
+        files: FakeUsageFiles(contents: [path: originalData]),
+        keychain: FakeUsageKeychain()
+    )
+    guard case .oauth(let originalAccess) = originalStore.resolveAccess() else {
+        fatalError("original UTF-16 JSON should resolve to OAuth")
+    }
+    let changedStore = CodexAuthStore(
+        environment: environment,
+        files: FakeUsageFiles(contents: [path: changedData]),
+        keychain: FakeUsageKeychain()
+    )
+    guard case .oauth(let changedAccess) = changedStore.resolveAccess() else {
+        fatalError("changed UTF-16 JSON should resolve to OAuth")
+    }
+    expect(
+        originalAccess.sourceVersion != changedAccess.sourceVersion,
+        true,
+        "different raw JSON bytes must produce different source versions"
+    )
+
+    let mutableFiles = FakeUsageFiles(contents: [path: originalData])
+    let mutableStore = CodexAuthStore(
+        environment: environment,
+        files: mutableFiles,
+        keychain: FakeUsageKeychain()
+    )
+    guard case .oauth(let expected) = mutableStore.resolveAccess() else {
+        fatalError("mutable UTF-16 JSON should resolve to OAuth")
+    }
+    try? mutableFiles.writeAtomically(changedData, to: path, preservingModeOf: path)
+    let result = try? mutableStore.persist(
+        rotation: CodexTokenRotation(
+            accessToken: "rotated-token",
+            refreshToken: nil,
+            idToken: nil,
+            refreshedAt: Date(timeIntervalSince1970: 2_000_000)
+        ),
+        replacing: expected
+    )
+    expect(result == nil, true, "persist must refuse a raw-byte source version change")
+    expect(mutableFiles.capturedWrites().count, 1, "persist must not write after raw-byte version mismatch")
+}
+
+// MARK: - Claude auth checks
+
+func claudeCheckJSON(_ object: [String: Any]) -> Data {
+    try! JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+}
+
+func claudeCheckCredential(
+    accessToken: String,
+    refreshToken: String? = "refresh-token",
+    expiresAtMilliseconds: Double? = nil,
+    subscriptionType: String? = nil,
+    rateLimitTier: String? = nil,
+    scopes: [String]? = ["user:profile"],
+    extraOAuth: [String: Any] = [:],
+    extraRoot: [String: Any] = [:]
+) -> Data {
+    var oauth: [String: Any] = extraOAuth
+    oauth["accessToken"] = accessToken
+    if let refreshToken { oauth["refreshToken"] = refreshToken }
+    if let expiresAtMilliseconds { oauth["expiresAt"] = expiresAtMilliseconds }
+    if let subscriptionType { oauth["subscriptionType"] = subscriptionType }
+    if let rateLimitTier { oauth["rateLimitTier"] = rateLimitTier }
+    if let scopes { oauth["scopes"] = scopes }
+    var root = extraRoot
+    root["claudeAiOauth"] = oauth
+    return claudeCheckJSON(root)
+}
+
+func claudeCheckString(_ data: Data) -> String {
+    String(data: data, encoding: .utf8)!
+}
+
+func claudeCheckPath(home: String) -> String {
+    "\(home)/.claude/.credentials.json"
+}
+
+func runClaudeAuthChecks() {
+    testUsageDependencyFactoryDisablesProductionKeychainForPackagedVerification()
+    testSecurityUsageKeychainUsesAttributeOnlyMetadataThenExactDataRead()
+    testSecurityUsageKeychainWritesSecretBytesInProcess()
+    testSecurityUsageKeychainRefusesServiceOnlyWriteAndUpdatesOneExactAccount()
+    testSecurityUsageKeychainMapsNotFoundAndFrameworkErrors()
+    testSecurityUsageKeychainSourceContainsNoSecretCLIPath()
+    testClaudeDiscoveryIsKeychainFirst()
+    testClaudeConfigDirChangesPathAndKeychainService()
+    testClaudeConfigDirServiceHashNormalizesUnicode()
+    testClaudeStoredOAuthWinsOverEnvironmentToken()
+    testClaudeEnvironmentTokenAloneIsAPIKeyMode()
+    testClaudeScopesKeepOAuthModeAndAccountIdentity()
+    testClaudeExactSourceResolvedReloadHonorsScopes()
+    testClaudeAccountKeyUsesSourceAndTokenDigest()
+    testClaudeExpiresAtUsesEpochMilliseconds()
+    testClaudePlanHintsArePreserved()
+    testClaudeFileAndKeychainRotationPreserveUnknownFieldsAndSource()
+    testClaudeLegacyRotationWritesToDiscoveredAccount()
+    testClaudePersistRefusesServiceOnlySourceWithoutAccount()
+    testClaudePersistRefusesCredentialGenerationMismatch()
+    testClaudeRejectsNonProductionOAuthOverrides()
+}
+
+func testUsageDependencyFactoryDisablesProductionKeychainForPackagedVerification() {
+    let productionInstantiations = LockedBox(0)
+    let verification = UsageMonitoringDependencyFactory.keychain(for: .packagedVerification) {
+        productionInstantiations.withValue { $0 += 1 }
+        return FakeUsageSecurityItems()
+    }
+    expect(verification.backend, .disabled, "packaged verification must assemble the disabled backend")
+    expect(productionInstantiations.value, 0, "packaged verification must not instantiate Security.framework")
+    expect(
+        try? verification.keychain.readFirstMatching(service: CodexAuthStore.keychainService),
+        nil,
+        "disabled Keychain must always report not found"
+    )
+
+    let production = UsageMonitoringDependencyFactory.keychain(for: .production) {
+        productionInstantiations.withValue { $0 += 1 }
+        return FakeUsageSecurityItems()
+    }
+    expect(production.backend, .securityFramework, "normal startup must assemble SecurityUsageKeychain")
+    expect(productionInstantiations.value, 1, "production factory should instantiate its Security backend once")
+}
+
+func testSecurityUsageKeychainUsesAttributeOnlyMetadataThenExactDataRead() {
+    let service = "Claude Code-credentials"
+    let account = "legacy-account"
+    let items = FakeUsageSecurityItems()
+    items.enqueueCopy(
+        SecurityUsageKeychainResult(
+            status: UsageSecurityStatus.success,
+            account: account,
+            data: nil
+        )
+    )
+    items.enqueueCopy(
+        SecurityUsageKeychainResult(
+            status: UsageSecurityStatus.success,
+            account: nil,
+            data: Data("credential-json".utf8)
+        )
+    )
+    let keychain = SecurityUsageKeychain(items: items)
+    let matched = try? keychain.readFirstMatching(service: service)
+
+    expect(matched?.account, account, "metadata lookup should preserve the exact discovered account")
+    expect(matched?.value, "credential-json", "exact-account read should decode the credential in memory")
+    let queries = items.snapshot().copyQueries
+    expect(queries.count, 2, "legacy resolution should perform metadata then exact data lookup")
+    expect(queries[0].service, service, "metadata query service")
+    expect(queries[0].account == nil, "metadata query should search the service")
+    expect(queries[0].returnAttributes, true, "metadata query must request attributes")
+    expect(queries[0].returnData, false, "metadata query must never request secret data")
+    expect(queries[1].account, account, "data query should use the discovered exact account")
+    expect(queries[1].returnAttributes, false, "data query does not need attributes")
+    expect(queries[1].returnData, true, "data query requests secret bytes only into memory")
+}
+
+func testSecurityUsageKeychainWritesSecretBytesInProcess() {
+    let service = "Codex Auth"
+    let account = "exact-account"
+    let secret = "synthetic-credential-json"
+
+    let updateItems = FakeUsageSecurityItems()
+    updateItems.enqueueUpdate(status: UsageSecurityStatus.success)
+    let updating = SecurityUsageKeychain(items: updateItems)
+    try? updating.write(service: service, account: account, value: secret)
+    let updateState = updateItems.snapshot()
+    expect(updateState.updates.count, 1, "existing keychain item should use SecItemUpdate seam")
+    expect(updateState.updates.first?.0.account, account, "update keeps exact source account")
+    expect(updateState.updates.first?.1, Data(secret.utf8), "update passes secret bytes in process")
+    expect(updateState.additions.count, 0, "successful update should not add a duplicate")
+
+    let addItems = FakeUsageSecurityItems()
+    addItems.enqueueUpdate(status: UsageSecurityStatus.itemNotFound)
+    addItems.enqueueAdd(status: UsageSecurityStatus.success)
+    let adding = SecurityUsageKeychain(items: addItems)
+    try? adding.write(service: service, account: account, value: secret)
+    let addState = addItems.snapshot()
+    expect(addState.updates.count, 1, "write should first attempt exact update")
+    expect(addState.additions.count, 1, "missing keychain item should use SecItemAdd seam")
+    expect(addState.additions.first?.service, service, "add keeps exact service")
+    expect(addState.additions.first?.account, account, "add keeps exact account")
+    expect(addState.additions.first?.value, Data(secret.utf8), "add passes secret bytes in process")
+}
+
+func testSecurityUsageKeychainRefusesServiceOnlyWriteAndUpdatesOneExactAccount() {
+    let service = CodexAuthStore.keychainService
+    let items = StatefulUsageSecurityItems([
+        (service, "account-a", "value-a"),
+        (service, "account-b", "value-b"),
+    ])
+    let keychain = SecurityUsageKeychain(items: items)
+    let discovered = try? keychain.readFirstMatching(service: service)
+    expect(discovered?.account, "account-a", "legacy metadata ordering should discover the first exact account")
+
+    do {
+        try keychain.write(service: service, account: nil, value: "bulk-write")
+        fatalError("service-only Keychain writes must be rejected")
+    } catch let error as UsageKeychainError {
+        expect(error, .missingExactAccount, "ambiguous Keychain identity must fail safely")
+    } catch {
+        fatalError("unexpected Keychain error type")
+    }
+    try? keychain.write(service: service, account: discovered?.account, value: "rotated-a")
+    expect(items.value(service: service, account: "account-a"), "rotated-a", "target account rotates")
+    expect(items.value(service: service, account: "account-b"), "value-b", "other same-service account stays untouched")
+}
+
+func testSecurityUsageKeychainMapsNotFoundAndFrameworkErrors() {
+    let missingItems = FakeUsageSecurityItems()
+    missingItems.enqueueCopy(
+        SecurityUsageKeychainResult(
+            status: UsageSecurityStatus.itemNotFound,
+            account: nil,
+            data: nil
+        )
+    )
+    let missing = SecurityUsageKeychain(items: missingItems)
+    expect(try? missing.read(service: "missing", account: "exact"), nil, "SecItem not-found should remain nil")
+
+    let failureStatus: Int32 = -50
+    let failingItems = FakeUsageSecurityItems()
+    failingItems.enqueueCopy(
+        SecurityUsageKeychainResult(status: failureStatus, account: nil, data: nil)
+    )
+    let failing = SecurityUsageKeychain(items: failingItems)
+    do {
+        _ = try failing.read(service: "broken", account: "exact")
+        fatalError("unexpected Security.framework status should throw")
+    } catch let error as UsageKeychainError {
+        expect(error, .unexpectedExitCode(Int(failureStatus)), "framework error mapping stays classified")
+    } catch {
+        fatalError("unexpected keychain error type")
+    }
+}
+
+func testSecurityUsageKeychainSourceContainsNoSecretCLIPath() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("AgentHaloCore/UsageMonitoring/UsageSystemClients.swift")
+    guard let source = try? String(contentsOf: sourceDirectory, encoding: .utf8),
+          let start = source.range(of: "public final class SecurityUsageKeychain")?.lowerBound,
+          let end = source.range(of: "public enum UsageKeychainError", range: start..<source.endIndex)?.lowerBound
+    else {
+        fatalError("SecurityUsageKeychain source should be readable")
+    }
+    let keychainSource = source[start..<end]
+    expect(!keychainSource.contains("/usr/bin/security"), "Keychain implementation must not launch security CLI")
+    expect(!keychainSource.contains("\"-g\""), "metadata lookup must not request CLI secret output")
+    expect(!keychainSource.contains("\"-w\""), "credential JSON must not enter process argv")
+    expect(source.contains("SecItemCopyMatching"), "production read should use Security.framework")
+    expect(source.contains("SecItemUpdate"), "production update should use Security.framework")
+    expect(source.contains("SecItemAdd"), "production add should use Security.framework")
+}
+
+func testClaudeDiscoveryIsKeychainFirst() {
+    let home = "/tmp/agent-halo-claude-order-\(UUID().uuidString)"
+    let user = "agent-halo-user"
+    let environment = FakeUsageEnvironment(["HOME": home, "USER": user])
+    let filePath = claudeCheckPath(home: home)
+    let files = FakeUsageFiles(contents: [
+        filePath: claudeCheckCredential(accessToken: "file-token"),
+    ])
+
+    let bothKeychainForms = FakeUsageKeychain()
+    try? bothKeychainForms.write(
+        service: "Claude Code-credentials",
+        account: nil,
+        value: claudeCheckString(claudeCheckCredential(accessToken: "legacy-token"))
+    )
+    try? bothKeychainForms.write(
+        service: "Claude Code-credentials",
+        account: user,
+        value: claudeCheckString(claudeCheckCredential(accessToken: "current-user-token"))
+    )
+    let currentUserStore = ClaudeAuthStore(
+        environment: environment,
+        files: files,
+        keychain: bothKeychainForms
+    )
+    guard case .oauth(let currentUser) = currentUserStore.resolveAccess() else {
+        fatalError("current-user Claude keychain credential should resolve to OAuth")
+    }
+    expect(currentUser.accessToken, "current-user-token", "current-user keychain should win")
+    expect(
+        currentUser.source,
+        .keychain(service: "Claude Code-credentials", account: user),
+        "current-user keychain source identity"
+    )
+
+    let legacyOnly = FakeUsageKeychain()
+    try? legacyOnly.write(
+        service: "Claude Code-credentials",
+        account: "legacy-account",
+        value: claudeCheckString(claudeCheckCredential(accessToken: "legacy-token"))
+    )
+    let legacyStore = ClaudeAuthStore(environment: environment, files: files, keychain: legacyOnly)
+    guard case .oauth(let legacy) = legacyStore.resolveAccess() else {
+        fatalError("legacy Claude keychain credential should resolve to OAuth")
+    }
+    expect(legacy.accessToken, "legacy-token", "legacy service-only keychain should precede file")
+    expect(
+        legacy.source,
+        .keychain(service: "Claude Code-credentials", account: "legacy-account"),
+        "legacy source keeps the actual discovered account"
+    )
+
+    let fileStore = ClaudeAuthStore(
+        environment: environment,
+        files: files,
+        keychain: FakeUsageKeychain()
+    )
+    guard case .oauth(let file) = fileStore.resolveAccess() else {
+        fatalError("Claude credential file should be the final stored OAuth fallback")
+    }
+    expect(file.accessToken, "file-token", "credential file should load after keychain misses")
+    expect(file.source, .file(path: filePath), "file source should retain its exact path")
+
+    guard let exactFile = currentUserStore.reload(source: .file(path: filePath)) else {
+        fatalError("reload should read the exact requested file source")
+    }
+    expect(exactFile.accessToken, "file-token", "exact file reload must not rediscover keychain")
+}
+
+func testClaudeConfigDirChangesPathAndKeychainService() {
+    let configDir = "/tmp/agent-halo-claude-config-\(UUID().uuidString)"
+    let home = "/tmp/agent-halo-claude-home-\(UUID().uuidString)"
+    let user = "config-user"
+    let suffix = String(UsageDigest.sha256(configDir).prefix(8))
+    let scopedService = "Claude Code-credentials-\(suffix)"
+    let environment = FakeUsageEnvironment([
+        "CLAUDE_CONFIG_DIR": configDir,
+        "HOME": home,
+        "USER": user,
+    ])
+    let files = FakeUsageFiles(contents: [
+        "\(configDir)/.credentials.json": claudeCheckCredential(accessToken: "config-file-token"),
+        claudeCheckPath(home: home): claudeCheckCredential(accessToken: "default-file-token"),
+    ])
+    let keychain = FakeUsageKeychain()
+    try? keychain.write(
+        service: "Claude Code-credentials",
+        account: user,
+        value: claudeCheckString(claudeCheckCredential(accessToken: "base-keychain-token"))
+    )
+    try? keychain.write(
+        service: scopedService,
+        account: user,
+        value: claudeCheckString(claudeCheckCredential(accessToken: "scoped-keychain-token"))
+    )
+    let store = ClaudeAuthStore(environment: environment, files: files, keychain: keychain)
+    guard case .oauth(let scoped) = store.resolveAccess() else {
+        fatalError("config-scoped Claude keychain should resolve to OAuth")
+    }
+    expect(scoped.accessToken, "scoped-keychain-token", "config-scoped service should precede base service")
+    expect(
+        scoped.source,
+        .keychain(service: scopedService, account: user),
+        "config-scoped service should use 8-character SHA256 suffix"
+    )
+
+    let fileOnlyStore = ClaudeAuthStore(
+        environment: environment,
+        files: files,
+        keychain: FakeUsageKeychain()
+    )
+    guard case .oauth(let configFile) = fileOnlyStore.resolveAccess() else {
+        fatalError("CLAUDE_CONFIG_DIR credential file should resolve to OAuth")
+    }
+    expect(configFile.source, .file(path: "\(configDir)/.credentials.json"), "config dir changes file path")
+}
+
+func testClaudeConfigDirServiceHashNormalizesUnicode() {
+    let composedConfigDir = "/tmp/agent-halo-caf\u{00e9}"
+    let decomposedConfigDir = composedConfigDir.decomposedStringWithCanonicalMapping
+    expect(
+        Array(composedConfigDir.utf8) == Array(decomposedConfigDir.utf8),
+        false,
+        "Unicode fixture must use distinct UTF-8 code units"
+    )
+
+    let user = "unicode-user"
+    let normalized = decomposedConfigDir.precomposedStringWithCanonicalMapping
+    let suffix = String(UsageDigest.sha256(normalized).prefix(8))
+    let service = "Claude Code-credentials-\(suffix)"
+    let keychain = FakeUsageKeychain()
+    try? keychain.write(
+        service: service,
+        account: user,
+        value: claudeCheckString(claudeCheckCredential(accessToken: "unicode-config-token"))
+    )
+    let store = ClaudeAuthStore(
+        environment: FakeUsageEnvironment([
+            "CLAUDE_CONFIG_DIR": decomposedConfigDir,
+            "USER": user,
+        ]),
+        files: FakeUsageFiles(),
+        keychain: keychain
+    )
+    guard case .oauth(let access) = store.resolveAccess() else {
+        fatalError("canonically equivalent CLAUDE_CONFIG_DIR should discover the same keychain service")
+    }
+    expect(access.source, .keychain(service: service, account: user), "config service hash uses NFC path")
+}
+
+func testClaudeStoredOAuthWinsOverEnvironmentToken() {
+    let home = "/tmp/agent-halo-claude-env-shadow-\(UUID().uuidString)"
+    let store = ClaudeAuthStore(
+        environment: FakeUsageEnvironment([
+            "HOME": home,
+            "CLAUDE_CODE_OAUTH_TOKEN": "inference-only-token",
+        ]),
+        files: FakeUsageFiles(contents: [
+            claudeCheckPath(home: home): claudeCheckCredential(accessToken: "stored-oauth-token"),
+        ]),
+        keychain: FakeUsageKeychain()
+    )
+    guard case .oauth(let access) = store.resolveAccess() else {
+        fatalError("stored Claude OAuth should win over inference-only environment token")
+    }
+    expect(access.accessToken, "stored-oauth-token", "stored OAuth wins over environment token")
+}
+
+func testClaudeEnvironmentTokenAloneIsAPIKeyMode() {
+    let store = ClaudeAuthStore(
+        environment: FakeUsageEnvironment(["CLAUDE_CODE_OAUTH_TOKEN": "inference-only-token"]),
+        files: FakeUsageFiles(),
+        keychain: FakeUsageKeychain()
+    )
+    guard case .apiKey = store.resolveAccess() else {
+        fatalError("CLAUDE_CODE_OAUTH_TOKEN alone must remain API key mode")
+    }
+}
+
+func testClaudeScopesKeepOAuthModeAndAccountIdentity() {
+    let home = "/tmp/agent-halo-claude-scopes-\(UUID().uuidString)"
+    let path = claudeCheckPath(home: home)
+    let environment = FakeUsageEnvironment(["HOME": home])
+
+    for scopes in [Optional<[String]>.none, []] {
+        let store = ClaudeAuthStore(
+            environment: environment,
+            files: FakeUsageFiles(contents: [
+                path: claudeCheckCredential(accessToken: "allowed-token", scopes: scopes),
+            ]),
+            keychain: FakeUsageKeychain()
+        )
+        guard case .oauth = store.resolveAccess() else {
+            fatalError("absent or empty Claude scopes should remain OAuth mode")
+        }
+    }
+
+    let missingStore = ClaudeAuthStore(
+        environment: environment,
+        files: FakeUsageFiles(contents: [
+            path: claudeCheckCredential(accessToken: "missing-scope-token", scopes: ["user:inference"]),
+        ]),
+        keychain: FakeUsageKeychain()
+    )
+    guard let parsed = missingStore.reload(source: .file(path: path)) else {
+        fatalError("explicitly under-scoped credential should still parse as stored OAuth")
+    }
+    guard case .oauthNeedsSignIn(let accountKey) = missingStore.resolveAccess() else {
+        fatalError("stored OAuth missing user:profile should request OAuth sign-in again")
+    }
+    expect(accountKey, parsed.accountKey, "scope failure keeps the same OAuth account key")
+}
+
+func testClaudeExactSourceResolvedReloadHonorsScopes() {
+    let home = "/tmp/agent-halo-claude-exact-scopes-\(UUID().uuidString)"
+    let path = claudeCheckPath(home: home)
+    let files = FakeUsageFiles()
+    let store = ClaudeAuthStore(
+        environment: FakeUsageEnvironment(["HOME": home]),
+        files: files,
+        keychain: FakeUsageKeychain()
+    )
+
+    for scopes in [Optional<[String]>.none, []] {
+        try? files.writeAtomically(
+            claudeCheckCredential(accessToken: "exact-allowed", scopes: scopes),
+            to: path,
+            preservingModeOf: path
+        )
+        guard case .oauth = store.reloadResolved(source: .file(path: path)) else {
+            fatalError("exact-source reload should allow absent or empty Claude scopes")
+        }
+    }
+
+    try? files.writeAtomically(
+        claudeCheckCredential(accessToken: "exact-under-scoped", scopes: ["user:inference"]),
+        to: path,
+        preservingModeOf: path
+    )
+    guard case .oauthNeedsSignIn(let accountKey) = store.reloadResolved(source: .file(path: path)) else {
+        fatalError("exact-source reload missing user:profile should require sign in")
+    }
+    expect(accountKey?.providerID, .claude, "exact-source scope failure preserves Claude account identity")
+}
+
+func testClaudeAccountKeyUsesSourceAndTokenDigest() {
+    let home = "/tmp/agent-halo-claude-account-\(UUID().uuidString)"
+    let path = claudeCheckPath(home: home)
+    let environment = FakeUsageEnvironment(["HOME": home])
+
+    func resolved(accessToken: String, refreshToken: String?) -> OAuthAccess {
+        let store = ClaudeAuthStore(
+            environment: environment,
+            files: FakeUsageFiles(contents: [
+                path: claudeCheckCredential(accessToken: accessToken, refreshToken: refreshToken),
+            ]),
+            keychain: FakeUsageKeychain()
+        )
+        guard case .oauth(let access) = store.resolveAccess() else {
+            fatalError("Claude account-key fixture should resolve to OAuth")
+        }
+        return access
+    }
+
+    let withRefresh = resolved(accessToken: "access-token", refreshToken: "stable-refresh")
+    expect(
+        withRefresh.accountKey.digest,
+        UsageDigest.sha256("\(path)|\(UsageDigest.sha256("stable-refresh"))"),
+        "Claude account key uses source identity plus refresh-token digest"
+    )
+    let accessOnly = resolved(accessToken: "access-only", refreshToken: nil)
+    expect(
+        accessOnly.accountKey.digest,
+        UsageDigest.sha256("\(path)|\(UsageDigest.sha256("access-only"))"),
+        "Claude account key falls back to source identity plus access-token digest"
+    )
+    expect(accessOnly.sourceVersion.count, 64, "Claude source version remains a SHA256 digest")
+}
+
+func testClaudeExpiresAtUsesEpochMilliseconds() {
+    let now = Date(timeIntervalSince1970: 1_000_000)
+    let home = "/tmp/agent-halo-claude-expiry-\(UUID().uuidString)"
+    let path = claudeCheckPath(home: home)
+    func access(after seconds: TimeInterval) -> (ClaudeAuthStore, OAuthAccess) {
+        let store = ClaudeAuthStore(
+            environment: FakeUsageEnvironment(["HOME": home]),
+            files: FakeUsageFiles(contents: [
+                path: claudeCheckCredential(
+                    accessToken: "expiry-token-\(seconds)",
+                    expiresAtMilliseconds: now.addingTimeInterval(seconds).timeIntervalSince1970 * 1000
+                ),
+            ]),
+            keychain: FakeUsageKeychain(),
+            now: { now }
+        )
+        guard case .oauth(let access) = store.resolveAccess() else {
+            fatalError("Claude expiresAt fixture should resolve to OAuth")
+        }
+        return (store, access)
+    }
+
+    let (soonStore, soon) = access(after: 3 * 60)
+    expect(soon.expiresAt, now.addingTimeInterval(3 * 60), "expiresAt parses epoch milliseconds")
+    expect(soonStore.needsRefresh(soon), true, "Claude token within five minutes needs refresh")
+    let (farStore, far) = access(after: 10 * 60)
+    expect(farStore.needsRefresh(far), false, "Claude token beyond five minutes does not need refresh")
+}
+
+func testClaudePlanHintsArePreserved() {
+    let home = "/tmp/agent-halo-claude-plan-\(UUID().uuidString)"
+    let store = ClaudeAuthStore(
+        environment: FakeUsageEnvironment(["HOME": home]),
+        files: FakeUsageFiles(contents: [
+            claudeCheckPath(home: home): claudeCheckCredential(
+                accessToken: "plan-token",
+                subscriptionType: "max",
+                rateLimitTier: "default_claude_max_20x"
+            ),
+        ]),
+        keychain: FakeUsageKeychain()
+    )
+    guard case .oauth(let access) = store.resolveAccess() else {
+        fatalError("Claude plan-hint fixture should resolve to OAuth")
+    }
+    expect(access.planHint?.subscriptionType, "max", "subscriptionType plan hint")
+    expect(access.planHint?.rateLimitTier, "default_claude_max_20x", "rateLimitTier plan hint")
+}
+
+func testClaudeFileAndKeychainRotationPreserveUnknownFieldsAndSource() {
+    let now = Date(timeIntervalSince1970: 2_000_000)
+    let rotatedExpiry = now.addingTimeInterval(3600)
+    let home = "/tmp/agent-halo-claude-rotate-\(UUID().uuidString)"
+    let path = claudeCheckPath(home: home)
+    let files = FakeUsageFiles(
+        contents: [
+            path: claudeCheckCredential(
+                accessToken: "old-file-token",
+                extraOAuth: ["oauthCustom": "keep"],
+                extraRoot: ["rootCustom": "keep"]
+            ),
+        ],
+        modes: [path: 0o640]
+    )
+    let fileStore = ClaudeAuthStore(
+        environment: FakeUsageEnvironment(["HOME": home]),
+        files: files,
+        keychain: FakeUsageKeychain(),
+        now: { now }
+    )
+    guard case .oauth(let fileAccess) = fileStore.resolveAccess() else {
+        fatalError("Claude file rotation should start from OAuth")
+    }
+    let fileRotated = try? fileStore.persist(
+        rotation: ClaudeTokenRotation(
+            accessToken: "new-file-token",
+            refreshToken: "new-file-refresh",
+            expiresAt: rotatedExpiry
+        ),
+        replacing: fileAccess
+    )
+    expect(fileRotated?.source, .file(path: path), "file rotation keeps exact source")
+    expect(files.storedMode(for: path), 0o640, "file rotation preserves original permissions")
+    guard let fileWrite = files.capturedWrites().last,
+          let fileObject = try? JSONSerialization.jsonObject(with: fileWrite.data) as? [String: Any],
+          let fileOAuth = fileObject["claudeAiOauth"] as? [String: Any]
+    else {
+        fatalError("Claude file rotation should write valid merged JSON")
+    }
+    expect(fileObject["rootCustom"] as? String, "keep", "file rotation preserves unknown root field")
+    expect(fileOAuth["oauthCustom"] as? String, "keep", "file rotation preserves unknown OAuth field")
+    expect(fileOAuth["accessToken"] as? String, "new-file-token", "file access token rotates")
+    expect(fileOAuth["expiresAt"] as? Double, rotatedExpiry.timeIntervalSince1970 * 1000, "expiry writes epoch ms")
+
+    let user = "rotate-user"
+    let keychain = FakeUsageKeychain()
+    try? keychain.write(
+        service: "Claude Code-credentials",
+        account: user,
+        value: claudeCheckString(claudeCheckCredential(
+            accessToken: "old-keychain-token",
+            extraOAuth: ["keychainCustom": "keep"]
+        ))
+    )
+    let keychainStore = ClaudeAuthStore(
+        environment: FakeUsageEnvironment(["USER": user]),
+        files: FakeUsageFiles(),
+        keychain: keychain,
+        now: { now }
+    )
+    guard case .oauth(let keychainAccess) = keychainStore.resolveAccess() else {
+        fatalError("Claude keychain rotation should start from OAuth")
+    }
+    let keychainRotated = try? keychainStore.persist(
+        rotation: ClaudeTokenRotation(
+            accessToken: "new-keychain-token",
+            refreshToken: nil,
+            expiresAt: rotatedExpiry
+        ),
+        replacing: keychainAccess
+    )
+    expect(
+        keychainRotated?.source,
+        .keychain(service: "Claude Code-credentials", account: user),
+        "keychain rotation keeps exact service/account source"
+    )
+    let writtenKeychain = try? keychain.read(service: "Claude Code-credentials", account: user)
+    guard let keychainData = writtenKeychain.flatMap({ Data($0.utf8) }),
+          let keychainObject = try? JSONSerialization.jsonObject(with: keychainData) as? [String: Any],
+          let keychainOAuth = keychainObject["claudeAiOauth"] as? [String: Any]
+    else {
+        fatalError("Claude keychain rotation should write valid merged JSON")
+    }
+    expect(keychainOAuth["keychainCustom"] as? String, "keep", "keychain rotation preserves unknown field")
+    expect(keychainOAuth["refreshToken"] as? String, "refresh-token", "nil rotated refresh preserves stored refresh")
+}
+
+func testClaudeLegacyRotationWritesToDiscoveredAccount() {
+    let service = "Claude Code-credentials"
+    let legacyAccount = "legacy-account"
+    let storedValue = claudeCheckString(
+        claudeCheckCredential(accessToken: "old-legacy-token")
+    )
+    let items = FakeUsageSecurityItems()
+    items.enqueueCopy(
+        SecurityUsageKeychainResult(
+            status: UsageSecurityStatus.itemNotFound,
+            account: nil,
+            data: nil
+        )
+    )
+    items.enqueueCopy(
+        SecurityUsageKeychainResult(
+            status: UsageSecurityStatus.success,
+            account: legacyAccount,
+            data: nil
+        )
+    )
+    for _ in 0..<2 {
+        items.enqueueCopy(
+            SecurityUsageKeychainResult(
+                status: UsageSecurityStatus.success,
+                account: nil,
+                data: Data(storedValue.utf8)
+            )
+        )
+    }
+    items.enqueueUpdate(status: UsageSecurityStatus.success)
+    let keychain = SecurityUsageKeychain(items: items)
+    let store = ClaudeAuthStore(
+        environment: FakeUsageEnvironment(["USER": "different-current-user"]),
+        files: FakeUsageFiles(),
+        keychain: keychain
+    )
+    guard case .oauth(let access) = store.resolveAccess() else {
+        fatalError("legacy service-only fallback should resolve to OAuth")
+    }
+    expect(
+        access.source,
+        .keychain(service: service, account: legacyAccount),
+        "legacy access stores the actual matched account"
+    )
+
+    let rotated: OAuthAccess?
+    do {
+        rotated = try store.persist(
+            rotation: ClaudeTokenRotation(
+                accessToken: "new-legacy-token",
+                refreshToken: "new-legacy-refresh",
+                expiresAt: Date(timeIntervalSince1970: 4_000_000)
+            ),
+            replacing: access
+        )
+    } catch {
+        fatalError("legacy exact-account persist should not throw: \(error)")
+    }
+    expect(rotated?.source, access.source, "legacy rotation keeps exact service/account")
+    expect(rotated?.accessToken, "new-legacy-token", "legacy account receives rotation")
+
+    let state = items.snapshot()
+    expect(state.copyQueries.count, 4, "resolve and persist use metadata plus exact-account reads")
+    expect(state.copyQueries[3].account, legacyAccount, "persist reloads the exact discovered account")
+    expect(state.updates.count, 1, "persist updates the discovered legacy item")
+    expect(state.updates.first?.0.account, legacyAccount, "persist keeps the discovered legacy account")
+    guard let updatedData = state.updates.first?.1,
+          let updatedObject = try? JSONSerialization.jsonObject(with: updatedData) as? [String: Any],
+          let updatedOAuth = updatedObject["claudeAiOauth"] as? [String: Any]
+    else {
+        fatalError("legacy Security.framework update should carry merged JSON bytes")
+    }
+    expect(updatedOAuth["accessToken"] as? String, "new-legacy-token", "legacy update carries rotated access")
+}
+
+func testClaudePersistRefusesServiceOnlySourceWithoutAccount() {
+    let service = "Claude Code-credentials"
+    let home = "/tmp/agent-halo-claude-unsafe-source-\(UUID().uuidString)"
+    let path = claudeCheckPath(home: home)
+    let storedData = claudeCheckCredential(accessToken: "old-token")
+    let keychain = FakeUsageKeychain()
+    try? keychain.write(
+        service: service,
+        account: nil,
+        value: claudeCheckString(storedData)
+    )
+    let store = ClaudeAuthStore(
+        environment: FakeUsageEnvironment(["HOME": home]),
+        files: FakeUsageFiles(contents: [path: storedData]),
+        keychain: keychain
+    )
+    guard case .oauth(var ambiguous) = store.resolveAccess() else {
+        fatalError("unsafe-source fixture should start from file OAuth")
+    }
+    ambiguous.source = .keychain(service: service, account: nil)
+
+    let result = try? store.persist(
+        rotation: ClaudeTokenRotation(
+            accessToken: "must-not-write",
+            refreshToken: "must-not-write-refresh",
+            expiresAt: Date(timeIntervalSince1970: 5_000_000)
+        ),
+        replacing: ambiguous
+    )
+    expect(result == nil, true, "Claude persist refuses an ambiguous service-only source")
+    let stored = try? keychain.read(service: service, account: nil)
+    expect(
+        stored,
+        claudeCheckString(storedData),
+        "refused service-only persist leaves the original credential unchanged"
+    )
+}
+
+func testClaudePersistRefusesCredentialGenerationMismatch() {
+    let home = "/tmp/agent-halo-claude-version-\(UUID().uuidString)"
+    let path = claudeCheckPath(home: home)
+    let files = FakeUsageFiles(contents: [
+        path: claudeCheckCredential(accessToken: "old-token", refreshToken: "old-refresh"),
+    ])
+    let store = ClaudeAuthStore(
+        environment: FakeUsageEnvironment(["HOME": home]),
+        files: files,
+        keychain: FakeUsageKeychain()
+    )
+    guard case .oauth(let expected) = store.resolveAccess() else {
+        fatalError("Claude version check should start from OAuth")
+    }
+    try? files.writeAtomically(
+        claudeCheckCredential(accessToken: "external-login", refreshToken: "external-refresh"),
+        to: path,
+        preservingModeOf: path
+    )
+    let result = try? store.persist(
+        rotation: ClaudeTokenRotation(
+            accessToken: "refreshed-old-login",
+            refreshToken: "refreshed-old-refresh",
+            expiresAt: Date(timeIntervalSince1970: 3_000_000)
+        ),
+        replacing: expected
+    )
+    expect(result == nil, true, "external Claude re-login must invalidate credential generation")
+    expect(files.capturedWrites().count, 1, "mismatched generation must not be overwritten")
+}
+
+func testClaudeRejectsNonProductionOAuthOverrides() {
+    let home = "/tmp/agent-halo-claude-custom-oauth-\(UUID().uuidString)"
+    let files = FakeUsageFiles(contents: [
+        claudeCheckPath(home: home): claudeCheckCredential(accessToken: "stored-token"),
+    ])
+    for override in [
+        ("CLAUDE_CODE_CUSTOM_OAUTH_URL", "https://custom.invalid"),
+        ("CLAUDE_LOCAL_OAUTH_API_BASE", "http://localhost:8000"),
+        ("ANTHROPIC_BASE_URL", "https://inference-proxy.invalid"),
+        ("USE_STAGING_OAUTH", "1"),
+    ] {
+        let store = ClaudeAuthStore(
+            environment: FakeUsageEnvironment(["HOME": home, override.0: override.1]),
+            files: files,
+            keychain: FakeUsageKeychain()
+        )
+        guard case .apiKey = store.resolveAccess() else {
+            fatalError("non-production OAuth override \(override.0) must not use stored OAuth")
+        }
+    }
+}
+
+// MARK: - Codex usage checks
+
+func codexUsageResponse(
+    statusCode: Int = 200,
+    headers: [String: String] = [:],
+    _ body: String
+) -> UsageHTTPResponse {
+    UsageHTTPResponse(statusCode: statusCode, headers: headers, body: Data(body.utf8))
+}
+
+func expectCodexFailure(
+    _ expected: UsageProviderFailure,
+    _ message: String,
+    operation: () async throws -> Void
+) async {
+    do {
+        try await operation()
+        fatalError("\(message): expected \(expected), got success")
+    } catch let failure as UsageProviderFailure {
+        expect(failure, expected, message)
+    } catch {
+        fatalError("\(message): unexpected error type")
+    }
+}
+
+func runCodexUsageChecks() async {
+    await testCodexUsageClientBuildsOnlyOfficialRequests()
+    await testCodexUsageClientClassifiesFailures()
+    testCodexUsageMapperPlansWindowsAndRestrictedFields()
+    testCodexUsageMapperClassifiesInvalidResponses()
+    await testCodexProviderAdoptsExternalSourceWithoutMigration()
+    await testCodexProviderDetectsExternalSourceDuringRefresh()
+    await testCodexProviderDetectsExternalSourceAfterRefreshFailure()
+    await testCodexProviderDetectsExternalSourceDuringUsageSuccess()
+    await testCodexProviderDetectsExternalSourceDuringUsageFailure()
+    await testCodexProviderDetectsExternalSourceOnFirstUnauthorized()
+    await testCodexProviderDetectsExternalSourceDuringUnauthorizedRetry()
+    await testCodexProviderDetectsExternalSourceDuringUnauthorizedRetryFailure()
+    await testCodexProviderRefreshesProactively()
+    await testCodexProviderRetriesOneUnauthorizedAndMigratesCache()
+    await testCodexProviderStopsAfterSecondUnauthorized()
+    await testCodexProviderRefreshCodesRequireSignIn()
+    await testCodexProviderUsesRotatedTokenWhenWritebackFails()
+}
+
+func expectExternalAccessChange(_ result: UsageRefreshResult, _ message: String) {
+    guard case .externalAccessChanged = result.outcome else {
+        fatalError(message)
+    }
+    expect(result.snapshot == nil, "external access change must not carry a snapshot")
+    expect(result.failure == nil, "external access change must not masquerade as a failure")
+    expect(result.migrateCacheFrom == nil, "external access change must not masquerade as cache migration")
+}
+
+func waitForHTTPRequestCount(
+    _ client: GatedUsageHTTPClient,
+    _ expectedCount: Int,
+    _ message: String
+) async {
+    for _ in 0..<10_000 {
+        if await client.capturedRequests.count >= expectedCount { return }
+        await Task.yield()
+    }
+    fatalError(message)
+}
+
+func testCodexUsageClientBuildsOnlyOfficialRequests() async {
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: codexUsageResponse(#"{"plan_type":"plus"}"#))
+    await http.enqueue(response: codexUsageResponse(#"{"access_token":"new-access","refresh_token":"new-refresh","id_token":"new-id"}"#))
+    let client = CodexUsageClient(http: http, now: { Date(timeIntervalSince1970: 2_000_000_000) })
+
+    _ = try? await client.fetchUsage(accessToken: "access token", accountID: "account-1")
+    let refreshed = try? await client.refreshToken("refresh token+/=")
+    expect(refreshed?.accessToken, "new-access", "refresh response access token")
+
+    let requests = await http.capturedRequests
+    expect(requests.count, 2, "client should issue exactly usage and refresh requests")
+    expect(requests[0].method, "GET", "usage method")
+    expect(requests[0].host, "chatgpt.com", "usage official host")
+    expect(requests[0].path, "/backend-api/wham/usage", "usage official path")
+    expect(requests[0].timeout, 10, "usage timeout")
+    expect(requests[0].headers["authorization"], "Bearer access token", "usage bearer header")
+    expect(requests[0].headers["chatgpt-account-id"], "account-1", "usage account header")
+
+    expect(requests[1].method, "POST", "refresh method")
+    expect(requests[1].host, "auth.openai.com", "refresh official host")
+    expect(requests[1].path, "/oauth/token", "refresh official path")
+    expect(requests[1].timeout, 15, "refresh timeout")
+    expect(requests[1].headers["content-type"], "application/x-www-form-urlencoded", "refresh content type")
+    let form = String(data: requests[1].body ?? Data(), encoding: .utf8) ?? ""
+    expect(form.contains("grant_type=refresh_token"), "refresh form grant type")
+    expect(form.contains("client_id=app_EMoamEEZ73f0CkXaXp7hrann"), "refresh form client id")
+    expect(form.contains("refresh_token=refresh%20token%2B%2F%3D"), "refresh token must be form encoded")
+    expect(
+        requests.allSatisfy {
+            !$0.path.contains("reset-credit") && !$0.path.contains("balance") &&
+                !$0.path.contains("spend") && ["chatgpt.com", "auth.openai.com"].contains($0.host)
+        },
+        "Codex client must call only the two approved official endpoints"
+    )
+
+    let noAccountHTTP = RecordingUsageHTTPClient()
+    await noAccountHTTP.enqueue(response: codexUsageResponse(#"{"plan_type":"free"}"#))
+    _ = try? await CodexUsageClient(http: noAccountHTTP).fetchUsage(accessToken: "a", accountID: nil)
+    let noAccountRequests = await noAccountHTTP.capturedRequests
+    expect(noAccountRequests.first?.headers["chatgpt-account-id"] == nil, "account header must be optional")
+}
+
+func testCodexUsageClientClassifiesFailures() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+
+    let transport = RecordingUsageHTTPClient()
+    await transport.enqueue(error: .network)
+    await expectCodexFailure(.network, "transport failure") {
+        _ = try await CodexUsageClient(http: transport, now: { now }).fetchUsage(accessToken: "a", accountID: nil)
+    }
+
+    let unavailable = RecordingUsageHTTPClient()
+    await unavailable.enqueue(response: codexUsageResponse(statusCode: 503, "{}"))
+    await expectCodexFailure(.serviceUnavailable, "5xx failure") {
+        _ = try await CodexUsageClient(http: unavailable, now: { now }).fetchUsage(accessToken: "a", accountID: nil)
+    }
+
+    let limited = RecordingUsageHTTPClient()
+    await limited.enqueue(response: codexUsageResponse(statusCode: 429, headers: ["Retry-After": "120"], "{}"))
+    await expectCodexFailure(.rateLimited(retryAt: now.addingTimeInterval(120)), "Retry-After seconds") {
+        _ = try await CodexUsageClient(http: limited, now: { now }).fetchUsage(accessToken: "a", accountID: nil)
+    }
+
+    let dateLimited = RecordingUsageHTTPClient()
+    await dateLimited.enqueue(response: codexUsageResponse(
+        statusCode: 429,
+        headers: ["Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"],
+        "{}"
+    ))
+    let retryDate = Date(timeIntervalSince1970: 1_445_412_480)
+    await expectCodexFailure(.rateLimited(retryAt: retryDate), "Retry-After HTTP date") {
+        _ = try await CodexUsageClient(http: dateLimited, now: { now }).fetchUsage(accessToken: "a", accountID: nil)
+    }
+
+    let malformed = RecordingUsageHTTPClient()
+    await malformed.enqueue(response: codexUsageResponse("not-json"))
+    await expectCodexFailure(.invalidResponse, "malformed successful usage body") {
+        _ = try await CodexUsageClient(http: malformed).fetchUsage(accessToken: "a", accountID: nil)
+    }
+}
+
+func testCodexUsageMapperPlansWindowsAndRestrictedFields() {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let accountKey = AccountCacheKey(providerID: .codex, digest: "mapper")
+    let planCases: [(String, String?)] = [
+        ("prolite", "Pro 5x"), ("pro", "Pro 20x"), ("free", "Free"),
+        ("plus", "Plus"), ("", nil), ("team_plan", "Team Plan"),
+    ]
+    for (raw, expected) in planCases {
+        let mapped = try? CodexUsageMapper.map(
+            response: codexUsageResponse(
+                #"{"plan_type":"\#(raw)","rate_limit":{"primary_window":{"used_percent":1}}}"#
+            ),
+            accountKey: accountKey,
+            now: now
+        )
+        expect(mapped?.planName, expected, "Codex plan mapping for \(raw)")
+    }
+
+    let response = codexUsageResponse("""
+    {
+      "plan_type": "pro",
+      "rate_limit": {
+        "primary_window": {
+          "used_percent": -5,
+          "limit_window_seconds": 18000,
+          "reset_after_seconds": 60
+        },
+        "secondary_window": {
+          "used_percent": 140,
+          "limit_window_seconds": 604800,
+          "reset_at": "2033-05-18T03:35:00Z"
+        }
+      },
+      "additional_rate_limits": [{"rate_limit":{"primary_window":{"used_percent":55}}}],
+      "credits": {"balance": 100},
+      "rate_limit_reset_credits": {"available_count": 9},
+      "balance": 100,
+      "spend": 50
+    }
+    """)
+    guard let mapped = try? CodexUsageMapper.map(response: response, accountKey: accountKey, now: now) else {
+        fatalError("valid Codex usage should map")
+    }
+    expect(mapped.windows.count, 2, "mapper must expose exactly the two supported windows")
+    expect(mapped.windows[0].kind, .session, "primary 5-hour window kind")
+    expect(mapped.windows[0].usedPercent, 0, "used percent lower clamp")
+    expect(mapped.windows[0].duration, 18_000, "session duration")
+    expect(mapped.windows[0].resetsAt, now.addingTimeInterval(60), "reset-after seconds")
+    expect(mapped.windows[1].kind, .weekly, "secondary weekly window kind")
+    expect(mapped.windows[1].usedPercent, 100, "used percent upper clamp")
+    expect(mapped.windows[1].duration, 604_800, "weekly duration")
+    expect(mapped.windows[1].resetsAt, ISO8601DateFormatter().date(from: "2033-05-18T03:35:00Z"), "ISO reset time")
+
+    let weeklyOnly = try? CodexUsageMapper.map(
+        response: codexUsageResponse("""
+        {"rate_limit":{"primary_window":{"used_percent":5,"limit_window_seconds":604800}}}
+        """),
+        accountKey: accountKey,
+        now: now
+    )
+    expect(weeklyOnly?.windows.count, 1, "missing secondary must stay absent")
+    expect(weeklyOnly?.windows.first?.kind, .weekly, "sole 7-day primary must reclassify as weekly")
+}
+
+func testCodexUsageMapperClassifiesInvalidResponses() {
+    let key = AccountCacheKey(providerID: .codex, digest: "invalid")
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let cases: [(UsageHTTPResponse, UsageProviderFailure)] = [
+        (codexUsageResponse("{}"), .invalidResponse),
+        (codexUsageResponse(#"{"credits":{"balance":100}}"#), .invalidResponse),
+        (codexUsageResponse(statusCode: 401, "{}"), .signInAgain),
+        (codexUsageResponse(statusCode: 503, "{}"), .serviceUnavailable),
+    ]
+    for (response, expected) in cases {
+        do {
+            _ = try CodexUsageMapper.map(response: response, accountKey: key, now: now)
+            fatalError("invalid Codex response should fail")
+        } catch let failure as UsageProviderFailure {
+            expect(failure, expected, "Codex mapper failure classification")
+        } catch {
+            fatalError("unexpected Codex mapper error")
+        }
+    }
+}
+
+func makeCodexProviderFixture(
+    token: String,
+    refreshToken: String = "refresh-old",
+    accountID: String? = nil,
+    now: Date,
+    files: (any UsageFileAccessing)? = nil
+) -> (CodexAuthStore, OAuthAccess, any UsageFileAccessing, String) {
+    let home = "/tmp/agent-halo-provider-\(UUID().uuidString)"
+    let path = codexCheckAuthPath(home: home)
+    var tokens: [String: Any] = ["access_token": token, "refresh_token": refreshToken]
+    if let accountID { tokens["account_id"] = accountID }
+    let initial = codexCheckJSON(["tokens": tokens, "last_refresh": "2030-01-01T00:00:00Z"])
+    let resolvedFiles: any UsageFileAccessing = files ?? FakeUsageFiles(contents: [path: initial])
+    if let custom = resolvedFiles as? CodexCheckFailingFiles {
+        custom.setData(initial, at: path)
+    }
+    let store = CodexAuthStore(
+        environment: FakeUsageEnvironment(["HOME": home]),
+        files: resolvedFiles,
+        keychain: FakeUsageKeychain(),
+        now: { now }
+    )
+    guard case .oauth(let access) = store.resolveAccess() else {
+        fatalError("provider fixture should resolve OAuth")
+    }
+    return (store, access, resolvedFiles, path)
+}
+
+func testCodexProviderAdoptsExternalSourceWithoutMigration() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let oldJWT = codexCheckJWT(exp: now.addingTimeInterval(60).timeIntervalSince1970)
+    let fixture = makeCodexProviderFixture(token: oldJWT, now: now)
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let externalJWT = codexCheckJWT(exp: now.addingTimeInterval(3_600).timeIntervalSince1970)
+    try? files.writeAtomically(
+        codexCheckJSON(["tokens": ["access_token": externalJWT, "refresh_token": "external-refresh"]]),
+        to: fixture.3,
+        preservingModeOf: fixture.3
+    )
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: codexUsageResponse(#"{"plan_type":"plus"}"#))
+    let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expectExternalAccessChange(result, "external source adoption must be a typed Coordinator outcome")
+    expect(requests.count, 0, "Provider must not continue under an externally replaced source")
+}
+
+func codexExternalCredential(
+    accessToken: String,
+    refreshToken: String = "external-refresh"
+) -> Data {
+    codexCheckJSON([
+        "tokens": [
+            "access_token": accessToken,
+            "refresh_token": refreshToken,
+        ],
+    ])
+}
+
+func testCodexProviderDetectsExternalSourceDuringRefresh() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeCodexProviderFixture(
+        token: codexCheckJWT(exp: now.addingTimeInterval(60).timeIntervalSince1970),
+        now: now
+    )
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let http = GatedUsageHTTPClient(
+        outcomes: [.response(codexUsageResponse(#"{"access_token":"stale-rotation"}"#))],
+        gatedPath: "/oauth/token"
+    )
+    let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+
+    let request = Task { await provider.refresh(using: .oauth(fixture.1)) }
+    await waitForHTTPRequestCount(http, 1, "Codex refresh request did not enter gate")
+    try? files.writeAtomically(
+        codexExternalCredential(accessToken: "external-during-refresh"),
+        to: fixture.3,
+        preservingModeOf: fixture.3
+    )
+    await http.resume()
+    expectExternalAccessChange(
+        await request.value,
+        "external login during Codex refresh must discard the old refresh result"
+    )
+}
+
+func testCodexProviderDetectsExternalSourceAfterRefreshFailure() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeCodexProviderFixture(
+        token: codexCheckJWT(exp: now.addingTimeInterval(60).timeIntervalSince1970),
+        now: now
+    )
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let http = GatedUsageHTTPClient(
+        outcomes: [.failure(.network)],
+        gatedPath: "/oauth/token"
+    )
+    let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+
+    let request = Task { await provider.refresh(using: .oauth(fixture.1)) }
+    await waitForHTTPRequestCount(http, 1, "failing Codex refresh request did not enter gate")
+    try? files.writeAtomically(
+        codexExternalCredential(accessToken: "external-after-refresh-failure"),
+        to: fixture.3,
+        preservingModeOf: fixture.3
+    )
+    await http.resume()
+    expectExternalAccessChange(
+        await request.value,
+        "external login during Codex refresh failure must supersede the old error"
+    )
+}
+
+func testCodexProviderDetectsExternalSourceDuringUsageSuccess() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeCodexProviderFixture(
+        token: codexCheckJWT(exp: now.addingTimeInterval(3_600).timeIntervalSince1970),
+        now: now
+    )
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let http = GatedUsageHTTPClient(
+        outcomes: [.response(codexUsageResponse(#"{"plan_type":"pro"}"#))],
+        gatedPath: "/backend-api/wham/usage"
+    )
+    let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+
+    let request = Task { await provider.refresh(using: .oauth(fixture.1)) }
+    await waitForHTTPRequestCount(http, 1, "Codex Usage request did not enter gate")
+    try? files.writeAtomically(
+        codexExternalCredential(accessToken: "external-during-usage"),
+        to: fixture.3,
+        preservingModeOf: fixture.3
+    )
+    await http.resume()
+    expectExternalAccessChange(
+        await request.value,
+        "external login during Codex Usage success must discard the old snapshot"
+    )
+}
+
+func testCodexProviderDetectsExternalSourceDuringUsageFailure() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeCodexProviderFixture(
+        token: codexCheckJWT(exp: now.addingTimeInterval(3_600).timeIntervalSince1970),
+        now: now
+    )
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let http = GatedUsageHTTPClient(
+        outcomes: [.failure(.network)],
+        gatedPath: "/backend-api/wham/usage"
+    )
+    let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+
+    let request = Task { await provider.refresh(using: .oauth(fixture.1)) }
+    await waitForHTTPRequestCount(http, 1, "Codex failing Usage request did not enter gate")
+    try? files.writeAtomically(
+        codexExternalCredential(accessToken: "external-after-network"),
+        to: fixture.3,
+        preservingModeOf: fixture.3
+    )
+    await http.resume()
+    expectExternalAccessChange(
+        await request.value,
+        "external login during Codex transport failure must supersede the old error"
+    )
+}
+
+func testCodexProviderDetectsExternalSourceOnFirstUnauthorized() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeCodexProviderFixture(
+        token: codexCheckJWT(exp: now.addingTimeInterval(3_600).timeIntervalSince1970),
+        now: now
+    )
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let http = GatedUsageHTTPClient(
+        outcomes: [.response(codexUsageResponse(statusCode: 401, "{}"))],
+        gatedPath: "/backend-api/wham/usage"
+    )
+    let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+
+    let request = Task { await provider.refresh(using: .oauth(fixture.1)) }
+    await waitForHTTPRequestCount(http, 1, "Codex first 401 request did not enter gate")
+    try? files.writeAtomically(
+        codexExternalCredential(accessToken: "external-on-first-401"),
+        to: fixture.3,
+        preservingModeOf: fixture.3
+    )
+    await http.resume()
+    expectExternalAccessChange(
+        await request.value,
+        "external login at first Codex 401 must prevent old-token refresh"
+    )
+    expect(await http.capturedRequests.count, 1, "first-401 access change must stop before refresh")
+}
+
+func testCodexProviderDetectsExternalSourceDuringUnauthorizedRetry() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeCodexProviderFixture(
+        token: codexCheckJWT(exp: now.addingTimeInterval(3_600).timeIntervalSince1970),
+        now: now
+    )
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let http = GatedUsageHTTPClient(
+        outcomes: [
+            .response(codexUsageResponse(statusCode: 401, "{}")),
+            .response(codexUsageResponse(#"{"access_token":"internal-retry"}"#)),
+            .response(codexUsageResponse(statusCode: 401, "{}")),
+        ],
+        gatedPath: "/backend-api/wham/usage",
+        gatedMatchNumber: 2
+    )
+    let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+
+    let request = Task { await provider.refresh(using: .oauth(fixture.1)) }
+    await waitForHTTPRequestCount(http, 3, "Codex retry Usage request did not enter gate")
+    try? files.writeAtomically(
+        codexExternalCredential(accessToken: "external-during-retry"),
+        to: fixture.3,
+        preservingModeOf: fixture.3
+    )
+    await http.resume()
+    expectExternalAccessChange(
+        await request.value,
+        "external login during Codex 401 retry must supersede sign-in failure"
+    )
+}
+
+func testCodexProviderDetectsExternalSourceDuringUnauthorizedRetryFailure() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeCodexProviderFixture(
+        token: codexCheckJWT(exp: now.addingTimeInterval(3_600).timeIntervalSince1970),
+        now: now
+    )
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let http = GatedUsageHTTPClient(
+        outcomes: [
+            .response(codexUsageResponse(statusCode: 401, "{}")),
+            .response(codexUsageResponse(#"{"access_token":"internal-retry"}"#)),
+            .failure(.network),
+        ],
+        gatedPath: "/backend-api/wham/usage",
+        gatedMatchNumber: 2
+    )
+    let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+
+    let request = Task { await provider.refresh(using: .oauth(fixture.1)) }
+    await waitForHTTPRequestCount(http, 3, "failing Codex retry request did not enter gate")
+    try? files.writeAtomically(
+        codexExternalCredential(accessToken: "external-during-retry-failure"),
+        to: fixture.3,
+        preservingModeOf: fixture.3
+    )
+    await http.resume()
+    expectExternalAccessChange(
+        await request.value,
+        "external login during Codex retry failure must supersede the old error"
+    )
+}
+
+func testCodexProviderRefreshesProactively() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let expiring = codexCheckJWT(exp: now.addingTimeInterval(60).timeIntervalSince1970)
+    let fixture = makeCodexProviderFixture(token: expiring, accountID: "stable-account", now: now)
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: codexUsageResponse(#"{"access_token":"proactive-access","refresh_token":"proactive-refresh"}"#))
+    await http.enqueue(response: codexUsageResponse(#"{"plan_type":"free"}"#))
+    let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expect(result.failure == nil, "proactive refresh should succeed")
+    expect(requests.map(\.path), ["/oauth/token", "/backend-api/wham/usage"], "proactive refresh order")
+    expect(requests.last?.headers["authorization"], "Bearer proactive-access", "proactive token must serve usage")
+    expect(result.migrateCacheFrom == nil, "stable account id should not require cache migration")
+}
+
+func testCodexProviderRetriesOneUnauthorizedAndMigratesCache() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fresh = codexCheckJWT(exp: now.addingTimeInterval(3_600).timeIntervalSince1970)
+    let fixture = makeCodexProviderFixture(token: fresh, now: now)
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: codexUsageResponse(statusCode: 401, "{}"))
+    await http.enqueue(response: codexUsageResponse(#"{"access_token":"retry-access","refresh_token":"retry-refresh"}"#))
+    await http.enqueue(response: codexUsageResponse(#"{"plan_type":"pro"}"#))
+    let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expect(result.failure == nil, "first 401 should refresh and retry")
+    expect(
+        requests.map(\.path),
+        ["/backend-api/wham/usage", "/oauth/token", "/backend-api/wham/usage"],
+        "401 retry request order"
+    )
+    expect(requests.last?.headers["authorization"], "Bearer retry-access", "retry must use rotated token")
+    expect(result.migrateCacheFrom, fixture.1.accountKey, "internal rotation should return old cache key")
+}
+
+func testCodexProviderStopsAfterSecondUnauthorized() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fresh = codexCheckJWT(exp: now.addingTimeInterval(3_600).timeIntervalSince1970)
+    let fixture = makeCodexProviderFixture(token: fresh, now: now)
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: codexUsageResponse(statusCode: 401, "{}"))
+    await http.enqueue(response: codexUsageResponse(#"{"access_token":"retry-access"}"#))
+    await http.enqueue(response: codexUsageResponse(statusCode: 401, "{}"))
+    let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expect(result.failure, .signInAgain, "second 401 should require sign in")
+    expect(requests.filter { $0.path == "/backend-api/wham/usage" }.count, 2, "usage must retry at most once")
+}
+
+func testCodexProviderRefreshCodesRequireSignIn() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    for code in ["refresh_token_expired", "refresh_token_reused", "refresh_token_invalidated"] {
+        let fresh = codexCheckJWT(exp: now.addingTimeInterval(3_600).timeIntervalSince1970)
+        let fixture = makeCodexProviderFixture(token: fresh, now: now)
+        let http = RecordingUsageHTTPClient()
+        await http.enqueue(response: codexUsageResponse(statusCode: 401, "{}"))
+        await http.enqueue(response: codexUsageResponse(statusCode: 400, #"{"error":{"code":"\#(code)"}}"#))
+        let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+        let result = await provider.refresh(using: .oauth(fixture.1))
+        expect(result.failure, .signInAgain, "refresh code \(code) should require sign in")
+    }
+}
+
+final class CodexCheckFailingFiles: UsageFileAccessing, @unchecked Sendable {
+    private let data = LockedBox<[String: Data]>([:])
+
+    func setData(_ value: Data, at path: String) {
+        data.withValue { $0[path] = value }
+    }
+
+    func readDataIfPresent(at path: String) throws -> Data? {
+        data.value[path]
+    }
+
+    func ensureDirectory(at path: String, mode: mode_t) throws {}
+
+    func writeAtomically(_ data: Data, to path: String, preservingModeOf existingPath: String?) throws {
+        throw UsageProviderFailure.network
+    }
+}
+
+func testCodexProviderUsesRotatedTokenWhenWritebackFails() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let files = CodexCheckFailingFiles()
+    let expiring = codexCheckJWT(exp: now.addingTimeInterval(60).timeIntervalSince1970)
+    let fixture = makeCodexProviderFixture(token: expiring, now: now, files: files)
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: codexUsageResponse(#"{"access_token":"memory-access","refresh_token":"memory-refresh"}"#))
+    await http.enqueue(response: codexUsageResponse(#"{"plan_type":"plus"}"#))
+    let provider = CodexUsageProvider(authStore: fixture.0, usageClient: CodexUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expect(result.failure == nil, "writeback failure must not fail current usage request")
+    expect(requests.last?.headers["authorization"], "Bearer memory-access", "in-memory token must serve current request")
+    expect(result.snapshot?.accountKey, fixture.1.accountKey, "unpersisted Codex rotation keeps the stable account key")
+    expect(result.migrateCacheFrom == nil, "unpersisted Codex rotation must not migrate cache")
+}
+
+// MARK: - Claude usage checks
+
+func claudeUsageResponse(
+    statusCode: Int = 200,
+    headers: [String: String] = [:],
+    _ body: String
+) -> UsageHTTPResponse {
+    UsageHTTPResponse(statusCode: statusCode, headers: headers, body: Data(body.utf8))
+}
+
+func runClaudeUsageChecks() async {
+    await testClaudeUsageClientBuildsOnlyOfficialRequests()
+    testClaudeUsageMapperPlansWindowsAndRestrictedFields()
+    testClaudeUsageMapperClassifiesFailuresAndRetryAfter()
+    await testClaudeProviderScopeFailureSkipsHTTP()
+    await testClaudeProviderRejectsUnderScopedInitialReload()
+    await testClaudeProviderAdoptsExternalSourceWithoutMigration()
+    await testClaudeProviderAdoptsExternalSourceChangedDuringRefresh()
+    await testClaudeProviderAdoptsExternalSourceAfterRefreshFailure()
+    await testClaudeProviderRejectsUnderScopedRefreshChange()
+    await testClaudeProviderAdoptsExternalSourceChangedDuringUsage()
+    await testClaudeProviderAdoptsExternalSourceAfterUsageTransportFailure()
+    await testClaudeProviderRejectsUnderScopedUsageChange()
+    await testClaudeProviderAdoptsExternalSourceChangedDuringUnauthorizedRetry()
+    await testClaudeProviderRefreshesProactively()
+    await testClaudeProviderRetriesOneUnauthorizedAndMigratesCache()
+    await testClaudeProviderClassifiesRefreshFailures()
+    await testClaudeProviderUsesRotatedTokenWhenWritebackFails()
+}
+
+func testClaudeUsageClientBuildsOnlyOfficialRequests() async {
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: claudeUsageResponse(#"{"five_hour":{"utilization":1}}"#))
+    await http.enqueue(response: claudeUsageResponse(#"{"access_token":"new-access"}"#))
+    let client = ClaudeUsageClient(http: http)
+
+    _ = try? await client.fetchUsage(accessToken: " access token ")
+    _ = try? await client.refreshToken("refresh token")
+
+    let requests = await http.capturedRequests
+    expect(requests.count, 2, "Claude client should issue exactly usage and refresh requests")
+    expect(requests[0].method, "GET", "Claude usage method")
+    expect(requests[0].host, "api.anthropic.com", "Claude usage official host")
+    expect(requests[0].path, "/api/oauth/usage", "Claude usage official path")
+    expect(requests[0].timeout, 10, "Claude usage timeout")
+    expect(requests[0].headers["authorization"], "Bearer access token", "Claude usage bearer header")
+    expect(requests[0].headers["accept"], "application/json", "Claude usage accept header")
+    expect(requests[0].headers["content-type"], "application/json", "Claude usage content type")
+    expect(requests[0].headers["anthropic-beta"], "oauth-2025-04-20", "Claude OAuth beta header")
+    expect(requests[0].headers["user-agent"], "claude-code/2.1.69", "Claude Code user agent")
+
+    expect(requests[1].method, "POST", "Claude refresh method")
+    expect(requests[1].host, "platform.claude.com", "Claude refresh official host")
+    expect(requests[1].path, "/v1/oauth/token", "Claude refresh official path")
+    expect(requests[1].timeout, 15, "Claude refresh timeout")
+    expect(requests[1].headers["content-type"], "application/json", "Claude refresh content type")
+    let body = (try? JSONSerialization.jsonObject(with: requests[1].body ?? Data())) as? [String: String]
+    expect(body?["grant_type"], "refresh_token", "Claude refresh grant type")
+    expect(body?["refresh_token"], "refresh token", "Claude refresh token")
+    expect(body?["client_id"], "9d1c250a-e61b-44d9-88ed-5944d1962f5e", "Claude refresh client id")
+    expect(
+        body?["scope"],
+        "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload",
+        "Claude refresh must request the complete official scope set"
+    )
+    expect(
+        requests.allSatisfy { ["api.anthropic.com", "platform.claude.com"].contains($0.host) },
+        "Claude client must call only approved official endpoints"
+    )
+}
+
+func testClaudeUsageMapperPlansWindowsAndRestrictedFields() {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let accountKey = AccountCacheKey(providerID: .claude, digest: "mapper")
+    expect(ClaudeUsageMapper.formatPlan(subscriptionType: "max", rateLimitTier: "default_claude_max_5x"), "Max 5x", "Claude Max plan")
+    expect(ClaudeUsageMapper.formatPlan(subscriptionType: "pro", rateLimitTier: nil), "Pro", "Claude Pro plan")
+    expect(ClaudeUsageMapper.formatPlan(subscriptionType: "  ", rateLimitTier: "default_5x"), nil, "blank Claude plan")
+
+    let response = claudeUsageResponse("""
+    {
+      "five_hour": {"utilization": -5, "resets_at": "2033-05-18T03:35:00Z"},
+      "seven_day": {"utilization": 140, "resets_at": 2000001000},
+      "seven_day_sonnet": {"utilization": 55, "resets_at": 2000002000},
+      "limits": [{"kind":"weekly_scoped","percent":66}],
+      "extra_usage": {"is_enabled":true,"used_credits":500,"monthly_limit":1000},
+      "balance": 999
+    }
+    """)
+    let hint = OAuthPlanHint(subscriptionType: "max", rateLimitTier: "default_claude_max_5x")
+    guard let mapped = try? ClaudeUsageMapper.map(
+        response: response,
+        accountKey: accountKey,
+        planHint: hint,
+        now: now
+    ) else {
+        fatalError("valid Claude usage should map")
+    }
+    expect(mapped.planName, "Max 5x", "Claude plan comes from credential hints")
+    expect(mapped.windows.count, 2, "Claude mapper exposes exactly five-hour and seven-day windows")
+    expect(mapped.windows[0].kind, .session, "Claude five-hour window kind")
+    expect(mapped.windows[0].usedPercent, 0, "Claude utilization lower clamp")
+    expect(mapped.windows[0].duration, 18_000, "Claude five-hour duration")
+    expect(mapped.windows[0].resetsAt, ISO8601DateFormatter().date(from: "2033-05-18T03:35:00Z"), "Claude ISO reset")
+    expect(mapped.windows[1].kind, .weekly, "Claude seven-day window kind")
+    expect(mapped.windows[1].usedPercent, 100, "Claude utilization upper clamp")
+    expect(mapped.windows[1].duration, 604_800, "Claude seven-day duration")
+    expect(mapped.windows[1].resetsAt, Date(timeIntervalSince1970: 2_000_001_000), "Claude epoch-second reset")
+
+    let milliseconds = try? ClaudeUsageMapper.map(
+        response: claudeUsageResponse(#"{"seven_day":{"utilization":3,"resets_at":2000001000000}}"#),
+        accountKey: accountKey,
+        planHint: nil,
+        now: now
+    )
+    expect(milliseconds?.windows.first?.resetsAt, Date(timeIntervalSince1970: 2_000_001_000), "Claude epoch-millisecond reset")
+
+    let microsecondsWithoutZone = try? ClaudeUsageMapper.map(
+        response: claudeUsageResponse(#"{"five_hour":{"utilization":3,"resets_at":"2099-06-01T12:00:00.123456"}}"#),
+        accountKey: accountKey,
+        planHint: nil,
+        now: now
+    )
+    let expectedFormatter = ISO8601DateFormatter()
+    expectedFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    guard let expectedMicroseconds = expectedFormatter.date(from: "2099-06-01T12:00:00.123Z") else {
+        fatalError("Claude microsecond fixture should produce a valid expected date")
+    }
+    expect(
+        microsecondsWithoutZone?.windows.first?.resetsAt,
+        expectedMicroseconds,
+        "Claude microsecond reset without timezone assumes UTC"
+    )
+}
+
+func testClaudeUsageMapperClassifiesFailuresAndRetryAfter() {
+    let key = AccountCacheKey(providerID: .claude, digest: "invalid")
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let limited = claudeUsageResponse(statusCode: 429, headers: ["Retry-After": "120"], "{}")
+    expect(ClaudeUsageMapper.retryAfterDate(limited, now: now), now.addingTimeInterval(120), "Claude Retry-After seconds")
+    let dated = claudeUsageResponse(
+        statusCode: 429,
+        headers: ["Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"],
+        "{}"
+    )
+    expect(ClaudeUsageMapper.retryAfterDate(dated, now: now), Date(timeIntervalSince1970: 1_445_412_480), "Claude Retry-After HTTP date")
+
+    let cases: [(UsageHTTPResponse, UsageProviderFailure)] = [
+        (claudeUsageResponse("{}"), .invalidResponse),
+        (claudeUsageResponse(#"{"seven_day_sonnet":{"utilization":1},"extra_usage":{"used_credits":1}}"#), .invalidResponse),
+        (claudeUsageResponse(statusCode: 401, "{}"), .signInAgain),
+        (limited, .rateLimited(retryAt: now.addingTimeInterval(120))),
+        (claudeUsageResponse(statusCode: 503, "{}"), .serviceUnavailable),
+    ]
+    for (response, expected) in cases {
+        do {
+            _ = try ClaudeUsageMapper.map(response: response, accountKey: key, planHint: nil, now: now)
+            fatalError("invalid Claude response should fail")
+        } catch let failure as UsageProviderFailure {
+            expect(failure, expected, "Claude mapper failure classification")
+        } catch {
+            fatalError("unexpected Claude mapper error")
+        }
+    }
+}
+
+func makeClaudeProviderFixture(
+    accessToken: String,
+    refreshToken: String = "refresh-old",
+    expiresAt: Date,
+    subscriptionType: String? = "pro",
+    rateLimitTier: String? = nil,
+    scopes: [String]? = ["user:profile"],
+    now: Date,
+    files: (any UsageFileAccessing)? = nil
+) -> (ClaudeAuthStore, OAuthAccess, any UsageFileAccessing, String) {
+    let home = "/tmp/agent-halo-claude-provider-\(UUID().uuidString)"
+    let path = claudeCheckPath(home: home)
+    let initial = claudeCheckCredential(
+        accessToken: accessToken,
+        refreshToken: refreshToken,
+        expiresAtMilliseconds: expiresAt.timeIntervalSince1970 * 1000,
+        subscriptionType: subscriptionType,
+        rateLimitTier: rateLimitTier,
+        scopes: scopes
+    )
+    let resolvedFiles: any UsageFileAccessing = files ?? FakeUsageFiles(contents: [path: initial])
+    if let failing = resolvedFiles as? CodexCheckFailingFiles { failing.setData(initial, at: path) }
+    let store = ClaudeAuthStore(
+        environment: FakeUsageEnvironment(["HOME": home]),
+        files: resolvedFiles,
+        keychain: FakeUsageKeychain(),
+        now: { now }
+    )
+    guard let access = store.reload(source: .file(path: path)) else {
+        fatalError("Claude provider fixture should parse the exact credential source")
+    }
+    return (store, access, resolvedFiles, path)
+}
+
+func testClaudeProviderScopeFailureSkipsHTTP() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeClaudeProviderFixture(
+        accessToken: "under-scoped",
+        expiresAt: now.addingTimeInterval(3_600),
+        scopes: ["user:inference"],
+        now: now
+    )
+    let http = RecordingUsageHTTPClient()
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+    let access = await provider.resolveAccess(accountKey: nil)
+    guard case .oauthNeedsSignIn = access else { fatalError("missing user:profile should require sign in") }
+    let result = await provider.refresh(using: access)
+    expect(result.failure, .signInAgain, "under-scoped Claude OAuth requires sign in")
+    expect(await http.capturedRequests.count, 0, "under-scoped Claude OAuth must not reach HTTP")
+}
+
+func testClaudeProviderRejectsUnderScopedInitialReload() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeClaudeProviderFixture(accessToken: "initial-allowed", expiresAt: now.addingTimeInterval(3_600), now: now)
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    try? files.writeAtomically(
+        claudeCheckCredential(
+            accessToken: "initial-under-scoped",
+            refreshToken: "initial-under-refresh",
+            expiresAtMilliseconds: now.addingTimeInterval(3_600).timeIntervalSince1970 * 1000,
+            scopes: ["user:inference"]
+        ),
+        to: fixture.3,
+        preservingModeOf: fixture.3
+    )
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: claudeUsageResponse(#"{"five_hour":{"utilization":99}}"#))
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    expectExternalAccessChange(result, "under-scoped exact-source replacement must re-enter Coordinator prepare")
+    expect(await http.capturedRequests.count, 0, "under-scoped exact-source reload must skip HTTP")
+}
+
+func testClaudeProviderAdoptsExternalSourceWithoutMigration() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeClaudeProviderFixture(accessToken: "old-access", expiresAt: now.addingTimeInterval(60), now: now)
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    try? files.writeAtomically(
+        claudeCheckCredential(
+            accessToken: "external-access",
+            refreshToken: "external-refresh",
+            expiresAtMilliseconds: now.addingTimeInterval(3_600).timeIntervalSince1970 * 1000,
+            subscriptionType: "max",
+            rateLimitTier: "default_claude_max_5x"
+        ),
+        to: fixture.3,
+        preservingModeOf: fixture.3
+    )
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: claudeUsageResponse(#"{"five_hour":{"utilization":9}}"#))
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expectExternalAccessChange(result, "external Claude source adoption must be a typed Coordinator outcome")
+    expect(requests.count, 0, "Claude Provider must not continue under an externally replaced source")
+}
+
+actor ClaudeCheckMutatingHTTPClient: UsageHTTPClient {
+    private var responses: [UsageHTTPResponse]
+    private let mutationPath: String
+    private let mutation: @Sendable () -> Void
+    private let mutationMatchNumber: Int
+    private var matchingRequestCount = 0
+    private(set) var capturedRequests: [UsageHTTPRequest] = []
+
+    init(
+        responses: [UsageHTTPResponse],
+        mutationPath: String,
+        mutationMatchNumber: Int = 1,
+        mutation: @escaping @Sendable () -> Void
+    ) {
+        self.responses = responses
+        self.mutationPath = mutationPath
+        self.mutationMatchNumber = mutationMatchNumber
+        self.mutation = mutation
+    }
+
+    func send(_ request: UsageHTTPRequest) async throws -> UsageHTTPResponse {
+        capturedRequests.append(request)
+        if request.path == mutationPath {
+            matchingRequestCount += 1
+            if matchingRequestCount == mutationMatchNumber { mutation() }
+        }
+        guard !responses.isEmpty else {
+            throw UsageProviderFailure.invalidResponse
+        }
+        return responses.removeFirst()
+    }
+}
+
+enum ClaudeCheckHTTPOutcome: Sendable {
+    case response(UsageHTTPResponse)
+    case failure(UsageProviderFailure)
+}
+
+actor ClaudeCheckMutatingOutcomeHTTPClient: UsageHTTPClient {
+    private var outcomes: [ClaudeCheckHTTPOutcome]
+    private let mutationPath: String
+    private let mutation: @Sendable () -> Void
+    private(set) var capturedRequests: [UsageHTTPRequest] = []
+
+    init(
+        outcomes: [ClaudeCheckHTTPOutcome],
+        mutationPath: String,
+        mutation: @escaping @Sendable () -> Void
+    ) {
+        self.outcomes = outcomes
+        self.mutationPath = mutationPath
+        self.mutation = mutation
+    }
+
+    func send(_ request: UsageHTTPRequest) async throws -> UsageHTTPResponse {
+        capturedRequests.append(request)
+        if request.path == mutationPath { mutation() }
+        guard !outcomes.isEmpty else { throw UsageProviderFailure.invalidResponse }
+        switch outcomes.removeFirst() {
+        case .response(let response):
+            return response
+        case .failure(let failure):
+            throw failure
+        }
+    }
+}
+
+func testClaudeProviderAdoptsExternalSourceChangedDuringRefresh() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeClaudeProviderFixture(accessToken: "expiring-old", expiresAt: now.addingTimeInterval(60), now: now)
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let externalData = claudeCheckCredential(
+        accessToken: "external-during-refresh",
+        refreshToken: "external-refresh",
+        expiresAtMilliseconds: now.addingTimeInterval(3_600).timeIntervalSince1970 * 1000,
+        subscriptionType: "max",
+        rateLimitTier: "default_claude_max_5x"
+    )
+    let http = ClaudeCheckMutatingHTTPClient(
+        responses: [
+            claudeUsageResponse(#"{"access_token":"stale-rotation","refresh_token":"stale-refresh","expires_in":3600}"#),
+            claudeUsageResponse(#"{"five_hour":{"utilization":6}}"#),
+        ],
+        mutationPath: "/v1/oauth/token",
+        mutation: {
+            try? files.writeAtomically(externalData, to: fixture.3, preservingModeOf: fixture.3)
+        }
+    )
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expectExternalAccessChange(result, "Claude source change during refresh must escape to Coordinator")
+    expect(requests.count, 1, "Claude Provider must stop after the stale refresh response")
+}
+
+func testClaudeProviderAdoptsExternalSourceAfterRefreshFailure() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeClaudeProviderFixture(accessToken: "expiring-invalid-grant", expiresAt: now.addingTimeInterval(60), now: now)
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let externalData = claudeCheckCredential(
+        accessToken: "external-after-invalid-grant",
+        refreshToken: "external-invalid-grant-refresh",
+        expiresAtMilliseconds: now.addingTimeInterval(3_600).timeIntervalSince1970 * 1000,
+        subscriptionType: "max",
+        rateLimitTier: "default_claude_max_5x"
+    )
+    let http = ClaudeCheckMutatingOutcomeHTTPClient(
+        outcomes: [
+            .response(claudeUsageResponse(statusCode: 400, #"{"error":"invalid_grant"}"#)),
+            .response(claudeUsageResponse(#"{"five_hour":{"utilization":13}}"#)),
+        ],
+        mutationPath: "/v1/oauth/token",
+        mutation: {
+            try? files.writeAtomically(externalData, to: fixture.3, preservingModeOf: fixture.3)
+        }
+    )
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expectExternalAccessChange(result, "external Claude login must supersede invalid_grant")
+    expect(requests.count, 1, "Claude Provider must not internally restart after invalid_grant")
+}
+
+func testClaudeProviderRejectsUnderScopedRefreshChange() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeClaudeProviderFixture(accessToken: "refresh-allowed", expiresAt: now.addingTimeInterval(60), now: now)
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let underScoped = claudeCheckCredential(
+        accessToken: "refresh-under-scoped",
+        refreshToken: "refresh-under-refresh",
+        expiresAtMilliseconds: now.addingTimeInterval(3_600).timeIntervalSince1970 * 1000,
+        scopes: ["user:inference"]
+    )
+    let http = ClaudeCheckMutatingHTTPClient(
+        responses: [
+            claudeUsageResponse(#"{"access_token":"old-refresh-result","refresh_token":"old-refresh-next","expires_in":3600}"#),
+        ],
+        mutationPath: "/v1/oauth/token",
+        mutation: {
+            try? files.writeAtomically(underScoped, to: fixture.3, preservingModeOf: fixture.3)
+        }
+    )
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expectExternalAccessChange(result, "under-scoped refresh generation must re-enter Coordinator prepare")
+    expect(requests.count, 1, "under-scoped refresh generation must stop after refresh response")
+    expect(requests.first?.path, "/v1/oauth/token", "under-scoped refresh fixture request")
+}
+
+func testClaudeProviderAdoptsExternalSourceChangedDuringUsage() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeClaudeProviderFixture(accessToken: "old-usage-access", expiresAt: now.addingTimeInterval(3_600), now: now)
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let externalData = claudeCheckCredential(
+        accessToken: "external-during-usage",
+        refreshToken: "external-usage-refresh",
+        expiresAtMilliseconds: now.addingTimeInterval(3_600).timeIntervalSince1970 * 1000,
+        subscriptionType: "max",
+        rateLimitTier: "default_claude_max_5x"
+    )
+    let http = ClaudeCheckMutatingHTTPClient(
+        responses: [
+            claudeUsageResponse(#"{"five_hour":{"utilization":91}}"#),
+            claudeUsageResponse(#"{"five_hour":{"utilization":8}}"#),
+        ],
+        mutationPath: "/api/oauth/usage",
+        mutation: {
+            try? files.writeAtomically(externalData, to: fixture.3, preservingModeOf: fixture.3)
+        }
+    )
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expectExternalAccessChange(result, "Claude source change during Usage must escape to Coordinator")
+    expect(requests.count, 1, "Claude Provider must discard old Usage without internally retrying")
+}
+
+func testClaudeProviderAdoptsExternalSourceAfterUsageTransportFailure() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeClaudeProviderFixture(accessToken: "old-transport-access", expiresAt: now.addingTimeInterval(3_600), now: now)
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let externalData = claudeCheckCredential(
+        accessToken: "external-after-network",
+        refreshToken: "external-network-refresh",
+        expiresAtMilliseconds: now.addingTimeInterval(3_600).timeIntervalSince1970 * 1000,
+        subscriptionType: "max",
+        rateLimitTier: "default_claude_max_5x"
+    )
+    let http = ClaudeCheckMutatingOutcomeHTTPClient(
+        outcomes: [
+            .failure(.network),
+            .response(claudeUsageResponse(#"{"seven_day":{"utilization":14}}"#)),
+        ],
+        mutationPath: "/api/oauth/usage",
+        mutation: {
+            try? files.writeAtomically(externalData, to: fixture.3, preservingModeOf: fixture.3)
+        }
+    )
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expectExternalAccessChange(result, "external Claude login must supersede Usage transport failure")
+    expect(requests.count, 1, "Claude Provider must not internally retry transport failure")
+
+    let unchangedFixture = makeClaudeProviderFixture(
+        accessToken: "unchanged-network",
+        expiresAt: now.addingTimeInterval(3_600),
+        now: now
+    )
+    let unchangedHTTP = RecordingUsageHTTPClient()
+    await unchangedHTTP.enqueue(error: .network)
+    let unchangedProvider = ClaudeUsageProvider(
+        authStore: unchangedFixture.0,
+        usageClient: ClaudeUsageClient(http: unchangedHTTP),
+        now: { now }
+    )
+    let unchangedResult = await unchangedProvider.refresh(using: .oauth(unchangedFixture.1))
+    expect(unchangedResult.failure, .network, "unchanged Claude usage transport failure stays network")
+}
+
+func testClaudeProviderRejectsUnderScopedUsageChange() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeClaudeProviderFixture(accessToken: "usage-allowed", expiresAt: now.addingTimeInterval(3_600), now: now)
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let underScoped = claudeCheckCredential(
+        accessToken: "usage-under-scoped",
+        refreshToken: "usage-under-refresh",
+        expiresAtMilliseconds: now.addingTimeInterval(3_600).timeIntervalSince1970 * 1000,
+        scopes: ["user:inference"]
+    )
+    let http = ClaudeCheckMutatingHTTPClient(
+        responses: [claudeUsageResponse(#"{"five_hour":{"utilization":77}}"#)],
+        mutationPath: "/api/oauth/usage",
+        mutation: {
+            try? files.writeAtomically(underScoped, to: fixture.3, preservingModeOf: fixture.3)
+        }
+    )
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expectExternalAccessChange(result, "under-scoped Usage generation must re-enter Coordinator prepare")
+    expect(requests.count, 1, "under-scoped usage generation must not retry Usage HTTP")
+}
+
+func testClaudeProviderAdoptsExternalSourceChangedDuringUnauthorizedRetry() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeClaudeProviderFixture(accessToken: "old-retry-access", expiresAt: now.addingTimeInterval(3_600), now: now)
+    guard let files = fixture.2 as? FakeUsageFiles else { fatalError("expected fake files") }
+    let externalData = claudeCheckCredential(
+        accessToken: "external-during-retry",
+        refreshToken: "external-retry-refresh",
+        expiresAtMilliseconds: now.addingTimeInterval(3_600).timeIntervalSince1970 * 1000,
+        subscriptionType: "max",
+        rateLimitTier: "default_claude_max_5x"
+    )
+    let http = ClaudeCheckMutatingHTTPClient(
+        responses: [
+            claudeUsageResponse(statusCode: 401, "{}"),
+            claudeUsageResponse(#"{"access_token":"internal-retry","refresh_token":"internal-refresh","expires_in":3600}"#),
+            claudeUsageResponse(statusCode: 401, "{}"),
+            claudeUsageResponse(#"{"five_hour":{"utilization":12}}"#),
+        ],
+        mutationPath: "/api/oauth/usage",
+        mutationMatchNumber: 2,
+        mutation: {
+            try? files.writeAtomically(externalData, to: fixture.3, preservingModeOf: fixture.3)
+        }
+    )
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expectExternalAccessChange(result, "external Claude login during second 401 must escape to Coordinator")
+    expect(requests.count, 3, "Claude Provider must stop after the stale second Usage response")
+}
+
+func testClaudeProviderRefreshesProactively() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeClaudeProviderFixture(accessToken: "expiring", expiresAt: now.addingTimeInterval(60), now: now)
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: claudeUsageResponse(#"{"access_token":"proactive-access","refresh_token":"proactive-refresh","expires_in":3600}"#))
+    await http.enqueue(response: claudeUsageResponse(#"{"seven_day":{"utilization":7}}"#))
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expect(result.failure == nil, "Claude proactive refresh should succeed")
+    expect(requests.map(\.path), ["/v1/oauth/token", "/api/oauth/usage"], "Claude proactive refresh order")
+    expect(requests.last?.headers["authorization"], "Bearer proactive-access", "Claude proactive token serves usage")
+    expect(result.migrateCacheFrom, fixture.1.accountKey, "Claude internal proactive rotation migrates cache binding")
+}
+
+func testClaudeProviderRetriesOneUnauthorizedAndMigratesCache() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeClaudeProviderFixture(accessToken: "fresh", expiresAt: now.addingTimeInterval(3_600), now: now)
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: claudeUsageResponse(statusCode: 401, "{}"))
+    await http.enqueue(response: claudeUsageResponse(#"{"access_token":"retry-access","refresh_token":"retry-refresh","expires_in":3600}"#))
+    await http.enqueue(response: claudeUsageResponse(#"{"five_hour":{"utilization":4}}"#))
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expect(result.failure == nil, "first Claude 401 refreshes and retries")
+    expect(requests.map(\.path), ["/api/oauth/usage", "/v1/oauth/token", "/api/oauth/usage"], "Claude 401 retry order")
+    expect(requests.last?.headers["authorization"], "Bearer retry-access", "Claude retry uses rotated token")
+    expect(result.migrateCacheFrom, fixture.1.accountKey, "Claude internal 401 rotation migrates cache binding")
+
+    let secondFixture = makeClaudeProviderFixture(accessToken: "fresh-2", expiresAt: now.addingTimeInterval(3_600), now: now)
+    let secondHTTP = RecordingUsageHTTPClient()
+    await secondHTTP.enqueue(response: claudeUsageResponse(statusCode: 401, "{}"))
+    await secondHTTP.enqueue(response: claudeUsageResponse(#"{"access_token":"retry-once","expires_in":3600}"#))
+    await secondHTTP.enqueue(response: claudeUsageResponse(statusCode: 401, "{}"))
+    let secondProvider = ClaudeUsageProvider(authStore: secondFixture.0, usageClient: ClaudeUsageClient(http: secondHTTP), now: { now })
+    let secondResult = await secondProvider.refresh(using: .oauth(secondFixture.1))
+    expect(secondResult.failure, .signInAgain, "second Claude 401 requires sign in")
+    let secondRequests = await secondHTTP.capturedRequests
+    expect(secondRequests.filter { $0.path == "/api/oauth/usage" }.count, 2, "Claude usage retries at most once")
+}
+
+func testClaudeProviderClassifiesRefreshFailures() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    for (body, expected) in [
+        (#"{"error":"invalid_grant"}"#, UsageProviderFailure.signInAgain),
+        (#"{"error":"proxy_failure"}"#, UsageProviderFailure.invalidResponse),
+    ] {
+        let fixture = makeClaudeProviderFixture(accessToken: "refresh-classification", expiresAt: now.addingTimeInterval(60), now: now)
+        let http = RecordingUsageHTTPClient()
+        await http.enqueue(response: claudeUsageResponse(statusCode: 400, body))
+        let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+        let result = await provider.refresh(using: .oauth(fixture.1))
+        expect(result.failure, expected, "Claude refresh failure taxonomy")
+    }
+}
+
+func testClaudeProviderUsesRotatedTokenWhenWritebackFails() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let files = CodexCheckFailingFiles()
+    let fixture = makeClaudeProviderFixture(
+        accessToken: "expiring",
+        expiresAt: now.addingTimeInterval(60),
+        now: now,
+        files: files
+    )
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: claudeUsageResponse(#"{"access_token":"memory-access","refresh_token":"memory-refresh","expires_in":3600}"#))
+    await http.enqueue(response: claudeUsageResponse(#"{"five_hour":{"utilization":2}}"#))
+    let provider = ClaudeUsageProvider(authStore: fixture.0, usageClient: ClaudeUsageClient(http: http), now: { now })
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    let requests = await http.capturedRequests
+    expect(result.failure == nil, "Claude writeback failure must not fail current request")
+    expect(requests.last?.headers["authorization"], "Bearer memory-access", "Claude in-memory token serves current request")
+    expect(result.snapshot?.accountKey, fixture.1.accountKey, "unpersisted Claude rotation keeps the stable account key")
+    expect(result.migrateCacheFrom == nil, "unpersisted Claude rotation must not migrate cache")
+}

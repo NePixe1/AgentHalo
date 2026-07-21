@@ -2,26 +2,36 @@ import AppKit
 
 @MainActor
 enum CodexAppDetector {
-    private static let runningCacheInterval: TimeInterval = 2
-    private static var runningCacheValue = false
-    private static var runningCacheExpiresAt = Date.distantPast
+    private static var runningCacheValue: Bool?
 
-    static func isCodexRunning(now: Date = Date()) -> Bool {
-        if now < runningCacheExpiresAt {
+    static func isCodexRunning() -> Bool {
+        if let runningCacheValue {
             return runningCacheValue
         }
         let value = NSWorkspace.shared.runningApplications.contains { app in
             isCodexApp(app, allowLocalizedName: false)
         }
         runningCacheValue = value
-        runningCacheExpiresAt = now.addingTimeInterval(runningCacheInterval)
         return value
     }
 
-    static func isCodexForeground() -> Bool {
-        guard let app = NSWorkspace.shared.frontmostApplication else {
-            return false
-        }
+    @discardableResult
+    static func noteApplicationDidLaunch(_ app: NSRunningApplication?) -> Bool {
+        guard let app, isCodexApp(app, allowLocalizedName: false) else { return false }
+        let changed = runningCacheValue != true
+        runningCacheValue = true
+        return changed
+    }
+
+    @discardableResult
+    static func noteApplicationDidTerminate(_ app: NSRunningApplication?) -> Bool {
+        guard runningCacheValue == true else { return false }
+        runningCacheValue = nil
+        return true
+    }
+
+    static func isCodexForeground(_ app: NSRunningApplication?) -> Bool {
+        guard let app else { return false }
         return isCodexApp(app, allowLocalizedName: true)
     }
 

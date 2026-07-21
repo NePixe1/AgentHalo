@@ -32,21 +32,30 @@
   "status.permission_denied": "授权已拒绝",
   "status.reviewing_result": "正在分析结果",
 
-  "quota.5h": "5 小时额度",
-  "quota.weekly": "周额度",
+  "quota.5h": "五小时",
+  "quota.weekly": "每周",
   "quota.monthly": "月额度",
   "quota.remaining": "剩余 {0}%",
   "quota.no_data": "暂无数据",
-  "quota.waiting_refresh": "等待 Codex 刷新",
+  "quota.waiting_refresh": "等待刷新",
 
   "context.title": "上下文",
   "context.label": "上下文 {0}%",
   "context.empty": "上下文 --",
 
   "metadata.project": "项目",
+  "metadata.session_title": "会话标题",
   "metadata.model": "模型",
   "metadata.tokens": "输入输出",
   "metadata.separator": "  ·  ",
+
+  "usage.warning.sign_in_codex": "请重新登录 Codex 以刷新使用情况。",
+  "usage.warning.sign_in_claude": "请重新登录 Claude Code 以刷新使用情况。",
+  "usage.warning.rate_limited": "使用情况请求过于频繁，AgentHalo 将稍后重试。",
+  "usage.warning.stale": "使用情况可能已过期，上次更新于 {0}。",
+  "usage.warning.network": "网络异常，暂时无法刷新使用情况。",
+  "usage.warning.service": "使用情况服务暂时不可用。",
+  "usage.warning.invalid": "使用情况服务暂未返回可用数据。",
 
   "failure.auth_expired": "认证已失效",
   "failure.quota_exhausted": "额度已用尽",
