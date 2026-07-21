@@ -7,6 +7,12 @@ public struct SessionReducer: Sendable {
     private var liveTracking: Bool
     private var currentTurnIsPlanMode = false
     private var planProposalSeen = false
+    private var hasTotalUsage = false
+    private var turnUsageBaselineKnown = false
+    private var totalInputTokens: Int64 = 0
+    private var totalOutputTokens: Int64 = 0
+    private var turnBaselineInputTokens: Int64 = 0
+    private var turnBaselineOutputTokens: Int64 = 0
 
     public init(filePath: String, now: Date = Date(), liveTracking: Bool = true) {
         self.snapshot = SessionSnapshot(
@@ -108,6 +114,7 @@ public struct SessionReducer: Sendable {
 
     private mutating func reduceEvent(_ type: String, payload: [String: Any], eventAt: Date, now: Date) {
         if GeneratedHaloSpec.isTaskStartEvent(type) {
+            startTurnUsage()
             inFlightTools = 0
             workingVisibleUntil = nil
             if type == "task_started" {
@@ -252,16 +259,39 @@ public struct SessionReducer: Sendable {
         }
     }
 
+    private mutating func startTurnUsage() {
+        turnUsageBaselineKnown = hasTotalUsage
+        turnBaselineInputTokens = totalInputTokens
+        turnBaselineOutputTokens = totalOutputTokens
+        snapshot.inputTokens = 0
+        snapshot.outputTokens = 0
+    }
+
     private mutating func updateSessionDetails(from payload: [String: Any]) {
         let info = payload.dictionary("info")
         let totalUsage = info?.dictionary("total_token_usage")
-        if let inputTokens = Self.int64(totalUsage?["input_tokens"]) {
-            snapshot.inputTokens = inputTokens
-        }
-        if let outputTokens = Self.int64(totalUsage?["output_tokens"]) {
-            snapshot.outputTokens = outputTokens
-        }
         let lastUsage = info?.dictionary("last_token_usage")
+        let nextInput = Self.int64(totalUsage?["input_tokens"]) ?? totalInputTokens
+        let nextOutput = Self.int64(totalUsage?["output_tokens"]) ?? totalOutputTokens
+        let lastInput = Self.int64(lastUsage?["input_tokens"]) ?? 0
+        let lastOutput = Self.int64(lastUsage?["output_tokens"]) ?? 0
+
+        if totalUsage != nil {
+            if !turnUsageBaselineKnown {
+                turnBaselineInputTokens = max(0, nextInput - lastInput)
+                turnBaselineOutputTokens = max(0, nextOutput - lastOutput)
+                turnUsageBaselineKnown = true
+            }
+            totalInputTokens = nextInput
+            totalOutputTokens = nextOutput
+            hasTotalUsage = true
+            snapshot.inputTokens = max(0, totalInputTokens - turnBaselineInputTokens)
+            snapshot.outputTokens = max(0, totalOutputTokens - turnBaselineOutputTokens)
+        } else if lastUsage != nil {
+            snapshot.inputTokens = max(0, lastInput)
+            snapshot.outputTokens = max(0, lastOutput)
+        }
+
         if let contextTokens = Self.int64(lastUsage?["input_tokens"]),
            let contextWindow = Self.int64(info?["model_context_window"]),
            contextWindow > 0 {

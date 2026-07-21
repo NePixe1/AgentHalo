@@ -503,25 +503,43 @@ func testWorkingVisibilityLiveCallOutputAndInitialTail() {
     expect(initial.snapshot.state, .thinking, "initial tail output should not fake working")
 }
 
-func testSessionReducerCapturesCodexSessionDetailsAndRateLimitAvailability() {
+func testSessionReducerCapturesCurrentCodexTurnDetailsAndRateLimitAvailability() {
     var reducer = SessionReducer(filePath: "/tmp/codex-session-details.jsonl")
     reducer.consume(jsonLine: #"{"type":"session_meta","payload":{"id":"codex-details","cwd":"/Users/wjs/work/pyproj/AgentHalo","title":"  Resolve Usage details  "}}"#)
     reducer.consume(jsonLine: #"{"type":"turn_context","payload":{"model":"gpt-5.5"}}"#)
-    reducer.consume(jsonLine: #"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":38000,"output_tokens":1200},"last_token_usage":{"input_tokens":20000},"model_context_window":100000}}}"#)
+    reducer.consume(jsonLine: #"{"type":"event_msg","payload":{"type":"task_started"}}"#)
+    reducer.consume(jsonLine: #"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":38000,"output_tokens":1200},"last_token_usage":{"input_tokens":2000,"output_tokens":200},"model_context_window":100000}}}"#)
 
     expect(reducer.snapshot.projectName, "AgentHalo", "Codex detail project")
     expect(reducer.snapshot.sessionTitle, "Resolve Usage details", "Codex detail session title")
     expect(reducer.snapshot.modelName, "gpt-5.5", "Codex detail model")
-    expect(reducer.snapshot.inputTokens, 38_000, "Codex detail input tokens")
-    expect(reducer.snapshot.outputTokens, 1_200, "Codex detail output tokens")
+    expect(reducer.snapshot.inputTokens, 2_000, "first observed turn should use last input usage")
+    expect(reducer.snapshot.outputTokens, 200, "first observed turn should use last output usage")
     expect(reducer.snapshot.hasRateLimits, false, "third-party Codex should have no rate limits")
-    expect(reducer.snapshot.contextUsedPercent, 20, "Codex context should come from the current session")
+    expect(reducer.snapshot.contextUsedPercent, 2, "Codex context should come from the current session")
 
-    reducer.consume(jsonLine: #"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":40000,"output_tokens":1500}},"rate_limits":{"primary":{},"secondary":{}}}}"#)
-
-    expect(reducer.snapshot.inputTokens, 40_000, "Codex detail input tokens should refresh")
-    expect(reducer.snapshot.outputTokens, 1_500, "Codex detail output tokens should refresh")
+    reducer.consume(jsonLine: #"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":40000,"output_tokens":1500},"last_token_usage":{"input_tokens":4000,"output_tokens":500}},"rate_limits":{"primary":{},"secondary":{}}}}"#)
+    expect(reducer.snapshot.inputTokens, 4_000, "current turn input should grow from its inferred baseline")
+    expect(reducer.snapshot.outputTokens, 500, "current turn output should grow from its inferred baseline")
     expect(reducer.snapshot.hasRateLimits, true, "subscription Codex should report rate limits")
+
+    reducer.consume(jsonLine: #"{"type":"event_msg","payload":{"type":"task_complete"}}"#)
+    reducer.consume(jsonLine: #"{"type":"event_msg","payload":{"type":"task_started"}}"#)
+    expect(reducer.snapshot.inputTokens, 0, "new turn should reset displayed input tokens")
+    expect(reducer.snapshot.outputTokens, 0, "new turn should reset displayed output tokens")
+    reducer.consume(jsonLine: #"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":40500,"output_tokens":1580},"last_token_usage":{"input_tokens":500,"output_tokens":80}}}}"#)
+    expect(reducer.snapshot.inputTokens, 500, "later turn input should subtract the known baseline")
+    expect(reducer.snapshot.outputTokens, 80, "later turn output should subtract the known baseline")
+}
+
+func testSessionReducerFallsBackToLastTokenUsageWithoutTotals() {
+    var reducer = SessionReducer(filePath: "/tmp/codex-last-token-details.jsonl")
+    reducer.consume(jsonLine: #"{"type":"event_msg","payload":{"type":"task_started"}}"#)
+    reducer.consume(jsonLine: #"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":90,"output_tokens":12},"model_context_window":1000}}}"#)
+
+    expect(reducer.snapshot.inputTokens, 90, "last input usage should work without cumulative totals")
+    expect(reducer.snapshot.outputTokens, 12, "last output usage should work without cumulative totals")
+    expect(reducer.snapshot.contextUsedPercent, 9, "last input usage should continue driving context")
 }
 
 func testSessionReducerCapturesOnlyExplicitCodexSessionTitles() {
@@ -2406,7 +2424,8 @@ do {
 testSettingsPersistsFocusedAgent()
 testAcknowledgedErrorVisibilityUsesLatestErrorTime()
 testWorkingVisibilityLiveCallOutputAndInitialTail()
-testSessionReducerCapturesCodexSessionDetailsAndRateLimitAvailability()
+testSessionReducerCapturesCurrentCodexTurnDetailsAndRateLimitAvailability()
+testSessionReducerFallsBackToLastTokenUsageWithoutTotals()
 testSessionReducerCapturesOnlyExplicitCodexSessionTitles()
 do {
     try testCodexSessionTitleReaderUsesLatestValidTitle()
