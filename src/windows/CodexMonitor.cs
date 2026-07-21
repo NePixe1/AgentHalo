@@ -6,7 +6,6 @@ using System.Drawing.Drawing2D;
 using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
@@ -35,9 +34,8 @@ public sealed class SessionTracker
         private string pending;
         private DateTime observedWriteUtc;
         private long observedLength;
-        private int inFlightTools;
-        private DateTime workingVisibleUntilUtc;
-        private bool liveTracking;
+        private readonly HashSet<string> activeToolIds;
+        private int anonymousActiveTools;
         private bool currentTurnIsPlanMode;
         private bool planProposalSeen;
 
@@ -50,6 +48,7 @@ public sealed class SessionTracker
             serializer = new JavaScriptSerializer();
             serializer.MaxJsonLength = Int32.MaxValue;
             pending = String.Empty;
+            activeToolIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             Snapshot = new SessionSnapshot();
             Snapshot.ThreadId = ExtractThreadId(path);
             Snapshot.ProjectName = "Codex";
@@ -58,12 +57,14 @@ public sealed class SessionTracker
             Snapshot.Action = "Ready";
             Snapshot.LastEventUtc = File.GetLastWriteTimeUtc(path);
             Snapshot.Agent = AgentKind.Codex;
+            Snapshot.TurnPhase = AgentTurnPhase.None;
+            Snapshot.Activity = AgentActivityKind.None;
+            Snapshot.EvidenceSource = AgentEvidenceSource.SessionJsonl;
             ReadMetadata();
             ReadInitialTail();
             FileInfo initialInfo = new FileInfo(path);
             observedWriteUtc = initialInfo.LastWriteTimeUtc;
             observedLength = initialInfo.Length;
-            liveTracking = true;
         }
 
         private static string ExtractThreadId(string path)
@@ -133,7 +134,6 @@ public sealed class SessionTracker
             long previousTicks = Snapshot.LastEventUtc.Ticks;
             HaloState previousState = Snapshot.State;
             string previousAction = Snapshot.Action;
-            ApplyWorkingVisibility();
             try
             {
                 FileInfo info = new FileInfo(FilePath);
@@ -172,30 +172,9 @@ public sealed class SessionTracker
                 previousState != Snapshot.State || previousAction != Snapshot.Action;
         }
 
-        private void ApplyWorkingVisibility()
+        private bool HasActiveTools
         {
-            if (Snapshot.Active && inFlightTools == 0 &&
-                Snapshot.State == HaloState.Working &&
-                workingVisibleUntilUtc != DateTime.MinValue &&
-                DateTime.UtcNow >= workingVisibleUntilUtc)
-            {
-                workingVisibleUntilUtc = DateTime.MinValue;
-                Snapshot.State = HaloState.Thinking;
-                Snapshot.Action = "Reviewing result";
-            }
-        }
-
-        private void ExtendWorkingVisibility(double seconds)
-        {
-            if (!liveTracking)
-            {
-                return;
-            }
-            DateTime candidate = DateTime.UtcNow.AddSeconds(seconds);
-            if (candidate > workingVisibleUntilUtc)
-            {
-                workingVisibleUntilUtc = candidate;
-            }
+            get { return activeToolIds.Count > 0 || anonymousActiveTools > 0; }
         }
 
         private void ReadAvailable(FileStream stream)
@@ -283,6 +262,9 @@ public sealed class SessionTracker
                 }
 
                 string payloadType = GetString(payload, "type");
+                Snapshot.EvidenceSource = AgentEvidenceSource.SessionJsonl;
+                Snapshot.EvidenceKind = payloadType;
+                Snapshot.EvidenceId = GetToolId(payload);
                 if (topType == "event_msg")
                 {
                     ReduceEvent(payloadType, payload, eventUtc);
@@ -315,41 +297,39 @@ public sealed class SessionTracker
             string lower = (payloadType ?? String.Empty).ToLowerInvariant();
             if (GeneratedHaloSpec.IsTaskStartEvent(lower))
             {
-                inFlightTools = 0;
-                workingVisibleUntilUtc = DateTime.MinValue;
+                ClearActiveTools();
                 if (lower == "task_started" && IsPlanModePayload(payload))
                 {
                     currentTurnIsPlanMode = true;
                 }
                 planProposalSeen = false;
-                Snapshot.Active = true;
-                Snapshot.State = HaloState.Thinking;
-                Snapshot.Action = "Planning";
+                SetBusinessState(HaloState.Thinking, AgentTurnPhase.Thinking,
+                    AgentActivityKind.Planning, "Planning", true);
             }
             else if (GeneratedHaloSpec.IsTaskCompleteEvent(lower))
             {
-                inFlightTools = 0;
-                workingVisibleUntilUtc = DateTime.MinValue;
+                ClearActiveTools();
                 if (currentTurnIsPlanMode && planProposalSeen)
                 {
-                    Snapshot.Active = true;
-                    Snapshot.State = HaloState.Attention;
-                    Snapshot.Action = "Waiting for your choice";
+                    SetBusinessState(HaloState.Attention,
+                        AgentTurnPhase.AwaitingUser, AgentActivityKind.None,
+                        "Waiting for your choice", true,
+                        AgentAttentionReason.PlanDecision);
                 }
                 else
                 {
-                    Snapshot.Active = false;
-                    Snapshot.State = HaloState.Done;
-                    Snapshot.Action = "Complete";
+                    SetBusinessState(HaloState.Done, AgentTurnPhase.Completed,
+                        AgentActivityKind.None, "Complete", false);
                 }
                 Snapshot.CompletedUtc = eventUtc == DateTime.MinValue ? DateTime.UtcNow : eventUtc;
                 ClearPlanModeState();
             }
             else if (lower == "agent_message" || lower.EndsWith("_end"))
             {
-                if (lower.EndsWith("_end") && inFlightTools > 0)
+                if (lower.EndsWith("_end") &&
+                    GeneratedHaloSpec.IsExecutionLifecycleEvent(lower))
                 {
-                    inFlightTools--;
+                    CompleteTool(payload);
                 }
                 if (lower == "agent_message" && IsFinalAnswerPayload(payload))
                 {
@@ -357,18 +337,28 @@ public sealed class SessionTracker
                     {
                         planProposalSeen = true;
                     }
-                    Snapshot.Active = true;
-                    Snapshot.State = HaloState.Working;
-                    Snapshot.Action = "Writing answer";
+                    SetBusinessState(HaloState.Working, AgentTurnPhase.Answering,
+                        AgentActivityKind.WritingAnswer, "Writing answer", true);
                     return;
                 }
                 ApplyActiveThinkingOrWorking();
             }
             else if (GeneratedHaloSpec.IsAttentionEvent(lower))
             {
-                Snapshot.Active = true;
-                Snapshot.State = HaloState.Attention;
-                Snapshot.Action = "Needs you";
+                SetBusinessState(HaloState.Attention, AgentTurnPhase.AwaitingUser,
+                    AgentActivityKind.None, "Needs you", true,
+                    AttentionReasonForEvent(lower));
+            }
+            else if (IsRecoverableToolFailureEvent(lower))
+            {
+                Snapshot.FailureSeverity = AgentFailureSeverity.RecoverableTool;
+                if (Snapshot.Active && !HasActiveTools)
+                {
+                    Snapshot.State = HaloState.Thinking;
+                    Snapshot.TurnPhase = AgentTurnPhase.Thinking;
+                    Snapshot.Activity = AgentActivityKind.ReviewingResult;
+                    Snapshot.Action = "Reviewing result";
+                }
             }
             else if (lower == "item_completed")
             {
@@ -379,18 +369,18 @@ public sealed class SessionTracker
             }
             else if (GeneratedHaloSpec.IsFatalEvent(lower))
             {
-                inFlightTools = 0;
-                workingVisibleUntilUtc = DateTime.MinValue;
+                ClearActiveTools();
                 ClearPlanModeState();
-                Snapshot.Active = false;
-                Snapshot.State = HaloState.Error;
-                Snapshot.Action = "Interrupted";
+                SetBusinessState(HaloState.Error, AgentTurnPhase.Failed,
+                    AgentActivityKind.None, "Interrupted", false,
+                    AgentAttentionReason.None, AgentFailureSeverity.FatalTurn);
             }
-            else if (lower.EndsWith("_begin") || lower.EndsWith("_start"))
+            else if ((lower.EndsWith("_begin") || lower.EndsWith("_start")) &&
+                GeneratedHaloSpec.IsExecutionLifecycleEvent(lower))
             {
-                Snapshot.Active = true;
-                Snapshot.State = HaloState.Working;
-                Snapshot.Action = GeneratedHaloSpec.FriendlyAction(lower);
+                string action = GeneratedHaloSpec.FriendlyAction(lower);
+                SetBusinessState(HaloState.Working, AgentTurnPhase.Executing,
+                    ActivityForTool(lower, action), action, true);
             }
         }
 
@@ -400,18 +390,20 @@ public sealed class SessionTracker
             if (lower == "function_call" || lower == "custom_tool_call")
             {
                 string name = GetString(payload, "name");
-                Snapshot.Active = true;
                 if (IsAttentionFunctionCall(name, payload))
                 {
-                    Snapshot.State = HaloState.Attention;
-                    Snapshot.Action = "Needs you";
+                    SetBusinessState(HaloState.Attention,
+                        AgentTurnPhase.AwaitingUser, AgentActivityKind.None,
+                        "Needs you", true,
+                        AttentionReasonForFunction(name, payload));
                 }
                 else
                 {
-                    inFlightTools++;
-                    ExtendWorkingVisibility(2.2);
-                    Snapshot.State = HaloState.Working;
-                    Snapshot.Action = GeneratedHaloSpec.FriendlyAction(name);
+                    RegisterTool(payload);
+                    string action = GeneratedHaloSpec.FriendlyAction(name);
+                    SetBusinessState(HaloState.Working,
+                        AgentTurnPhase.Executing, ActivityForTool(name, action),
+                        action, true);
                 }
             }
             else if (lower == "message" && IsFinalAnswerPayload(payload))
@@ -420,40 +412,38 @@ public sealed class SessionTracker
                 {
                     planProposalSeen = true;
                 }
-                Snapshot.Active = true;
-                Snapshot.State = HaloState.Working;
-                Snapshot.Action = "Writing answer";
+                SetBusinessState(HaloState.Working, AgentTurnPhase.Answering,
+                    AgentActivityKind.WritingAnswer, "Writing answer", true);
             }
             else if (GeneratedHaloSpec.IsToolCall(lower) || lower.EndsWith("_call"))
             {
-                inFlightTools++;
-                ExtendWorkingVisibility(2.2);
-                Snapshot.Active = true;
-                Snapshot.State = HaloState.Working;
-                Snapshot.Action = GeneratedHaloSpec.FriendlyAction(lower);
+                RegisterTool(payload);
+                string action = GeneratedHaloSpec.FriendlyAction(lower);
+                SetBusinessState(HaloState.Working, AgentTurnPhase.Executing,
+                    ActivityForTool(lower, action), action, true);
             }
             else if (GeneratedHaloSpec.IsToolOutput(lower) || lower.EndsWith("_output"))
             {
-                if (inFlightTools > 0)
-                {
-                    inFlightTools--;
-                }
+                bool toolFailed = IsToolFailurePayload(payload);
+                CompleteTool(payload);
                 if (Snapshot.Active)
                 {
-                    if (inFlightTools > 0)
+                    if (HasActiveTools)
                     {
-                        Snapshot.State = HaloState.Working;
-                    }
-                    else if (liveTracking)
-                    {
-                        ExtendWorkingVisibility(1.8);
-                        Snapshot.State = HaloState.Working;
-                        Snapshot.Action = "Reviewing result";
+                        SetBusinessState(HaloState.Working,
+                            AgentTurnPhase.Executing, AgentActivityKind.UsingTool,
+                            "Using tools", true);
                     }
                     else
                     {
-                        Snapshot.State = HaloState.Thinking;
-                        Snapshot.Action = "Reviewing result";
+                        SetBusinessState(HaloState.Thinking,
+                            AgentTurnPhase.Thinking,
+                            AgentActivityKind.ReviewingResult,
+                            "Reviewing result", true);
+                    }
+                    if (toolFailed)
+                    {
+                        Snapshot.FailureSeverity = AgentFailureSeverity.RecoverableTool;
                     }
                 }
             }
@@ -469,20 +459,132 @@ public sealed class SessionTracker
             {
                 return;
             }
-            if (inFlightTools > 0)
+            if (HasActiveTools)
             {
-                Snapshot.State = HaloState.Working;
-            }
-            else if (DateTime.UtcNow < workingVisibleUntilUtc)
-            {
-                Snapshot.State = HaloState.Working;
-                Snapshot.Action = "Reviewing result";
+                SetBusinessState(HaloState.Working, AgentTurnPhase.Executing,
+                    AgentActivityKind.UsingTool, Snapshot.Action, true);
             }
             else
             {
-                Snapshot.State = HaloState.Thinking;
-                Snapshot.Action = "Thinking";
+                SetBusinessState(HaloState.Thinking, AgentTurnPhase.Thinking,
+                    AgentActivityKind.Reasoning, "Thinking", true);
             }
+        }
+
+        private void SetBusinessState(HaloState state, AgentTurnPhase turnPhase,
+            AgentActivityKind activity, string action, bool active,
+            AgentAttentionReason attentionReason = AgentAttentionReason.None,
+            AgentFailureSeverity failureSeverity = AgentFailureSeverity.None)
+        {
+            Snapshot.State = state;
+            Snapshot.TurnPhase = turnPhase;
+            Snapshot.Activity = activity;
+            Snapshot.Action = action;
+            Snapshot.Active = active;
+            Snapshot.AttentionReason = attentionReason;
+            Snapshot.FailureSeverity = failureSeverity;
+        }
+
+        private static bool IsRecoverableToolFailureEvent(string eventType)
+        {
+            string lower = (eventType ?? String.Empty).ToLowerInvariant();
+            return lower.Contains("tool_failed") || lower.Contains("tool_failure") ||
+                lower.Contains("function_call_failed");
+        }
+
+        private static bool IsToolFailurePayload(Dictionary<string, object> payload)
+        {
+            string status = GetString(payload, "status");
+            string isError = GetString(payload, "is_error");
+            return String.Equals(status, "failed", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(isError, "true", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static AgentAttentionReason AttentionReasonForEvent(string eventType)
+        {
+            string lower = (eventType ?? String.Empty).ToLowerInvariant();
+            if (lower.Contains("approval")) return AgentAttentionReason.Approval;
+            if (lower.Contains("permission")) return AgentAttentionReason.Permission;
+            return AgentAttentionReason.UserInput;
+        }
+
+        private static AgentAttentionReason AttentionReasonForFunction(string name,
+            Dictionary<string, object> payload)
+        {
+            string lower = (name ?? String.Empty).ToLowerInvariant();
+            if (lower.Contains("approval")) return AgentAttentionReason.Approval;
+            if (lower.Contains("permission")) return AgentAttentionReason.Permission;
+            if (lower.Contains("exec") || lower.Contains("command") ||
+                lower.Contains("shell"))
+                return AgentAttentionReason.CommandConfirmation;
+            if (IsEscalatedCommandArguments(GetString(payload, "arguments")))
+                return AgentAttentionReason.CommandConfirmation;
+            return AgentAttentionReason.UserInput;
+        }
+
+        private void RegisterTool(Dictionary<string, object> payload)
+        {
+            string status = GetString(payload, "status");
+            if (String.Equals(status, "completed", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(status, "failed", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+            string id = GetToolId(payload);
+            if (String.IsNullOrEmpty(id))
+            {
+                anonymousActiveTools++;
+            }
+            else
+            {
+                activeToolIds.Add(id);
+            }
+        }
+
+        private void CompleteTool(Dictionary<string, object> payload)
+        {
+            string id = GetToolId(payload);
+            if (!String.IsNullOrEmpty(id))
+            {
+                activeToolIds.Remove(id);
+                return;
+            }
+            if (anonymousActiveTools > 0)
+            {
+                anonymousActiveTools--;
+            }
+            else if (String.IsNullOrEmpty(id) && activeToolIds.Count == 1)
+            {
+                activeToolIds.Clear();
+            }
+        }
+
+        private void ClearActiveTools()
+        {
+            activeToolIds.Clear();
+            anonymousActiveTools = 0;
+        }
+
+        private static string GetToolId(Dictionary<string, object> payload)
+        {
+            string id = GetString(payload, "call_id");
+            if (String.IsNullOrEmpty(id)) id = GetString(payload, "item_id");
+            if (String.IsNullOrEmpty(id)) id = GetString(payload, "id");
+            return id;
+        }
+
+        private static AgentActivityKind ActivityForTool(string tool,
+            string action)
+        {
+            string value = ((tool ?? String.Empty) + " " +
+                (action ?? String.Empty)).ToLowerInvariant();
+            if (value.Contains("apply_patch") || value.Contains("edit") ||
+                value.Contains("write")) return AgentActivityKind.EditingFiles;
+            if (value.Contains("shell") || value.Contains("command") ||
+                value.Contains("exec")) return AgentActivityKind.RunningCommand;
+            if (value.Contains("search") || value.Contains("browser"))
+                return AgentActivityKind.Searching;
+            return AgentActivityKind.UsingTool;
         }
 
         private void ClearPlanModeState()
@@ -618,6 +720,8 @@ public sealed class CodexSessionMonitor : IDisposable
         private readonly string root;
         private readonly Dictionary<string, SessionTracker> trackers;
         private readonly CodexRealtimeActivityReader realtimeActivity;
+        private readonly bool realtimeEnabled;
+        private readonly HashSet<string> pendingSessionPaths;
         private readonly System.Threading.Timer timer;
         private readonly Dispatcher dispatcher;
         private readonly object sync;
@@ -628,15 +732,23 @@ public sealed class CodexSessionMonitor : IDisposable
         private bool realtimeAnswerStreaming;
         private bool hasRealtimeActivity;
         private int pollInProgress;
+        private FileSystemWatcher sessionWatcher;
 
         public event EventHandler Changed;
 
         public CodexSessionMonitor()
+            : this(Path.Combine(Environment.GetFolderPath(
+                Environment.SpecialFolder.UserProfile), ".codex", "sessions"), true)
         {
-            root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".codex", "sessions");
+        }
+
+        internal CodexSessionMonitor(string sessionsRoot, bool enableRealtime)
+        {
+            root = sessionsRoot;
+            realtimeEnabled = enableRealtime;
             trackers = new Dictionary<string, SessionTracker>(StringComparer.OrdinalIgnoreCase);
             realtimeActivity = new CodexRealtimeActivityReader();
+            pendingSessionPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             realtimeAction = String.Empty;
             dispatcher = Dispatcher.CurrentDispatcher;
             sync = new object();
@@ -646,6 +758,10 @@ public sealed class CodexSessionMonitor : IDisposable
 
         public void Start()
         {
+            lock (sync)
+            {
+                EnsureSessionWatcher();
+            }
             timer.Change(0, 220);
         }
 
@@ -665,9 +781,14 @@ public sealed class CodexSessionMonitor : IDisposable
             {
                 lock (sync)
                 {
-                    if ((DateTime.UtcNow - lastDiscoveryUtc).TotalSeconds >= 2)
+                    EnsureSessionWatcher();
+                    if (DrainPendingSessions())
                     {
-                        changed = Discover();
+                        changed = true;
+                    }
+                    if ((DateTime.UtcNow - lastDiscoveryUtc).TotalSeconds >= 30)
+                    {
+                        changed = Discover() || changed;
                     }
                     foreach (SessionTracker tracker in trackers.Values.ToList())
                     {
@@ -676,7 +797,7 @@ public sealed class CodexSessionMonitor : IDisposable
                             changed = true;
                         }
                     }
-                    if (DateTime.UtcNow >= nextRealtimePollUtc)
+                    if (realtimeEnabled && DateTime.UtcNow >= nextRealtimePollUtc)
                     {
                         nextRealtimePollUtc = DateTime.UtcNow.AddMilliseconds(300);
                         HaloState activeState;
@@ -766,7 +887,85 @@ public sealed class CodexSessionMonitor : IDisposable
             return changed;
         }
 
+        private void EnsureSessionWatcher()
+        {
+            if (sessionWatcher != null || !Directory.Exists(root))
+            {
+                return;
+            }
+            try
+            {
+                sessionWatcher = new FileSystemWatcher(root, "*.jsonl");
+                sessionWatcher.IncludeSubdirectories = true;
+                sessionWatcher.NotifyFilter = NotifyFilters.FileName |
+                    NotifyFilters.LastWrite | NotifyFilters.Size;
+                sessionWatcher.Created += OnSessionFileChanged;
+                sessionWatcher.Changed += OnSessionFileChanged;
+                sessionWatcher.Renamed += delegate(object sender,
+                    RenamedEventArgs args) { QueueSessionPath(args.FullPath); };
+                sessionWatcher.EnableRaisingEvents = true;
+            }
+            catch (Exception ex)
+            {
+                if (sessionWatcher != null)
+                {
+                    sessionWatcher.Dispose();
+                    sessionWatcher = null;
+                }
+                SettingsStorage.Log("Session watcher failed: " + ex.Message);
+            }
+        }
+
+        private void OnSessionFileChanged(object sender, FileSystemEventArgs args)
+        {
+            QueueSessionPath(args.FullPath);
+        }
+
+        private void QueueSessionPath(string path)
+        {
+            if (String.IsNullOrEmpty(path) ||
+                !path.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+            lock (sync)
+            {
+                pendingSessionPaths.Add(path);
+            }
+        }
+
+        private bool DrainPendingSessions()
+        {
+            if (pendingSessionPaths.Count == 0)
+            {
+                return false;
+            }
+            bool changed = false;
+            List<string> paths = pendingSessionPaths.ToList();
+            pendingSessionPaths.Clear();
+            foreach (string path in paths)
+            {
+                if (!File.Exists(path))
+                {
+                    if (trackers.Remove(path)) changed = true;
+                    continue;
+                }
+                if (!trackers.ContainsKey(path))
+                {
+                    trackers[path] = new SessionTracker(path);
+                    changed = true;
+                }
+            }
+            return changed;
+        }
+
         public AggregateSnapshot GetAggregate(HaloSettings settings)
+        {
+            return GetAggregate(settings, CodexRuntimeReader.IsRunning());
+        }
+
+        internal AggregateSnapshot GetAggregate(HaloSettings settings,
+            bool codexRunning)
         {
             lock (sync)
             {
@@ -780,15 +979,7 @@ public sealed class CodexSessionMonitor : IDisposable
                 List<SessionSnapshot> sessions = WithoutSupersededErrors(rawSessions)
                 .Where(delegate(SessionSnapshot snapshot)
                 {
-                    if (snapshot.State == HaloState.Done)
-                    {
-                        return snapshot.CompletedUtc > settings.GetAcknowledgedUtc(snapshot.ThreadId) &&
-                            snapshot.CompletedUtc >= settings.GetInstalledUtc() &&
-                            snapshot.CompletedUtc >= now.AddDays(-1);
-                    }
-                    return snapshot.Active ||
-                        (snapshot.State == HaloState.Error &&
-                         snapshot.LastEventUtc >= now.AddHours(-12));
+                    return IsSessionVisible(snapshot, settings, codexRunning, now);
                 })
                 .OrderBy(delegate(SessionSnapshot snapshot) { return StatePriority(snapshot.State); })
                 .ThenByDescending(delegate(SessionSnapshot snapshot) { return snapshot.LastEventUtc; })
@@ -797,6 +988,8 @@ public sealed class CodexSessionMonitor : IDisposable
                 AggregateSnapshot result = new AggregateSnapshot();
                 result.Sessions = sessions;
                 result.FocusedAgent = AgentKind.Codex;
+                result.Presence = codexRunning
+                    ? AgentPresenceState.Standby : AgentPresenceState.Offline;
                 if (settings.Paused)
                 {
                     result.State = HaloState.Idle;
@@ -809,7 +1002,7 @@ public sealed class CodexSessionMonitor : IDisposable
                     return snapshot.State == HaloState.Error ||
                         snapshot.State == HaloState.Attention;
                 });
-                if (hasRealtimeActivity && !hasBlockingState)
+                if (codexRunning && hasRealtimeActivity && !hasBlockingState)
                 {
                     SessionSnapshot current = sessions.FirstOrDefault();
                     result.State = realtimeState;
@@ -817,13 +1010,36 @@ public sealed class CodexSessionMonitor : IDisposable
                     result.Detail = (current == null ? "Codex" : current.ProjectName) +
                         " · " + realtimeAction;
                     result.AnswerStreaming = realtimeAnswerStreaming;
+                    result.Presence = AgentPresenceState.Active;
+                    result.TurnPhase = PhaseForState(realtimeState);
+                    result.Activity = ActivityForRealtime(realtimeAction);
+                    result.EvidenceSource = AgentEvidenceSource.DiagnosticSqlite;
+                    result.EvidenceKind = realtimeAction;
+                    result.AttentionReason = realtimeState == HaloState.Attention
+                        ? AgentAttentionReason.UserInput : AgentAttentionReason.None;
                     return result;
                 }
                 if (sessions.Count == 0)
                 {
-                    result.State = HaloState.Idle;
-                    result.Label = StateLabel(HaloState.Idle);
-                    result.Detail = "Codex is not running";
+                    if (codexRunning)
+                    {
+                        result.State = HaloState.Done;
+                        result.Label = "STANDBY";
+                        result.Detail = L10n.Instance["status.standby_codex"];
+                        result.Presence = AgentPresenceState.Standby;
+                    }
+                    else
+                    {
+                        result.State = HaloState.Idle;
+                        result.Label = StateLabel(HaloState.Idle);
+                        result.Detail = "Codex is not running";
+                        result.Presence = AgentPresenceState.Offline;
+                    }
+                    result.TurnPhase = AgentTurnPhase.None;
+                    result.Activity = AgentActivityKind.None;
+                    result.EvidenceSource = AgentEvidenceSource.Process;
+                    result.EvidenceKind = codexRunning
+                        ? "process_running" : "process_stopped";
                     return result;
                 }
 
@@ -834,8 +1050,59 @@ public sealed class CodexSessionMonitor : IDisposable
                     ? primary.ProjectName + " · " + primary.Action
                     : primary.ProjectName + " +" +
                         (sessions.Count - 1).ToString(CultureInfo.InvariantCulture);
+                result.Presence = primary.Active
+                    ? AgentPresenceState.Active
+                    : (codexRunning ? AgentPresenceState.Standby : AgentPresenceState.Offline);
+                result.TurnPhase = primary.TurnPhase;
+                result.Activity = primary.Activity;
+                result.EvidenceSource = primary.EvidenceSource;
+                result.EvidenceKind = primary.EvidenceKind;
+                result.AttentionReason = primary.AttentionReason;
+                result.FailureSeverity = primary.FailureSeverity;
                 return result;
             }
+        }
+
+        internal static bool IsSessionVisible(SessionSnapshot snapshot,
+            HaloSettings settings, bool codexRunning, DateTime now)
+        {
+            if (snapshot.State == HaloState.Done)
+            {
+                return snapshot.CompletedUtc > settings.GetAcknowledgedUtc(snapshot.ThreadId) &&
+                    snapshot.CompletedUtc >= settings.GetInstalledUtc() &&
+                    snapshot.CompletedUtc >= now.AddDays(-1);
+            }
+            if (snapshot.Active)
+            {
+                return codexRunning && snapshot.LastEventUtc >= now.AddMinutes(-10);
+            }
+            return snapshot.State == HaloState.Error &&
+                snapshot.LastEventUtc >= now.AddHours(-12);
+        }
+
+        private static AgentTurnPhase PhaseForState(HaloState state)
+        {
+            switch (state)
+            {
+                case HaloState.Thinking: return AgentTurnPhase.Thinking;
+                case HaloState.Working: return AgentTurnPhase.Executing;
+                case HaloState.Attention: return AgentTurnPhase.AwaitingUser;
+                case HaloState.Done: return AgentTurnPhase.Completed;
+                case HaloState.Error: return AgentTurnPhase.Failed;
+                default: return AgentTurnPhase.None;
+            }
+        }
+
+        private static AgentActivityKind ActivityForRealtime(string action)
+        {
+            string value = (action ?? String.Empty).ToLowerInvariant();
+            if (value.Contains("compressing")) return AgentActivityKind.CompactingContext;
+            if (value.Contains("answer") || value.Contains("response"))
+                return AgentActivityKind.WritingAnswer;
+            if (value.Contains("editing")) return AgentActivityKind.EditingFiles;
+            if (value.Contains("command")) return AgentActivityKind.RunningCommand;
+            if (value.Contains("search")) return AgentActivityKind.Searching;
+            return AgentActivityKind.UsingTool;
         }
 
         internal static List<SessionSnapshot> WithoutSupersededErrors(
@@ -892,7 +1159,14 @@ public sealed class CodexSessionMonitor : IDisposable
                 LastEventUtc = snapshot.LastEventUtc,
                 CompletedUtc = snapshot.CompletedUtc,
                 Active = snapshot.Active,
-                Agent = snapshot.Agent
+                Agent = snapshot.Agent,
+                TurnPhase = snapshot.TurnPhase,
+                Activity = snapshot.Activity,
+                EvidenceSource = snapshot.EvidenceSource,
+                EvidenceKind = snapshot.EvidenceKind,
+                EvidenceId = snapshot.EvidenceId,
+                AttentionReason = snapshot.AttentionReason,
+                FailureSeverity = snapshot.FailureSeverity
             };
         }
 
@@ -909,23 +1183,28 @@ public sealed class CodexSessionMonitor : IDisposable
         public void Dispose()
         {
             timer.Dispose();
+            FileSystemWatcher watcher;
+            lock (sync)
+            {
+                watcher = sessionWatcher;
+                sessionWatcher = null;
+            }
+            if (watcher != null)
+            {
+                watcher.EnableRaisingEvents = false;
+                watcher.Dispose();
+            }
         }
     }
 
 public sealed class CodexRealtimeActivityReader
     {
-        private const int SqliteOpenReadOnly = 0x00000001;
-        private const int SqliteRow = 100;
         private readonly JavaScriptSerializer serializer;
-        private readonly string database;
-        private bool unavailable;
 
         public CodexRealtimeActivityReader()
         {
             serializer = new JavaScriptSerializer();
             serializer.MaxJsonLength = Int32.MaxValue;
-            database = Path.Combine(Environment.GetFolderPath(
-                Environment.SpecialFolder.UserProfile), ".codex", "logs_2.sqlite");
         }
 
         public bool TryReadActive(out HaloState state, out string action)
@@ -940,68 +1219,14 @@ public sealed class CodexRealtimeActivityReader
             state = HaloState.Working;
             action = String.Empty;
             answerStreaming = false;
-            if (unavailable || !File.Exists(database))
-            {
-                return false;
-            }
-
-            IntPtr connection = IntPtr.Zero;
-            IntPtr statement = IntPtr.Zero;
-            try
-            {
-                int opened = sqlite3_open_v2(database, out connection,
-                    SqliteOpenReadOnly, null);
-                if (opened != 0 || connection == IntPtr.Zero)
-                {
-                    return false;
-                }
-                sqlite3_busy_timeout(connection, 80);
-                long cutoff = DateTimeOffset.UtcNow.AddMinutes(-5).ToUnixTimeSeconds();
-                string query = "select feedback_log_body from logs where ts >= " +
-                    cutoff.ToString(CultureInfo.InvariantCulture) +
-                    " and target='codex_api::sse::responses' and " +
-                    "feedback_log_body like 'SSE event: {\"type\":\"response.%' " +
-                    "order by id desc limit 96;";
-                if (sqlite3_prepare_v2(connection, query, -1, out statement,
-                    IntPtr.Zero) != 0 || statement == IntPtr.Zero)
-                {
-                    return false;
-                }
-
-                List<string> rows = new List<string>();
-                while (sqlite3_step(statement) == SqliteRow)
-                {
-                    string value = ReadUtf8Column(statement, 0);
-                    if (!String.IsNullOrEmpty(value))
-                    {
-                        rows.Add(value);
-                    }
-                }
-                return FindActive(rows, out state, out action, out answerStreaming);
-            }
-            catch (DllNotFoundException)
-            {
-                unavailable = true;
-            }
-            catch (EntryPointNotFoundException)
-            {
-                unavailable = true;
-            }
-            catch
-            {
-            }
-            finally
-            {
-                if (statement != IntPtr.Zero)
-                {
-                    sqlite3_finalize(statement);
-                }
-                if (connection != IntPtr.Zero)
-                {
-                    sqlite3_close(connection);
-                }
-            }
-            return false;
+            long cutoff = DateTimeOffset.UtcNow.AddMinutes(-5).ToUnixTimeSeconds();
+            string query = "select feedback_log_body from logs where ts >= " +
+                cutoff.ToString(CultureInfo.InvariantCulture) +
+                " and target='codex_api::sse::responses' and " +
+                "feedback_log_body like 'SSE event: {\"type\":\"response.%' " +
+                "order by id desc limit 96;";
+            List<string> rows = CodexSQLiteLogStore.Shared.QueryText(query);
+            return FindActive(rows, out state, out action, out answerStreaming);
         }
 
         public bool FindActive(IEnumerable<string> newestFirst, out HaloState state,
@@ -1042,7 +1267,7 @@ public sealed class CodexRealtimeActivityReader
                     }
                     else
                     {
-                        action = "Writing answer";
+                        action = "Generating response";
                     }
                     answerStreaming = false;
                     return true;
@@ -1087,7 +1312,7 @@ public sealed class CodexRealtimeActivityReader
                 {
                     state = HaloState.Working;
                     action = itemType == "message"
-                        ? "Writing answer"
+                        ? "Generating response"
                         : GeneratedHaloSpec.FriendlyAction(
                             String.IsNullOrEmpty(name) ? itemType : name);
                 }
@@ -1221,47 +1446,6 @@ public sealed class CodexRealtimeActivityReader
                 : null;
         }
 
-        private static string ReadUtf8Column(IntPtr statement, int column)
-        {
-            IntPtr pointer = sqlite3_column_text(statement, column);
-            int length = sqlite3_column_bytes(statement, column);
-            if (pointer == IntPtr.Zero || length <= 0)
-            {
-                return String.Empty;
-            }
-            byte[] bytes = new byte[length];
-            Marshal.Copy(pointer, bytes, 0, length);
-            return Encoding.UTF8.GetString(bytes);
-        }
-
-        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl,
-            CharSet = CharSet.Ansi)]
-        private static extern int sqlite3_open_v2(string filename,
-            out IntPtr database, int flags, string vfs);
-
-        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl,
-            CharSet = CharSet.Ansi)]
-        private static extern int sqlite3_prepare_v2(IntPtr database, string sql,
-            int byteCount, out IntPtr statement, IntPtr tail);
-
-        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
-        private static extern int sqlite3_step(IntPtr statement);
-
-        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
-        private static extern IntPtr sqlite3_column_text(IntPtr statement, int column);
-
-        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
-        private static extern int sqlite3_column_bytes(IntPtr statement, int column);
-
-        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
-        private static extern int sqlite3_finalize(IntPtr statement);
-
-        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
-        private static extern int sqlite3_close(IntPtr database);
-
-        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
-        private static extern int sqlite3_busy_timeout(IntPtr database,
-            int milliseconds);
     }
 
 public static class CodexRuntimeReader
@@ -1294,164 +1478,39 @@ public static class CodexRuntimeReader
             catch
             {
             }
-            return HasRecentLocalActivity();
-        }
-
-        private static bool HasRecentLocalActivity()
-        {
-            try
-            {
-                string root = Path.Combine(Environment.GetFolderPath(
-                    Environment.SpecialFolder.UserProfile), ".codex");
-                string logs = Path.Combine(root, "logs_2.sqlite");
-                if (File.Exists(logs) &&
-                    File.GetLastWriteTimeUtc(logs) >= DateTime.UtcNow.AddMinutes(-20))
-                {
-                    return true;
-                }
-                string sessions = Path.Combine(root, "sessions");
-                if (Directory.Exists(sessions))
-                {
-                    foreach (string path in Directory.GetFiles(sessions, "*.jsonl",
-                        SearchOption.AllDirectories))
-                    {
-                        if (File.GetLastWriteTimeUtc(path) >= DateTime.UtcNow.AddMinutes(-20))
-                        {
-                            return true;
-                        }
-                    }
-                }
-            }
-            catch
-            {
-            }
             return false;
         }
     }
 
 public static class CodexFailureReader
     {
-        private const int SqliteOpenReadOnly = 0x00000001;
-        private const int SqliteRow = 100;
-        private static bool unavailable;
-
         public static bool TryReadRecent(out string detail, out DateTime eventUtc)
         {
             detail = null;
             eventUtc = DateTime.MinValue;
-            string root = Path.Combine(Environment.GetFolderPath(
-                Environment.SpecialFolder.UserProfile), ".codex");
-            string database = Path.Combine(root, "logs_2.sqlite");
-            if (unavailable || !File.Exists(database))
+            long cutoff = DateTimeOffset.UtcNow.AddMinutes(-2).ToUnixTimeSeconds();
+            string query = "select ts || char(9) || replace(replace(" +
+                "coalesce(feedback_log_body,''),char(10),' '),char(13),' ') from logs " +
+                "where ts >= " + cutoff.ToString(CultureInfo.InvariantCulture) +
+                " and lower(level)='error' and (" +
+                "lower(target) like '%client%' or lower(target) like '%auth%' or " +
+                "lower(target) like '%response%' or lower(target) like '%session%') " +
+                "order by id desc limit 24;";
+            foreach (string line in CodexSQLiteLogStore.Shared.QueryText(query))
             {
-                return false;
-            }
-            IntPtr connection = IntPtr.Zero;
-            IntPtr statement = IntPtr.Zero;
-            try
-            {
-                int opened = sqlite3_open_v2(database, out connection,
-                    SqliteOpenReadOnly, null);
-                if (opened != 0 || connection == IntPtr.Zero)
-                {
-                    return false;
-                }
-                sqlite3_busy_timeout(connection, 80);
-                long cutoff = DateTimeOffset.UtcNow.AddMinutes(-2).ToUnixTimeSeconds();
-                string query = "select ts || char(9) || replace(replace(" +
-                    "coalesce(feedback_log_body,''),char(10),' '),char(13),' ') from logs " +
-                    "where ts >= " + cutoff.ToString(CultureInfo.InvariantCulture) +
-                    " and lower(level)='error' and (" +
-                    "lower(target) like '%client%' or lower(target) like '%auth%' or " +
-                    "lower(target) like '%response%' or lower(target) like '%session%') " +
-                    "order by id desc limit 24;";
-                if (sqlite3_prepare_v2(connection, query, -1, out statement,
-                    IntPtr.Zero) != 0 || statement == IntPtr.Zero)
-                {
-                    return false;
-                }
-                while (sqlite3_step(statement) == SqliteRow)
-                {
-                    string line = ReadUtf8Column(statement, 0);
-                    int tab = line.IndexOf('\t');
-                    if (tab <= 0) continue;
-                    long seconds;
-                    if (!long.TryParse(line.Substring(0, tab), out seconds)) continue;
-                    string matched = GeneratedHaloSpec.ClassifyFailure(
-                        line.Substring(tab + 1));
-                    if (matched == null) continue;
-                    detail = L10n.Instance[matched];
-                    eventUtc = DateTimeOffset.FromUnixTimeSeconds(seconds).UtcDateTime;
-                    return true;
-                }
-            }
-            catch (DllNotFoundException)
-            {
-                unavailable = true;
-            }
-            catch (EntryPointNotFoundException)
-            {
-                unavailable = true;
-            }
-            catch
-            {
-            }
-            finally
-            {
-                if (statement != IntPtr.Zero)
-                {
-                    sqlite3_finalize(statement);
-                }
-                if (connection != IntPtr.Zero)
-                {
-                    sqlite3_close(connection);
-                }
+                int tab = line.IndexOf('\t');
+                if (tab <= 0) continue;
+                long seconds;
+                if (!long.TryParse(line.Substring(0, tab), out seconds)) continue;
+                string matched = GeneratedHaloSpec.ClassifyFailure(
+                    line.Substring(tab + 1));
+                if (matched == null) continue;
+                detail = L10n.Instance[matched];
+                eventUtc = DateTimeOffset.FromUnixTimeSeconds(seconds).UtcDateTime;
+                return true;
             }
             return false;
         }
-
-        private static string ReadUtf8Column(IntPtr statement, int column)
-        {
-            IntPtr pointer = sqlite3_column_text(statement, column);
-            int length = sqlite3_column_bytes(statement, column);
-            if (pointer == IntPtr.Zero || length <= 0)
-            {
-                return String.Empty;
-            }
-            byte[] bytes = new byte[length];
-            Marshal.Copy(pointer, bytes, 0, length);
-            return Encoding.UTF8.GetString(bytes);
-        }
-
-        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl,
-            CharSet = CharSet.Ansi)]
-        private static extern int sqlite3_open_v2(string filename,
-            out IntPtr database, int flags, string vfs);
-
-        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl,
-            CharSet = CharSet.Ansi)]
-        private static extern int sqlite3_prepare_v2(IntPtr database, string sql,
-            int byteCount, out IntPtr statement, IntPtr tail);
-
-        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
-        private static extern int sqlite3_step(IntPtr statement);
-
-        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
-        private static extern IntPtr sqlite3_column_text(IntPtr statement, int column);
-
-        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
-        private static extern int sqlite3_column_bytes(IntPtr statement, int column);
-
-        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
-        private static extern int sqlite3_finalize(IntPtr statement);
-
-        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
-        private static extern int sqlite3_close(IntPtr database);
-
-        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
-        private static extern int sqlite3_busy_timeout(IntPtr database,
-            int milliseconds);
-
     }
 
 public static class RateLimitReader
@@ -1473,7 +1532,9 @@ public static class RateLimitReader
             return result && metrics.HasMonthly;
         }
 
-        // Why we only read sessions/*.jsonl and ignore logs_2.sqlite for quota:
+        // This reader is the passive JSONL fallback for quota and the source of
+        // context-window usage. CodexUsageMonitor now obtains current quota from
+        // the OAuth usage endpoint independently of conversation activity.
         //
         // Codex persists rate_limits to disk ONLY as a by-product of a conversation
         // turn — the server attaches them to the response that Codex writes into the
@@ -1490,11 +1551,9 @@ public static class RateLimitReader
         //     are embedded inside chat content and are themselves conversation-triggered,
         //     so they do not solve the "no quota until you talk to Codex" case anyway.
         //
-        // Consequence (intended, not a bug): if Codex has not held a conversation
-        // since the last window reset, the halo shows "等待 Codex 刷新" until the next
-        // turn writes fresh rate_limits. Reading Codex's real-time quota without a
-        // conversation would require using the OAuth token in ~/.codex/auth.json to call
-        // Codex's private usage endpoint — that path is intentionally NOT taken here.
+        // If OAuth access is unavailable or the endpoint fails, these snapshots
+        // keep the panel useful without turning SQLite chat-content matches into
+        // false structured quota records.
         public static bool TryRead(out UsageMetrics metrics)
         {
             metrics = new UsageMetrics

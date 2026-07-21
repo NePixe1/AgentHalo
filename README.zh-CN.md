@@ -17,7 +17,7 @@
   </p>
   <p>
     <img src="https://img.shields.io/badge/版本-0.14.0-14B8A6?style=for-the-badge" alt="Version"/>
-    <img src="https://img.shields.io/badge/仅本地运行-0F172A?style=for-the-badge" alt="Local Only"/>
+    <img src="https://img.shields.io/badge/隐私优先-0F172A?style=for-the-badge" alt="Privacy First"/>
     <img src="https://img.shields.io/badge/Swift-FA7343?style=for-the-badge&logo=swift&logoColor=white" alt="Swift"/>
     <img src="https://img.shields.io/badge/Xcode-007ACC?style=for-the-badge&logo=xcode&logoColor=white" alt="Xcode"/>
     <img src="https://img.shields.io/badge/C%23-512BD4?style=for-the-badge&logo=csharp&logoColor=white" alt="C#"/>
@@ -74,7 +74,9 @@ swift run AgentHaloDiagnostics --transition-strip /tmp/agent-halo-transitions
 2. 解压整个 ZIP 压缩包，不要直接在压缩包内运行。
 3. 双击 `AgentHalo.exe`，光环会出现在主显示器右上方附近。
 
-程序没有安装器，不会修改 Codex，也不需要 OpenAI API Key。
+程序没有安装器，也不需要 OpenAI API Key。为独立刷新额度，Agent Halo
+会复用 Codex 已有的 OAuth 登录凭据；OAuth Token 轮换时会原子更新 Codex
+原有的 `auth.json`。
 
 ## 操作
 
@@ -109,13 +111,18 @@ swift run AgentHaloDiagnostics --transition-strip /tmp/agent-halo-transitions
 
 ## 隐私
 
-Agent Halo 只在本机读取 `%USERPROFILE%\.codex\sessions` 中的生命周期事件、
-额度信息，并在 macOS 上自动配置 `~/.claude/settings.json` 中的 Claude Code
+Agent Halo 只在本机读取 `%USERPROFILE%\.codex\sessions` 中的生命周期事件，
+并在 macOS 上自动配置 `~/.claude/settings.json` 中的 Claude Code
 生命周期 hooks 和 status line proxy。它会将 hook 事件写入
 `~/.agent-halo/claude-code-status.jsonl`，上下文快照写入
 `~/.agent-halo/claude-code-context.json`。它还会只读查询 `logs_2.sqlite`
-中结构化的 Codex 连接和服务故障记录。程序不会上传数据、调用网络服务，
-也不会读取或保存 API Key。
+中结构化的 Codex 连接和服务故障记录。
+
+为了独立刷新 Codex 额度，程序会读取现有 OAuth 登录凭据，并仅向
+`auth.openai.com` 与 `chatgpt.com` 的官方接口发起 HTTPS 请求。OAuth Token
+不会写入 Agent Halo 缓存；Token 轮换时只会原子写回 Codex 原有凭据文件。
+Agent Halo 的额度缓存仅保存账户哈希、使用百分比和重置时间，不上传会话内容，
+也不读取或保存 OpenAI API Key。
 
 ## Windows 安全提示
 

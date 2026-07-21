@@ -279,7 +279,11 @@ public sealed class DetailsWindow : Window
             layers.Children.Add(content);
             shell.Child = layers;
             Content = shell;
-            Closed += delegate { quotaTimer.Stop(); };
+            Closed += delegate
+            {
+                quotaTimer.Stop();
+                CodexUsageMonitor.Instance.Updated -= OnCodexUsageUpdated;
+            };
             quotaTimer = new DispatcherTimer();
             quotaTimer.Interval = TimeSpan.FromSeconds(3);
             quotaTimer.Tick += delegate
@@ -290,6 +294,7 @@ public sealed class DetailsWindow : Window
                 }
             };
             quotaTimer.Start();
+            CodexUsageMonitor.Instance.Updated += OnCodexUsageUpdated;
 
             L10n.Instance.LanguageChanged += (s, ev) =>
             {
@@ -345,7 +350,8 @@ public sealed class DetailsWindow : Window
                 return session.Active;
             });
             string action = active == null ? String.Empty : active.Action;
-            if (action.IndexOf("Writing answer", StringComparison.OrdinalIgnoreCase) >= 0)
+            if (action.IndexOf("Writing answer", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                action.IndexOf("Generating response", StringComparison.OrdinalIgnoreCase) >= 0)
             {
                 return L10n.Instance["status.writing_answer"];
             }
@@ -543,7 +549,7 @@ public sealed class DetailsWindow : Window
             {
                 metrics = previewMetrics;
             }
-            else if (!RateLimitReader.TryRead(out metrics))
+            else if (!CodexUsageMonitor.Instance.TryRead(out metrics))
             {
                 metrics = null;
             }
@@ -557,6 +563,22 @@ public sealed class DetailsWindow : Window
                 ApplyQuotaMetrics(new UsageMetrics { ContextInputTokens = -1 });
                 SetContextPercent(false, 0);
             }
+        }
+
+        private void OnCodexUsageUpdated()
+        {
+            if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+            {
+                return;
+            }
+            Dispatcher.BeginInvoke(new Action(delegate
+            {
+                if (IsVisible && currentAgent == AgentKind.Codex &&
+                    previewMetrics == null)
+                {
+                    RefreshQuota();
+                }
+            }));
         }
 
         private void SetContextPercent(bool available, double value)

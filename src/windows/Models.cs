@@ -34,6 +34,65 @@ public enum AgentKind
         ClaudeCode
     }
 
+public enum AgentPresenceState
+    {
+        Offline,
+        Standby,
+        Active
+    }
+
+public enum AgentTurnPhase
+    {
+        None,
+        Thinking,
+        Executing,
+        Answering,
+        AwaitingUser,
+        Completed,
+        Failed
+    }
+
+public enum AgentActivityKind
+    {
+        None,
+        Planning,
+        Reasoning,
+        UsingTool,
+        EditingFiles,
+        RunningCommand,
+        Searching,
+        ReviewingResult,
+        WritingAnswer,
+        CompactingContext
+    }
+
+public enum AgentEvidenceSource
+    {
+        None,
+        Process,
+        SessionJsonl,
+        DiagnosticSqlite,
+        ClaudeHook
+    }
+
+public enum AgentAttentionReason
+    {
+        None,
+        Approval,
+        Permission,
+        UserInput,
+        PlanDecision,
+        CommandConfirmation
+    }
+
+public enum AgentFailureSeverity
+    {
+        None,
+        RecoverableTool,
+        TransientApplication,
+        FatalTurn
+    }
+
 public sealed class SessionSnapshot
     {
         public string ThreadId;
@@ -45,6 +104,13 @@ public sealed class SessionSnapshot
         public DateTime CompletedUtc;
         public bool Active;
         public AgentKind Agent;
+        public AgentTurnPhase TurnPhase;
+        public AgentActivityKind Activity;
+        public AgentEvidenceSource EvidenceSource;
+        public string EvidenceKind;
+        public string EvidenceId;
+        public AgentAttentionReason AttentionReason;
+        public AgentFailureSeverity FailureSeverity;
     }
 
 public sealed class AggregateSnapshot
@@ -55,6 +121,13 @@ public sealed class AggregateSnapshot
         public List<SessionSnapshot> Sessions;
         public bool AnswerStreaming;
         public AgentKind FocusedAgent;
+        public AgentPresenceState Presence;
+        public AgentTurnPhase TurnPhase;
+        public AgentActivityKind Activity;
+        public AgentEvidenceSource EvidenceSource;
+        public string EvidenceKind;
+        public AgentAttentionReason AttentionReason;
+        public AgentFailureSeverity FailureSeverity;
     }
 
 public sealed class UsageMetrics

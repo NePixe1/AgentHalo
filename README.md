@@ -17,7 +17,7 @@
   </p>
   <p>
     <img src="https://img.shields.io/badge/version-0.14.0-14B8A6?style=for-the-badge" alt="Version"/>
-    <img src="https://img.shields.io/badge/local--only-0F172A?style=for-the-badge" alt="Local Only"/>
+    <img src="https://img.shields.io/badge/privacy--first-0F172A?style=for-the-badge" alt="Privacy First"/>
     <img src="https://img.shields.io/badge/Swift-FA7343?style=for-the-badge&logo=swift&logoColor=white" alt="Swift"/>
     <img src="https://img.shields.io/badge/Xcode-007ACC?style=for-the-badge&logo=xcode&logoColor=white" alt="Xcode"/>
     <img src="https://img.shields.io/badge/C%23-512BD4?style=for-the-badge&logo=csharp&logoColor=white" alt="C#"/>
@@ -75,8 +75,9 @@ swift run AgentHaloDiagnostics --transition-strip /tmp/agent-halo-transitions
 3. Double-click `AgentHalo.exe`. The halo appears near the upper-right corner
    of the primary display.
 
-There is no installer. Agent Halo does not modify Codex and does not require an
-OpenAI API key.
+There is no installer, and Agent Halo does not require an OpenAI API key. To
+refresh usage independently, it reuses the existing Codex OAuth login. When an
+OAuth token rotates, the original Codex `auth.json` is updated atomically.
 
 ## Controls
 
@@ -134,13 +135,19 @@ still produce a readable execution state.
 
 ## Privacy
 
-Agent Halo locally reads lifecycle and usage events from
-`%USERPROFILE%\.codex\sessions` and, on macOS, automatically configures Claude Code
+Agent Halo locally reads lifecycle events from `%USERPROFILE%\.codex\sessions`
+and, on macOS, automatically configures Claude Code
 lifecycle hooks and status line proxy in `~/.claude/settings.json`. It writes hook
 events to `~/.agent-halo/claude-code-status.jsonl` and context snapshots to
 `~/.agent-halo/claude-code-context.json`. It also performs read-only structured queries
-against `logs_2.sqlite` for Codex connection and service failures. It does not upload
-data, call a network service, or read/store API keys.
+against `logs_2.sqlite` for Codex connection and service failures.
+
+To refresh Codex usage independently, Agent Halo reads the existing OAuth login and
+makes HTTPS requests only to the official `auth.openai.com` and `chatgpt.com`
+endpoints. OAuth tokens are never stored in Agent Halo's cache; rotated tokens are
+written atomically back to the original Codex credential file. The usage cache stores
+only an account hash, percentages, and reset times. Session content is not uploaded,
+and OpenAI API keys are neither read nor stored.
 
 ## Windows security notice
 

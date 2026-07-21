@@ -348,13 +348,19 @@ public sealed class HaloWindow : Window
             bool codexRunning = CodexRuntimeReader.IsRunning();
             string appFailure;
             DateTime appFailureUtc;
-            if (codexRunning && aggregate.State == HaloState.Idle &&
+            if (codexRunning && aggregate.Presence == AgentPresenceState.Standby &&
                 CodexFailureReader.TryReadRecent(out appFailure, out appFailureUtc) &&
                 appFailureUtc > settings.GetAcknowledgedErrorUtc())
             {
                 aggregate.State = HaloState.Error;
                 aggregate.Label = CodexSessionMonitor.StateLabel(HaloState.Error);
                 aggregate.Detail = appFailure;
+                aggregate.TurnPhase = AgentTurnPhase.Failed;
+                aggregate.Activity = AgentActivityKind.None;
+                aggregate.EvidenceSource = AgentEvidenceSource.DiagnosticSqlite;
+                aggregate.EvidenceKind = "application_failure";
+                aggregate.AttentionReason = AgentAttentionReason.None;
+                aggregate.FailureSeverity = AgentFailureSeverity.TransientApplication;
                 aggregate.Sessions.Add(new SessionSnapshot
                 {
                     ThreadId = "codex-app",
@@ -363,7 +369,12 @@ public sealed class HaloWindow : Window
                     State = HaloState.Error,
                     Action = appFailure,
                     LastEventUtc = appFailureUtc,
-                    Active = false
+                    Active = false,
+                    TurnPhase = AgentTurnPhase.Failed,
+                    Activity = AgentActivityKind.None,
+                    EvidenceSource = AgentEvidenceSource.DiagnosticSqlite,
+                    EvidenceKind = "application_failure",
+                    FailureSeverity = AgentFailureSeverity.TransientApplication
                 });
             }
             if (aggregate.State == HaloState.Error)
@@ -381,7 +392,7 @@ public sealed class HaloWindow : Window
                 activeErrorUtc = latestError == null ? DateTime.UtcNow : latestError.LastEventUtc;
                 if (activeErrorUtc <= settings.GetAcknowledgedErrorUtc())
                 {
-                    aggregate.State = HaloState.Idle;
+                    SetCodexIdlePresentation(aggregate, codexRunning);
                 }
                 else if (activeErrorUtc > previousErrorUtc)
                 {
@@ -403,40 +414,57 @@ public sealed class HaloWindow : Window
                 settings.AcknowledgedErrorAt = activeErrorUtc.ToString("o");
                 SettingsStorage.Save(settings);
                 errorPresentation = ErrorPresentation.Flashing;
-                aggregate.State = HaloState.Idle;
+                SetCodexIdlePresentation(aggregate, codexRunning);
             }
             if (demoState.HasValue)
             {
                 aggregate.State = demoState.Value;
                 aggregate.Label = CodexSessionMonitor.StateLabel(demoState.Value);
                 aggregate.Detail = "Preview mode";
+                aggregate.Presence = AgentPresenceState.Active;
             }
             int count = aggregate.Sessions == null ? 0 : aggregate.Sessions.Count;
-            bool showGreenStandby = !demoState.HasValue && codexRunning &&
-                aggregate.State == HaloState.Idle;
+            bool showGreenStandby = !demoState.HasValue &&
+                aggregate.Presence == AgentPresenceState.Standby &&
+                aggregate.TurnPhase == AgentTurnPhase.None &&
+                String.Equals(aggregate.Label, "STANDBY",
+                    StringComparison.OrdinalIgnoreCase);
             visual.SetSteadyDone(showGreenStandby);
             visual.SetErrorPresentation(demoErrorPresentation ?? errorPresentation);
-            visual.SetState(showGreenStandby ? HaloState.Done : aggregate.State,
-                showGreenStandby ? "STANDBY" : aggregate.Label, count);
+            visual.SetState(aggregate.State, aggregate.Label, count);
             visual.SetAnswerStreaming(false);
             AggregateSnapshot codexDisplayAggregate = aggregate;
-            if (showGreenStandby)
-            {
-                codexDisplayAggregate = new AggregateSnapshot
-                {
-                    State = HaloState.Done,
-                    Label = "STANDBY",
-                    Detail = L10n.Instance["status.standby_codex"],
-                    Sessions = aggregate.Sessions,
-                    AnswerStreaming = false,
-                    FocusedAgent = AgentKind.Codex
-                };
-            }
             displayAggregate = codexDisplayAggregate;
             tray.Text = ("Agent Halo · " + codexDisplayAggregate.Label).Substring(0,
                 Math.Min(63, ("Agent Halo · " + codexDisplayAggregate.Label).Length));
             details.UpdateContent(codexDisplayAggregate, monitor.GetAllRecent());
             UpdateAgentMenuChecks();
+        }
+
+        private static void SetCodexIdlePresentation(AggregateSnapshot snapshot,
+            bool codexRunning)
+        {
+            snapshot.TurnPhase = AgentTurnPhase.None;
+            snapshot.Activity = AgentActivityKind.None;
+            snapshot.EvidenceSource = AgentEvidenceSource.Process;
+            snapshot.EvidenceKind = codexRunning
+                ? "process_running" : "process_stopped";
+            snapshot.AttentionReason = AgentAttentionReason.None;
+            snapshot.FailureSeverity = AgentFailureSeverity.None;
+            if (codexRunning)
+            {
+                snapshot.State = HaloState.Done;
+                snapshot.Label = "STANDBY";
+                snapshot.Detail = L10n.Instance["status.standby_codex"];
+                snapshot.Presence = AgentPresenceState.Standby;
+            }
+            else
+            {
+                snapshot.State = HaloState.Idle;
+                snapshot.Label = CodexSessionMonitor.StateLabel(HaloState.Idle);
+                snapshot.Detail = L10n.Instance["status.offline_codex"];
+                snapshot.Presence = AgentPresenceState.Offline;
+            }
         }
 
         private void OnMouseDown(object sender, MouseButtonEventArgs e)
