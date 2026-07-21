@@ -263,8 +263,8 @@ public struct SessionReducer: Sendable {
         turnUsageBaselineKnown = hasTotalUsage
         turnBaselineInputTokens = totalInputTokens
         turnBaselineOutputTokens = totalOutputTokens
-        snapshot.inputTokens = 0
-        snapshot.outputTokens = 0
+        snapshot.inputTokens = nil
+        snapshot.outputTokens = nil
     }
 
     private mutating func updateSessionDetails(from payload: [String: Any]) {
