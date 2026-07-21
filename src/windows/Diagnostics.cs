@@ -96,15 +96,92 @@ public static class Diagnostics
                 string now = DateTime.UtcNow.ToString("o");
                 List<string> lines = new List<string>();
                 lines.Add("{\"timestamp\":\"" + now + "\",\"type\":\"session_meta\",\"payload\":{\"id\":\"" +
-                    id + "\",\"cwd\":\"C:\\\\work\\\\halo\"}}");
+                    id + "\",\"cwd\":\"C:\\\\work\\\\halo\",\"model_provider\":\"ccswitch\"}}");
+                lines.Add("{\"timestamp\":\"" + now +
+                    "\",\"type\":\"turn_context\",\"payload\":{\"cwd\":\"C:\\\\work\\\\halo\"," +
+                    "\"model\":\"glm-5.2\",\"collaboration_mode\":{\"mode\":\"default\"}}}");
                 lines.Add("{\"timestamp\":\"" + now +
                     "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}");
                 lines.Add("{\"timestamp\":\"" + now +
                     "\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"shell_command\"}}");
+                lines.Add("{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{" +
+                    "\"total_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":400,\"output_tokens\":80}," +
+                    "\"last_token_usage\":{\"input_tokens\":200,\"cached_input_tokens\":100,\"output_tokens\":20}," +
+                    "\"model_context_window\":200000}}}");
                 File.WriteAllLines(temp, lines.ToArray(), Encoding.UTF8);
                 SessionTracker tracker = new SessionTracker(temp);
                 Assert(tracker.Snapshot.ProjectName == "halo", "project metadata");
                 Assert(tracker.Snapshot.State == HaloState.Working, "function call -> working");
+                Assert(tracker.Snapshot.ModelName == "glm-5.2" &&
+                    tracker.Snapshot.ModelProvider == "ccswitch",
+                    "Codex model and provider metadata");
+                Assert(tracker.Snapshot.TurnInputTokens == 200 &&
+                    tracker.Snapshot.TurnCachedInputTokens == 100 &&
+                    tracker.Snapshot.TurnOutputTokens == 20,
+                    "Codex first turn token sample");
+                Assert(tracker.Snapshot.ContextInputTokens == 200 &&
+                    tracker.Snapshot.ContextWindowTokens == 200000,
+                    "Codex context token sample");
+
+                File.AppendAllText(temp, "{\"timestamp\":\"" + now +
+                    "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{" +
+                    "\"total_token_usage\":{\"input_tokens\":1600,\"cached_input_tokens\":700,\"output_tokens\":120}," +
+                    "\"last_token_usage\":{\"input_tokens\":600,\"cached_input_tokens\":300,\"output_tokens\":40}," +
+                    "\"model_context_window\":200000}}}\n", Encoding.UTF8);
+                tracker.Refresh();
+                Assert(tracker.Snapshot.TurnInputTokens == 800 &&
+                    tracker.Snapshot.TurnCachedInputTokens == 400 &&
+                    tracker.Snapshot.TurnOutputTokens == 60,
+                    "Codex turn tokens use cumulative delta");
+
+                CodexProviderProfile customProfile = new CodexProviderProfile
+                {
+                    Model = "glm-5.2",
+                    ProviderId = "ccswitch",
+                    ProviderName = "Custom Provider",
+                    BaseUrl = "http://127.0.0.1:8317/v1",
+                    IsCustomApi = true
+                };
+                CodexCustomApiMetrics customMetrics = CodexCustomApiMetricsReader.Read(
+                    new List<SessionSnapshot> { tracker.Snapshot }, customProfile,
+                    CodexUsageDataStatus.Fresh);
+                Assert(customMetrics.IsCustomApi && customMetrics.Model == "glm-5.2" &&
+                    customMetrics.ProjectName == "halo" &&
+                    customMetrics.InputTokens == 800 && customMetrics.OutputTokens == 60,
+                    "Codex custom API metrics use session metadata");
+                CodexProviderProfile officialProfile = new CodexProviderProfile
+                {
+                    ProviderId = "openai",
+                    BaseUrl = "https://api.openai.com/v1"
+                };
+                SessionSnapshot officialSnapshot = new SessionSnapshot
+                {
+                    Agent = AgentKind.Codex,
+                    ModelProvider = "openai",
+                    ModelName = "gpt-5.6-sol"
+                };
+                Assert(!CodexCustomApiMetricsReader.Read(
+                    new List<SessionSnapshot> { officialSnapshot }, officialProfile,
+                    CodexUsageDataStatus.Fresh).IsCustomApi,
+                    "official OAuth remains quota mode");
+                Assert(CodexCustomApiMetricsReader.Read(
+                    new List<SessionSnapshot> { officialSnapshot }, officialProfile,
+                    CodexUsageDataStatus.ApiKey).IsCustomApi,
+                    "API key auth uses custom API panel");
+
+                string configTemp = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-codex-config-" + Guid.NewGuid().ToString("N") + ".toml");
+                File.WriteAllText(configTemp,
+                    "model = \"deepseek-v4\"\nmodel_provider = \"ccswitch\"\n" +
+                    "[model_providers.ccswitch]\nname = \"Private API\"\n" +
+                    "base_url = \"http://127.0.0.1:8317/v1\"\n",
+                    new UTF8Encoding(false));
+                CodexProviderProfile parsedProfile = CodexProviderProfileReader.Read(configTemp);
+                File.Delete(configTemp);
+                Assert(parsedProfile.IsCustomApi && parsedProfile.Model == "deepseek-v4" &&
+                    parsedProfile.ProviderName == "Private API",
+                    "Codex custom provider config detection");
 
                 File.AppendAllText(temp, "{\"timestamp\":\"" + now +
                     "\",\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\"}}\n",
@@ -1581,6 +1658,54 @@ public static class Diagnostics
                 encoder.Save(stream);
             }
             panel.Close();
+
+            DetailsWindow customCodexPanel = new DetailsWindow();
+            customCodexPanel.SetPreviewCodexCustomMetrics(new CodexCustomApiMetrics
+            {
+                IsCustomApi = true,
+                ProjectName = "AgentHalo",
+                Model = "glm-5.2",
+                InputTokens = 14200,
+                OutputTokens = 730,
+                ContextTokens = 14200,
+                ContextWindowTokens = 128000
+            });
+            customCodexPanel.UpdateContent(aggregate, sessions);
+            FrameworkElement customCodexContent =
+                customCodexPanel.Content as FrameworkElement;
+            customCodexPanel.Content = null;
+            Grid customCodexStage = new Grid();
+            customCodexStage.Width = 380;
+            customCodexStage.Background = new SolidColorBrush(
+                MediaColor.FromRgb(7, 10, 15));
+            customCodexContent.Width = 324;
+            customCodexContent.Margin = new Thickness(28);
+            customCodexStage.Children.Add(customCodexContent);
+            customCodexStage.Measure(new System.Windows.Size(380, 1000));
+            double customCodexHeight = Math.Ceiling(
+                customCodexStage.DesiredSize.Height);
+            if (Math.Abs(height - customCodexHeight) > 0.001)
+            {
+                throw new InvalidOperationException(
+                    "Panel preview height mismatch: official Codex=" +
+                    height.ToString(CultureInfo.InvariantCulture) +
+                    ", custom Codex=" +
+                    customCodexHeight.ToString(CultureInfo.InvariantCulture));
+            }
+            customCodexStage.Height = customCodexHeight;
+            customCodexStage.Arrange(new Rect(0, 0, 380, customCodexHeight));
+            customCodexStage.UpdateLayout();
+            RenderTargetBitmap customCodexBitmap = new RenderTargetBitmap(760,
+                (int)(customCodexHeight * 2), 192, 192, PixelFormats.Pbgra32);
+            customCodexBitmap.Render(customCodexStage);
+            PngBitmapEncoder customCodexEncoder = new PngBitmapEncoder();
+            customCodexEncoder.Frames.Add(BitmapFrame.Create(customCodexBitmap));
+            using (FileStream stream = File.Create(Path.Combine(outputDirectory,
+                "panel-codex-custom.png")))
+            {
+                customCodexEncoder.Save(stream);
+            }
+            customCodexPanel.Close();
 
             List<SessionSnapshot> claudeSessions = new List<SessionSnapshot>();
             claudeSessions.Add(new SessionSnapshot

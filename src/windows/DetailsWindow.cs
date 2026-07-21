@@ -175,6 +175,7 @@ public sealed class DetailsWindow : Window
         private readonly DispatcherTimer quotaTimer;
         private UsageMetrics previewMetrics;
         private ClaudeCodeMetrics previewClaudeMetrics;
+        private CodexCustomApiMetrics previewCodexCustomMetrics;
         private AgentKind currentAgent;
         private AggregateSnapshot currentAggregate;
         private List<SessionSnapshot> currentSessions;
@@ -319,10 +320,6 @@ public sealed class DetailsWindow : Window
             MediaColor accent = HaloVisual.StateColor(aggregate.State);
             headline.Foreground = new SolidColorBrush(accent);
             subtitle.Text = FriendlyStatusDetail(aggregate, sessions);
-            quotaGroup.Visibility = currentAgent == AgentKind.Codex
-                ? Visibility.Visible : Visibility.Hidden;
-            claudeGroup.Visibility = currentAgent == AgentKind.ClaudeCode
-                ? Visibility.Visible : Visibility.Hidden;
             RefreshSupplementalData();
         }
 
@@ -412,7 +409,7 @@ public sealed class DetailsWindow : Window
             }
             else
             {
-                RefreshQuota();
+                RefreshCodexDetails();
             }
         }
 
@@ -429,8 +426,13 @@ public sealed class DetailsWindow : Window
 
         private void ApplyOfflinePlaceholders()
         {
-            if (currentAgent == AgentKind.ClaudeCode)
+            CodexCustomApiMetrics codexMetrics = currentAgent == AgentKind.Codex
+                ? ReadCodexCustomMetrics() : null;
+            if (currentAgent == AgentKind.ClaudeCode ||
+                (codexMetrics != null && codexMetrics.IsCustomApi))
             {
+                quotaGroup.Visibility = Visibility.Hidden;
+                claudeGroup.Visibility = Visibility.Visible;
                 claudeProjectRow.Visibility = Visibility.Visible;
                 claudeProjectSeparator.Visibility = Visibility.Visible;
                 claudeModelSeparator.Visibility = Visibility.Visible;
@@ -452,6 +454,8 @@ public sealed class DetailsWindow : Window
 
         private void RefreshClaudeDetails()
         {
+            quotaGroup.Visibility = Visibility.Hidden;
+            claudeGroup.Visibility = Visibility.Visible;
             ClaudeCodeMetrics metrics = previewClaudeMetrics ?? ClaudeCodeMetricsReader.Read();
             SessionSnapshot primary = currentSessions == null ? null :
                 currentSessions.FirstOrDefault(delegate(SessionSnapshot session)
@@ -467,6 +471,50 @@ public sealed class DetailsWindow : Window
                 ? metrics.SessionTitle
                 : DisplayProjectName(primary);
             claudeModelValue.Text = metrics.HasModel ? metrics.Model : L10n.Instance["quota.no_data"];
+            claudeTokenValue.Text = metrics.HasTokenUsage
+                ? "↑ " + FormatCompactNumber(metrics.InputTokens) +
+                  "  ·  ↓ " + FormatCompactNumber(metrics.OutputTokens)
+                : L10n.Instance["quota.no_data"];
+            SetContextPercent(metrics.HasContext, metrics.ContextUsedPercent);
+        }
+
+        private void RefreshCodexDetails()
+        {
+            CodexCustomApiMetrics metrics = ReadCodexCustomMetrics();
+            if (metrics != null && metrics.IsCustomApi)
+            {
+                ApplyCodexCustomMetrics(metrics);
+                return;
+            }
+            RefreshQuota();
+        }
+
+        private CodexCustomApiMetrics ReadCodexCustomMetrics()
+        {
+            if (previewCodexCustomMetrics != null)
+            {
+                return previewCodexCustomMetrics;
+            }
+            if (previewMetrics != null)
+            {
+                return new CodexCustomApiMetrics { IsCustomApi = false };
+            }
+            return CodexCustomApiMetricsReader.Read(currentSessions);
+        }
+
+        private void ApplyCodexCustomMetrics(CodexCustomApiMetrics metrics)
+        {
+            quotaGroup.Visibility = Visibility.Hidden;
+            claudeGroup.Visibility = Visibility.Visible;
+            claudeProjectRow.Visibility = Visibility.Visible;
+            claudeProjectSeparator.Visibility = Visibility.Visible;
+            claudeModelSeparator.Visibility = Visibility.Visible;
+            claudeModelRow.Margin = new Thickness(0);
+            claudeTokenRow.Margin = new Thickness(0);
+            claudeProjectValue.Text = metrics.HasProject
+                ? metrics.ProjectName : L10n.Instance["quota.no_data"];
+            claudeModelValue.Text = metrics.HasModel
+                ? metrics.Model : L10n.Instance["quota.no_data"];
             claudeTokenValue.Text = metrics.HasTokenUsage
                 ? "↑ " + FormatCompactNumber(metrics.InputTokens) +
                   "  ·  ↓ " + FormatCompactNumber(metrics.OutputTokens)
@@ -544,6 +592,8 @@ public sealed class DetailsWindow : Window
 
         private void RefreshQuota()
         {
+            quotaGroup.Visibility = Visibility.Visible;
+            claudeGroup.Visibility = Visibility.Hidden;
             UsageMetrics metrics;
             if (previewMetrics != null)
             {
@@ -576,7 +626,7 @@ public sealed class DetailsWindow : Window
                 if (IsVisible && currentAgent == AgentKind.Codex &&
                     previewMetrics == null)
                 {
-                    RefreshQuota();
+                    RefreshCodexDetails();
                 }
             }));
         }
@@ -598,6 +648,12 @@ public sealed class DetailsWindow : Window
         {
             previewClaudeMetrics = metrics;
             RefreshClaudeDetails();
+        }
+
+        public void SetPreviewCodexCustomMetrics(CodexCustomApiMetrics metrics)
+        {
+            previewCodexCustomMetrics = metrics;
+            RefreshCodexDetails();
         }
 
         private void SelectAgent(AgentKind agent)

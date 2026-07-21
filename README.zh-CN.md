@@ -81,10 +81,11 @@ swift run AgentHaloDiagnostics --transition-strip /tmp/agent-halo-transitions
 ## 操作
 
 - 拖动光环：调整位置，靠近屏幕边缘时会自动吸附。
-- 鼠标悬停：查看当前状态、5 小时额度和周额度。
+- 鼠标悬停：查看当前状态；官方 Codex OAuth 显示 5 小时额度和周额度。
+- 使用 CCSwitch、自定义模型提供商或 API Key 时，Codex 面板会自动改为显示项目、模型和本轮输入/输出 Token，不展示 API Key、Base URL 或中转工具名称。
 - 悬停详情面板提供 `Codex / CC` 切换。Agent Halo 会同时监听两个工具，但光环颜色、状态文案和额度行只跟随当前选中的监控对象。
 - 上下文 pill 显示当前监控对象的上下文占用：Codex 显示配额上下文占用，Claude Code 显示通过 status line proxy 捕获的上下文窗口使用率。
-- Codex 额度行只在 `Codex` 视图显示。切到 `CC` 时，详情面板只显示 Claude Code 会话状态，不混入 Codex 余额信息。
+- Codex 官方额度行只在 OAuth 模式显示；自定义 API 模式和 `CC` 视图使用相同高度的信息行，不混入虚假的官方额度。
 - 任务完成后绿色会缓慢呼吸；再次打开 Codex 后自动确认并变为不发光的稳定绿色。
 - 右键单击：打开状态预览、暂停监听、开机启动和退出菜单。
 - 右键”光环大小”：选择 `75% / 100% / 125%`，重启后保持设置。

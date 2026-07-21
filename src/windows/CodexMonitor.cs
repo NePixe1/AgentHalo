@@ -38,6 +38,14 @@ public sealed class SessionTracker
         private int anonymousActiveTools;
         private bool currentTurnIsPlanMode;
         private bool planProposalSeen;
+        private bool hasTotalUsage;
+        private bool turnUsageBaselineKnown;
+        private long totalInputTokens;
+        private long totalCachedInputTokens;
+        private long totalOutputTokens;
+        private long turnBaselineInputTokens;
+        private long turnBaselineCachedInputTokens;
+        private long turnBaselineOutputTokens;
 
         public string FilePath { get; private set; }
         public SessionSnapshot Snapshot { get; private set; }
@@ -236,7 +244,7 @@ public sealed class SessionTracker
 
                 if (topType == "turn_context" && payload != null)
                 {
-                    UpdatePlanModeFromTurnContext(payload);
+                    UpdateFromTurnContext(payload);
                     return;
                 }
                 if (topType == "session_meta" && payload != null)
@@ -253,6 +261,16 @@ public sealed class SessionTracker
                     if (!String.IsNullOrEmpty(id))
                     {
                         Snapshot.ThreadId = id;
+                    }
+                    string provider = GetString(payload, "model_provider");
+                    if (!String.IsNullOrEmpty(provider))
+                    {
+                        Snapshot.ModelProvider = provider;
+                    }
+                    string model = GetString(payload, "model");
+                    if (!String.IsNullOrEmpty(model))
+                    {
+                        Snapshot.ModelName = model;
                     }
                     return;
                 }
@@ -280,7 +298,7 @@ public sealed class SessionTracker
             }
         }
 
-        private void UpdatePlanModeFromTurnContext(Dictionary<string, object> payload)
+        private void UpdateFromTurnContext(Dictionary<string, object> payload)
         {
             Dictionary<string, object> collaborationMode =
                 GetDictionary(payload, "collaboration_mode");
@@ -288,6 +306,19 @@ public sealed class SessionTracker
             if (String.Equals(mode, "plan", StringComparison.OrdinalIgnoreCase))
             {
                 currentTurnIsPlanMode = true;
+            }
+            string model = GetString(payload, "model");
+            if (!String.IsNullOrEmpty(model))
+            {
+                Snapshot.ModelName = model;
+            }
+            string cwd = GetString(payload, "cwd");
+            if (!String.IsNullOrEmpty(cwd))
+            {
+                Snapshot.WorkingDirectory = cwd;
+                string leaf = Path.GetFileName(cwd.TrimEnd(
+                    Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+                Snapshot.ProjectName = String.IsNullOrEmpty(leaf) ? cwd : leaf;
             }
         }
 
@@ -298,6 +329,7 @@ public sealed class SessionTracker
             if (GeneratedHaloSpec.IsTaskStartEvent(lower))
             {
                 ClearActiveTools();
+                StartTurnUsage();
                 if (lower == "task_started" && IsPlanModePayload(payload))
                 {
                     currentTurnIsPlanMode = true;
@@ -305,6 +337,10 @@ public sealed class SessionTracker
                 planProposalSeen = false;
                 SetBusinessState(HaloState.Thinking, AgentTurnPhase.Thinking,
                     AgentActivityKind.Planning, "Planning", true);
+            }
+            else if (lower == "token_count")
+            {
+                UpdateTokenUsage(payload);
             }
             else if (GeneratedHaloSpec.IsTaskCompleteEvent(lower))
             {
@@ -382,6 +418,64 @@ public sealed class SessionTracker
                 SetBusinessState(HaloState.Working, AgentTurnPhase.Executing,
                     ActivityForTool(lower, action), action, true);
             }
+        }
+
+        private void StartTurnUsage()
+        {
+            turnUsageBaselineKnown = hasTotalUsage;
+            turnBaselineInputTokens = totalInputTokens;
+            turnBaselineCachedInputTokens = totalCachedInputTokens;
+            turnBaselineOutputTokens = totalOutputTokens;
+            Snapshot.TurnInputTokens = 0;
+            Snapshot.TurnCachedInputTokens = 0;
+            Snapshot.TurnOutputTokens = 0;
+        }
+
+        private void UpdateTokenUsage(Dictionary<string, object> payload)
+        {
+            Dictionary<string, object> info = GetDictionary(payload, "info");
+            Dictionary<string, object> total = GetDictionary(info, "total_token_usage");
+            Dictionary<string, object> last = GetDictionary(info, "last_token_usage");
+            long nextInput = GetLong(total, "input_tokens", totalInputTokens);
+            long nextCached = GetLong(total, "cached_input_tokens", totalCachedInputTokens);
+            long nextOutput = GetLong(total, "output_tokens", totalOutputTokens);
+            long lastInput = GetLong(last, "input_tokens", 0);
+            long lastCached = GetLong(last, "cached_input_tokens", 0);
+            long lastOutput = GetLong(last, "output_tokens", 0);
+
+            if (total != null)
+            {
+                if (!turnUsageBaselineKnown)
+                {
+                    turnBaselineInputTokens = Math.Max(0, nextInput - lastInput);
+                    turnBaselineCachedInputTokens = Math.Max(0, nextCached - lastCached);
+                    turnBaselineOutputTokens = Math.Max(0, nextOutput - lastOutput);
+                    turnUsageBaselineKnown = true;
+                }
+                totalInputTokens = nextInput;
+                totalCachedInputTokens = nextCached;
+                totalOutputTokens = nextOutput;
+                hasTotalUsage = true;
+                Snapshot.TurnInputTokens = Math.Max(0,
+                    totalInputTokens - turnBaselineInputTokens);
+                Snapshot.TurnCachedInputTokens = Math.Max(0,
+                    totalCachedInputTokens - turnBaselineCachedInputTokens);
+                Snapshot.TurnOutputTokens = Math.Max(0,
+                    totalOutputTokens - turnBaselineOutputTokens);
+            }
+            else if (last != null)
+            {
+                Snapshot.TurnInputTokens = Math.Max(0, lastInput);
+                Snapshot.TurnCachedInputTokens = Math.Max(0, lastCached);
+                Snapshot.TurnOutputTokens = Math.Max(0, lastOutput);
+            }
+
+            if (last != null)
+            {
+                Snapshot.ContextInputTokens = Math.Max(0, lastInput);
+            }
+            Snapshot.ContextWindowTokens = Math.Max(0,
+                GetLong(info, "model_context_window", Snapshot.ContextWindowTokens));
         }
 
         private void ReduceResponse(string payloadType, Dictionary<string, object> payload, DateTime eventUtc)
@@ -712,6 +806,25 @@ public sealed class SessionTracker
                 return value as Dictionary<string, object>;
             }
             return null;
+        }
+
+        private static long GetLong(Dictionary<string, object> dictionary,
+            string key, long fallback)
+        {
+            object value;
+            if (dictionary == null || !dictionary.TryGetValue(key, out value) ||
+                value == null)
+            {
+                return fallback;
+            }
+            try
+            {
+                return Convert.ToInt64(value, CultureInfo.InvariantCulture);
+            }
+            catch
+            {
+                return fallback;
+            }
         }
     }
 
@@ -1166,7 +1279,14 @@ public sealed class CodexSessionMonitor : IDisposable
                 EvidenceKind = snapshot.EvidenceKind,
                 EvidenceId = snapshot.EvidenceId,
                 AttentionReason = snapshot.AttentionReason,
-                FailureSeverity = snapshot.FailureSeverity
+                FailureSeverity = snapshot.FailureSeverity,
+                ModelName = snapshot.ModelName,
+                ModelProvider = snapshot.ModelProvider,
+                TurnInputTokens = snapshot.TurnInputTokens,
+                TurnCachedInputTokens = snapshot.TurnCachedInputTokens,
+                TurnOutputTokens = snapshot.TurnOutputTokens,
+                ContextInputTokens = snapshot.ContextInputTokens,
+                ContextWindowTokens = snapshot.ContextWindowTokens
             };
         }
 

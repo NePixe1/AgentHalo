@@ -111,6 +111,13 @@ public sealed class SessionSnapshot
         public string EvidenceId;
         public AgentAttentionReason AttentionReason;
         public AgentFailureSeverity FailureSeverity;
+        public string ModelName;
+        public string ModelProvider;
+        public long TurnInputTokens;
+        public long TurnCachedInputTokens;
+        public long TurnOutputTokens;
+        public long ContextInputTokens;
+        public long ContextWindowTokens;
     }
 
 public sealed class AggregateSnapshot
@@ -181,6 +188,52 @@ public sealed class ClaudeCodeMetrics
         public bool HasSessionTitle
         {
             get { return !String.IsNullOrWhiteSpace(SessionTitle); }
+        }
+
+        public bool HasTokenUsage
+        {
+            get { return InputTokens > 0 || OutputTokens > 0; }
+        }
+
+        public bool HasContext
+        {
+            get { return ContextTokens >= 0 && ContextWindowTokens > 0; }
+        }
+
+        public double ContextUsedPercent
+        {
+            get
+            {
+                if (!HasContext)
+                {
+                    return 0;
+                }
+                return Math.Max(0, Math.Min(100,
+                    ContextTokens * 100.0 / ContextWindowTokens));
+            }
+        }
+    }
+
+public sealed class CodexCustomApiMetrics
+    {
+        public bool IsCustomApi;
+        public string ProjectName;
+        public string Model;
+        public string Provider;
+        public long InputTokens;
+        public long CachedInputTokens;
+        public long OutputTokens;
+        public long ContextTokens;
+        public long ContextWindowTokens;
+
+        public bool HasProject
+        {
+            get { return !String.IsNullOrWhiteSpace(ProjectName); }
+        }
+
+        public bool HasModel
+        {
+            get { return !String.IsNullOrWhiteSpace(Model); }
         }
 
         public bool HasTokenUsage

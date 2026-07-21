@@ -82,10 +82,11 @@ OAuth token rotates, the original Codex `auth.json` is updated atomically.
 ## Controls
 
 - Drag the halo to reposition it; it gently snaps to display edges.
-- Hover to inspect the current state plus five-hour and weekly usage limits.
+- Hover to inspect the current state; official Codex OAuth sessions show the five-hour and weekly usage limits.
+- With CCSwitch, a custom model provider, or API-key authentication, the Codex panel automatically shows the project, model, and current-turn input/output tokens instead. API keys, base URLs, and relay tool names are never displayed.
 - Hover details include a `Codex / CC` switch. Agent Halo keeps watching both tools, while the halo color, status text, and quota rows follow the selected focused agent.
 - The context pill displays context usage for the focused agent: Codex shows quota-based context usage, while Claude Code shows context window usage captured via status line proxy.
-- Codex quota rows are Codex-only. When `CC` is focused, the hover panel shows Claude Code session state without Codex balance information.
+- Official Codex quota rows appear only in OAuth mode. Custom API mode and the `CC` view use the same fixed-height information rows without presenting fake official quota data.
 - Completed green breathes until Codex returns to the foreground, then settles
   into a non-glowing standby green.
 - Right-click for state previews, pause, startup, and exit controls.
