@@ -545,6 +545,60 @@ func testSessionReducerCapturesOnlyExplicitCodexSessionTitles() {
     expect(missingTitle.snapshot.sessionTitle == nil, "missing title must not fall back to project or thread")
 }
 
+func testCodexSessionTitleReaderUsesLatestValidTitle() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-title-index-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let indexURL = root.appendingPathComponent("session_index.jsonl")
+    let records = """
+    {"id":"thread-a","thread_name":"  First title  ","updated_at":"2026-07-21T01:00:00Z"}
+    not-json
+    {"id":"thread-empty","thread_name":"   ","updated_at":"2026-07-21T01:01:00Z"}
+    {"id":"thread-a","thread_name":"Renamed title","updated_at":"2026-07-21T01:02:00Z"}
+
+    """
+    try Data(records.utf8).write(to: indexURL)
+
+    var reader = CodexSessionTitleReader(indexURL: indexURL)
+    let titles = reader.read()
+
+    expect(titles["thread-a"], "Renamed title", "latest valid Codex title should win")
+    expect(titles["thread-empty"] == nil, "blank Codex titles should be ignored")
+    expect(titles.count, 1, "malformed title records should be ignored independently")
+}
+
+func testCodexSessionMonitorPrefersIndexTitleAndKeepsMetadataFallback() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-title-monitor-\(UUID().uuidString)", isDirectory: true)
+    let sessionsRoot = root.appendingPathComponent("sessions", isDirectory: true)
+    try FileManager.default.createDirectory(at: sessionsRoot, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let indexedID = "019f841a-336f-79e3-8f28-dab1e7c94958"
+    let fallbackID = "019f841a-7d2d-7403-a6b9-24f13051c36e"
+    let indexedSession = sessionsRoot.appendingPathComponent("rollout-\(indexedID).jsonl")
+    let fallbackSession = sessionsRoot.appendingPathComponent("rollout-\(fallbackID).jsonl")
+    try Data("{\"type\":\"session_meta\",\"payload\":{\"id\":\"\(indexedID)\",\"title\":\"Old metadata title\"}}\n".utf8)
+        .write(to: indexedSession)
+    try Data("{\"type\":\"session_meta\",\"payload\":{\"id\":\"\(fallbackID)\",\"title\":\"Metadata fallback\"}}\n".utf8)
+        .write(to: fallbackSession)
+
+    let indexURL = root.appendingPathComponent("session_index.jsonl")
+    try Data("{\"id\":\"\(indexedID)\",\"thread_name\":\"Codex sidebar title\"}\n".utf8)
+        .write(to: indexURL)
+    let monitor = CodexSessionMonitor(
+        sessionsRoot: sessionsRoot,
+        sessionTitleReader: CodexSessionTitleReader(indexURL: indexURL)
+    )
+
+    _ = monitor.refresh()
+    let sessions = Dictionary(uniqueKeysWithValues: monitor.snapshots().map { ($0.threadId, $0) })
+    expect(sessions[indexedID]?.sessionTitle, "Codex sidebar title", "index title should be authoritative")
+    expect(sessions[fallbackID]?.sessionTitle, "Metadata fallback", "metadata title should remain the fallback")
+}
+
 func testToolFailedDoesNotBecomeFatalError() {
     let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
     var reducer = SessionReducer(filePath: "/tmp/tool-failed.jsonl", now: now, liveTracking: true)
@@ -2354,6 +2408,12 @@ testAcknowledgedErrorVisibilityUsesLatestErrorTime()
 testWorkingVisibilityLiveCallOutputAndInitialTail()
 testSessionReducerCapturesCodexSessionDetailsAndRateLimitAvailability()
 testSessionReducerCapturesOnlyExplicitCodexSessionTitles()
+do {
+    try testCodexSessionTitleReaderUsesLatestValidTitle()
+    try testCodexSessionMonitorPrefersIndexTitleAndKeepsMetadataFallback()
+} catch {
+    fatalError("Codex session title checks failed: \(error)")
+}
 testToolFailedDoesNotBecomeFatalError()
 do {
     try testClaudeHookConfiguratorWritesUserSettingsNotLegacyClaudeJson()

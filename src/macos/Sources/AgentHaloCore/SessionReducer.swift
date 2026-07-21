@@ -84,6 +84,16 @@ public struct SessionReducer: Sendable {
         liveTracking = value
     }
 
+    @discardableResult
+    public mutating func setSessionTitle(_ title: String) -> Bool {
+        let normalized = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty, snapshot.sessionTitle != normalized else {
+            return false
+        }
+        snapshot.sessionTitle = normalized
+        return true
+    }
+
     public mutating func applyWorkingVisibility(now: Date = Date()) {
         if snapshot.active,
            inFlightTools == 0,

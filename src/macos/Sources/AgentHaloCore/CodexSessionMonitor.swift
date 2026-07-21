@@ -7,15 +7,18 @@ public final class CodexSessionMonitor {
     private var pending: [URL: String] = [:]
     private var lastModified: [URL: Date] = [:]
     private var lastDiscoveryAt = Date.distantPast
+    private var sessionTitleReader: CodexSessionTitleReader
     private let fileManager: FileManager
 
     public init(
         sessionsRoot: URL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".codex", isDirectory: true)
             .appendingPathComponent("sessions", isDirectory: true),
+        sessionTitleReader: CodexSessionTitleReader = CodexSessionTitleReader(),
         fileManager: FileManager = .default
     ) {
         self.sessionsRoot = sessionsRoot
+        self.sessionTitleReader = sessionTitleReader
         self.fileManager = fileManager
     }
 
@@ -27,6 +30,14 @@ public final class CodexSessionMonitor {
         for url in Array(reducers.keys) {
             changed = readNewLines(from: url, now: now) || changed
             reducers[url]?.applyWorkingVisibility(now: now)
+        }
+        let titles = sessionTitleReader.read()
+        for url in reducers.keys {
+            guard let threadID = reducers[url]?.snapshot.threadId,
+                  let title = titles[threadID] else {
+                continue
+            }
+            changed = reducers[url]?.setSessionTitle(title) == true || changed
         }
         return changed
     }
