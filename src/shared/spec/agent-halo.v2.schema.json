@@ -11,7 +11,7 @@
   ],
   "properties": {
     "contractVersion": {"const": 2},
-    "releaseVersion": {"type": "string", "pattern": "^0\\.[0-9]+\\.[0-9]+$"},
+    "releaseVersion": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
     "algorithms": {"type": "object"},
     "states": {
       "type": "object",

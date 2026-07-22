@@ -572,7 +572,7 @@ public static class Diagnostics
                     "fatal turn clears plan flag");
                 Assert(GeneratedHaloSpec.ContractVersion == 2,
                     "generated shared contract version");
-                Assert(GeneratedHaloSpec.ReleaseVersion == "0.14.0",
+                Assert(GeneratedHaloSpec.ReleaseVersion == "1.0.0",
                     "generated shared release version");
                 Assert(GeneratedHaloSpec.State(HaloState.Attention).Label == "NEEDS YOU",
                     "generated state labels");

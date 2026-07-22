@@ -1,6 +1,6 @@
 # Agent Halo cross-platform shared contract
 
-Version 0.14.0 keeps two native applications and one generated behavior contract:
+Version 1.0.0 keeps two native applications and one generated behavior contract:
 
 ```text
 src/shared/spec/agent-halo.v2.json

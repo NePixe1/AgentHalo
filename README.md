@@ -16,7 +16,7 @@
     </a>
   </p>
   <p>
-    <img src="https://img.shields.io/badge/version-0.14.0-14B8A6?style=for-the-badge" alt="Version"/>
+    <img src="https://img.shields.io/badge/version-1.0.0-14B8A6?style=for-the-badge" alt="Version"/>
     <img src="https://img.shields.io/badge/privacy--first-0F172A?style=for-the-badge" alt="Privacy First"/>
     <img src="https://img.shields.io/badge/Swift-FA7343?style=for-the-badge&logo=swift&logoColor=white" alt="Swift"/>
     <img src="https://img.shields.io/badge/Xcode-007ACC?style=for-the-badge&logo=xcode&logoColor=white" alt="Xcode"/>
