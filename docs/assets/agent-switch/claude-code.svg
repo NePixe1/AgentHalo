@@ -1,6 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none">
-  <title>Claude Code</title>
-  <path fill="#D97757" d="M6.9 2.7h10.2c.9 0 1.6.7 1.6 1.6v3.4h2.4c.8 0 1.4.6 1.4 1.4v3.9c0 .8-.6 1.4-1.4 1.4h-2.4v6.9h-3.2v-6.9h-2.1v6.9h-2.8v-6.9H8.5v6.9H5.3v-6.9H2.9c-.8 0-1.4-.6-1.4-1.4V9.1c0-.8.6-1.4 1.4-1.4h2.4V4.3c0-.9.7-1.6 1.6-1.6z"/>
-  <rect x="7.7" y="8" width="2.25" height="2.6" rx="0.25" fill="#111111"/>
-  <rect x="14.05" y="8" width="2.25" height="2.6" rx="0.25" fill="#111111"/>
-</svg>
