@@ -9,10 +9,10 @@
 <div align="center">
   <p>
     <a href="https://github.com/NePixe1/AgentHalo/releases/latest">
-      <img src="https://img.shields.io/github/downloads/NePixe1/AgentHalo/latest/total?style=flat&label=下载%20%40latest&labelColor=444&logo=github&logoColor=white&cacheSeconds=600" alt="最新下载">
+      <img src="https://img.shields.io/github/downloads/NePixe1/AgentHalo/latest/total?style=flat&label=%E6%9C%80%E6%96%B0%E4%B8%8B%E8%BD%BD%20%40latest&labelColor=444&logo=github&logoColor=white&cacheSeconds=600" alt="最新下载">
     </a>
     <a href="https://github.com/NePixe1/AgentHalo/releases">
-      <img src="https://img.shields.io/github/downloads/NePixe1/AgentHalo/total?label=总下载量" alt="总下载量">
+      <img src="https://img.shields.io/github/downloads/NePixe1/AgentHalo/total?label=%E6%80%BB%E4%B8%8B%E8%BD%BD%E9%87%8F" alt="总下载量">
     </a>
   </p>
   <p>
