@@ -99,6 +99,106 @@
             "target": "ClaudeCodeStatusLineProxy",
             "configuration": "release",
             "preLaunchTask": "swift: Build Release ClaudeCodeStatusLineProxy (src/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AgentHalo}/.worktrees/macos-codex-session-details/src/macos",
+            "name": "Debug AgentHaloMac (.worktrees/macos-codex-session-details/src/macos)",
+            "target": "AgentHaloMac",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug AgentHaloMac (.worktrees/macos-codex-session-details/src/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AgentHalo}/.worktrees/macos-codex-session-details/src/macos",
+            "name": "Release AgentHaloMac (.worktrees/macos-codex-session-details/src/macos)",
+            "target": "AgentHaloMac",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release AgentHaloMac (.worktrees/macos-codex-session-details/src/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AgentHalo}/.worktrees/macos-codex-session-details/src/macos",
+            "name": "Debug AgentHaloCoreChecks (.worktrees/macos-codex-session-details/src/macos)",
+            "target": "AgentHaloCoreChecks",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug AgentHaloCoreChecks (.worktrees/macos-codex-session-details/src/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AgentHalo}/.worktrees/macos-codex-session-details/src/macos",
+            "name": "Release AgentHaloCoreChecks (.worktrees/macos-codex-session-details/src/macos)",
+            "target": "AgentHaloCoreChecks",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release AgentHaloCoreChecks (.worktrees/macos-codex-session-details/src/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AgentHalo}/.worktrees/macos-codex-session-details/src/macos",
+            "name": "Debug AgentHaloDiagnostics (.worktrees/macos-codex-session-details/src/macos)",
+            "target": "AgentHaloDiagnostics",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug AgentHaloDiagnostics (.worktrees/macos-codex-session-details/src/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AgentHalo}/.worktrees/macos-codex-session-details/src/macos",
+            "name": "Release AgentHaloDiagnostics (.worktrees/macos-codex-session-details/src/macos)",
+            "target": "AgentHaloDiagnostics",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release AgentHaloDiagnostics (.worktrees/macos-codex-session-details/src/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AgentHalo}/.worktrees/macos-codex-session-details/src/macos",
+            "name": "Debug ClaudeCodeStatusHook (.worktrees/macos-codex-session-details/src/macos)",
+            "target": "ClaudeCodeStatusHook",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug ClaudeCodeStatusHook (.worktrees/macos-codex-session-details/src/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AgentHalo}/.worktrees/macos-codex-session-details/src/macos",
+            "name": "Release ClaudeCodeStatusHook (.worktrees/macos-codex-session-details/src/macos)",
+            "target": "ClaudeCodeStatusHook",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release ClaudeCodeStatusHook (.worktrees/macos-codex-session-details/src/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AgentHalo}/.worktrees/macos-codex-session-details/src/macos",
+            "name": "Debug ClaudeCodeStatusLineProxy (.worktrees/macos-codex-session-details/src/macos)",
+            "target": "ClaudeCodeStatusLineProxy",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug ClaudeCodeStatusLineProxy (.worktrees/macos-codex-session-details/src/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:AgentHalo}/.worktrees/macos-codex-session-details/src/macos",
+            "name": "Release ClaudeCodeStatusLineProxy (.worktrees/macos-codex-session-details/src/macos)",
+            "target": "ClaudeCodeStatusLineProxy",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release ClaudeCodeStatusLineProxy (.worktrees/macos-codex-session-details/src/macos)"
         }
     ]
 }
