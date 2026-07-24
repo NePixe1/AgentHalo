@@ -1696,6 +1696,24 @@ func testClaudeHookReducerStopFailureMapsToError() {
     expect(reducer.snapshot.active, false, "StopFailure should deactivate")
 }
 
+func testGrokHookReducerLifecycle() {
+    var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
+    r.consume(jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p/AgentHalo","source":"grok-hook"}"#, now: Date(timeIntervalSince1970: 1))
+    expect(r.snapshot.state, .thinking, "prompt → thinking")
+    expect(r.snapshot.agent, .grok, "agent kind")
+    expect(r.snapshot.projectName, "AgentHalo", "cwd basename")
+
+    r.consume(jsonLine: #"{"timestamp":"2026-07-25T00:00:02Z","event":"PreToolUse","sessionId":"s1","cwd":"/p/AgentHalo","toolName":"run_terminal_command","source":"grok-hook"}"#, now: Date(timeIntervalSince1970: 2))
+    expect(r.snapshot.state, .working, "tool → working")
+    expect(r.snapshot.action, "Running command", "run_terminal_command → shell friendly action")
+
+    r.consume(jsonLine: #"{"timestamp":"2026-07-25T00:00:03Z","event":"Notification","sessionId":"s1","notificationType":"permission_prompt","source":"grok-hook"}"#, now: Date(timeIntervalSince1970: 3))
+    expect(r.snapshot.state, .attention, "permission")
+
+    r.consume(jsonLine: #"{"timestamp":"2026-07-25T00:00:04Z","event":"Stop","sessionId":"s1","source":"grok-hook"}"#, now: Date(timeIntervalSince1970: 4))
+    expect(r.snapshot.state, .done, "stop → done")
+}
+
 func testClaudeHookReducerStuckPreToolUseRecoversAfterSafetyTimeout() {
     let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
     var reducer = ClaudeHookStatusReducer(threadId: "stuck-pretool", now: now)
@@ -2594,6 +2612,7 @@ testClaudeHookReducerPermissionPromptHoldsUntilResolved()
 testClaudeHookReducerIdlePromptReturnsToReady()
 testClaudeHookIdlePromptDoesNotDriveThinkingAggregate()
 testClaudeHookReducerStopFailureMapsToError()
+testGrokHookReducerLifecycle()
 testClaudeHookReducerStuckPreToolUseRecoversAfterSafetyTimeout()
 testClaudeHookReducerManualCompactShowsDoneThenReady()
 testClaudeHookReducerActiveCompactRestoresThinking()
