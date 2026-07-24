@@ -108,6 +108,8 @@ func runHaloInteractionChecks() {
     testAgentToggleDimsInactiveIconMoreStrongly()
     testAgentToggleSelectionPillFitsItsIconWidth()
     testAgentToggleKeepsWholeControlClickable()
+    testAgentToggleSupportsThreeAgentsIncludingGrok()
+    testFocusSubmenuIncludesGrok()
     testDetailsPanelSwitchCallbackSelectsClaudeCode()
 }
 
@@ -666,6 +668,27 @@ private func testFocusSubmenuSwitchesToClaudeCode() {
 
     expect(checkedTitles == ["Claude Code"], "Claude Code focus should be checked after selection")
     expect(loaded.focusedAgent, .claudeCode, "focused agent should persist after menu selection")
+}
+
+@MainActor
+private func testFocusSubmenuIncludesGrok() {
+    let store = SettingsStore(settingsURL: temporarySettingsURL())
+    let delegate = AppDelegate(settingsStore: store)
+    let submenu = focusedAgentSubmenu(in: delegate.makeHaloContextMenu())
+    let titles = submenu.items.map(\.title)
+
+    expect(titles.contains("Grok"), "focused-agent submenu should list Grok")
+    expect(titles == ["Codex", "Claude Code", "Grok"], "focus menu order should be Codex, Claude Code, Grok")
+
+    let grokItem = menuItem(titled: "Grok", in: submenu)
+    NSApplication.shared.sendAction(grokItem.action!, to: grokItem.target, from: grokItem)
+
+    let refreshedSubmenu = focusedAgentSubmenu(in: delegate.makeHaloContextMenu())
+    let checkedTitles = refreshedSubmenu.items.filter { $0.state == .on }.map(\.title)
+    let loaded = store.load()
+
+    expect(checkedTitles == ["Grok"], "Grok focus should be checked after selection")
+    expect(loaded.focusedAgent, .grok, "focused agent should persist Grok after menu selection")
 }
 
 @MainActor
@@ -2633,6 +2656,7 @@ private func testAgentToggleUsesSharedSVGAssets() {
     let assetDirectory = srcRoot.appendingPathComponent("shared/assets/agent-switch", isDirectory: true)
     let codexURL = assetDirectory.appendingPathComponent("codex.svg")
     let claudeURL = assetDirectory.appendingPathComponent("claude-code.svg")
+    let grokURL = assetDirectory.appendingPathComponent("grok.svg")
     let detailsSourceURL = sourceDirectory.appendingPathComponent("DetailsPanel.swift")
     let buildScriptURL = srcRoot
         .deletingLastPathComponent()
@@ -2640,20 +2664,30 @@ private func testAgentToggleUsesSharedSVGAssets() {
 
     expect(FileManager.default.fileExists(atPath: codexURL.path), "Codex SVG should live in shared assets")
     expect(FileManager.default.fileExists(atPath: claudeURL.path), "Claude SVG should live in shared assets")
+    expect(FileManager.default.fileExists(atPath: grokURL.path), "Grok SVG should live in shared assets")
 
     let detailsSource = try? String(contentsOf: detailsSourceURL, encoding: .utf8)
     expect(detailsSource?.contains("<svg") == false, "DetailsPanel should not embed SVG markup")
+    expect(
+        detailsSource?.contains("agentToggle.widthAnchor.constraint(equalToConstant: 108)") == true,
+        "details panel agent toggle should be wide enough for three icons"
+    )
 
     let buildScript = try? String(contentsOf: buildScriptURL, encoding: .utf8)
     expect(
         buildScript?.contains("src/shared/assets/agent-switch") == true,
         "macOS packaging should copy the shared agent icons"
     )
+    expect(
+        buildScript?.contains("agent-switch") == true
+            && buildScript?.contains("*.svg") == true,
+        "macOS packaging should copy all agent-switch SVGs including grok.svg"
+    )
 }
 
 @MainActor
 private func testAgentToggleUsesCodexAndClaudeIcons() {
-    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 110, height: 24))
+    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 108, height: 24))
     let descendants = allDescendants(of: toggle)
     let visibleLabels = descendants
         .compactMap { $0 as? NSTextField }
@@ -2663,49 +2697,86 @@ private func testAgentToggleUsesCodexAndClaudeIcons() {
 
     expect(!visibleLabels.contains("Codex"), "agent toggle should replace the Codex text with an icon")
     expect(!visibleLabels.contains("CC"), "agent toggle should replace the CC text with an icon")
-    expect(icons.count == 2, "agent toggle should render one icon for each agent")
-    expect(icons.allSatisfy { $0.image != nil }, "agent toggle should load both shared SVG images")
+    expect(!visibleLabels.contains("Grok"), "agent toggle should replace the Grok text with an icon")
+    expect(icons.count == 3, "agent toggle should render one icon for each agent")
+    expect(icons.allSatisfy { $0.image != nil }, "agent toggle should load all shared SVG images")
 }
 
 @MainActor
 private func testAgentToggleDimsInactiveIconMoreStrongly() {
-    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 110, height: 24))
+    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 108, height: 24))
     let icons = allDescendants(of: toggle).compactMap { $0 as? NSImageView }
 
-    expect(icons.count == 2, "agent toggle should expose both agent icons for opacity checks")
-    guard icons.count == 2 else { return }
+    expect(icons.count == 3, "agent toggle should expose all agent icons for opacity checks")
+    guard icons.count == 3 else { return }
 
     expect(icons[0].alphaValue, 1, "selected Codex icon should remain fully opaque")
     expect(icons[1].alphaValue, 0.40, "inactive Claude Code icon should use stronger dimming")
+    expect(icons[2].alphaValue, 0.40, "inactive Grok icon should use stronger dimming")
 
     toggle.setAgent(.claudeCode)
 
     expect(icons[0].alphaValue, 0.40, "inactive Codex icon should use stronger dimming")
     expect(icons[1].alphaValue, 1, "selected Claude Code icon should remain fully opaque")
+    expect(icons[2].alphaValue, 0.40, "inactive Grok icon should stay dimmed")
+
+    toggle.setAgent(.grok)
+
+    expect(icons[0].alphaValue, 0.40, "inactive Codex icon should stay dimmed")
+    expect(icons[1].alphaValue, 0.40, "inactive Claude Code icon should stay dimmed")
+    expect(icons[2].alphaValue, 1, "selected Grok icon should remain fully opaque")
 }
 
 @MainActor
 private func testAgentToggleSelectionPillFitsItsIconWidth() {
-    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 110, height: 24))
+    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 108, height: 24))
     toggle.layoutSubtreeIfNeeded()
 
     let selectionPill = toggle.subviews.first?.subviews.first
     expect(
         selectionPill?.frame.width ?? 0,
-        51,
+        34,
         "selected agent pill should fit the icon width without extra horizontal expansion"
     )
 }
 
 @MainActor
 private func testAgentToggleKeepsWholeControlClickable() {
-    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 110, height: 24))
+    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 108, height: 24))
     toggle.layoutSubtreeIfNeeded()
 
     expect(
-        toggle.hitTest(NSPoint(x: 82, y: 12)) === toggle,
+        toggle.hitTest(NSPoint(x: 90, y: 12)) === toggle,
         "agent icons should not intercept clicks from the toggle"
     )
+}
+
+@MainActor
+private func testAgentToggleSupportsThreeAgentsIncludingGrok() {
+    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 108, height: 24))
+    toggle.layoutSubtreeIfNeeded()
+
+    expect(toggle.bounds.width, 108, "three-way agent toggle should use a wider control")
+
+    toggle.setAgent(.grok)
+    expect(toggle.selectedAgent, .grok, "setAgent(.grok) should select Grok")
+
+    toggle.setAgent(.codex)
+    expect(toggle.selectedAgent, .codex, "setAgent should restore Codex")
+
+    var selected: AgentKind?
+    toggle.onAgentSelected = { selected = $0 }
+    toggle.selectAgentAtXForTesting(90)
+    expect(toggle.selectedAgent, .grok, "clicking the right third should select Grok")
+    expect(selected, .grok, "right-third click should emit Grok")
+
+    toggle.selectAgentAtXForTesting(18)
+    expect(toggle.selectedAgent, .codex, "clicking the left third should select Codex")
+    expect(selected, .codex, "left-third click should emit Codex")
+
+    toggle.selectAgentAtXForTesting(54)
+    expect(toggle.selectedAgent, .claudeCode, "clicking the middle third should select Claude Code")
+    expect(selected, .claudeCode, "middle-third click should emit Claude Code")
 }
 
 @MainActor

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none">
+  <title>Grok</title>
+  <desc>Simple geometric mark identifying Grok Build.</desc>
+  <circle cx="12" cy="12" r="8.25" stroke="#111111" stroke-width="1.75" fill="none"/>
+  <path fill="#111111" d="M9.1 7.6h2.05l2.55 5.05 2.55-5.05H18.3l-3.7 8.8h-2.15L9.1 7.6z"/>
+</svg>

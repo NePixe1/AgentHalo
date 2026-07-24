@@ -605,6 +605,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let focusMenu = NSMenu()
         addFocusedAgentItem(.codex, to: focusMenu)
         addFocusedAgentItem(.claudeCode, to: focusMenu)
+        addFocusedAgentItem(.grok, to: focusMenu)
         focus.submenu = focusMenu
         menu.addItem(focus)
 
