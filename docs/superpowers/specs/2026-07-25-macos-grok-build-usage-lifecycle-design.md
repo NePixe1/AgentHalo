@@ -3,7 +3,7 @@
 ## 文档状态
 
 - 日期：2026-07-25
-- 状态：设计已确认，待用户审阅后进入实施计划
+- 状态：设计已确认；实施计划见 [2026-07-25-macos-grok-build-usage-lifecycle-implementation.md](../plans/2026-07-25-macos-grok-build-usage-lifecycle-implementation.md)
 - 实现范围：AgentHalo **macOS only**
 - 产品原则：见 [PRODUCT.md](../../PRODUCT.md)
 - 额度管线先例：[OpenUsage 风格监控 macOS 设计](./2026-07-10-openusage-monitoring-macos-design.md)
