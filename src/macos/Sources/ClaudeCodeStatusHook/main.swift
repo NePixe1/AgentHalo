@@ -35,12 +35,44 @@ func nestedGet(_ obj: Any?, path: [String]) -> Any? {
     return cur
 }
 
-let eventName = firstString(
+/// Map snake_case hook event names to PascalCase used by reducers.
+/// Already-PascalCase names pass through unchanged.
+func normalizeEventName(_ raw: String) -> String {
+    let mapping: [String: String] = [
+        "session_start": "SessionStart",
+        "user_prompt_submit": "UserPromptSubmit",
+        "pre_tool_use": "PreToolUse",
+        "post_tool_use": "PostToolUse",
+        "post_tool_use_failure": "PostToolUseFailure",
+        "notification": "Notification",
+        "stop": "Stop",
+        "stop_failure": "StopFailure",
+        "session_end": "SessionEnd",
+        "pre_compact": "PreCompact",
+        "post_compact": "PostCompact",
+    ]
+    if let mapped = mapping[raw] {
+        return mapped
+    }
+    if let mapped = mapping[raw.lowercased()] {
+        return mapped
+    }
+    return raw
+}
+
+let env = ProcessInfo.processInfo.environment
+let isGrok = !(env["GROK_SESSION_ID"] ?? "").isEmpty
+    || !(env["GROK_HOOK_EVENT"] ?? "").isEmpty
+
+let rawEventName = firstString(
     event,
+    env["GROK_HOOK_EVENT"],
     payload["hook_event_name"],
     payload["event"],
     payload["eventName"]
 )
+
+let eventName = normalizeEventName(rawEventName)
 
 guard !eventName.isEmpty else {
     exit(0)
@@ -57,7 +89,8 @@ let sessionId = firstString(
     payload["session_id"],
     payload["sessionId"],
     payload["conversation_id"],
-    "claude-code"
+    env["GROK_SESSION_ID"],
+    isGrok ? "grok-build" : "claude-code"
 )
 
 let toolName = firstString(
@@ -101,6 +134,9 @@ let timestamp = firstString(
 
 // MARK: - Build record
 
+let source = isGrok ? "grok-hook" : "claude-hook"
+let statusFileName = isGrok ? "grok-build-status.jsonl" : "claude-code-status.jsonl"
+
 var record: [String: Any?] = [
     "timestamp": timestamp,
     "event": eventName,
@@ -109,7 +145,7 @@ var record: [String: Any?] = [
     "toolName": toolName.isEmpty ? nil : toolName,
     "notificationType": notificationType.isEmpty ? nil : notificationType,
     "errorText": errorText.isEmpty ? nil : errorText,
-    "source": "claude-hook",
+    "source": source,
 ]
 
 let recordData = try! JSONSerialization.data(
@@ -120,8 +156,16 @@ let recordLine = String(data: recordData, encoding: .utf8)! + "\n"
 
 // MARK: - Write with flock and rotation
 
-let root = FileManager.default.homeDirectoryForCurrentUser
-    .appendingPathComponent(".agent-halo", isDirectory: true)
+// Prefer $HOME so isolation tests and sandboxed launches resolve correctly;
+// fall back to the platform home directory when HOME is unset.
+let homeURL: URL = {
+    if let home = env["HOME"], !home.isEmpty {
+        return URL(fileURLWithPath: home, isDirectory: true)
+    }
+    return FileManager.default.homeDirectoryForCurrentUser
+}()
+
+let root = homeURL.appendingPathComponent(".agent-halo", isDirectory: true)
 
 // Create directory with 0o700
 try? FileManager.default.createDirectory(
@@ -130,7 +174,7 @@ try? FileManager.default.createDirectory(
     attributes: [.posixPermissions: 0o700]
 )
 
-let statusFilePath = root.appendingPathComponent("claude-code-status.jsonl").path
+let statusFilePath = root.appendingPathComponent(statusFileName).path
 
 // Always use open() — mixing FileHandle and POSIX fd risks the fd being
 // closed when the FileHandle is deallocated by ARC.
