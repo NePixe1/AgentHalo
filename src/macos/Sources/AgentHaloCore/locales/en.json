@@ -13,8 +13,10 @@
 
   "status.offline_codex": "Codex Not Running",
   "status.offline_claude": "Claude Code Not Running",
+  "status.offline_grok": "Grok is not running",
   "status.standby_codex": "Codex Standing By",
   "status.standby_claude": "Claude Code Standing By",
+  "status.standby_grok": "Grok is standing by",
   "status.paused": "Monitoring Paused",
   "status.thinking": "Thinking & Planning",
   "status.working": "Executing Task",
@@ -51,6 +53,7 @@
 
   "usage.warning.sign_in_codex": "Sign in to Codex again to refresh usage.",
   "usage.warning.sign_in_claude": "Sign in to Claude Code again to refresh usage.",
+  "usage.warning.sign_in_grok": "Run `grok login` again to refresh usage.",
   "usage.warning.rate_limited": "Usage requests are limited. AgentHalo will retry later.",
   "usage.warning.stale": "Usage may be outdated. Last updated {0}.",
   "usage.warning.network": "Usage could not be refreshed because of a network error.",

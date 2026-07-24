@@ -136,7 +136,7 @@ public enum SessionAggregator {
         switch agent {
         case .claudeCode:
             return claudeCompletedVisibleDuration
-        case .codex:
+        case .codex, .grok:
             return codexCompletedVisibleDuration
         }
     }

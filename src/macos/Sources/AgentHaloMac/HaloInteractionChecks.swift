@@ -1844,7 +1844,8 @@ private func testUsageMonitoringLifecycleWiring() {
     )
     expect(
         source.contains("case .codex:") && source.contains("return .codex")
-            && source.contains("case .claudeCode:") && source.contains("return .claude"),
+            && source.contains("case .claudeCode:") && source.contains("return .claude")
+            && source.contains("case .grok:") && source.contains("return .grok"),
         "AgentKind should map totally to its Usage Provider"
     )
     expect(

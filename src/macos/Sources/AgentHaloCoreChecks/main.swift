@@ -472,6 +472,26 @@ func testSettingsPersistsFocusedAgent() {
     expect(loaded.focusedAgent, .claudeCode, "focused agent should persist")
 }
 
+func testGrokFocusedAgentPersistence() {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-grok-settings-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
+    let url = root.appendingPathComponent("settings.json")
+    let store = SettingsStore(settingsURL: url)
+    let settings = HaloSettings(focusedAgent: .grok)
+
+    expect(settings.focusedAgent, .grok, "settings should accept grok focus")
+    expect(AgentKind.grok.segmentedTitle, "Grok", "segmented label must be Grok")
+    expect(AgentKind.grok.menuTitle, "Grok", "menu title must be Grok")
+
+    store.save(settings)
+    let loaded = store.load()
+
+    expect(loaded.focusedAgent, .grok, "focused agent grok should persist")
+}
+
 func testAcknowledgedErrorVisibilityUsesLatestErrorTime() {
     let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
     let earlier = now.addingTimeInterval(-60)
@@ -2422,6 +2442,7 @@ do {
     fatalError("\(error)")
 }
 testSettingsPersistsFocusedAgent()
+testGrokFocusedAgentPersistence()
 testAcknowledgedErrorVisibilityUsesLatestErrorTime()
 testWorkingVisibilityLiveCallOutputAndInitialTail()
 testSessionReducerCapturesCurrentCodexTurnDetailsAndRateLimitAvailability()

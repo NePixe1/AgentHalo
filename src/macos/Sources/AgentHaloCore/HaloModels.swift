@@ -3,11 +3,13 @@ import Foundation
 public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
     case codex
     case claudeCode
+    case grok
 
     public var menuTitle: String {
         switch self {
         case .codex: return "Codex"
         case .claudeCode: return "Claude Code"
+        case .grok: return "Grok"
         }
     }
 
@@ -15,6 +17,7 @@ public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
         switch self {
         case .codex: return "Codex"
         case .claudeCode: return "CC"
+        case .grok: return "Grok"
         }
     }
 
@@ -22,6 +25,7 @@ public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
         switch self {
         case .codex: return "Codex is standing by"
         case .claudeCode: return "Claude Code is standing by"
+        case .grok: return "Grok is standing by"
         }
     }
 
@@ -29,6 +33,7 @@ public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
         switch self {
         case .codex: return L10n.shared["status.standby_codex"]
         case .claudeCode: return L10n.shared["status.standby_claude"]
+        case .grok: return L10n.shared["status.standby_grok"]
         }
     }
 
@@ -36,6 +41,7 @@ public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
         switch self {
         case .codex: return "Codex is not running"
         case .claudeCode: return "Claude Code is not running"
+        case .grok: return "Grok is not running"
         }
     }
 
@@ -43,6 +49,7 @@ public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
         switch self {
         case .codex: return L10n.shared["status.offline_codex"]
         case .claudeCode: return L10n.shared["status.offline_claude"]
+        case .grok: return L10n.shared["status.offline_grok"]
         }
     }
 }

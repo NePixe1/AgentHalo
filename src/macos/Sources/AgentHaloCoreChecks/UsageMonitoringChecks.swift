@@ -60,6 +60,7 @@ func testUsageMonitoringLocalization() {
                 ("metadata.session_title", "Session title"),
                 ("usage.warning.sign_in_codex", "Sign in to Codex again to refresh usage."),
                 ("usage.warning.sign_in_claude", "Sign in to Claude Code again to refresh usage."),
+                ("usage.warning.sign_in_grok", "Run `grok login` again to refresh usage."),
                 ("usage.warning.rate_limited", "Usage requests are limited. AgentHalo will retry later."),
                 ("usage.warning.stale", "Usage may be outdated. Last updated {0}."),
                 ("usage.warning.network", "Usage could not be refreshed because of a network error."),
@@ -76,6 +77,7 @@ func testUsageMonitoringLocalization() {
                 ("metadata.session_title", "会话标题"),
                 ("usage.warning.sign_in_codex", "请重新登录 Codex 以刷新使用情况。"),
                 ("usage.warning.sign_in_claude", "请重新登录 Claude Code 以刷新使用情况。"),
+                ("usage.warning.sign_in_grok", "请重新执行 grok login 以刷新使用情况。"),
                 ("usage.warning.rate_limited", "使用情况请求过于频繁，AgentHalo 将稍后重试。"),
                 ("usage.warning.stale", "使用情况可能已过期，上次更新于 {0}。"),
                 ("usage.warning.network", "网络异常，暂时无法刷新使用情况。"),
@@ -156,6 +158,25 @@ func testDetailsContentResolverSeparatesOAuthUsageAndAPISessionDetails() {
         claudeOAuth.body,
         .usage(UsageDetailsModel(windows: [], status: .noData)),
         "OAuth without a snapshot should still render usage"
+    )
+
+    let grokOAuth = DetailsContentResolver.resolve(
+        providerID: .grok,
+        monitorState: UsageMonitorState(
+            providerID: .grok,
+            accessMode: .oauth,
+            status: .noData
+        ),
+        isOffline: false,
+        sessionDetails: SessionDetailsSnapshot(),
+        contextUsedPercent: nil,
+        now: now
+    )
+    expect(grokOAuth.providerName, "Grok", "grok provider display name")
+    expect(
+        grokOAuth.body,
+        .usage(UsageDetailsModel(windows: [], status: .noData)),
+        "Grok OAuth without a snapshot should still render usage"
     )
 
     for providerID in [UsageProviderID.codex, .claude] {
@@ -310,6 +331,25 @@ func testDetailsContentResolverWarningPriorityAndRedaction() {
         "Claude sign-in warning should name the exact provider"
     )
 
+    let grokSignIn = DetailsContentResolver.resolve(
+        providerID: .grok,
+        monitorState: UsageMonitorState(
+            providerID: .grok,
+            accessMode: .oauth,
+            status: .signInAgain,
+            lastFailure: .signInAgain
+        ),
+        isOffline: false,
+        sessionDetails: session,
+        contextUsedPercent: nil,
+        now: now
+    ).usageWarning
+    expect(
+        grokSignIn,
+        L10n.shared["usage.warning.sign_in_grok"],
+        "Grok sign-in warning should name the exact provider"
+    )
+
     let rateLimited = warning(
         status: .stale(updatedAt: updatedAt),
         failure: .rateLimited(retryAt: now)
@@ -343,7 +383,7 @@ func testDetailsContentResolverWarningPriorityAndRedaction() {
     expect(warning(status: .fresh(updatedAt: now), failure: nil) == nil, "fresh Usage has no warning")
     expect(warning(status: .noData, failure: nil) == nil, "initial noData has no warning")
 
-    for safeWarning in [signIn, claudeSignIn, rateLimited, stale, network, service, invalid]
+    for safeWarning in [signIn, claudeSignIn, grokSignIn, rateLimited, stale, network, service, invalid]
         .compactMap({ $0 }) {
         expect(!safeWarning.contains(syntheticToken), "warning must redact token")
         expect(!safeWarning.contains(syntheticResponseBody), "warning must redact response body")

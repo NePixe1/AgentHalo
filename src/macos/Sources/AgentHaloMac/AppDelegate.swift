@@ -921,6 +921,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             exactSessionDetails = resolved.sessionDetails
             exactContextUsedPercent = resolved.contextUsedPercent
+        case .grok:
+            // Grok session/details wiring lands in a later task; keep panels empty for now.
+            exactSessionDetails = SessionDetailsSnapshot()
+            exactContextUsedPercent = nil
         }
         let model = DetailsContentResolver.resolve(
             providerID: providerID,
@@ -967,6 +971,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return .codex
         case .claudeCode:
             return .claude
+        case .grok:
+            return .grok
         }
     }
 
