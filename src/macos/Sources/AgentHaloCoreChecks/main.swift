@@ -689,6 +689,47 @@ func testClaudeHookConfiguratorWritesUserSettingsNotLegacyClaudeJson() throws {
     expect(legacyCommand, "/old/claude-code-status-hook PreToolUse", "legacy ~/.claude.json should not be rewritten")
 }
 
+func testGrokHookConfiguratorWritesHooksJSON() throws {
+    let home = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-grok-hook-config-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: home)
+    }
+    try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    let bundledHook = home.appendingPathComponent("bundle-hook")
+    try Data("fake grok hook".utf8).write(to: bundledHook)
+
+    GrokHookConfigurator.configure(homeDirectory: home, bundledHookBinary: bundledHook)
+
+    let hooksURL = home.appendingPathComponent(".grok/hooks/agent-halo-status.json")
+    expect(FileManager.default.fileExists(atPath: hooksURL.path), "hooks json exists")
+    let text = try String(contentsOf: hooksURL, encoding: .utf8)
+    expect(text.contains("PreToolUse"), "pre tool registered")
+    expect(
+        text.contains("claude-code-status-hook") || text.contains("agent-halo"),
+        "command points to staged binary"
+    )
+    expect(text.contains("SessionStart"), "SessionStart registered")
+    expect(text.contains("SessionEnd"), "SessionEnd registered")
+    expect(text.contains("PostCompact"), "PostCompact registered")
+
+    let staged = home.appendingPathComponent(".agent-halo/claude-code-status-hook")
+    expect(FileManager.default.fileExists(atPath: staged.path), "hook binary staged under .agent-halo")
+
+    // Second call must be idempotent: content and mtime stable when already configured.
+    let attrsBefore = try FileManager.default.attributesOfItem(atPath: hooksURL.path)
+    let mtimeBefore = attrsBefore[.modificationDate] as? Date
+    let contentBefore = try Data(contentsOf: hooksURL)
+    // Brief pause so a non-idempotent rewrite would bump mtime.
+    Thread.sleep(forTimeInterval: 0.05)
+    GrokHookConfigurator.configure(homeDirectory: home, bundledHookBinary: bundledHook)
+    let contentAfter = try Data(contentsOf: hooksURL)
+    expect(contentAfter, contentBefore, "second configure should not rewrite hooks json content")
+    let attrsAfter = try FileManager.default.attributesOfItem(atPath: hooksURL.path)
+    let mtimeAfter = attrsAfter[.modificationDate] as? Date
+    expect(mtimeAfter, mtimeBefore, "second configure should not bump hooks json mtime")
+}
+
 func testClaudeStatusLineConfiguratorPreservesAndChainsExistingCommand() throws {
     let home = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-statusline-config-\(UUID().uuidString)", isDirectory: true)
@@ -2457,6 +2498,11 @@ do {
 testToolFailedDoesNotBecomeFatalError()
 do {
     try testClaudeHookConfiguratorWritesUserSettingsNotLegacyClaudeJson()
+} catch {
+    fatalError("\(error)")
+}
+do {
+    try testGrokHookConfiguratorWritesHooksJSON()
 } catch {
     fatalError("\(error)")
 }

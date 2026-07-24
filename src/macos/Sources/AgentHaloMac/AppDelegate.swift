@@ -187,6 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         ClaudeHookConfigurator.configure()
+        GrokHookConfigurator.configure()
         ClaudeStatusLineConfigurator.configure()
         NSApp.setActivationPolicy(.accessory)
         createStatusItem()
