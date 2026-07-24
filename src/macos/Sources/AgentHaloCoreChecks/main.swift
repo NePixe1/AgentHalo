@@ -1403,6 +1403,59 @@ func testAggregatorFiltersByFocusedAgent() {
     expect(claudeAggregate.sessions.map(\.threadId), ["claude-working"], "Claude focus sessions")
 }
 
+func testAggregatorFiltersClaudeAndGrokByFocusedAgent() {
+    let now = ISO8601DateFormatter().date(from: "2026-07-25T02:00:00Z")!
+    let claudeWorking = SessionSnapshot(
+        threadId: "claude-working",
+        projectName: "ClaudeProject",
+        workingDirectory: "",
+        state: .working,
+        action: "Running command",
+        lastEventAt: now,
+        completedAt: nil,
+        active: true,
+        agent: .claudeCode
+    )
+    let grokWorking = SessionSnapshot(
+        threadId: "grok-working",
+        projectName: "GrokProject",
+        workingDirectory: "",
+        state: .working,
+        action: "Running command",
+        lastEventAt: now.addingTimeInterval(1),
+        completedAt: nil,
+        active: true,
+        agent: .grok
+    )
+    let settings = HaloSettings(
+        paused: false,
+        installedAt: now.addingTimeInterval(-60),
+        acknowledged: [:]
+    )
+
+    let grokAggregate = SessionAggregator.aggregate(
+        snapshots: [claudeWorking, grokWorking],
+        settings: settings,
+        focusedAgent: .grok,
+        now: now.addingTimeInterval(2)
+    )
+    expect(grokAggregate.focusedAgent, .grok, "Grok aggregate should stamp focus")
+    expect(grokAggregate.state, .working, "Grok focus should use Grok working state")
+    expect(grokAggregate.sessions.map(\.threadId), ["grok-working"], "Grok focus should only keep Grok sessions")
+    expect(grokAggregate.detail, "GrokProject - Running command", "Grok focus detail")
+
+    let claudeAggregate = SessionAggregator.aggregate(
+        snapshots: [claudeWorking, grokWorking],
+        settings: settings,
+        focusedAgent: .claudeCode,
+        now: now.addingTimeInterval(2)
+    )
+    expect(claudeAggregate.focusedAgent, .claudeCode, "Claude aggregate should stamp focus")
+    expect(claudeAggregate.state, .working, "Claude focus should ignore concurrent Grok working")
+    expect(claudeAggregate.sessions.map(\.threadId), ["claude-working"], "Claude focus should not include Grok sessions")
+    expect(claudeAggregate.detail, "ClaudeProject - Running command", "Claude focus detail should stay Claude-only")
+}
+
 func testAggregatorIdleDetailUsesFocusedAgent() {
     let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
 
@@ -1418,11 +1471,19 @@ func testAggregatorIdleDetailUsesFocusedAgent() {
         focusedAgent: .claudeCode,
         now: now
     )
+    let grokAggregate = SessionAggregator.aggregate(
+        snapshots: [],
+        settings: HaloSettings(installedAt: now.addingTimeInterval(-60)),
+        focusedAgent: .grok,
+        now: now
+    )
 
     expect(codexAggregate.label, "OFFLINE", "Codex idle label is offline")
     expect(codexAggregate.detail, "Codex is not running", "Codex offline detail")
     expect(claudeAggregate.label, "OFFLINE", "Claude idle label is offline")
     expect(claudeAggregate.detail, "Claude Code is not running", "Claude offline detail")
+    expect(grokAggregate.label, "OFFLINE", "Grok idle label is offline")
+    expect(grokAggregate.detail, "Grok is not running", "Grok offline detail")
 }
 
 func testAggregatorDoesNotInjectCodexFailureForClaudeFocus() {
@@ -2597,6 +2658,7 @@ testSessionReducerMapsEscalatedArgumentsStringToAttention()
 testCodexRealtimeActivityReaderDetectsRequestUserInput()
 testAggregatorInjectsUnacknowledgedCodexFailureWhenIdle()
 testAggregatorFiltersByFocusedAgent()
+testAggregatorFiltersClaudeAndGrokByFocusedAgent()
 testAggregatorIdleDetailUsesFocusedAgent()
 testAggregatorDoesNotInjectCodexFailureForClaudeFocus()
 testClaudeReducerDoesNotCompleteWithoutExplicitCompletionEvent()

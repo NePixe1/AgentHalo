@@ -124,6 +124,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var codexActivitySnapshot = CodexActivitySnapshot.empty
     private let claudeActivityMonitor = ClaudeActivityMonitor()
     private var claudeActivitySnapshot = ClaudeActivitySnapshot.empty
+    private let grokActivityMonitor = GrokActivityMonitor()
+    private var grokActivitySnapshot = GrokActivitySnapshot.empty
     private var nextStatusLineReconciliationAt = Date.distantPast
     private let statusLineReconciliationInterval: TimeInterval = 2
     private var selectedPreview = PreviewPayload.live
@@ -207,6 +209,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.claudeActivityDidChange(snapshot)
             }
         }
+        grokActivitySnapshot = grokActivityMonitor.snapshot()
+        grokActivityMonitor.start { [weak self] snapshot in
+            Task { @MainActor in
+                self?.grokActivityDidChange(snapshot)
+            }
+        }
         // Initialize L10n with user's saved preference
         L10n.shared.setLanguage(settings.language)
         currentLanguage = L10n.shared.currentLanguage
@@ -260,6 +268,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         cancelLocalUsageTasks()
         codexActivityMonitor.stop()
         claudeActivityMonitor.stop()
+        grokActivityMonitor.stop()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         settingsSaveTimer?.invalidate()
         if placementState.shouldPersistCurrentFrame, let panel {
@@ -299,6 +308,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             focusedAgent: settings.focusedAgent,
             detailsPanelVisible: detailsPanel.isVisible
         )
+        grokActivityMonitor.updatePollingContext(
+            focusedAgent: settings.focusedAgent,
+            detailsPanelVisible: detailsPanel.isVisible
+        )
         refreshAggregateAndUI(now: now, codexRunning: codexRunning)
     }
 
@@ -308,6 +321,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         claudeActivitySnapshot = snapshot
+        let codexRunning = CodexAppDetector.isCodexRunning()
+        refreshAggregateAndUI(now: Date(), codexRunning: codexRunning)
+    }
+
+    private func grokActivityDidChange(_ snapshot: GrokActivitySnapshot) {
+        guard haloView?.isDragging != true else {
+            grokActivitySnapshot = snapshot
+            return
+        }
+        grokActivitySnapshot = snapshot
         let codexRunning = CodexAppDetector.isCodexRunning()
         refreshAggregateAndUI(now: Date(), codexRunning: codexRunning)
     }
@@ -326,6 +349,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshAggregateAndUI(now: Date(), codexRunning: codexRunning)
     }
 
+    private func hasLiveSessionForFocusedAgent(codexRunning: Bool) -> Bool {
+        switch settings.focusedAgent {
+        case .codex:
+            return codexRunning
+        case .claudeCode:
+            return claudeActivitySnapshot.preferredStandbySession != nil
+        case .grok:
+            return grokActivitySnapshot.isPresent
+        }
+    }
+
     private func refreshAggregateAndUI(now: Date, codexRunning: Bool) {
         aggregate = SessionAggregator.aggregate(
             snapshots: allSnapshots(),
@@ -336,9 +370,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         aggregate = Self.standbyAggregate(
             aggregate: aggregate,
-            hasLiveSession: settings.focusedAgent == .codex
-                ? codexRunning
-                : claudeActivitySnapshot.preferredStandbySession != nil
+            hasLiveSession: hasLiveSessionForFocusedAgent(codexRunning: codexRunning)
         )
         applyRealtimeCodexActivity(codexActivitySnapshot.realtimeActivity)
         let errorUpdate = liveErrorPresentationState.update(
@@ -360,9 +392,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             aggregate = Self.standbyAggregate(
                 aggregate: aggregate,
-                hasLiveSession: settings.focusedAgent == .codex
-                    ? codexRunning
-                    : claudeActivitySnapshot.preferredStandbySession != nil
+                hasLiveSession: hasLiveSessionForFocusedAgent(codexRunning: codexRunning)
             )
             applyRealtimeCodexActivity(codexActivitySnapshot.realtimeActivity)
         }
@@ -690,8 +720,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         settings.focusedAgent = agent
         settingsStore.save(settings)
-        if agent == .claudeCode {
+        switch agent {
+        case .claudeCode:
             claudeActivityMonitor.requestRefresh()
+        case .grok:
+            grokActivityMonitor.requestRefresh()
+        case .codex:
+            break
         }
         tick()
         refreshVisibleDetailsPanel()
@@ -814,6 +849,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func claudeSnapshots() -> [SessionSnapshot] {
         claudeActivitySnapshot.mergedClaudeSnapshots
+    }
+
+    private func grokSnapshots() -> [SessionSnapshot] {
+        grokActivitySnapshot.sessions
     }
 
     static func standbyAggregate(
@@ -1144,7 +1183,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func allSnapshots() -> [SessionSnapshot] {
-        codexActivitySnapshot.sessions + claudeSnapshots()
+        codexActivitySnapshot.sessions + claudeSnapshots() + grokSnapshots()
     }
 
     private func addMenuItem(_ title: String, _ action: Selector, enabled: Bool, to menu: NSMenu) {

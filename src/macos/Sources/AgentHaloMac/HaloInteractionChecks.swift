@@ -86,6 +86,9 @@ func runHaloInteractionChecks() {
     testCodexAppDetectorUsesWorkspaceEvents()
     testSessionMonitorsUseFastFileMetadata()
     testClaudePollingIsThrottledWhenCodexFocused()
+    testGrokPollingIsThrottledWhenNotFocused()
+    testGrokPresencePrefersActiveSessionsFile()
+    testGrokLiveStandbyUsesStableGreenAggregate()
     testClaudeLiveSessionsRefreshIsThrottled()
     testHaloUsesShapeLayersNotCpuRasterization()
     testRingSubmissionsAvoidConstantWork()
@@ -2075,6 +2078,100 @@ private func testClaudePollingIsThrottledWhenCodexFocused() {
     expect(!appDelegateSource.contains("refreshClaudeSourcesIfNeeded"), "AppDelegate should not poll Claude sources on the main tick")
     expect(!appDelegateSource.contains("claudeHookMonitor.refresh"), "AppDelegate should not refresh Claude hook status on the main thread")
     expect(!appDelegateSource.contains("claudeSessionMonitor.refresh"), "AppDelegate should not refresh Claude transcripts on the main thread")
+}
+
+private func testGrokPollingIsThrottledWhenNotFocused() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let monitorURL = sourceDirectory.appendingPathComponent("GrokActivityMonitor.swift")
+    guard let monitorSource = try? String(contentsOf: monitorURL, encoding: .utf8) else {
+        fatalError("GrokActivityMonitor source should be readable")
+    }
+    let appDelegateURL = sourceDirectory.appendingPathComponent("AppDelegate.swift")
+    guard let appDelegateSource = try? String(contentsOf: appDelegateURL, encoding: .utf8) else {
+        fatalError("AppDelegate source should be readable")
+    }
+
+    expect(monitorSource.contains("idleIntervalMilliseconds"), "Grok activity monitor should define a slower idle cadence")
+    expect(monitorSource.contains("activeIntervalMilliseconds"), "Grok activity monitor should define an active cadence")
+    expect(monitorSource.contains("focusedAgent == .grok"), "Grok polling should slow down when Grok is not focused")
+    expect(monitorSource.contains("detailsPanelVisible"), "Grok polling should stay active while the details panel is visible")
+    expect(monitorSource.contains("dispatchThrottleSeconds"), "Grok activity dispatch should throttle main-thread wakeups")
+    expect(monitorSource.contains("GrokHookStatusMonitor"), "Grok activity monitor should own the hook status monitor")
+    expect(monitorSource.contains("active_sessions.json"), "Grok presence should prefer ~/.grok/active_sessions.json")
+    expect(appDelegateSource.contains("grokActivityMonitor"), "AppDelegate should delegate Grok polling to a background monitor")
+    expect(appDelegateSource.contains("grokSnapshots()"), "AppDelegate should merge Grok snapshots into the aggregate")
+    expect(
+        appDelegateSource.contains("codexActivitySnapshot.sessions + claudeSnapshots() + grokSnapshots()"),
+        "AppDelegate should aggregate codex + claude + grok snapshots"
+    )
+    expect(appDelegateSource.contains("case .grok:"), "AppDelegate standby/live-session path should handle Grok focus")
+    expect(!appDelegateSource.contains("activateGrok"), "Grok must not gain a click-to-activate terminal path")
+}
+
+private func testGrokPresencePrefersActiveSessionsFile() {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("agent-halo-grok-presence-\(UUID().uuidString)", isDirectory: true)
+    let grokDir = root.appendingPathComponent(".grok", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try? FileManager.default.createDirectory(at: grokDir, withIntermediateDirectories: true)
+
+    expect(
+        !GrokActivityMonitor.hasActiveSessionsFile(homeDirectory: root),
+        "missing active_sessions.json should not report presence"
+    )
+    expect(
+        !GrokActivityMonitor.isPresent(homeDirectory: root, processPresenceProbe: { false }),
+        "absent file and no process should not report presence"
+    )
+
+    let sessionsURL = grokDir.appendingPathComponent("active_sessions.json")
+    try? "[]".write(to: sessionsURL, atomically: true, encoding: .utf8)
+    expect(
+        !GrokActivityMonitor.hasActiveSessionsFile(homeDirectory: root),
+        "empty active_sessions array should not report presence"
+    )
+
+    let payload = #"""
+    [{"session_id":"s1","pid":1,"cwd":"/tmp","opened_at":"2026-07-25T00:00:00Z"}]
+    """#
+    try? payload.write(to: sessionsURL, atomically: true, encoding: .utf8)
+    expect(
+        GrokActivityMonitor.hasActiveSessionsFile(homeDirectory: root),
+        "non-empty active_sessions.json should report presence"
+    )
+    expect(
+        GrokActivityMonitor.isPresent(homeDirectory: root, processPresenceProbe: { false }),
+        "non-empty active_sessions should win without a process probe"
+    )
+
+    try? "[]".write(to: sessionsURL, atomically: true, encoding: .utf8)
+    expect(
+        !GrokActivityMonitor.isPresent(homeDirectory: root, processPresenceProbe: { false }),
+        "empty sessions and no process should stay absent"
+    )
+    expect(
+        GrokActivityMonitor.isPresent(homeDirectory: root, processPresenceProbe: { true }),
+        "empty sessions file should fall back to process presence"
+    )
+}
+
+@MainActor
+private func testGrokLiveStandbyUsesStableGreenAggregate() {
+    let idle = AggregateSnapshot(
+        state: .idle,
+        label: "OFFLINE",
+        detail: AgentKind.grok.offlineDetail,
+        sessions: [],
+        focusedAgent: .grok
+    )
+
+    let standby = AppDelegate.standbyAggregate(aggregate: idle, hasLiveSession: true)
+    expect(standby.state, .done, "present idle Grok should use the stable green state")
+    expect(standby.label, "STANDBY", "present idle Grok label")
+    expect(standby.detail, AgentKind.grok.localizedStandbyDetail, "present idle Grok detail")
+
+    let offline = AppDelegate.standbyAggregate(aggregate: idle, hasLiveSession: false)
+    expect(offline, idle, "absent Grok should retain the normal idle aggregate")
 }
 
 private func testHaloUsesShapeLayersNotCpuRasterization() {
