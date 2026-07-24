@@ -134,9 +134,11 @@ public enum SessionAggregator {
 
     private static func completedVisibleDuration(for agent: AgentKind) -> TimeInterval {
         switch agent {
-        case .claudeCode:
+        case .claudeCode, .grok:
+            // Grok Build completions are ephemeral like Claude Code — brief green flash then ready.
             return claudeCompletedVisibleDuration
-        case .codex, .grok:
+        case .codex:
+            // Codex keeps done until acknowledged (or 24h window).
             return codexCompletedVisibleDuration
         }
     }

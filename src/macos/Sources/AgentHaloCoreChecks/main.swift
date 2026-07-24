@@ -1535,6 +1535,39 @@ func testAggregatorReturnsReadyAfterCompletedSessionSettles() {
     expect(settled.sessions.isEmpty, "settled completion should no longer be visible")
 }
 
+func testAggregatorReturnsReadyAfterGrokCompletedSessionSettles() {
+    let now = ISO8601DateFormatter().date(from: "2026-07-25T02:00:00Z")!
+    let completion = SessionSnapshot(
+        threadId: "grok-done",
+        projectName: "GrokProject",
+        workingDirectory: "",
+        state: .done,
+        action: "Complete",
+        lastEventAt: now,
+        completedAt: now,
+        active: false,
+        agent: .grok
+    )
+
+    let fresh = SessionAggregator.aggregate(
+        snapshots: [completion],
+        settings: HaloSettings(installedAt: now.addingTimeInterval(-60)),
+        focusedAgent: .grok,
+        now: now.addingTimeInterval(2)
+    )
+    expect(fresh.state, .done, "fresh Grok completion should show done")
+
+    // Same short window as Claude Code (~8s), not Codex's 86400s hold.
+    let settled = SessionAggregator.aggregate(
+        snapshots: [completion],
+        settings: HaloSettings(installedAt: now.addingTimeInterval(-60)),
+        focusedAgent: .grok,
+        now: now.addingTimeInterval(12)
+    )
+    expect(settled.state, .idle, "settled Grok completion should return ready after ~12s")
+    expect(settled.sessions.isEmpty, "settled Grok completion should no longer be visible")
+}
+
 func testAggregatorKeepsCodexCompletionVisibleUntilAcknowledged() {
     let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
     let completion = SessionSnapshot(
@@ -1773,6 +1806,157 @@ func testGrokHookReducerLifecycle() {
 
     r.consume(jsonLine: #"{"timestamp":"2026-07-25T00:00:04Z","event":"Stop","sessionId":"s1","source":"grok-hook"}"#, now: Date(timeIntervalSince1970: 4))
     expect(r.snapshot.state, .done, "stop → done")
+}
+
+// MARK: - Durable ClaudeCodeStatusHook isolation (Grok vs Claude status files)
+
+/// Locate the shared status-hook binary next to this process or under the package `.build`.
+private func resolveClaudeCodeStatusHookBinary() throws -> URL {
+    let fm = FileManager.default
+    let argv0 = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+    let sibling = argv0.deletingLastPathComponent().appendingPathComponent("ClaudeCodeStatusHook")
+    if fm.isExecutableFile(atPath: sibling.path) {
+        return sibling
+    }
+
+    // Walk up from CWD / argv0 looking for Package.swift + .build product.
+    let searchRoots: [URL] = [
+        URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true),
+        argv0.deletingLastPathComponent(),
+    ]
+    for root in searchRoots {
+        var dir = root
+        for _ in 0..<8 {
+            let package = dir.appendingPathComponent("Package.swift")
+            if fm.fileExists(atPath: package.path) {
+                let candidates = [
+                    dir.appendingPathComponent(".build/debug/ClaudeCodeStatusHook"),
+                    dir.appendingPathComponent(".build/arm64-apple-macosx/debug/ClaudeCodeStatusHook"),
+                    dir.appendingPathComponent(".build/x86_64-apple-macosx/debug/ClaudeCodeStatusHook"),
+                    dir.appendingPathComponent(".build/release/ClaudeCodeStatusHook"),
+                    dir.appendingPathComponent(".build/arm64-apple-macosx/release/ClaudeCodeStatusHook"),
+                ]
+                for candidate in candidates where fm.isExecutableFile(atPath: candidate.path) {
+                    return candidate
+                }
+                // Build once if missing (slow path; only when sibling/product absent).
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/swift")
+                process.arguments = ["build", "--product", "ClaudeCodeStatusHook"]
+                process.currentDirectoryURL = dir
+                process.standardOutput = FileHandle.nullDevice
+                process.standardError = FileHandle.nullDevice
+                try process.run()
+                process.waitUntilExit()
+                expect(process.terminationStatus, 0, "swift build ClaudeCodeStatusHook should succeed")
+                for candidate in candidates where fm.isExecutableFile(atPath: candidate.path) {
+                    return candidate
+                }
+            }
+            let parent = dir.deletingLastPathComponent()
+            if parent.path == dir.path { break }
+            dir = parent
+        }
+    }
+    throw NSError(
+        domain: "AgentHaloCoreChecks",
+        code: 1,
+        userInfo: [NSLocalizedDescriptionKey: "ClaudeCodeStatusHook binary not found; build product ClaudeCodeStatusHook first"]
+    )
+}
+
+private func runClaudeCodeStatusHook(
+    binary: URL,
+    home: URL,
+    arguments: [String],
+    environment: [String: String],
+    stdinJSON: String
+) throws {
+    let process = Process()
+    process.executableURL = binary
+    process.arguments = arguments
+    var env = ProcessInfo.processInfo.environment
+    // Isolate HOME so status files land under the temp tree only.
+    env["HOME"] = home.path
+    for (key, value) in environment {
+        env[key] = value
+    }
+    // Drop inherited GROK_* unless the caller set them explicitly.
+    if environment["GROK_SESSION_ID"] == nil {
+        env.removeValue(forKey: "GROK_SESSION_ID")
+    }
+    if environment["GROK_HOOK_EVENT"] == nil {
+        env.removeValue(forKey: "GROK_HOOK_EVENT")
+    }
+    process.environment = env
+
+    let stdinPipe = Pipe()
+    let stdoutPipe = Pipe()
+    let stderrPipe = Pipe()
+    process.standardInput = stdinPipe
+    process.standardOutput = stdoutPipe
+    process.standardError = stderrPipe
+    try process.run()
+    if let data = stdinJSON.data(using: .utf8) {
+        stdinPipe.fileHandleForWriting.write(data)
+    }
+    stdinPipe.fileHandleForWriting.closeFile()
+    process.waitUntilExit()
+    expect(process.terminationStatus, 0, "ClaudeCodeStatusHook should exit 0")
+}
+
+/// End-to-end: shared hook binary routes Grok env to grok-build-status.jsonl only,
+/// Claude path to claude-code-status.jsonl, and normalizes snake_case events.
+func testClaudeCodeStatusHookIsolatesGrokAndClaudeStatusFiles() throws {
+    let home = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-hook-isolation-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: home) }
+    try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+
+    let binary = try resolveClaudeCodeStatusHookBinary()
+    let agentHalo = home.appendingPathComponent(".agent-halo", isDirectory: true)
+    let grokStatus = agentHalo.appendingPathComponent("grok-build-status.jsonl")
+    let claudeStatus = agentHalo.appendingPathComponent("claude-code-status.jsonl")
+
+    // Grok path: GROK_SESSION_ID set; snake_case CLI event should become PreToolUse.
+    try runClaudeCodeStatusHook(
+        binary: binary,
+        home: home,
+        arguments: ["pre_tool_use"],
+        environment: [
+            "GROK_SESSION_ID": "test-grok-session",
+            "GROK_HOOK_EVENT": "pre_tool_use",
+        ],
+        stdinJSON: #"{"sessionId":"test-grok-session","cwd":"/tmp/proj","toolName":"run_terminal_command","timestamp":"2026-07-25T00:00:00Z"}"#
+    )
+
+    expect(FileManager.default.fileExists(atPath: grokStatus.path), "Grok path should write grok-build-status.jsonl")
+    let grokText = try String(contentsOf: grokStatus, encoding: .utf8)
+    expect(grokText.contains("grok-hook"), "Grok record source should be grok-hook")
+    expect(grokText.contains("test-grok-session"), "Grok record should include session id")
+    expect(grokText.contains("\"PreToolUse\""), "snake_case pre_tool_use should normalize to PreToolUse")
+    if FileManager.default.fileExists(atPath: claudeStatus.path) {
+        let existingClaude = try String(contentsOf: claudeStatus, encoding: .utf8)
+        expect(!existingClaude.contains("test-grok-session"), "Grok session id must not appear in claude-code-status.jsonl")
+    }
+
+    // Claude path: no GROK_* env — must write claude file only (for this session).
+    try runClaudeCodeStatusHook(
+        binary: binary,
+        home: home,
+        arguments: ["PreToolUse"],
+        environment: [:],
+        stdinJSON: #"{"session_id":"claude-1","cwd":"/tmp/c","tool_name":"Bash"}"#
+    )
+
+    expect(FileManager.default.fileExists(atPath: claudeStatus.path), "Claude path should write claude-code-status.jsonl")
+    let claudeText = try String(contentsOf: claudeStatus, encoding: .utf8)
+    expect(claudeText.contains("claude-hook"), "Claude record source should be claude-hook")
+    expect(claudeText.contains("claude-1"), "Claude record should include session id")
+    expect(claudeText.contains("\"PreToolUse\""), "Claude PreToolUse event should be PascalCase")
+    let grokAfterClaude = try String(contentsOf: grokStatus, encoding: .utf8)
+    expect(!grokAfterClaude.contains("claude-1"), "Claude session id must not be written to grok-build-status.jsonl")
+    expect(!claudeText.contains("test-grok-session"), "Grok session must not leak into Claude status file")
 }
 
 func testClaudeHookReducerStuckPreToolUseRecoversAfterSafetyTimeout() {
@@ -2663,6 +2847,7 @@ testAggregatorIdleDetailUsesFocusedAgent()
 testAggregatorDoesNotInjectCodexFailureForClaudeFocus()
 testClaudeReducerDoesNotCompleteWithoutExplicitCompletionEvent()
 testAggregatorReturnsReadyAfterCompletedSessionSettles()
+testAggregatorReturnsReadyAfterGrokCompletedSessionSettles()
 testAggregatorKeepsCodexCompletionVisibleUntilAcknowledged()
 testClaudeReducerMapsTranscriptEvents()
 testClaudeReducerIgnoresLocalCommandUserRecords()
@@ -2675,6 +2860,11 @@ testClaudeHookReducerIdlePromptReturnsToReady()
 testClaudeHookIdlePromptDoesNotDriveThinkingAggregate()
 testClaudeHookReducerStopFailureMapsToError()
 testGrokHookReducerLifecycle()
+do {
+    try testClaudeCodeStatusHookIsolatesGrokAndClaudeStatusFiles()
+} catch {
+    fatalError("hook isolation check failed: \(error)")
+}
 testClaudeHookReducerStuckPreToolUseRecoversAfterSafetyTimeout()
 testClaudeHookReducerManualCompactShowsDoneThenReady()
 testClaudeHookReducerActiveCompactRestoresThinking()
