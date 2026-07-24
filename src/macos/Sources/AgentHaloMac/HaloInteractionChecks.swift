@@ -2523,6 +2523,7 @@ private func testDetailsPanelLocalizesClaudeActivityDetails() {
 private func testUsageProviderMappingIsTotal() {
     expect(AppDelegate.usageProviderID(for: .codex), .codex, "Codex Provider mapping")
     expect(AppDelegate.usageProviderID(for: .claudeCode), .claude, "Claude Provider mapping")
+    expect(AppDelegate.usageProviderID(for: .grok), .grok, "grok focus maps to grok usage")
 }
 
 @MainActor
