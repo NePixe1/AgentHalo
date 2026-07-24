@@ -49,6 +49,7 @@ func runUsageModelChecks() async {
     }
     await runCodexUsageChecks()
     await runClaudeUsageChecks()
+    await runGrokUsageChecks()
 }
 
 func testUsageMonitoringLocalization() {
@@ -4691,4 +4692,243 @@ func grokCheckBase64URL(_ data: Data) -> String {
         .replacingOccurrences(of: "+", with: "-")
         .replacingOccurrences(of: "/", with: "_")
         .replacingOccurrences(of: "=", with: "")
+}
+
+// MARK: - Grok usage client + mapper
+
+func runGrokUsageChecks() async {
+    await testGrokUsageClientBuildsOnlyOfficialRequests()
+    try! testGrokUsageMapperWeeklyCredits()
+    try! testGrokUsageMapperOmitsPercentAsZero()
+    testGrokUsageMapperRejectsNonWeekly()
+    testGrokUsageMapperHTTPErrors()
+    testGrokUsageMapperPlanNameFromSettings()
+    testGrokUsageMapperClampsPercentAndIgnoresOnDemand()
+}
+
+func grokUsageResponse(
+    statusCode: Int = 200,
+    headers: [String: String] = [:],
+    _ body: String
+) -> UsageHTTPResponse {
+    UsageHTTPResponse(statusCode: statusCode, headers: headers, body: Data(body.utf8))
+}
+
+func testGrokUsageClientBuildsOnlyOfficialRequests() async {
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: grokUsageResponse(#"{"config":{}}"#))
+    await http.enqueue(response: grokUsageResponse(#"{"subscription_tier_display":"SuperGrok"}"#))
+    await http.enqueue(response: grokUsageResponse(#"{"access_token":"new-access"}"#))
+    let client = GrokUsageClient(http: http)
+
+    _ = try? await client.fetchCreditsConfig(accessToken: " access token ")
+    _ = try? await client.fetchSettings(accessToken: "access token")
+    _ = try? await client.refreshToken("refresh token+/=", clientID: GrokUsageClient.defaultClientID)
+
+    let requests = await http.capturedRequests
+    expect(requests.count, 3, "Grok client should issue credits, settings, and refresh requests")
+
+    expect(requests[0].method, "GET", "Grok credits method")
+    expect(requests[0].host, "cli-chat-proxy.grok.com", "Grok credits official host")
+    expect(requests[0].path, "/v1/billing?format=credits", "Grok credits official path with format query")
+    expect(requests[0].timeout, 10, "Grok credits timeout")
+    expect(requests[0].headers["authorization"], "Bearer access token", "Grok credits bearer header")
+    expect(requests[0].headers["x-xai-token-auth"], "xai-grok-cli", "Grok credits token-auth header")
+    expect(requests[0].headers["accept"], "application/json", "Grok credits accept header")
+    expect(requests[0].headers["user-agent"], "AgentHalo", "Grok credits user agent")
+
+    expect(requests[1].method, "GET", "Grok settings method")
+    expect(requests[1].host, "cli-chat-proxy.grok.com", "Grok settings official host")
+    expect(requests[1].path, "/v1/settings", "Grok settings official path")
+    expect(requests[1].timeout, 10, "Grok settings timeout")
+    expect(requests[1].headers["authorization"], "Bearer access token", "Grok settings bearer header")
+    expect(requests[1].headers["x-xai-token-auth"], GrokUsageClient.tokenAuthHeader, "Grok settings token-auth")
+    expect(requests[1].headers["user-agent"], "AgentHalo", "Grok settings user agent")
+
+    expect(requests[2].method, "POST", "Grok refresh method")
+    expect(requests[2].host, "auth.x.ai", "Grok refresh official host")
+    expect(requests[2].path, "/oauth2/token", "Grok refresh official path")
+    expect(requests[2].timeout, 15, "Grok refresh timeout")
+    expect(requests[2].headers["content-type"], "application/x-www-form-urlencoded", "Grok refresh content type")
+    let form = String(data: requests[2].body ?? Data(), encoding: .utf8) ?? ""
+    expect(form.contains("grant_type=refresh_token"), "Grok refresh grant type")
+    expect(
+        form.contains("client_id=\(GrokUsageClient.defaultClientID)"),
+        "Grok refresh client id"
+    )
+    expect(form.contains("refresh_token=refresh%20token%2B%2F%3D"), "Grok refresh token must be form encoded")
+    expect(
+        GrokUsageClient.defaultClientID,
+        GrokAuthStore.defaultClientID,
+        "GrokUsageClient and GrokAuthStore must share the same default client id"
+    )
+    expect(
+        GrokUsageClient.defaultClientID,
+        "b1a00492-073a-47ea-816f-4c329264a828",
+        "Grok default OIDC client id must match CLI / OpenUsage"
+    )
+    expect(
+        requests.allSatisfy {
+            ["cli-chat-proxy.grok.com", "auth.x.ai"].contains($0.host)
+        },
+        "Grok client must call only approved official endpoints"
+    )
+}
+
+func testGrokUsageMapperWeeklyCredits() throws {
+    let body = """
+    {"config":{
+      "creditUsagePercent": 12.5,
+      "currentPeriod":{
+        "type":"USAGE_PERIOD_TYPE_WEEKLY",
+        "start":"2026-07-24T08:44:29.522745+00:00",
+        "end":"2026-07-31T08:44:29.522745+00:00"
+      },
+      "onDemandCap":{"val":2500},
+      "productUsage":[{"product":"GrokBuild","usagePercent":12.5}]
+    }}
+    """
+    let response = UsageHTTPResponse(statusCode: 200, headers: [:], body: Data(body.utf8))
+    let key = AccountCacheKey(providerID: .grok, digest: String(repeating: "a", count: 64))
+    let now = Date(timeIntervalSince1970: 1_000_000)
+    let snapshot = try GrokUsageMapper.mapCredits(
+        response: response,
+        accountKey: key,
+        planName: "SuperGrok",
+        now: now
+    )
+    expect(snapshot.providerID, .grok, "provider")
+    expect(snapshot.accountKey, key, "account key")
+    expect(snapshot.planName, "SuperGrok", "plan")
+    expect(snapshot.windows.count, 1, "only weekly window")
+    expect(snapshot.windows[0].kind, .weekly, "weekly kind")
+    expect(snapshot.windows[0].usedPercent, 12.5, "percent from total pool")
+    expect(snapshot.windows[0].resetsAt != nil, "resetsAt set")
+    expect(snapshot.refreshedAt, now, "refreshedAt uses now")
+    // duration is end - start (~7 days); onDemand must not produce extra windows
+    expect(snapshot.windows[0].duration, 7 * 24 * 60 * 60, "weekly duration from period bounds")
+}
+
+func testGrokUsageMapperOmitsPercentAsZero() throws {
+    let body = """
+    {"config":{"currentPeriod":{
+      "type":"USAGE_PERIOD_TYPE_WEEKLY",
+      "start":"2026-07-24T00:00:00Z",
+      "end":"2026-07-31T00:00:00Z"
+    }}}
+    """
+    let snapshot = try GrokUsageMapper.mapCredits(
+        response: UsageHTTPResponse(statusCode: 200, headers: [:], body: Data(body.utf8)),
+        accountKey: AccountCacheKey(providerID: .grok, digest: String(repeating: "b", count: 64)),
+        planName: nil,
+        now: Date()
+    )
+    expect(snapshot.windows.count, 1, "weekly window present when percent omitted")
+    expect(snapshot.windows[0].usedPercent, 0, "absent percent is 0")
+    expect(snapshot.planName, nil, "nil planName passes through")
+}
+
+func testGrokUsageMapperRejectsNonWeekly() {
+    let body = """
+    {"config":{"creditUsagePercent":1,"currentPeriod":{
+      "type":"USAGE_PERIOD_TYPE_MONTHLY",
+      "start":"2026-07-01T00:00:00Z",
+      "end":"2026-08-01T00:00:00Z"
+    }}}
+    """
+    do {
+        let snap = try GrokUsageMapper.mapCredits(
+            response: UsageHTTPResponse(statusCode: 200, headers: [:], body: Data(body.utf8)),
+            accountKey: AccountCacheKey(providerID: .grok, digest: String(repeating: "c", count: 64)),
+            planName: nil,
+            now: Date()
+        )
+        expect(snap.windows.isEmpty, "non-weekly must not invent weekly bars")
+        expect(snap.windows.contains { $0.kind == .weekly } == false, "no weekly kind from monthly period")
+    } catch {
+        // invalidResponse is also acceptable for non-weekly periods
+        expect(error is UsageProviderFailure, "non-weekly failure should be UsageProviderFailure")
+    }
+}
+
+func testGrokUsageMapperHTTPErrors() {
+    let key = AccountCacheKey(providerID: .grok, digest: String(repeating: "d", count: 64))
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let cases: [(UsageHTTPResponse, UsageProviderFailure)] = [
+        (grokUsageResponse(statusCode: 401, "{}"), .signInAgain),
+        (grokUsageResponse(statusCode: 429, headers: ["Retry-After": "90"], "{}"),
+         .rateLimited(retryAt: now.addingTimeInterval(90))),
+        (grokUsageResponse(statusCode: 503, "{}"), .serviceUnavailable),
+        (grokUsageResponse("{}"), .invalidResponse),
+        (grokUsageResponse(#"{"config":{}}"#), .invalidResponse),
+        (grokUsageResponse(#"{"config":{"creditUsagePercent":"high","currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-07-24T00:00:00Z","end":"2026-07-31T00:00:00Z"}}}"#),
+         .invalidResponse),
+    ]
+    for (response, expected) in cases {
+        do {
+            _ = try GrokUsageMapper.mapCredits(
+                response: response,
+                accountKey: key,
+                planName: nil,
+                now: now
+            )
+            fatalError("invalid Grok response should fail: \(expected)")
+        } catch let failure as UsageProviderFailure {
+            expect(failure, expected, "Grok mapper failure classification")
+        } catch {
+            fatalError("unexpected Grok mapper error type")
+        }
+    }
+}
+
+func testGrokUsageMapperPlanNameFromSettings() {
+    let ok = grokUsageResponse(#"{"subscription_tier_display":" SuperGrok Heavy "}"#)
+    expect(GrokUsageMapper.planName(from: ok), "SuperGrok Heavy", "settings plan trims whitespace")
+
+    let blank = grokUsageResponse(#"{"subscription_tier_display":"  "}"#)
+    expect(GrokUsageMapper.planName(from: blank), nil, "blank plan is nil")
+
+    let missing = grokUsageResponse(#"{}"#)
+    expect(GrokUsageMapper.planName(from: missing), nil, "missing plan is nil")
+
+    let unauthorized = grokUsageResponse(statusCode: 401, #"{"subscription_tier_display":"SuperGrok"}"#)
+    expect(GrokUsageMapper.planName(from: unauthorized), nil, "non-2xx settings yield nil plan")
+}
+
+func testGrokUsageMapperClampsPercentAndIgnoresOnDemand() {
+    let body = """
+    {"config":{
+      "creditUsagePercent": 140,
+      "currentPeriod":{
+        "type":"USAGE_PERIOD_TYPE_WEEKLY",
+        "start":"2026-07-24T00:00:00Z",
+        "end":"2026-07-31T00:00:00Z"
+      },
+      "onDemandCap":{"val":2500},
+      "onDemandUsed":{"val":100},
+      "prepaidBalance":{"val":50}
+    }}
+    """
+    let snapshot = try? GrokUsageMapper.mapCredits(
+        response: UsageHTTPResponse(statusCode: 200, headers: [:], body: Data(body.utf8)),
+        accountKey: AccountCacheKey(providerID: .grok, digest: String(repeating: "e", count: 64)),
+        planName: nil,
+        now: Date()
+    )
+    expect(snapshot?.windows.count, 1, "onDemand fields must not add windows")
+    expect(snapshot?.windows[0].usedPercent, 100, "percent upper clamp")
+
+    let negative = try? GrokUsageMapper.mapCredits(
+        response: grokUsageResponse("""
+        {"config":{"creditUsagePercent":-5,"currentPeriod":{
+          "type":"USAGE_PERIOD_TYPE_WEEKLY",
+          "start":"2026-07-24T00:00:00Z",
+          "end":"2026-07-31T00:00:00Z"
+        }}}
+        """),
+        accountKey: AccountCacheKey(providerID: .grok, digest: String(repeating: "f", count: 64)),
+        planName: nil,
+        now: Date()
+    )
+    expect(negative?.windows[0].usedPercent, 0, "percent lower clamp")
 }

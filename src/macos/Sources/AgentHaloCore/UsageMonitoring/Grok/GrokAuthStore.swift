@@ -29,9 +29,8 @@ public enum GrokAuthError: Error, Equatable, Sendable {
 /// every other account untouched; a corrupt file never gets rebuilt from memory.
 public struct GrokAuthStore: Sendable {
     public static let refreshWindow: TimeInterval = 5 * 60
-    /// Matches Grok CLI / OpenUsage default OIDC client id. Task 3 also exposes
-    /// this as `GrokUsageClient.defaultClientID`.
-    public static let defaultClientID = "b1a00492-073a-47ea-816f-4c329264a828"
+    /// Shared with `GrokUsageClient.defaultClientID` (single source of truth).
+    public static let defaultClientID = GrokUsageClient.defaultClientID
 
     private let homeDirectory: URL?
     private let environment: any UsageEnvironmentReading
