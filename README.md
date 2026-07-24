@@ -42,7 +42,7 @@ platform-specific rendering remains native. See the
 ## Requirements
 
 - Windows 10 or Windows 11
-- The Codex desktop app installed and in use, or Claude Code on macOS
+- The Codex desktop app installed and in use, or Claude Code / Grok Build on macOS
 - .NET Framework 4.8, normally included with current Windows 10/11 systems
 
 ## macOS development build
@@ -84,7 +84,7 @@ OAuth token rotates, the original Codex `auth.json` is updated atomically.
 - Drag the halo to reposition it; it gently snaps to display edges.
 - Hover to inspect the current state; official Codex OAuth sessions show the five-hour and weekly usage limits.
 - With CCSwitch, a custom model provider, or API-key authentication, the Codex panel automatically shows the project, model, and current-turn input/output tokens instead. API keys, base URLs, and relay tool names are never displayed.
-- Hover details include a `Codex / CC` switch. Agent Halo keeps watching both tools, while the halo color, status text, and quota rows follow the selected focused agent.
+- Hover details include a `Codex / CC / Grok` switch on macOS (`Codex / CC` on Windows). Agent Halo keeps watching the available tools, while the halo color, status text, and quota rows follow the selected focused agent. macOS also monitors Grok Build weekly usage and minimal lifecycle (no Pay-as-you-go UI).
 - The context pill displays context usage for the focused agent: Codex shows quota-based context usage, while Claude Code shows context window usage captured via status line proxy.
 - Official Codex quota rows appear only in OAuth mode. Custom API mode and the `CC` view use the same fixed-height information rows without presenting fake official quota data.
 - Completed green breathes until Codex returns to the foreground, then settles
