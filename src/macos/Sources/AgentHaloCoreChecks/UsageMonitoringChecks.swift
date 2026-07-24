@@ -4529,7 +4529,8 @@ func runGrokAuthChecks() throws {
     }
     expect(missingKey == nil, "missing auth has no account key")
 
-    // Dual-account auth.json (second account entry must be preserved on persist)
+    // Dual-account auth.json (second account entry must be preserved on persist).
+    // Intentional `extra` field asserts unknown-key preservation on rotation.
     let authJSON = """
     {
       "https://auth.x.ai::client-a": {
@@ -4538,7 +4539,8 @@ func runGrokAuthChecks() throws {
         "expires_at": "2099-01-01T00:00:00Z",
         "user_id": "user-a",
         "email": "a@example.com",
-        "oidc_client_id": "client-a"
+        "oidc_client_id": "client-a",
+        "extra": "keep-extra-field"
       },
       "https://auth.x.ai::client-b": {
         "key": "keep-me-token",
@@ -4577,6 +4579,62 @@ func runGrokAuthChecks() throws {
     )
     expect(store.needsRefresh(nearExpiry), true, "expires within refresh window needs refresh")
 
+    // sourceVersion concurrent reject: same access token on disk, but entry fields
+    // change after resolve so sourceVersion no longer matches → persist nil, no write.
+    let concurrentRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("grok-auth-version-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: concurrentRoot, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: concurrentRoot) }
+    let concurrentGrok = concurrentRoot.appendingPathComponent(".grok", isDirectory: true)
+    try FileManager.default.createDirectory(at: concurrentGrok, withIntermediateDirectories: true)
+    let concurrentAuth = concurrentGrok.appendingPathComponent("auth.json")
+    // Fixed `key` so findEntry still matches; only refresh_token mutates sourceVersion.
+    let concurrentJSON = """
+    {
+      "https://auth.x.ai::client-a": {
+        "key": "stable-access-token",
+        "refresh_token": "refresh-a",
+        "expires_at": "2099-01-01T00:00:00Z",
+        "user_id": "user-a"
+      }
+    }
+    """
+    try concurrentJSON.write(to: concurrentAuth, atomically: true, encoding: .utf8)
+    let concurrentStore = GrokAuthStore(homeDirectory: concurrentRoot)
+    guard case .oauth(let concurrentAccess) = concurrentStore.resolveAccess() else {
+        expect(false, "concurrent-version fixture should resolve to oauth")
+        return
+    }
+    expect(concurrentAccess.accessToken, "stable-access-token", "concurrent fixture access token")
+    // External writer mutates the same entry (same key) so sourceVersion diverges.
+    let externallyChanged = """
+    {
+      "https://auth.x.ai::client-a": {
+        "key": "stable-access-token",
+        "refresh_token": "refresh-a-changed",
+        "expires_at": "2099-01-01T00:00:00Z",
+        "user_id": "user-a"
+      }
+    }
+    """
+    try externallyChanged.write(to: concurrentAuth, atomically: true, encoding: .utf8)
+    let beforeMismatch = try Data(contentsOf: concurrentAuth)
+    let concurrentRotation = GrokTokenRotation(
+        accessToken: "should-not-write",
+        refreshToken: "should-not-write-rt",
+        expiresAt: Date().addingTimeInterval(7200)
+    )
+    let mismatchResult = try concurrentStore.persist(
+        rotation: concurrentRotation,
+        replacing: concurrentAccess
+    )
+    expect(mismatchResult == nil, "persist returns nil when sourceVersion mismatches disk")
+    let afterMismatch = try Data(contentsOf: concurrentAuth)
+    expect(afterMismatch, beforeMismatch, "persist must not rewrite auth.json on version mismatch")
+    let mismatchText = String(data: afterMismatch, encoding: .utf8) ?? ""
+    expect(mismatchText.contains("should-not-write") == false, "stale rotation token must not appear on disk")
+    expect(mismatchText.contains("refresh-a-changed"), "external concurrent change remains on disk")
+
     let rotated = GrokTokenRotation(
         accessToken: "new-access",
         refreshToken: "new-refresh",
@@ -4590,6 +4648,23 @@ func runGrokAuthChecks() throws {
     expect(reloaded.contains("keep-me-token"), "must preserve other account entries")
     expect(reloaded.contains("new-access"), "must write rotated token")
     expect(reloaded.contains("new-refresh"), "must write rotated refresh token")
+
+    // Non-token fields on the rotated entry (including unknown `extra`) must remain.
+    let reloadedData = try Data(contentsOf: authURL)
+    guard let rootObject = try JSONSerialization.jsonObject(with: reloadedData) as? [String: Any],
+          let entryA = rootObject["https://auth.x.ai::client-a"] as? [String: Any]
+    else {
+        expect(false, "reloaded auth.json should parse with client-a entry")
+        return
+    }
+    expect(entryA["key"] as? String, "new-access", "rotated entry key")
+    expect(entryA["refresh_token"] as? String, "new-refresh", "rotated entry refresh_token")
+    expect(entryA["user_id"] as? String, "user-a", "persist preserves user_id")
+    expect(entryA["email"] as? String, "a@example.com", "persist preserves email")
+    expect(entryA["oidc_client_id"] as? String, "client-a", "persist preserves oidc_client_id")
+    expect(entryA["extra"] as? String, "keep-extra-field", "persist preserves unknown extra field")
+    let entryB = rootObject["https://auth.x.ai::client-b"] as? [String: Any]
+    expect(entryB?["key"] as? String, "keep-me-token", "second account token unchanged after rotation")
 
     // corrupt file: persist should throw and not wipe
     try "{not-json".write(to: authURL, atomically: true, encoding: .utf8)
