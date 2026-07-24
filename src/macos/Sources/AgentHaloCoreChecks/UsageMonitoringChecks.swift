@@ -42,6 +42,11 @@ func runUsageModelChecks() async {
 
     await runCodexAuthChecks()
     runClaudeAuthChecks()
+    do {
+        try runGrokAuthChecks()
+    } catch {
+        fatalError("grok auth checks failed: \(error)")
+    }
     await runCodexUsageChecks()
     await runClaudeUsageChecks()
 }
@@ -4502,4 +4507,113 @@ func testClaudeProviderUsesRotatedTokenWhenWritebackFails() async {
     expect(requests.last?.headers["authorization"], "Bearer memory-access", "Claude in-memory token serves current request")
     expect(result.snapshot?.accountKey, fixture.1.accountKey, "unpersisted Claude rotation keeps the stable account key")
     expect(result.migrateCacheFrom == nil, "unpersisted Claude rotation must not migrate cache")
+}
+
+// MARK: - Grok auth
+
+func runGrokAuthChecks() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("grok-auth-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let grokDir = root.appendingPathComponent(".grok", isDirectory: true)
+    try FileManager.default.createDirectory(at: grokDir, withIntermediateDirectories: true)
+    let authURL = grokDir.appendingPathComponent("auth.json")
+
+    // empty / missing → oauthNeedsSignIn
+    let missingStore = GrokAuthStore(homeDirectory: root)
+    guard case .oauthNeedsSignIn(let missingKey) = missingStore.resolveAccess() else {
+        expect(false, "missing auth.json should resolve to oauthNeedsSignIn")
+        return
+    }
+    expect(missingKey == nil, "missing auth has no account key")
+
+    // Dual-account auth.json (second account entry must be preserved on persist)
+    let authJSON = """
+    {
+      "https://auth.x.ai::client-a": {
+        "key": "header.\(grokCheckFakeJWT(exp: Date().addingTimeInterval(3600))).sig",
+        "refresh_token": "refresh-a",
+        "expires_at": "2099-01-01T00:00:00Z",
+        "user_id": "user-a",
+        "email": "a@example.com",
+        "oidc_client_id": "client-a"
+      },
+      "https://auth.x.ai::client-b": {
+        "key": "keep-me-token",
+        "refresh_token": "refresh-b",
+        "user_id": "user-b"
+      }
+    }
+    """
+    try authJSON.write(to: authURL, atomically: true, encoding: .utf8)
+
+    let store = GrokAuthStore(homeDirectory: root)
+    guard case .oauth(let access) = store.resolveAccess() else {
+        expect(false, "expected oauth from auth.json")
+        return
+    }
+    expect(access.providerID, .grok, "provider id")
+    expect(access.accountKey.digest.count, 64, "digest hex length")
+    expect(
+        access.accountKey.digest.contains("user-a") == false,
+        "digest must not embed raw id plaintext requirement is hash only"
+    )
+    expect(access.accountKey.digest, UsageDigest.sha256("user-a"), "account digest hashes user_id")
+    expect(access.refreshToken, "refresh-a", "refresh token from selected entry")
+    expect(store.needsRefresh(access), false, "far-future expires_at should not need refresh")
+
+    let nearExpiry = OAuthAccess(
+        providerID: access.providerID,
+        accountKey: access.accountKey,
+        source: access.source,
+        sourceVersion: access.sourceVersion,
+        accessToken: access.accessToken,
+        refreshToken: access.refreshToken,
+        expiresAt: Date().addingTimeInterval(60),
+        accountID: access.accountID,
+        planHint: access.planHint
+    )
+    expect(store.needsRefresh(nearExpiry), true, "expires within refresh window needs refresh")
+
+    let rotated = GrokTokenRotation(
+        accessToken: "new-access",
+        refreshToken: "new-refresh",
+        expiresAt: Date().addingTimeInterval(7200)
+    )
+    let persisted = try store.persist(rotation: rotated, replacing: access)
+    expect(persisted?.accessToken, "new-access", "access token updated")
+    expect(persisted?.refreshToken, "new-refresh", "refresh token updated")
+
+    let reloaded = try String(contentsOf: authURL, encoding: .utf8)
+    expect(reloaded.contains("keep-me-token"), "must preserve other account entries")
+    expect(reloaded.contains("new-access"), "must write rotated token")
+    expect(reloaded.contains("new-refresh"), "must write rotated refresh token")
+
+    // corrupt file: persist should throw and not wipe
+    try "{not-json".write(to: authURL, atomically: true, encoding: .utf8)
+    do {
+        _ = try store.persist(rotation: rotated, replacing: access)
+        expect(false, "persist on corrupt file must throw")
+    } catch {
+        // ok
+    }
+    let corruptContents = try String(contentsOf: authURL, encoding: .utf8)
+    expect(corruptContents, "{not-json", "corrupt auth.json must be left untouched")
+}
+
+/// Build a minimal unsigned JWT with an `exp` claim for Grok auth checks.
+func grokCheckFakeJWT(exp: Date) -> String {
+    let header = grokCheckBase64URL(Data(#"{"alg":"none"}"#.utf8))
+    let expSeconds = Int(exp.timeIntervalSince1970)
+    let payload = grokCheckBase64URL(Data(#"{"exp":\#(expSeconds)}"#.utf8))
+    return "\(header).\(payload)"
+}
+
+func grokCheckBase64URL(_ data: Data) -> String {
+    data.base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
 }
