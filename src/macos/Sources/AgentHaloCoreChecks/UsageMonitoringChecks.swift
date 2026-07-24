@@ -4704,6 +4704,9 @@ func runGrokUsageChecks() async {
     testGrokUsageMapperHTTPErrors()
     testGrokUsageMapperPlanNameFromSettings()
     testGrokUsageMapperClampsPercentAndIgnoresOnDemand()
+    await testGrokProviderRefreshSucceedsWithWeeklySnapshot()
+    await testGrokProviderRetriesCredits401WithTokenRefresh()
+    await testGrokProviderNoAuthSignInAgain()
 }
 
 func grokUsageResponse(
@@ -4931,4 +4934,200 @@ func testGrokUsageMapperClampsPercentAndIgnoresOnDemand() {
         now: Date()
     )
     expect(negative?.windows[0].usedPercent, 0, "percent lower clamp")
+}
+
+// MARK: - Grok provider
+
+func grokWeeklyCreditsBody(percent: Double = 12.5) -> String {
+    """
+    {"config":{
+      "creditUsagePercent": \(percent),
+      "currentPeriod":{
+        "type":"USAGE_PERIOD_TYPE_WEEKLY",
+        "start":"2026-07-24T00:00:00Z",
+        "end":"2026-07-31T00:00:00Z"
+      }
+    }}
+    """
+}
+
+func grokCheckISO8601(_ date: Date) -> String {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter.string(from: date)
+}
+
+func makeGrokProviderFixture(
+    accessToken: String,
+    refreshToken: String = "refresh-old",
+    expiresAt: Date,
+    userID: String = "user-fixture",
+    oidcClientID: String = GrokUsageClient.defaultClientID,
+    now: Date,
+    files: (any UsageFileAccessing)? = nil
+) -> (GrokAuthStore, OAuthAccess, any UsageFileAccessing, String) {
+    let home = "/tmp/agent-halo-grok-provider-\(UUID().uuidString)"
+    let path = "\(home)/.grok/auth.json"
+    let entryKey = "https://auth.x.ai::\(oidcClientID)"
+    let entry: [String: Any] = [
+        "key": accessToken,
+        "refresh_token": refreshToken,
+        "expires_at": grokCheckISO8601(expiresAt),
+        "user_id": userID,
+        "email": "fixture@example.com",
+        "oidc_client_id": oidcClientID,
+    ]
+    let root: [String: Any] = [entryKey: entry]
+    let initial = try! JSONSerialization.data(withJSONObject: root, options: [.sortedKeys, .prettyPrinted])
+    let resolvedFiles: any UsageFileAccessing = files ?? FakeUsageFiles(contents: [path: initial])
+    if let failing = resolvedFiles as? CodexCheckFailingFiles {
+        failing.setData(initial, at: path)
+    }
+    let store = GrokAuthStore(
+        homeDirectory: URL(fileURLWithPath: home, isDirectory: true),
+        environment: FakeUsageEnvironment(["HOME": home]),
+        files: resolvedFiles,
+        now: { now }
+    )
+    guard case .oauth(let access) = store.resolveAccess() else {
+        fatalError("Grok provider fixture should resolve OAuth access")
+    }
+    return (store, access, resolvedFiles, path)
+}
+
+func testGrokProviderRefreshSucceedsWithWeeklySnapshot() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeGrokProviderFixture(
+        accessToken: "fresh-access",
+        expiresAt: now.addingTimeInterval(3_600),
+        now: now
+    )
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: grokUsageResponse(grokWeeklyCreditsBody(percent: 18)))
+    await http.enqueue(response: grokUsageResponse(#"{"subscription_tier_display":" SuperGrok "}"#))
+    let provider = GrokUsageProvider(
+        authStore: fixture.0,
+        usageClient: GrokUsageClient(http: http),
+        now: { now }
+    )
+
+    let resolved = await provider.resolveAccess(accountKey: nil)
+    guard case .oauth(let oauth) = resolved else {
+        fatalError("Grok fixture resolveAccess should be oauth")
+    }
+    expect(oauth.providerID, .grok, "Grok provider resolves oauth access")
+
+    let result = await provider.refresh(using: .oauth(oauth))
+    expect(result.providerID, .grok, "Grok refresh result provider")
+    expect(result.failure == nil, "Grok refresh with 200 credits should succeed")
+    expect(result.snapshot?.providerID, .grok, "Grok snapshot provider")
+    expect(result.snapshot?.accountKey, oauth.accountKey, "Grok snapshot binds fixture account")
+    expect(result.snapshot?.planName, "SuperGrok", "Grok plan from settings")
+    expect(result.snapshot?.windows.count, 1, "Grok weekly window present")
+    expect(result.snapshot?.windows.first?.kind, .weekly, "Grok window kind weekly")
+    expect(result.snapshot?.windows.first?.usedPercent, 18, "Grok used percent")
+    expect(result.migrateCacheFrom == nil, "fresh Grok token needs no cache migration")
+
+    let requests = await http.capturedRequests
+    expect(
+        requests.map(\.path),
+        ["/v1/billing?format=credits", "/v1/settings"],
+        "Grok success path: credits then settings"
+    )
+    expect(requests[0].headers["authorization"], "Bearer fresh-access", "Grok credits uses access token")
+}
+
+func testGrokProviderRetriesCredits401WithTokenRefresh() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeGrokProviderFixture(
+        accessToken: "stale-access",
+        refreshToken: "stale-refresh",
+        expiresAt: now.addingTimeInterval(3_600),
+        now: now
+    )
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: grokUsageResponse(statusCode: 401, "{}"))
+    await http.enqueue(response: grokUsageResponse(
+        #"{"access_token":"retry-access","refresh_token":"retry-refresh","expires_in":3600}"#
+    ))
+    await http.enqueue(response: grokUsageResponse(grokWeeklyCreditsBody(percent: 4)))
+    await http.enqueue(response: grokUsageResponse(#"{"subscription_tier_display":"SuperGrok Heavy"}"#))
+    let provider = GrokUsageProvider(
+        authStore: fixture.0,
+        usageClient: GrokUsageClient(http: http),
+        now: { now }
+    )
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    expect(result.failure == nil, "first Grok credits 401 should rotate and retry")
+    expect(result.snapshot?.windows.first?.usedPercent, 4, "Grok retry credits map")
+    expect(result.snapshot?.planName, "SuperGrok Heavy", "Grok plan after 401 retry")
+
+    let requests = await http.capturedRequests
+    expect(
+        requests.map(\.path),
+        [
+            "/v1/billing?format=credits",
+            "/oauth2/token",
+            "/v1/billing?format=credits",
+            "/v1/settings",
+        ],
+        "Grok 401 retry order"
+    )
+    expect(
+        requests[2].headers["authorization"],
+        "Bearer retry-access",
+        "Grok second credits uses rotated token"
+    )
+
+    // Second 401 after rotation → sign in again
+    let secondFixture = makeGrokProviderFixture(
+        accessToken: "stale-access-2",
+        expiresAt: now.addingTimeInterval(3_600),
+        now: now
+    )
+    let secondHTTP = RecordingUsageHTTPClient()
+    await secondHTTP.enqueue(response: grokUsageResponse(statusCode: 401, "{}"))
+    await secondHTTP.enqueue(response: grokUsageResponse(
+        #"{"access_token":"once-access","expires_in":3600}"#
+    ))
+    await secondHTTP.enqueue(response: grokUsageResponse(statusCode: 401, "{}"))
+    let secondProvider = GrokUsageProvider(
+        authStore: secondFixture.0,
+        usageClient: GrokUsageClient(http: secondHTTP),
+        now: { now }
+    )
+    let secondResult = await secondProvider.refresh(using: .oauth(secondFixture.1))
+    expect(secondResult.failure, .signInAgain, "second Grok credits 401 requires sign in")
+    let secondRequests = await secondHTTP.capturedRequests
+    expect(
+        secondRequests.filter { $0.path == "/v1/billing?format=credits" }.count,
+        2,
+        "Grok credits retries at most once"
+    )
+}
+
+func testGrokProviderNoAuthSignInAgain() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let home = "/tmp/agent-halo-grok-empty-\(UUID().uuidString)"
+    let store = GrokAuthStore(
+        homeDirectory: URL(fileURLWithPath: home, isDirectory: true),
+        environment: FakeUsageEnvironment(["HOME": home]),
+        files: FakeUsageFiles(),
+        now: { now }
+    )
+    let http = RecordingUsageHTTPClient()
+    let provider = GrokUsageProvider(
+        authStore: store,
+        usageClient: GrokUsageClient(http: http),
+        now: { now }
+    )
+
+    let access = await provider.resolveAccess(accountKey: nil)
+    guard case .oauthNeedsSignIn = access else {
+        fatalError("missing Grok auth should resolve oauthNeedsSignIn")
+    }
+    let result = await provider.refresh(using: access)
+    expect(result.failure, .signInAgain, "Grok without auth requires sign in")
+    expect(await http.capturedRequests.count, 0, "Grok without auth must not reach HTTP")
 }
