@@ -6,8 +6,8 @@ import AgentHaloCore
 // main tick.
 struct GrokActivitySnapshot: Equatable, Sendable {
     var sessions: [SessionSnapshot]
-    /// True when Grok appears live: non-empty `~/.grok/active_sessions.json`
-    /// (preferred) or a process whose name contains `grok`.
+    /// True when Grok appears live via `~/.grok/active_sessions.json` (and live
+    /// PIDs when present). Drives STANDBY vs OFFLINE when hooks are idle.
     var isPresent: Bool
 
     static let empty = GrokActivitySnapshot(sessions: [], isPresent: false)
@@ -19,6 +19,8 @@ struct GrokActivitySnapshot: Equatable, Sendable {
 // throttled so burst hook changes coalesce into one onChange per window.
 //
 // No click-to-activate terminal path — presence only drives STANDBY vs OFFLINE.
+// Presence must stay filesystem-cheap: never spawn `ps` / Process on this queue
+// (a hung subprocess freezes hooks and leaves the ring stuck on STANDBY).
 final class GrokActivityMonitor: @unchecked Sendable {
     private struct PollingContext: Equatable {
         var focusedAgent: AgentKind = .codex
@@ -28,8 +30,8 @@ final class GrokActivityMonitor: @unchecked Sendable {
     private static let activeIntervalMilliseconds = 300
     private static let idleIntervalMilliseconds = 2_000
     private static let dispatchThrottleSeconds: TimeInterval = 0.3
-    // Presence probes hit the filesystem (and optionally process list). Refresh
-    // only when hooks change or this safety interval elapses so the active
+    // Presence probes only read `active_sessions.json` (+ cheap kill(0)).
+    // Refresh when hooks change or this safety interval elapses so the active
     // 0.3s poll stays cheap when nothing moved.
     private static let presencePollIntervalSeconds: TimeInterval = 2
 
@@ -37,6 +39,8 @@ final class GrokActivityMonitor: @unchecked Sendable {
     private let hookMonitor: GrokHookStatusMonitor
     private let homeDirectory: URL
     private let fileManager: FileManager
+    /// Optional test override. Production default is always false — presence
+    /// comes from `active_sessions.json` only (see `isPresent`).
     private let processPresenceProbe: () -> Bool
     private var timer: DispatchSourceTimer?
     private var currentIntervalMilliseconds = GrokActivityMonitor.activeIntervalMilliseconds
@@ -53,7 +57,7 @@ final class GrokActivityMonitor: @unchecked Sendable {
         hookMonitor: GrokHookStatusMonitor = GrokHookStatusMonitor(),
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         fileManager: FileManager = .default,
-        processPresenceProbe: @escaping () -> Bool = GrokActivityMonitor.defaultProcessPresenceProbe
+        processPresenceProbe: @escaping () -> Bool = { false }
     ) {
         self.hookMonitor = hookMonitor
         self.homeDirectory = homeDirectory
@@ -111,13 +115,19 @@ final class GrokActivityMonitor: @unchecked Sendable {
         }
     }
 
-    /// Prefer non-empty `~/.grok/active_sessions.json`; fall back to process probe.
+    /// Prefer live entries in `~/.grok/active_sessions.json` (PID-checked when
+    /// present; entries without a pid still count). Optional
+    /// `processPresenceProbe` is a test-only override — production never
+    /// shells out to `ps`.
     static func isPresent(
         homeDirectory: URL,
         fileManager: FileManager = .default,
-        processPresenceProbe: () -> Bool = defaultProcessPresenceProbe
+        processPresenceProbe: () -> Bool = { false }
     ) -> Bool {
-        if hasActiveSessionsFile(homeDirectory: homeDirectory, fileManager: fileManager) {
+        if GrokActiveSessionsReader.hasLiveSession(
+            homeDirectory: homeDirectory,
+            fileManager: fileManager
+        ) {
             return true
         }
         return processPresenceProbe()
@@ -127,54 +137,10 @@ final class GrokActivityMonitor: @unchecked Sendable {
         homeDirectory: URL,
         fileManager: FileManager = .default
     ) -> Bool {
-        let url = homeDirectory
-            .appendingPathComponent(".grok", isDirectory: true)
-            .appendingPathComponent("active_sessions.json")
-        guard fileManager.fileExists(atPath: url.path),
-              let data = try? Data(contentsOf: url),
-              !data.isEmpty else {
-            return false
-        }
-        // Primary shape is a JSON array of session objects.
-        if let array = try? JSONSerialization.jsonObject(with: data) as? [Any] {
-            return !array.isEmpty
-        }
-        // Tolerate an object wrapper: {"sessions":[...]} if Grok evolves.
-        if let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            if let sessions = root["sessions"] as? [Any] {
-                return !sessions.isEmpty
-            }
-            if let sessions = root["active_sessions"] as? [Any] {
-                return !sessions.isEmpty
-            }
-        }
-        return false
-    }
-
-    static func defaultProcessPresenceProbe() -> Bool {
-        // Lightweight process-table scan: any command name containing "grok"
-        // (e.g. `grok`, `grok-build`). Avoids AppKit so this can run on the
-        // utility queue without main-thread affinity.
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-axo", "comm="]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return false
-        }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let text = String(data: data, encoding: .utf8) else {
-            return false
-        }
-        return text.split(whereSeparator: \.isNewline).contains { line in
-            let name = line.split(separator: "/").last.map(String.init) ?? String(line)
-            return name.lowercased().contains("grok")
-        }
+        !GrokActiveSessionsReader.read(
+            homeDirectory: homeDirectory,
+            fileManager: fileManager
+        ).isEmpty
     }
 
     private func scheduleTimer(intervalMilliseconds: Int) {

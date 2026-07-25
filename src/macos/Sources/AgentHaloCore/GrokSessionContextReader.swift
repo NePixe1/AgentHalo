@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// Live Grok Build session context occupancy, read from the session store.
@@ -39,14 +40,18 @@ public struct GrokSessionContextSnapshot: Equatable, Sendable {
 public struct GrokActiveSessionRef: Equatable, Sendable {
     public var sessionId: String
     public var cwd: String?
+    /// Optional process id from `active_sessions.json` (`pid`). Used for cheap
+    /// liveness checks via `kill(pid, 0)` — never spawn `ps`.
+    public var processId: Int32?
 
-    public init(sessionId: String, cwd: String? = nil) {
+    public init(sessionId: String, cwd: String? = nil, processId: Int32? = nil) {
         self.sessionId = sessionId
         self.cwd = cwd
+        self.processId = processId
     }
 }
 
-/// Parses `~/.grok/active_sessions.json` (array of `{session_id, cwd, ...}`).
+/// Parses `~/.grok/active_sessions.json` (array of `{session_id, cwd, pid, ...}`).
 public enum GrokActiveSessionsReader {
     public static func read(
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
@@ -73,15 +78,54 @@ public enum GrokActiveSessionsReader {
         return []
     }
 
+    /// True when `active_sessions.json` lists at least one live session.
+    ///
+    /// Prefer PID liveness (`kill(pid, 0)` / `EPERM`) when a pid is present.
+    /// Entries without a pid still count as present so older file shapes keep
+    /// working. Never shells out to `ps` — subprocess presence probes have
+    /// hung Agent Halo's Grok activity queue indefinitely.
+    public static func hasLiveSession(
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        fileManager: FileManager = .default,
+        isProcessAlive: (Int32) -> Bool = defaultIsProcessAlive
+    ) -> Bool {
+        let sessions = read(homeDirectory: homeDirectory, fileManager: fileManager)
+        guard !sessions.isEmpty else {
+            return false
+        }
+        let withPid = sessions.compactMap(\.processId)
+        if withPid.isEmpty {
+            return true
+        }
+        return withPid.contains { isProcessAlive($0) }
+    }
+
+    public static func defaultIsProcessAlive(_ pid: Int32) -> Bool {
+        guard pid > 0 else {
+            return false
+        }
+        errno = 0
+        return kill(pid, 0) == 0 || errno == EPERM
+    }
+
     private static func parseEntry(_ entry: [String: Any]) -> GrokActiveSessionRef? {
         let sessionId = firstString(entry["session_id"], entry["sessionId"], entry["id"])
         guard !sessionId.isEmpty else {
             return nil
         }
         let cwd = firstString(entry["cwd"], entry["working_directory"], entry["workingDirectory"])
+        let processId: Int32?
+        if let number = entry["pid"] as? NSNumber, number.int32Value > 0 {
+            processId = number.int32Value
+        } else if let int = entry["pid"] as? Int, int > 0, int <= Int(Int32.max) {
+            processId = Int32(int)
+        } else {
+            processId = nil
+        }
         return GrokActiveSessionRef(
             sessionId: sessionId,
-            cwd: cwd.isEmpty ? nil : cwd
+            cwd: cwd.isEmpty ? nil : cwd,
+            processId: processId
         )
     }
 

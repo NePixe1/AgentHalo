@@ -1107,8 +1107,26 @@ func testGrokActiveSessionsReaderParsesArrayEntries() throws {
     expect(sessions.count, 2, "both active entries")
     expect(sessions[0].sessionId, "live-1", "snake_case session_id")
     expect(sessions[0].cwd, "/Users/me/proj", "cwd field")
+    expect(sessions[0].processId, Int32(123), "pid field")
     expect(sessions[1].sessionId, "live-2", "camelCase sessionId")
     expect(sessions[1].cwd, "/tmp", "working_directory alias")
+    expect(sessions[1].processId == nil, "missing pid stays nil")
+
+    // Dead pid → not live; live pid → live.
+    expect(
+        !GrokActiveSessionsReader.hasLiveSession(
+            homeDirectory: home,
+            isProcessAlive: { _ in false }
+        ),
+        "dead pid entries should not report a live session"
+    )
+    expect(
+        GrokActiveSessionsReader.hasLiveSession(
+            homeDirectory: home,
+            isProcessAlive: { $0 == 123 }
+        ),
+        "alive pid should report a live session"
+    )
 }
 
 func testClaudeContextUsageReaderKeepsLastKnownUsageForMatchingSession() throws {

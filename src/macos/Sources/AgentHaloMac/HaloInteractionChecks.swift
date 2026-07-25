@@ -2120,7 +2120,12 @@ private func testGrokPollingIsThrottledWhenNotFocused() {
     expect(monitorSource.contains("detailsPanelVisible"), "Grok polling should stay active while the details panel is visible")
     expect(monitorSource.contains("dispatchThrottleSeconds"), "Grok activity dispatch should throttle main-thread wakeups")
     expect(monitorSource.contains("GrokHookStatusMonitor"), "Grok activity monitor should own the hook status monitor")
-    expect(monitorSource.contains("active_sessions.json"), "Grok presence should prefer ~/.grok/active_sessions.json")
+    expect(monitorSource.contains("active_sessions.json") || monitorSource.contains("GrokActiveSessionsReader"), "Grok presence should prefer ~/.grok/active_sessions.json")
+    expect(monitorSource.contains("processPresenceProbe: @escaping () -> Bool = { false }")
+        || monitorSource.contains("processPresenceProbe: () -> Bool = { false }")
+        || !monitorSource.contains("defaultProcessPresenceProbe"),
+        "Grok presence must not spawn a ps-based process probe (hangs the activity queue)")
+    expect(!monitorSource.contains("/bin/ps"), "Grok presence must never shell out to /bin/ps")
     expect(appDelegateSource.contains("grokActivityMonitor"), "AppDelegate should delegate Grok polling to a background monitor")
     expect(appDelegateSource.contains("grokSnapshots()"), "AppDelegate should merge Grok snapshots into the aggregate")
     expect(
@@ -2154,9 +2159,11 @@ private func testGrokPresencePrefersActiveSessionsFile() {
         "empty active_sessions array should not report presence"
     )
 
-    let payload = #"""
-    [{"session_id":"s1","pid":1,"cwd":"/tmp","opened_at":"2026-07-25T00:00:00Z"}]
-    """#
+    // Use this process's pid so kill(0) succeeds without a custom probe.
+    let livePid = ProcessInfo.processInfo.processIdentifier
+    let payload = """
+    [{"session_id":"s1","pid":\(livePid),"cwd":"/tmp","opened_at":"2026-07-25T00:00:00Z"}]
+    """
     try? payload.write(to: sessionsURL, atomically: true, encoding: .utf8)
     expect(
         GrokActivityMonitor.hasActiveSessionsFile(homeDirectory: root),
@@ -2164,7 +2171,20 @@ private func testGrokPresencePrefersActiveSessionsFile() {
     )
     expect(
         GrokActivityMonitor.isPresent(homeDirectory: root, processPresenceProbe: { false }),
-        "non-empty active_sessions should win without a process probe"
+        "live-pid active_sessions should report presence without a process probe"
+    )
+
+    let deadPayload = #"""
+    [{"session_id":"s1","pid":99999999,"cwd":"/tmp","opened_at":"2026-07-25T00:00:00Z"}]
+    """#
+    try? deadPayload.write(to: sessionsURL, atomically: true, encoding: .utf8)
+    expect(
+        GrokActivityMonitor.hasActiveSessionsFile(homeDirectory: root),
+        "dead-pid entries still appear in the sessions file"
+    )
+    expect(
+        !GrokActivityMonitor.isPresent(homeDirectory: root, processPresenceProbe: { false }),
+        "dead-pid-only active_sessions should not report presence"
     )
 
     try? "[]".write(to: sessionsURL, atomically: true, encoding: .utf8)
@@ -2174,7 +2194,14 @@ private func testGrokPresencePrefersActiveSessionsFile() {
     )
     expect(
         GrokActivityMonitor.isPresent(homeDirectory: root, processPresenceProbe: { true }),
-        "empty sessions file should fall back to process presence"
+        "test override processPresenceProbe still works when file is empty"
+    )
+
+    // Entries without pid: non-empty file remains a presence signal.
+    try? #"[{"session_id":"legacy"}]"#.write(to: sessionsURL, atomically: true, encoding: .utf8)
+    expect(
+        GrokActivityMonitor.isPresent(homeDirectory: root, processPresenceProbe: { false }),
+        "legacy active_sessions entries without pid still report presence"
     )
 }
 
