@@ -1,8 +1,9 @@
 import Foundation
 
 public enum SessionAggregator {
-    private static let claudeCompletedVisibleDuration: TimeInterval = 8
-    private static let codexCompletedVisibleDuration: TimeInterval = 86_400
+    /// Brief green flash after a turn ends, then settle to STANDBY/OFFLINE.
+    /// Codex previously held done for 24h; that blocked offline and standby.
+    private static let completedVisibleDuration: TimeInterval = 8
 
     public static func aggregate(
         snapshots: [SessionSnapshot],
@@ -44,13 +45,18 @@ public enum SessionAggregator {
         }
         let visible = displayCandidates.filter { snapshot in
             if snapshot.state == .done {
+                // Codex done is only meaningful while the app is still present;
+                // quitting Codex must surface OFFLINE instead of a sticky COMPLETE.
+                if snapshot.agent == .codex && !codexRunning {
+                    return false
+                }
                 guard let completedAt = snapshot.completedAt else {
                     return false
                 }
                 let acknowledgedAt = settings.acknowledged[snapshot.threadId] ?? .distantPast
                 return completedAt > acknowledgedAt
                     && completedAt >= settings.installedAt
-                    && completedAt >= now.addingTimeInterval(-completedVisibleDuration(for: snapshot.agent))
+                    && completedAt >= now.addingTimeInterval(-Self.completedVisibleDuration)
             }
             if snapshot.state == .error {
                 if !settings.shouldShowError(eventAt: snapshot.lastEventAt) {
@@ -130,15 +136,6 @@ public enum SessionAggregator {
 
     public static func priority(_ state: HaloState) -> Int {
         GeneratedHaloSpec.state(state).priority
-    }
-
-    private static func completedVisibleDuration(for agent: AgentKind) -> TimeInterval {
-        switch agent {
-        case .claudeCode:
-            return claudeCompletedVisibleDuration
-        case .codex:
-            return codexCompletedVisibleDuration
-        }
     }
 
     private static func isSupersededError(

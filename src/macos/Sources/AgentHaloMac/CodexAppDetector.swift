@@ -8,8 +8,11 @@ enum CodexAppDetector {
         if let runningCacheValue {
             return runningCacheValue
         }
+        // Only the regular Codex desktop app counts as "running". Background
+        // helpers (for example host processes with "codex" in the name) must not
+        // keep the halo online after the user quits the main app.
         let value = NSWorkspace.shared.runningApplications.contains { app in
-            isCodexApp(app, allowLocalizedName: false)
+            isPrimaryCodexApp(app)
         }
         runningCacheValue = value
         return value
@@ -17,7 +20,7 @@ enum CodexAppDetector {
 
     @discardableResult
     static func noteApplicationDidLaunch(_ app: NSRunningApplication?) -> Bool {
-        guard let app, isCodexApp(app, allowLocalizedName: false) else { return false }
+        guard let app, isPrimaryCodexApp(app) else { return false }
         let changed = runningCacheValue != true
         runningCacheValue = true
         return changed
@@ -25,6 +28,10 @@ enum CodexAppDetector {
 
     @discardableResult
     static func noteApplicationDidTerminate(_ app: NSRunningApplication?) -> Bool {
+        // Invalidate any positive cache so the next scan re-reads running apps.
+        // When the terminated process is not Codex, the rescan still keeps the
+        // correct answer; when it is Codex (or a helper we previously matched),
+        // offline becomes visible without waiting for another event.
         guard runningCacheValue == true else { return false }
         runningCacheValue = nil
         return true
@@ -38,10 +45,17 @@ enum CodexAppDetector {
     static func activateCodex() {
         let candidates = NSWorkspace.shared.runningApplications.filter { app in
             app.processIdentifier != ProcessInfo.processInfo.processIdentifier &&
-            app.activationPolicy == .regular &&
-            isCodexApp(app, allowLocalizedName: true)
+            isPrimaryCodexApp(app)
         }
         candidates.first?.activate(options: [.activateIgnoringOtherApps])
+    }
+
+    /// Main Codex desktop app used for presence (STANDBY vs OFFLINE).
+    private static func isPrimaryCodexApp(_ app: NSRunningApplication) -> Bool {
+        guard app.activationPolicy == .regular else {
+            return false
+        }
+        return isCodexApp(app, allowLocalizedName: false)
     }
 
     private static func isCodexApp(
@@ -50,13 +64,19 @@ enum CodexAppDetector {
     ) -> Bool {
         let bundle = app.bundleIdentifier?.lowercased() ?? ""
         let executableName = app.executableURL?.lastPathComponent.lowercased() ?? ""
-        if bundle.contains("codex") || executableName.contains("codex") {
+        // Exact executable name avoids helpers such as "codex-code-mode-host".
+        if executableName == "codex" {
+            return true
+        }
+        // Official desktop bundles contain "codex" but helpers usually do not
+        // ship as regular apps with a product bundle id.
+        if bundle.contains("codex") {
             return true
         }
         guard allowLocalizedName else {
             return false
         }
         let name = app.localizedName?.lowercased() ?? ""
-        return name.contains("codex")
+        return name == "codex"
     }
 }

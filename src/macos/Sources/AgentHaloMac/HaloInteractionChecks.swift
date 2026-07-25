@@ -2022,6 +2022,8 @@ private func testCodexAppDetectorUsesWorkspaceEvents() {
     expect(detectorSource.contains("static func isCodexForeground(_ app: NSRunningApplication?)"), "Codex foreground detection should consume the application supplied by workspace events")
     expect(detectorSource.contains("executableURL"), "Codex app detection should preserve executable metadata matching")
     expect(detectorSource.contains("allowLocalizedName: false"), "Codex running scans should preserve the localized-name exclusion")
+    expect(detectorSource.contains("activationPolicy == .regular"), "Codex presence must require the regular desktop app, not helper hosts")
+    expect(detectorSource.contains("executableName == \"codex\""), "Codex presence must use an exact executable name, not a codex substring")
     expect(detectorSource.contains("guard runningCacheValue == true"), "termination events should invalidate a positive cache even when terminated-process metadata is unavailable")
     expect(!detectorSource.contains("runningCacheExpiresAt"), "event-driven Codex running state should not expire on a timer")
     expect(!detectorSource.contains("runningCacheInterval"), "event-driven Codex running state should not poll LaunchServices")

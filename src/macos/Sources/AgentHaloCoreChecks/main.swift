@@ -1413,7 +1413,7 @@ func testAggregatorReturnsReadyAfterCompletedSessionSettles() {
     expect(settled.sessions.isEmpty, "settled completion should no longer be visible")
 }
 
-func testAggregatorKeepsCodexCompletionVisibleUntilAcknowledged() {
+func testAggregatorSettlesCodexCompletionLikeClaude() {
     let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
     let completion = SessionSnapshot(
         threadId: "codex-done",
@@ -1426,16 +1426,41 @@ func testAggregatorKeepsCodexCompletionVisibleUntilAcknowledged() {
         active: false,
         agent: .codex
     )
+    let settings = HaloSettings(installedAt: now.addingTimeInterval(-60))
 
-    let aggregate = SessionAggregator.aggregate(
+    let fresh = SessionAggregator.aggregate(
         snapshots: [completion],
-        settings: HaloSettings(installedAt: now.addingTimeInterval(-60)),
+        settings: settings,
+        recentFailure: nil,
+        codexRunning: true,
+        focusedAgent: .codex,
+        now: now.addingTimeInterval(2)
+    )
+    expect(fresh.state, .done, "fresh Codex completion should show done while the app is running")
+    expect(fresh.sessions.map(\.threadId), ["codex-done"], "fresh Codex completion stays visible briefly")
+
+    let settled = SessionAggregator.aggregate(
+        snapshots: [completion],
+        settings: settings,
+        recentFailure: nil,
+        codexRunning: true,
         focusedAgent: .codex,
         now: now.addingTimeInterval(12)
     )
+    expect(settled.state, .idle, "Codex completion should settle after ~8s so standby can appear")
+    expect(settled.sessions.isEmpty, "settled Codex completion should no longer be visible")
 
-    expect(aggregate.state, .done, "Codex completion should remain visible until acknowledged")
-    expect(aggregate.sessions.map(\.threadId), ["codex-done"], "Codex completion should stay in visible sessions")
+    let offlineWhileComplete = SessionAggregator.aggregate(
+        snapshots: [completion],
+        settings: settings,
+        recentFailure: nil,
+        codexRunning: false,
+        focusedAgent: .codex,
+        now: now.addingTimeInterval(2)
+    )
+    expect(offlineWhileComplete.state, .idle, "quitting Codex must hide done and show offline")
+    expect(offlineWhileComplete.label, "OFFLINE", "offline label when Codex process is gone")
+    expect(offlineWhileComplete.sessions.isEmpty, "done sessions must not survive process exit")
 }
 
 func testClaudeReducerMapsTranscriptEvents() {
@@ -2516,7 +2541,7 @@ testAggregatorIdleDetailUsesFocusedAgent()
 testAggregatorDoesNotInjectCodexFailureForClaudeFocus()
 testClaudeReducerDoesNotCompleteWithoutExplicitCompletionEvent()
 testAggregatorReturnsReadyAfterCompletedSessionSettles()
-testAggregatorKeepsCodexCompletionVisibleUntilAcknowledged()
+testAggregatorSettlesCodexCompletionLikeClaude()
 testClaudeReducerMapsTranscriptEvents()
 testClaudeReducerIgnoresLocalCommandUserRecords()
 testClaudeHookReducerMapsLifecycleEvents()
