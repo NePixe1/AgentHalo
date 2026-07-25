@@ -146,6 +146,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let usageRefreshInterval: TimeInterval = 5 * 60
     private var usageTerminationHandshake = UsageTerminationHandshake()
     private let claudeContextUsageReader = ClaudeContextUsageReader()
+    private let grokSessionContextReader = GrokSessionContextReader()
     private let contextReaderQueue = DispatchQueue(
         label: "com.agenthalo.context-reader",
         qos: .userInteractive
@@ -963,9 +964,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             exactSessionDetails = resolved.sessionDetails
             exactContextUsedPercent = resolved.contextUsedPercent
         case .grok:
-            // Grok session/details wiring lands in a later task; keep panels empty for now.
-            exactSessionDetails = SessionDetailsSnapshot()
-            exactContextUsedPercent = nil
+            let activeSessions = GrokActiveSessionsReader.read()
+            let (sessionId, cwd) = Self.grokSessionIdentityForDetails(
+                displayedAggregate: displayedAggregate,
+                hookSessions: grokActivitySnapshot.sessions,
+                activeSessions: activeSessions
+            )
+            let context = sessionId.flatMap { id in
+                contextReaderQueue.sync {
+                    grokSessionContextReader.read(sessionId: id, cwd: cwd)
+                }
+            }
+            let hookSession = displayedAggregate.sessions.first
+            exactSessionDetails = SessionDetailsSnapshot(
+                projectName: context?.projectName ?? hookSession?.projectName,
+                sessionTitle: context?.sessionTitle ?? hookSession?.sessionTitle,
+                modelName: context?.modelName ?? hookSession?.modelName
+            )
+            exactContextUsedPercent = context?.contextUsedPercent
         }
         let model = DetailsContentResolver.resolve(
             providerID: providerID,
@@ -976,6 +992,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             now: Date()
         )
         detailsPanel.render(aggregate: displayedAggregate, model: model)
+    }
+
+    /// Prefer the hook/aggregate thread id, then the first live active_sessions entry.
+    static func grokSessionIdentityForDetails(
+        displayedAggregate: AggregateSnapshot,
+        hookSessions: [SessionSnapshot],
+        activeSessions: [GrokActiveSessionRef]
+    ) -> (sessionId: String?, cwd: String?) {
+        if let displayed = displayedAggregate.sessions.first(where: {
+            $0.agent == .grok && $0.threadId != "grok" && !$0.threadId.isEmpty
+        }) {
+            let cwd = activeSessions.first(where: { $0.sessionId == displayed.threadId })?.cwd
+                ?? (displayed.workingDirectory.isEmpty ? nil : displayed.workingDirectory)
+            return (displayed.threadId, cwd)
+        }
+        if let hook = hookSessions
+            .filter({ $0.threadId != "grok" && !$0.threadId.isEmpty })
+            .max(by: { $0.lastEventAt < $1.lastEventAt }) {
+            let cwd = activeSessions.first(where: { $0.sessionId == hook.threadId })?.cwd
+                ?? (hook.workingDirectory.isEmpty ? nil : hook.workingDirectory)
+            return (hook.threadId, cwd)
+        }
+        if let active = activeSessions.first {
+            return (active.sessionId, active.cwd)
+        }
+        return (nil, nil)
     }
 
     static func claudeMainSessionIdForDetails(

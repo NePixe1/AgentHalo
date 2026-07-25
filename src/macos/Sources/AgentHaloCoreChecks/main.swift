@@ -1029,6 +1029,88 @@ func testClaudeStatusLineUsageParserReadsAuthoritativeContextPercent() {
     expect(snapshot?.updatedAt, now, "Claude context capture time")
 }
 
+func testGrokSessionContextReaderReadsSignalsPercentAndSummary() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-grok-context-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
+    let cwd = "/Users/example/work/AgentHalo"
+    let sessionId = "019f94e7-1b86-74c2-838f-e42b06d4d9dc"
+    let sessionDir = root
+        .appendingPathComponent(GrokSessionContextReader.encodeWorkspaceDirectory(cwd), isDirectory: true)
+        .appendingPathComponent(sessionId, isDirectory: true)
+    try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+
+    let signals = """
+    {"contextWindowUsage":26,"contextTokensUsed":130000,"contextWindowTokens":500000,"primaryModelId":"grok-4.5"}
+    """
+    try Data(signals.utf8).write(to: sessionDir.appendingPathComponent("signals.json"))
+
+    let summary = """
+    {"info":{"id":"\(sessionId)","cwd":"\(cwd)"},"generated_title":"Wire Grok context pill","session_summary":"fallback title","current_model_id":"grok-4.5"}
+    """
+    try Data(summary.utf8).write(to: sessionDir.appendingPathComponent("summary.json"))
+
+    let reader = GrokSessionContextReader(sessionsRoot: root)
+    let byCwd = reader.read(sessionId: sessionId, cwd: cwd)
+    expect(byCwd?.contextUsedPercent, 26, "signals contextWindowUsage drives the pill")
+    expect(byCwd?.contextTokensUsed, 130_000, "token counters preserved")
+    expect(byCwd?.contextWindowTokens, 500_000, "window size preserved")
+    expect(byCwd?.modelName, "grok-4.5", "model from signals")
+    expect(byCwd?.sessionTitle, "Wire Grok context pill", "title from summary")
+    expect(byCwd?.projectName, "AgentHalo", "project from cwd leaf")
+    expect(byCwd?.workingDirectory, cwd, "cwd from summary.info")
+
+    let scanned = reader.read(sessionId: sessionId)
+    expect(scanned?.contextUsedPercent, 26, "scan fallback finds the session without cwd")
+
+    expect(
+        GrokSessionContextReader.encodeWorkspaceDirectory(cwd),
+        "%2FUsers%2Fexample%2Fwork%2FAgentHalo",
+        "workspace dirs must match Grok percent-encoding"
+    )
+}
+
+func testGrokSessionContextReaderFallsBackToTokenRatio() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-grok-context-ratio-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
+    let sessionId = "session-ratio"
+    let sessionDir = root
+        .appendingPathComponent("%2Ftmp", isDirectory: true)
+        .appendingPathComponent(sessionId, isDirectory: true)
+    try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+    try Data(#"{"contextTokensUsed":50,"contextWindowTokens":200}"#.utf8)
+        .write(to: sessionDir.appendingPathComponent("signals.json"))
+
+    let snapshot = GrokSessionContextReader(sessionsRoot: root).read(sessionId: sessionId)
+    expectAlmost(snapshot?.contextUsedPercent ?? -1, 25, tolerance: 0.01, "token ratio fallback")
+}
+
+func testGrokActiveSessionsReaderParsesArrayEntries() throws {
+    let home = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-grok-active-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: home)
+    }
+    let grokDir = home.appendingPathComponent(".grok", isDirectory: true)
+    try FileManager.default.createDirectory(at: grokDir, withIntermediateDirectories: true)
+    let body = """
+    [{"session_id":"live-1","cwd":"/Users/me/proj","pid":123},{"sessionId":"live-2","working_directory":"/tmp"}]
+    """
+    try Data(body.utf8).write(to: grokDir.appendingPathComponent("active_sessions.json"))
+
+    let sessions = GrokActiveSessionsReader.read(homeDirectory: home)
+    expect(sessions.count, 2, "both active entries")
+    expect(sessions[0].sessionId, "live-1", "snake_case session_id")
+    expect(sessions[0].cwd, "/Users/me/proj", "cwd field")
+    expect(sessions[1].sessionId, "live-2", "camelCase sessionId")
+    expect(sessions[1].cwd, "/tmp", "working_directory alias")
+}
+
 func testClaudeContextUsageReaderKeepsLastKnownUsageForMatchingSession() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-claude-context-\(UUID().uuidString)", isDirectory: true)
@@ -2807,6 +2889,13 @@ testRateLimitReaderTreatsEmptyCodexCreditsCompatibilityAsPlus()
 testRateLimitReaderDoesNotTreatEmptyLegacyCreditsSecondaryAsMonthly()
 testRateLimitReaderDoesNotReturnEarlyOnContextOnlySnapshot()
 testClaudeStatusLineUsageParserReadsAuthoritativeContextPercent()
+do {
+    try testGrokSessionContextReaderReadsSignalsPercentAndSummary()
+    try testGrokSessionContextReaderFallsBackToTokenRatio()
+    try testGrokActiveSessionsReaderParsesArrayEntries()
+} catch {
+    fatalError("\(error)")
+}
 do {
     try testClaudeContextUsageReaderKeepsLastKnownUsageForMatchingSession()
 } catch {
