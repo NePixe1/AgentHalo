@@ -3,9 +3,11 @@ import Foundation
 
 /// Live Grok Build session context occupancy, read from the session store.
 ///
-/// Grok persists `contextWindowUsage` (percent) plus token counters in
-/// `~/.grok/sessions/<percent-encoded-cwd>/<sessionId>/signals.json`. This is
-/// the same figure `/context` and the TUI status line use.
+/// End-of-turn occupancy lives in
+/// `~/.grok/sessions/<percent-encoded-cwd>/<sessionId>/signals.json`
+/// (`contextWindowUsage` / token counters). During a long turn those fields
+/// freeze, so the reader also tails `updates.jsonl` for streaming
+/// `params._meta.totalTokens` — the same running estimate the TUI uses.
 public struct GrokSessionContextSnapshot: Equatable, Sendable {
     public var sessionId: String
     public var contextUsedPercent: Double
@@ -143,6 +145,11 @@ public struct GrokSessionContextReader: @unchecked Sendable {
     private let sessionsRoot: URL
     private let fileManager: FileManager
 
+    /// How much of the (often multi‑MB) `updates.jsonl` to scan for the latest
+    /// `totalTokens`. Large enough for a long tool/thought burst, small enough
+    /// for the 0.3s details refresh path.
+    private static let updatesTailByteLimit = 256 * 1024
+
     public init(
         sessionsRoot: URL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".grok", isDirectory: true)
@@ -172,8 +179,20 @@ public struct GrokSessionContextReader: @unchecked Sendable {
             return nil
         }
 
-        guard let percent = contextUsedPercent(from: root) else {
+        guard var percent = contextUsedPercent(from: root) else {
             return nil
+        }
+        var tokensUsed = int64(root["contextTokensUsed"])
+        let windowTokens = int64(root["contextWindowTokens"])
+
+        // Prefer the live streaming estimate while a turn is in progress.
+        // `signals.json` is only rewritten at turn boundaries, so a multi-minute
+        // Grok turn would otherwise freeze the pill at the previous turn's end.
+        if let window = windowTokens, window > 0,
+           let liveTokens = latestLiveContextTokens(sessionDirectory: sessionDirectory),
+           liveTokens >= 0 {
+            tokensUsed = liveTokens
+            percent = min(100, max(0, Double(liveTokens) * 100 / Double(window)))
         }
 
         var modelName = string(root["primaryModelId"])
@@ -206,8 +225,8 @@ public struct GrokSessionContextReader: @unchecked Sendable {
         return GrokSessionContextSnapshot(
             sessionId: sessionId,
             contextUsedPercent: percent,
-            contextTokensUsed: int64(root["contextTokensUsed"]),
-            contextWindowTokens: int64(root["contextWindowTokens"]),
+            contextTokensUsed: tokensUsed,
+            contextWindowTokens: windowTokens,
             modelName: modelName.flatMap { $0.isEmpty ? nil : $0 },
             projectName: projectName,
             sessionTitle: sessionTitle,
@@ -267,6 +286,66 @@ public struct GrokSessionContextReader: @unchecked Sendable {
             return min(100, max(0, used * 100 / window))
         }
         return nil
+    }
+
+    /// Tail-scan `updates.jsonl` for the newest `params._meta.totalTokens`.
+    /// Returns `nil` when the file is missing or the tail has no token field.
+    private func latestLiveContextTokens(sessionDirectory: URL) -> Int64? {
+        let updatesURL = sessionDirectory.appendingPathComponent("updates.jsonl")
+        guard fileManager.fileExists(atPath: updatesURL.path),
+              let handle = try? FileHandle(forReadingFrom: updatesURL) else {
+            return nil
+        }
+        defer {
+            try? handle.close()
+        }
+
+        let endOffset: UInt64
+        do {
+            endOffset = try handle.seekToEnd()
+        } catch {
+            return nil
+        }
+        guard endOffset > 0 else {
+            return nil
+        }
+
+        let limit = UInt64(Self.updatesTailByteLimit)
+        let startOffset = endOffset > limit ? endOffset - limit : 0
+        do {
+            try handle.seek(toOffset: startOffset)
+        } catch {
+            return nil
+        }
+        guard let data = try? handle.readToEnd(), !data.isEmpty else {
+            return nil
+        }
+
+        let text = String(decoding: data, as: UTF8.self)
+        var lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        // Drop a possibly truncated first line when we sought into the middle.
+        if startOffset > 0, !lines.isEmpty {
+            lines.removeFirst()
+        }
+
+        for line in lines.reversed() where line.contains("totalTokens") {
+            if let tokens = totalTokens(fromJSONLine: String(line)) {
+                return tokens
+            }
+        }
+        return nil
+    }
+
+    private func totalTokens(fromJSONLine line: String) -> Int64? {
+        guard let data = line.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        let meta = (root["params"] as? [String: Any])?["_meta"] as? [String: Any]
+        guard let raw = number(meta?["totalTokens"]), raw >= 0 else {
+            return nil
+        }
+        return Int64(raw.rounded())
     }
 
     private func number(_ value: Any?) -> Double? {

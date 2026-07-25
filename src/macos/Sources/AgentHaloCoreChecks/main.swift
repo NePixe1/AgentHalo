@@ -1090,6 +1090,43 @@ func testGrokSessionContextReaderFallsBackToTokenRatio() throws {
     expectAlmost(snapshot?.contextUsedPercent ?? -1, 25, tolerance: 0.01, "token ratio fallback")
 }
 
+func testGrokSessionContextReaderPrefersLiveUpdatesTotalTokens() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-grok-context-live-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
+    let sessionId = "session-live"
+    let sessionDir = root
+        .appendingPathComponent("%2Ftmp", isDirectory: true)
+        .appendingPathComponent(sessionId, isDirectory: true)
+    try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+
+    // End-of-previous-turn snapshot freezes at 26% / 130k.
+    try Data(
+        #"{"contextWindowUsage":26,"contextTokensUsed":130000,"contextWindowTokens":500000,"primaryModelId":"grok-4.5"}"#
+            .utf8
+    ).write(to: sessionDir.appendingPathComponent("signals.json"))
+
+    // Mid-turn streaming estimate after compaction is much lower.
+    let updates = """
+    {"timestamp":1,"method":"session/update","params":{"_meta":{"totalTokens":40000},"update":{"sessionUpdate":"agent_thought_chunk"}}}
+    {"timestamp":2,"method":"session/update","params":{"_meta":{"totalTokens":65000},"update":{"sessionUpdate":"tool_call"}}}
+    {"timestamp":3,"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update"}}}
+    """
+    try Data(updates.utf8).write(to: sessionDir.appendingPathComponent("updates.jsonl"))
+
+    let snapshot = GrokSessionContextReader(sessionsRoot: root).read(sessionId: sessionId)
+    expect(snapshot?.contextTokensUsed, 65_000, "live totalTokens must override stale signals counters")
+    expectAlmost(
+        snapshot?.contextUsedPercent ?? -1,
+        13,
+        tolerance: 0.01,
+        "pill percent = liveTokens / contextWindowTokens"
+    )
+    expect(snapshot?.contextWindowTokens, 500_000, "window size still comes from signals")
+}
+
 func testGrokActiveSessionsReaderParsesArrayEntries() throws {
     let home = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-grok-active-\(UUID().uuidString)", isDirectory: true)
@@ -2910,6 +2947,7 @@ testClaudeStatusLineUsageParserReadsAuthoritativeContextPercent()
 do {
     try testGrokSessionContextReaderReadsSignalsPercentAndSummary()
     try testGrokSessionContextReaderFallsBackToTokenRatio()
+    try testGrokSessionContextReaderPrefersLiveUpdatesTotalTokens()
     try testGrokActiveSessionsReaderParsesArrayEntries()
 } catch {
     fatalError("\(error)")
