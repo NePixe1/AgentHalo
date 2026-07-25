@@ -13,8 +13,10 @@
 
   "status.offline_codex": "Codex 未运行",
   "status.offline_claude": "Claude Code 未运行",
+  "status.offline_grok": "Grok 未在运行",
   "status.standby_codex": "Codex 正在待命",
   "status.standby_claude": "Claude Code 正在待命",
+  "status.standby_grok": "Grok 正在待命",
   "status.paused": "状态监听已暂停",
   "status.thinking": "正在思考与规划",
   "status.working": "正在执行任务",
@@ -51,6 +53,7 @@
 
   "usage.warning.sign_in_codex": "请重新登录 Codex 以刷新使用情况。",
   "usage.warning.sign_in_claude": "请重新登录 Claude Code 以刷新使用情况。",
+  "usage.warning.sign_in_grok": "请重新执行 grok login 以刷新使用情况。",
   "usage.warning.rate_limited": "使用情况请求过于频繁，AgentHalo 将稍后重试。",
   "usage.warning.stale": "使用情况可能已过期，上次更新于 {0}。",
   "usage.warning.network": "网络异常，暂时无法刷新使用情况。",
