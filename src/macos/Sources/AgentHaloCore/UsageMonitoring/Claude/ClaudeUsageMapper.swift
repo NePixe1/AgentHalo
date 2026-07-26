@@ -164,8 +164,13 @@ public enum ClaudeUsageMapper {
     }
 
     private static func number(_ value: Any?) -> Double? {
-        if value is Bool { return nil }
-        if let value = value as? NSNumber { return value.doubleValue }
+        // Reject real JSON booleans only. `is Bool` also matches NSNumber(0/1).
+        if let value = value as? NSNumber {
+            if CFGetTypeID(value as CFTypeRef) == CFBooleanGetTypeID() {
+                return nil
+            }
+            return value.doubleValue
+        }
         if let value = value as? String { return Double(value) }
         return nil
     }

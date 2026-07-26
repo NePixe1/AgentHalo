@@ -143,8 +143,15 @@ public enum CodexUsageMapper {
     }
 
     private static func number(_ value: Any?) -> Double? {
-        if value is Bool { return nil }
-        if let number = value as? NSNumber { return number.doubleValue }
+        // Reject real JSON booleans only. Do not use `is Bool`: NSNumber(0)
+        // and NSNumber(1) also bridge as Bool, which would drop valid
+        // used_percent 0%/1% windows (Codex weekly-only Plus payloads).
+        if let number = value as? NSNumber {
+            if CFGetTypeID(number as CFTypeRef) == CFBooleanGetTypeID() {
+                return nil
+            }
+            return number.doubleValue
+        }
         if let string = value as? String { return Double(string) }
         return nil
     }

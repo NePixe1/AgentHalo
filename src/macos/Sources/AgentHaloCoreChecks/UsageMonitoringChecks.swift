@@ -3493,6 +3493,47 @@ func testCodexUsageMapperPlansWindowsAndRestrictedFields() {
     )
     expect(weeklyOnly?.windows.count, 1, "missing secondary must stay absent")
     expect(weeklyOnly?.windows.first?.kind, .weekly, "sole 7-day primary must reclassify as weekly")
+
+    // Live Plus shape: only a 7-day primary with used_percent 0 and null secondary.
+    // NSNumber(0) bridges as Bool in Swift — number() must not drop the window.
+    let weeklyOnlyZero = try? CodexUsageMapper.map(
+        response: codexUsageResponse("""
+        {
+          "plan_type": "plus",
+          "rate_limit": {
+            "primary_window": {
+              "used_percent": 0,
+              "limit_window_seconds": 604800,
+              "reset_after_seconds": 548872,
+              "reset_at": 1785614327
+            },
+            "secondary_window": null
+          }
+        }
+        """),
+        accountKey: accountKey,
+        now: now
+    )
+    expect(weeklyOnlyZero?.planName, "Plus", "plus plan with zero weekly usage")
+    expect(weeklyOnlyZero?.windows.count, 1, "zero used_percent weekly-only must still map one window")
+    expect(weeklyOnlyZero?.windows.first?.kind, .weekly, "zero used_percent primary 7d is weekly")
+    expect(weeklyOnlyZero?.windows.first?.usedPercent, 0, "zero used_percent must parse as 0 not absent")
+    expect(
+        weeklyOnlyZero?.windows.first?.resetsAt,
+        Date(timeIntervalSince1970: 1_785_614_327),
+        "zero used_percent weekly reset_at"
+    )
+
+    let onePercent = try? CodexUsageMapper.map(
+        response: codexUsageResponse(
+            #"{"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":1,"limit_window_seconds":18000}}}"#
+        ),
+        accountKey: accountKey,
+        now: now
+    )
+    expect(onePercent?.windows.count, 1, "used_percent 1 must not be dropped as Bool")
+    expect(onePercent?.windows.first?.usedPercent, 1, "used_percent 1 parses as 1")
+    expect(onePercent?.windows.first?.kind, .session, "1% 5-hour window stays session")
 }
 
 func testCodexUsageMapperClassifiesInvalidResponses() {
