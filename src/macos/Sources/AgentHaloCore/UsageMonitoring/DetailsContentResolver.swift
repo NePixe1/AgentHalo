@@ -85,6 +85,8 @@ public enum DetailsContentResolver {
             return "Codex"
         case .claude:
             return "Claude Code"
+        case .grok:
+            return "Grok"
         }
     }
 
@@ -100,6 +102,8 @@ public enum DetailsContentResolver {
                 return L10n.shared["usage.warning.sign_in_codex"]
             case .claude:
                 return L10n.shared["usage.warning.sign_in_claude"]
+            case .grok:
+                return L10n.shared["usage.warning.sign_in_grok"]
             }
         }
 

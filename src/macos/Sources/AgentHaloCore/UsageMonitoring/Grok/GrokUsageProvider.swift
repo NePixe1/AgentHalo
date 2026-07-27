@@ -1,21 +1,21 @@
 import Foundation
 
-private enum ClaudeGenerationChecked<Value: Sendable>: Sendable {
+private enum GrokGenerationChecked<Value: Sendable>: Sendable {
     case value(Value)
     case externalAccessChanged
     case failure(UsageProviderFailure)
 }
 
-public struct ClaudeUsageProvider: UsageProvider, Sendable {
-    public let providerID: UsageProviderID = .claude
+public struct GrokUsageProvider: UsageProvider, Sendable {
+    public let providerID: UsageProviderID = .grok
 
-    private let authStore: ClaudeAuthStore
-    private let usageClient: ClaudeUsageClient
+    private let authStore: GrokAuthStore
+    private let usageClient: GrokUsageClient
     private let now: @Sendable () -> Date
 
     public init(
-        authStore: ClaudeAuthStore = ClaudeAuthStore(),
-        usageClient: ClaudeUsageClient = ClaudeUsageClient(),
+        authStore: GrokAuthStore = GrokAuthStore(),
+        usageClient: GrokUsageClient = GrokUsageClient(),
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         self.authStore = authStore
@@ -69,16 +69,18 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
                 migrateCacheFrom = rotated.migrateCacheFrom
             }
 
-            let firstUsageCandidate = current
-            let firstUsage = await generationChecked(
-                candidate: firstUsageCandidate,
-                successCandidate: { _ in firstUsageCandidate },
+            let firstCreditsCandidate = current
+            let firstCredits = await generationChecked(
+                candidate: firstCreditsCandidate,
+                successCandidate: { _ in firstCreditsCandidate },
                 operation: {
-                    try await usageClient.fetchUsage(accessToken: firstUsageCandidate.accessToken)
+                    try await usageClient.fetchCreditsConfig(
+                        accessToken: firstCreditsCandidate.accessToken
+                    )
                 }
             )
             var response: UsageHTTPResponse
-            switch firstUsage {
+            switch firstCredits {
             case .value(let value):
                 response = value
             case .externalAccessChanged:
@@ -104,15 +106,17 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
                 }
                 current = rotated.access
                 migrateCacheFrom = migrateCacheFrom ?? rotated.migrateCacheFrom
-                let secondUsageCandidate = current
-                let secondUsage = await generationChecked(
-                    candidate: secondUsageCandidate,
-                    successCandidate: { _ in secondUsageCandidate },
+                let secondCreditsCandidate = current
+                let secondCredits = await generationChecked(
+                    candidate: secondCreditsCandidate,
+                    successCandidate: { _ in secondCreditsCandidate },
                     operation: {
-                        try await usageClient.fetchUsage(accessToken: secondUsageCandidate.accessToken)
+                        try await usageClient.fetchCreditsConfig(
+                            accessToken: secondCreditsCandidate.accessToken
+                        )
                     }
                 )
-                switch secondUsage {
+                switch secondCredits {
                 case .value(let value):
                     response = value
                 case .externalAccessChanged:
@@ -123,10 +127,33 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
                 if response.statusCode == 401 { return failure(.signInAgain) }
             }
 
-            let snapshot = try ClaudeUsageMapper.map(
+            // Best-effort plan label; settings failure still yields a credits snapshot.
+            var planName: String?
+            if (200..<300).contains(response.statusCode) {
+                let settingsCandidate = current
+                let settingsChecked = await generationChecked(
+                    candidate: settingsCandidate,
+                    successCandidate: { _ in settingsCandidate },
+                    operation: {
+                        try await usageClient.fetchSettings(
+                            accessToken: settingsCandidate.accessToken
+                        )
+                    }
+                )
+                switch settingsChecked {
+                case .value(let settingsResponse):
+                    planName = GrokUsageMapper.planName(from: settingsResponse)
+                case .externalAccessChanged:
+                    return externalAccessChanged()
+                case .failure:
+                    planName = nil
+                }
+            }
+
+            let snapshot = try GrokUsageMapper.mapCredits(
                 response: response,
                 accountKey: current.accountKey,
-                planHint: current.planHint,
+                planName: planName,
                 now: now()
             )
             return UsageRefreshResult(
@@ -148,7 +175,8 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
         guard let refreshToken = expected.refreshToken, !refreshToken.isEmpty else {
             throw UsageProviderFailure.signInAgain
         }
-        let response = try await usageClient.refreshToken(refreshToken)
+        let clientID = authStore.clientID(for: expected)
+        let response = try await usageClient.refreshToken(refreshToken, clientID: clientID)
         let rotation = try Self.rotation(from: response, now: now())
         var requestAccess = Self.rotatedAccess(rotation, replacing: expected)
         requestAccess.accountKey = expected.accountKey
@@ -160,7 +188,7 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
                 persistedAccess = persisted
             }
         } catch {
-            NSLog("[ClaudeUsage] rotated credential writeback failed; continuing in memory")
+            NSLog("[GrokUsage] rotated credential writeback failed; continuing in memory")
         }
 
         let migration = persistedAccess.map { $0.accountKey != expected.accountKey } == true
@@ -173,7 +201,7 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
         candidate: OAuthAccess,
         successCandidate: @Sendable (Value) -> OAuthAccess,
         operation: @Sendable () async throws -> Value
-    ) async -> ClaudeGenerationChecked<Value> {
+    ) async -> GrokGenerationChecked<Value> {
         do {
             let value = try await operation()
             if sourceHasChanged(since: successCandidate(value)) {
@@ -211,7 +239,7 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
     private static func rotation(
         from response: UsageHTTPResponse,
         now: Date
-    ) throws -> ClaudeTokenRotation {
+    ) throws -> GrokTokenRotation {
         switch response.statusCode {
         case 200..<300:
             break
@@ -222,7 +250,7 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
             throw UsageProviderFailure.invalidResponse
         case 429:
             throw UsageProviderFailure.rateLimited(
-                retryAt: ClaudeUsageMapper.retryAfterDate(response, now: now)
+                retryAt: GrokUsageMapper.retryAfterDate(response, now: now)
             )
         case 500...599:
             throw UsageProviderFailure.serviceUnavailable
@@ -235,7 +263,7 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
             throw UsageProviderFailure.invalidResponse
         }
         let expiresAt = number(object["expires_in"]).map { now.addingTimeInterval($0) }
-        return ClaudeTokenRotation(
+        return GrokTokenRotation(
             accessToken: accessToken,
             refreshToken: nonemptyString(object["refresh_token"]),
             expiresAt: expiresAt
@@ -243,34 +271,21 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
     }
 
     private static func rotatedAccess(
-        _ rotation: ClaudeTokenRotation,
+        _ rotation: GrokTokenRotation,
         replacing expected: OAuthAccess
     ) -> OAuthAccess {
         let refreshToken = rotation.refreshToken ?? expected.refreshToken
-        let identityToken = refreshToken ?? rotation.accessToken
-        let accountDigest = UsageDigest.sha256(
-            "\(sourceIdentity(expected.source))|\(UsageDigest.sha256(identityToken))"
-        )
         return OAuthAccess(
-            providerID: .claude,
-            accountKey: AccountCacheKey(providerID: .claude, digest: accountDigest),
+            providerID: .grok,
+            accountKey: expected.accountKey,
             source: expected.source,
             sourceVersion: expected.sourceVersion,
             accessToken: rotation.accessToken,
             refreshToken: refreshToken,
-            expiresAt: rotation.expiresAt,
-            accountID: nil,
+            expiresAt: rotation.expiresAt ?? expected.expiresAt,
+            accountID: expected.accountID,
             planHint: expected.planHint
         )
-    }
-
-    private static func sourceIdentity(_ source: CredentialSource) -> String {
-        switch source {
-        case .file(let path):
-            return path
-        case .keychain(let service, let account):
-            return account.map { "\(service)|\($0)" } ?? service
-        }
     }
 
     private static func nonemptyString(_ value: Any?) -> String? {

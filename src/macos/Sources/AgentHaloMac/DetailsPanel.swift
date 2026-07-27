@@ -407,7 +407,7 @@ class DetailsPanel: NSPanel {
             row.heightAnchor.constraint(equalToConstant: 24),
             agentToggle.leadingAnchor.constraint(equalTo: row.leadingAnchor),
             agentToggle.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            agentToggle.widthAnchor.constraint(equalToConstant: 76),
+            agentToggle.widthAnchor.constraint(equalToConstant: 108),
             agentToggle.heightAnchor.constraint(equalToConstant: 24),
             contextPill.trailingAnchor.constraint(equalTo: row.trailingAnchor),
             contextPill.centerYAnchor.constraint(equalTo: row.centerYAnchor),
@@ -939,6 +939,7 @@ final class AgentToggleView: NSView {
     private let activeBg = NSView()
     private let codexIcon = NSImageView()
     private let claudeIcon = NSImageView()
+    private let grokIcon = NSImageView()
     private var activeBgConstraints: [NSLayoutConstraint] = []
 
     override init(frame frameRect: NSRect) {
@@ -976,8 +977,10 @@ final class AgentToggleView: NSView {
 
         configureIcon(codexIcon, assetName: "codex", accessibilityLabel: "Codex")
         configureIcon(claudeIcon, assetName: "claude-code", accessibilityLabel: "Claude Code")
+        configureIcon(grokIcon, assetName: "grok", accessibilityLabel: "Grok")
         bgView.addSubview(codexIcon)
         bgView.addSubview(claudeIcon)
+        bgView.addSubview(grokIcon)
 
         NSLayoutConstraint.activate([
             bgView.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -985,15 +988,20 @@ final class AgentToggleView: NSView {
             bgView.topAnchor.constraint(equalTo: topAnchor),
             bgView.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            codexIcon.leadingAnchor.constraint(equalTo: bgView.leadingAnchor, constant: 4),
+            codexIcon.leadingAnchor.constraint(equalTo: bgView.leadingAnchor, constant: 3),
             codexIcon.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
-            codexIcon.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: 0.5, constant: -4),
+            codexIcon.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: 1.0 / 3.0, constant: -2),
             codexIcon.heightAnchor.constraint(equalToConstant: 18),
 
-            claudeIcon.trailingAnchor.constraint(equalTo: bgView.trailingAnchor, constant: -4),
+            claudeIcon.centerXAnchor.constraint(equalTo: bgView.centerXAnchor),
             claudeIcon.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
-            claudeIcon.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: 0.5, constant: -4),
+            claudeIcon.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: 1.0 / 3.0, constant: -2),
             claudeIcon.heightAnchor.constraint(equalToConstant: 18),
+
+            grokIcon.trailingAnchor.constraint(equalTo: bgView.trailingAnchor, constant: -3),
+            grokIcon.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
+            grokIcon.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: 1.0 / 3.0, constant: -2),
+            grokIcon.heightAnchor.constraint(equalToConstant: 18),
         ])
 
         updateSelectedState(animated: false)
@@ -1004,10 +1012,14 @@ final class AgentToggleView: NSView {
         selectedAgent = agent
     }
 
+    func selectAgentAtXForTesting(_ x: CGFloat) {
+        selectAgent(atX: x)
+    }
+
     private func updateSelectedState(animated: Bool) {
         NSLayoutConstraint.deactivate(activeBgConstraints)
 
-        let targetIcon = selectedAgent == .codex ? codexIcon : claudeIcon
+        let targetIcon = icon(for: selectedAgent)
 
         activeBgConstraints = [
             activeBg.leadingAnchor.constraint(equalTo: targetIcon.leadingAnchor),
@@ -1029,6 +1041,15 @@ final class AgentToggleView: NSView {
 
         codexIcon.alphaValue = selectedAgent == .codex ? 1 : 0.40
         claudeIcon.alphaValue = selectedAgent == .claudeCode ? 1 : 0.40
+        grokIcon.alphaValue = selectedAgent == .grok ? 1 : 0.40
+    }
+
+    private func icon(for agent: AgentKind) -> NSImageView {
+        switch agent {
+        case .codex: return codexIcon
+        case .claudeCode: return claudeIcon
+        case .grok: return grokIcon
+        }
     }
 
     private func configureIcon(_ imageView: NSImageView, assetName: String, accessibilityLabel: String) {
@@ -1041,8 +1062,19 @@ final class AgentToggleView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        let isLeft = point.x < bounds.width / 2
-        let newAgent: AgentKind = isLeft ? .codex : .claudeCode
+        selectAgent(atX: point.x)
+    }
+
+    private func selectAgent(atX x: CGFloat) {
+        let third = bounds.width / 3
+        let newAgent: AgentKind
+        if x < third {
+            newAgent = .codex
+        } else if x < third * 2 {
+            newAgent = .claudeCode
+        } else {
+            newAgent = .grok
+        }
         if newAgent != selectedAgent {
             selectedAgent = newAgent
             onAgentSelected?(newAgent)

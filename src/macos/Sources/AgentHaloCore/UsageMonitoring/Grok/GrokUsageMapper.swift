@@ -1,13 +1,18 @@
 import Foundation
 
-public enum ClaudeUsageMapper {
-    public static let sessionDuration: TimeInterval = 18_000
-    public static let weeklyDuration: TimeInterval = 604_800
+/// Maps Grok credits billing responses into `UsageSnapshot`.
+///
+/// Aligns with OpenUsage `GrokCreditsConfigDecoder` / `GrokUsageMapper`:
+/// - total-pool `creditUsagePercent` (proto-JSON: absent means 0)
+/// - only `USAGE_PERIOD_TYPE_WEEKLY` produces a weekly window
+/// - `onDemandCap` / prepaid fields are ignored (no Pay-as-you-go UI)
+public enum GrokUsageMapper {
+    public static let weeklyPeriodType = "USAGE_PERIOD_TYPE_WEEKLY"
 
-    public static func map(
+    public static func mapCredits(
         response: UsageHTTPResponse,
         accountKey: AccountCacheKey,
-        planHint: OAuthPlanHint?,
+        planName: String?,
         now: Date
     ) throws -> UsageSnapshot {
         switch response.statusCode {
@@ -23,22 +28,21 @@ public enum ClaudeUsageMapper {
             throw UsageProviderFailure.invalidResponse
         }
 
-        guard let body = (try? JSONSerialization.jsonObject(with: response.body)) as? [String: Any] else {
-            throw UsageProviderFailure.invalidResponse
+        let config = try decodeConfig(response.body)
+        var windows: [UsageWindow] = []
+        if config.periodType == weeklyPeriodType {
+            windows.append(
+                UsageWindow(
+                    kind: .weekly,
+                    usedPercent: min(100, max(0, config.usedPercent)),
+                    resetsAt: config.periodEnd,
+                    duration: config.periodEnd.timeIntervalSince(config.periodStart)
+                )
+            )
         }
-        let planName = formatPlan(
-            subscriptionType: planHint?.subscriptionType,
-            rateLimitTier: planHint?.rateLimitTier
-        )
-        let windows = [
-            window(body["five_hour"], kind: .session, duration: sessionDuration),
-            window(body["seven_day"], kind: .weekly, duration: weeklyDuration),
-        ].compactMap { $0 }
-        guard planName != nil || !windows.isEmpty else {
-            throw UsageProviderFailure.invalidResponse
-        }
+        // Non-weekly periods: return empty windows rather than mislabel monthly as weekly.
         return UsageSnapshot(
-            providerID: .claude,
+            providerID: .grok,
             accountKey: accountKey,
             planName: planName,
             windows: windows,
@@ -46,21 +50,16 @@ public enum ClaudeUsageMapper {
         )
     }
 
-    public static func formatPlan(subscriptionType: String?, rateLimitTier: String?) -> String? {
-        guard let raw = subscriptionType?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !raw.isEmpty
+    /// Best-effort plan label from `GET /v1/settings`. Non-2xx or blank → nil.
+    public static func planName(from response: UsageHTTPResponse) -> String? {
+        guard (200..<300).contains(response.statusCode),
+              let body = jsonObject(response.body),
+              let plan = body["subscription_tier_display"] as? String
         else {
             return nil
         }
-        let base = raw.split(whereSeparator: { $0 == " " || $0 == "_" || $0 == "-" })
-            .map { $0.prefix(1).uppercased() + $0.dropFirst().lowercased() }
-            .joined(separator: " ")
-        guard let tier = rateLimitTier,
-              let range = tier.range(of: #"\d+x"#, options: [.regularExpression, .caseInsensitive])
-        else {
-            return base
-        }
-        return "\(base) \(tier[range].lowercased())"
+        let trimmed = plan.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     public static func retryAfterDate(_ response: UsageHTTPResponse, now: Date) -> Date? {
@@ -86,37 +85,63 @@ public enum ClaudeUsageMapper {
         return nil
     }
 
-    private static func window(
-        _ value: Any?,
-        kind: UsageWindowKind,
-        duration: TimeInterval
-    ) -> UsageWindow? {
-        guard let object = value as? [String: Any],
-              let utilization = number(object["utilization"])
+    // MARK: - Config decode (OpenUsage GrokCreditsConfigDecoder shape)
+
+    private struct CreditsConfig {
+        var periodType: String
+        var usedPercent: Double
+        var periodStart: Date
+        var periodEnd: Date
+    }
+
+    private static func decodeConfig(_ bodyData: Data) throws -> CreditsConfig {
+        guard let body = jsonObject(bodyData),
+              let config = body["config"] as? [String: Any],
+              let period = config["currentPeriod"] as? [String: Any],
+              let periodType = (period["type"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !periodType.isEmpty,
+              let start = date(period["start"]),
+              let end = date(period["end"]),
+              end > start
         else {
-            return nil
+            throw UsageProviderFailure.invalidResponse
         }
-        return UsageWindow(
-            kind: kind,
-            usedPercent: min(100, max(0, utilization)),
-            resetsAt: resetDate(object["resets_at"]),
-            duration: duration
+
+        // proto-JSON omits zero values: absent percent is genuine 0%.
+        // A present non-numeric / non-finite value is schema drift → invalid.
+        let percent: Double
+        if let raw = config["creditUsagePercent"] {
+            guard let number = number(raw), number.isFinite else {
+                throw UsageProviderFailure.invalidResponse
+            }
+            percent = number
+        } else {
+            percent = 0
+        }
+
+        return CreditsConfig(
+            periodType: periodType,
+            usedPercent: percent,
+            periodStart: start,
+            periodEnd: end
         )
     }
 
-    private static func resetDate(_ value: Any?) -> Date? {
-        if let text = value as? String {
-            let normalized = normalizeTimestamp(text)
-            let fractional = ISO8601DateFormatter()
-            fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            if let date = fractional.date(from: normalized) { return date }
-            if let date = ISO8601DateFormatter().date(from: normalized) { return date }
-        }
-        guard let raw = number(value), raw.isFinite else { return nil }
-        let seconds = abs(raw) < 10_000_000_000 ? raw : raw / 1000
-        return Date(timeIntervalSince1970: seconds)
+    private static func date(_ value: Any?) -> Date? {
+        guard let text = value as? String else { return nil }
+        let normalized = normalizeTimestamp(text)
+        guard !normalized.isEmpty else { return nil }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: normalized) { return date }
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return plain.date(from: normalized)
     }
 
+    /// Normalize provider timestamps: fractional digits truncated/padded to ms,
+    /// space separators, missing timezone → Z (same approach as Claude mapper).
     private static func normalizeTimestamp(_ raw: String) -> String {
         var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return value }
@@ -161,6 +186,10 @@ public enum ClaudeUsageMapper {
             timezone = "Z"
         }
         return String(value[headRange]) + fraction + timezone
+    }
+
+    private static func jsonObject(_ data: Data) -> [String: Any]? {
+        (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 
     private static func number(_ value: Any?) -> Double? {

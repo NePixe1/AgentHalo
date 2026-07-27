@@ -42,8 +42,14 @@ func runUsageModelChecks() async {
 
     await runCodexAuthChecks()
     runClaudeAuthChecks()
+    do {
+        try runGrokAuthChecks()
+    } catch {
+        fatalError("grok auth checks failed: \(error)")
+    }
     await runCodexUsageChecks()
     await runClaudeUsageChecks()
+    await runGrokUsageChecks()
 }
 
 func testUsageMonitoringLocalization() {
@@ -60,6 +66,7 @@ func testUsageMonitoringLocalization() {
                 ("metadata.session_title", "Session title"),
                 ("usage.warning.sign_in_codex", "Sign in to Codex again to refresh usage."),
                 ("usage.warning.sign_in_claude", "Sign in to Claude Code again to refresh usage."),
+                ("usage.warning.sign_in_grok", "Run `grok login` again to refresh usage."),
                 ("usage.warning.rate_limited", "Usage requests are limited. AgentHalo will retry later."),
                 ("usage.warning.stale", "Usage may be outdated. Last updated {0}."),
                 ("usage.warning.network", "Usage could not be refreshed because of a network error."),
@@ -76,6 +83,7 @@ func testUsageMonitoringLocalization() {
                 ("metadata.session_title", "会话标题"),
                 ("usage.warning.sign_in_codex", "请重新登录 Codex 以刷新使用情况。"),
                 ("usage.warning.sign_in_claude", "请重新登录 Claude Code 以刷新使用情况。"),
+                ("usage.warning.sign_in_grok", "请重新执行 grok login 以刷新使用情况。"),
                 ("usage.warning.rate_limited", "使用情况请求过于频繁，AgentHalo 将稍后重试。"),
                 ("usage.warning.stale", "使用情况可能已过期，上次更新于 {0}。"),
                 ("usage.warning.network", "网络异常，暂时无法刷新使用情况。"),
@@ -156,6 +164,25 @@ func testDetailsContentResolverSeparatesOAuthUsageAndAPISessionDetails() {
         claudeOAuth.body,
         .usage(UsageDetailsModel(windows: [], status: .noData)),
         "OAuth without a snapshot should still render usage"
+    )
+
+    let grokOAuth = DetailsContentResolver.resolve(
+        providerID: .grok,
+        monitorState: UsageMonitorState(
+            providerID: .grok,
+            accessMode: .oauth,
+            status: .noData
+        ),
+        isOffline: false,
+        sessionDetails: SessionDetailsSnapshot(),
+        contextUsedPercent: nil,
+        now: now
+    )
+    expect(grokOAuth.providerName, "Grok", "grok provider display name")
+    expect(
+        grokOAuth.body,
+        .usage(UsageDetailsModel(windows: [], status: .noData)),
+        "Grok OAuth without a snapshot should still render usage"
     )
 
     for providerID in [UsageProviderID.codex, .claude] {
@@ -310,6 +337,25 @@ func testDetailsContentResolverWarningPriorityAndRedaction() {
         "Claude sign-in warning should name the exact provider"
     )
 
+    let grokSignIn = DetailsContentResolver.resolve(
+        providerID: .grok,
+        monitorState: UsageMonitorState(
+            providerID: .grok,
+            accessMode: .oauth,
+            status: .signInAgain,
+            lastFailure: .signInAgain
+        ),
+        isOffline: false,
+        sessionDetails: session,
+        contextUsedPercent: nil,
+        now: now
+    ).usageWarning
+    expect(
+        grokSignIn,
+        L10n.shared["usage.warning.sign_in_grok"],
+        "Grok sign-in warning should name the exact provider"
+    )
+
     let rateLimited = warning(
         status: .stale(updatedAt: updatedAt),
         failure: .rateLimited(retryAt: now)
@@ -343,7 +389,7 @@ func testDetailsContentResolverWarningPriorityAndRedaction() {
     expect(warning(status: .fresh(updatedAt: now), failure: nil) == nil, "fresh Usage has no warning")
     expect(warning(status: .noData, failure: nil) == nil, "initial noData has no warning")
 
-    for safeWarning in [signIn, claudeSignIn, rateLimited, stale, network, service, invalid]
+    for safeWarning in [signIn, claudeSignIn, grokSignIn, rateLimited, stale, network, service, invalid]
         .compactMap({ $0 }) {
         expect(!safeWarning.contains(syntheticToken), "warning must redact token")
         expect(!safeWarning.contains(syntheticResponseBody), "warning must redact response body")
@@ -3447,6 +3493,47 @@ func testCodexUsageMapperPlansWindowsAndRestrictedFields() {
     )
     expect(weeklyOnly?.windows.count, 1, "missing secondary must stay absent")
     expect(weeklyOnly?.windows.first?.kind, .weekly, "sole 7-day primary must reclassify as weekly")
+
+    // Live Plus shape: only a 7-day primary with used_percent 0 and null secondary.
+    // NSNumber(0) bridges as Bool in Swift — number() must not drop the window.
+    let weeklyOnlyZero = try? CodexUsageMapper.map(
+        response: codexUsageResponse("""
+        {
+          "plan_type": "plus",
+          "rate_limit": {
+            "primary_window": {
+              "used_percent": 0,
+              "limit_window_seconds": 604800,
+              "reset_after_seconds": 548872,
+              "reset_at": 1785614327
+            },
+            "secondary_window": null
+          }
+        }
+        """),
+        accountKey: accountKey,
+        now: now
+    )
+    expect(weeklyOnlyZero?.planName, "Plus", "plus plan with zero weekly usage")
+    expect(weeklyOnlyZero?.windows.count, 1, "zero used_percent weekly-only must still map one window")
+    expect(weeklyOnlyZero?.windows.first?.kind, .weekly, "zero used_percent primary 7d is weekly")
+    expect(weeklyOnlyZero?.windows.first?.usedPercent, 0, "zero used_percent must parse as 0 not absent")
+    expect(
+        weeklyOnlyZero?.windows.first?.resetsAt,
+        Date(timeIntervalSince1970: 1_785_614_327),
+        "zero used_percent weekly reset_at"
+    )
+
+    let onePercent = try? CodexUsageMapper.map(
+        response: codexUsageResponse(
+            #"{"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":1,"limit_window_seconds":18000}}}"#
+        ),
+        accountKey: accountKey,
+        now: now
+    )
+    expect(onePercent?.windows.count, 1, "used_percent 1 must not be dropped as Bool")
+    expect(onePercent?.windows.first?.usedPercent, 1, "used_percent 1 parses as 1")
+    expect(onePercent?.windows.first?.kind, .session, "1% 5-hour window stays session")
 }
 
 func testCodexUsageMapperClassifiesInvalidResponses() {
@@ -4462,4 +4549,626 @@ func testClaudeProviderUsesRotatedTokenWhenWritebackFails() async {
     expect(requests.last?.headers["authorization"], "Bearer memory-access", "Claude in-memory token serves current request")
     expect(result.snapshot?.accountKey, fixture.1.accountKey, "unpersisted Claude rotation keeps the stable account key")
     expect(result.migrateCacheFrom == nil, "unpersisted Claude rotation must not migrate cache")
+}
+
+// MARK: - Grok auth
+
+func runGrokAuthChecks() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("grok-auth-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let grokDir = root.appendingPathComponent(".grok", isDirectory: true)
+    try FileManager.default.createDirectory(at: grokDir, withIntermediateDirectories: true)
+    let authURL = grokDir.appendingPathComponent("auth.json")
+
+    // empty / missing → oauthNeedsSignIn
+    let missingStore = GrokAuthStore(homeDirectory: root)
+    guard case .oauthNeedsSignIn(let missingKey) = missingStore.resolveAccess() else {
+        expect(false, "missing auth.json should resolve to oauthNeedsSignIn")
+        return
+    }
+    expect(missingKey == nil, "missing auth has no account key")
+
+    // Dual-account auth.json (second account entry must be preserved on persist).
+    // Intentional `extra` field asserts unknown-key preservation on rotation.
+    let authJSON = """
+    {
+      "https://auth.x.ai::client-a": {
+        "key": "header.\(grokCheckFakeJWT(exp: Date().addingTimeInterval(3600))).sig",
+        "refresh_token": "refresh-a",
+        "expires_at": "2099-01-01T00:00:00Z",
+        "user_id": "user-a",
+        "email": "a@example.com",
+        "oidc_client_id": "client-a",
+        "extra": "keep-extra-field"
+      },
+      "https://auth.x.ai::client-b": {
+        "key": "keep-me-token",
+        "refresh_token": "refresh-b",
+        "user_id": "user-b"
+      }
+    }
+    """
+    try authJSON.write(to: authURL, atomically: true, encoding: .utf8)
+
+    let store = GrokAuthStore(homeDirectory: root)
+    guard case .oauth(let access) = store.resolveAccess() else {
+        expect(false, "expected oauth from auth.json")
+        return
+    }
+    expect(access.providerID, .grok, "provider id")
+    expect(access.accountKey.digest.count, 64, "digest hex length")
+    expect(
+        access.accountKey.digest.contains("user-a") == false,
+        "digest must not embed raw id plaintext requirement is hash only"
+    )
+    expect(access.accountKey.digest, UsageDigest.sha256("user-a"), "account digest hashes user_id")
+    expect(access.refreshToken, "refresh-a", "refresh token from selected entry")
+    expect(store.needsRefresh(access), false, "far-future expires_at should not need refresh")
+
+    let nearExpiry = OAuthAccess(
+        providerID: access.providerID,
+        accountKey: access.accountKey,
+        source: access.source,
+        sourceVersion: access.sourceVersion,
+        accessToken: access.accessToken,
+        refreshToken: access.refreshToken,
+        expiresAt: Date().addingTimeInterval(60),
+        accountID: access.accountID,
+        planHint: access.planHint
+    )
+    expect(store.needsRefresh(nearExpiry), true, "expires within refresh window needs refresh")
+
+    // sourceVersion concurrent reject: same access token on disk, but entry fields
+    // change after resolve so sourceVersion no longer matches → persist nil, no write.
+    let concurrentRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("grok-auth-version-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: concurrentRoot, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: concurrentRoot) }
+    let concurrentGrok = concurrentRoot.appendingPathComponent(".grok", isDirectory: true)
+    try FileManager.default.createDirectory(at: concurrentGrok, withIntermediateDirectories: true)
+    let concurrentAuth = concurrentGrok.appendingPathComponent("auth.json")
+    // Fixed `key` so findEntry still matches; only refresh_token mutates sourceVersion.
+    let concurrentJSON = """
+    {
+      "https://auth.x.ai::client-a": {
+        "key": "stable-access-token",
+        "refresh_token": "refresh-a",
+        "expires_at": "2099-01-01T00:00:00Z",
+        "user_id": "user-a"
+      }
+    }
+    """
+    try concurrentJSON.write(to: concurrentAuth, atomically: true, encoding: .utf8)
+    let concurrentStore = GrokAuthStore(homeDirectory: concurrentRoot)
+    guard case .oauth(let concurrentAccess) = concurrentStore.resolveAccess() else {
+        expect(false, "concurrent-version fixture should resolve to oauth")
+        return
+    }
+    expect(concurrentAccess.accessToken, "stable-access-token", "concurrent fixture access token")
+    // External writer mutates the same entry (same key) so sourceVersion diverges.
+    let externallyChanged = """
+    {
+      "https://auth.x.ai::client-a": {
+        "key": "stable-access-token",
+        "refresh_token": "refresh-a-changed",
+        "expires_at": "2099-01-01T00:00:00Z",
+        "user_id": "user-a"
+      }
+    }
+    """
+    try externallyChanged.write(to: concurrentAuth, atomically: true, encoding: .utf8)
+    let beforeMismatch = try Data(contentsOf: concurrentAuth)
+    let concurrentRotation = GrokTokenRotation(
+        accessToken: "should-not-write",
+        refreshToken: "should-not-write-rt",
+        expiresAt: Date().addingTimeInterval(7200)
+    )
+    let mismatchResult = try concurrentStore.persist(
+        rotation: concurrentRotation,
+        replacing: concurrentAccess
+    )
+    expect(mismatchResult == nil, "persist returns nil when sourceVersion mismatches disk")
+    let afterMismatch = try Data(contentsOf: concurrentAuth)
+    expect(afterMismatch, beforeMismatch, "persist must not rewrite auth.json on version mismatch")
+    let mismatchText = String(data: afterMismatch, encoding: .utf8) ?? ""
+    expect(mismatchText.contains("should-not-write") == false, "stale rotation token must not appear on disk")
+    expect(mismatchText.contains("refresh-a-changed"), "external concurrent change remains on disk")
+
+    let rotated = GrokTokenRotation(
+        accessToken: "new-access",
+        refreshToken: "new-refresh",
+        expiresAt: Date().addingTimeInterval(7200)
+    )
+    let persisted = try store.persist(rotation: rotated, replacing: access)
+    expect(persisted?.accessToken, "new-access", "access token updated")
+    expect(persisted?.refreshToken, "new-refresh", "refresh token updated")
+
+    let reloaded = try String(contentsOf: authURL, encoding: .utf8)
+    expect(reloaded.contains("keep-me-token"), "must preserve other account entries")
+    expect(reloaded.contains("new-access"), "must write rotated token")
+    expect(reloaded.contains("new-refresh"), "must write rotated refresh token")
+
+    // Non-token fields on the rotated entry (including unknown `extra`) must remain.
+    let reloadedData = try Data(contentsOf: authURL)
+    guard let rootObject = try JSONSerialization.jsonObject(with: reloadedData) as? [String: Any],
+          let entryA = rootObject["https://auth.x.ai::client-a"] as? [String: Any]
+    else {
+        expect(false, "reloaded auth.json should parse with client-a entry")
+        return
+    }
+    expect(entryA["key"] as? String, "new-access", "rotated entry key")
+    expect(entryA["refresh_token"] as? String, "new-refresh", "rotated entry refresh_token")
+    expect(entryA["user_id"] as? String, "user-a", "persist preserves user_id")
+    expect(entryA["email"] as? String, "a@example.com", "persist preserves email")
+    expect(entryA["oidc_client_id"] as? String, "client-a", "persist preserves oidc_client_id")
+    expect(entryA["extra"] as? String, "keep-extra-field", "persist preserves unknown extra field")
+    let entryB = rootObject["https://auth.x.ai::client-b"] as? [String: Any]
+    expect(entryB?["key"] as? String, "keep-me-token", "second account token unchanged after rotation")
+
+    // corrupt file: persist should throw and not wipe
+    try "{not-json".write(to: authURL, atomically: true, encoding: .utf8)
+    do {
+        _ = try store.persist(rotation: rotated, replacing: access)
+        expect(false, "persist on corrupt file must throw")
+    } catch {
+        // ok
+    }
+    let corruptContents = try String(contentsOf: authURL, encoding: .utf8)
+    expect(corruptContents, "{not-json", "corrupt auth.json must be left untouched")
+}
+
+/// Build a minimal unsigned JWT with an `exp` claim for Grok auth checks.
+func grokCheckFakeJWT(exp: Date) -> String {
+    let header = grokCheckBase64URL(Data(#"{"alg":"none"}"#.utf8))
+    let expSeconds = Int(exp.timeIntervalSince1970)
+    let payload = grokCheckBase64URL(Data(#"{"exp":\#(expSeconds)}"#.utf8))
+    return "\(header).\(payload)"
+}
+
+func grokCheckBase64URL(_ data: Data) -> String {
+    data.base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+}
+
+// MARK: - Grok usage client + mapper
+
+func runGrokUsageChecks() async {
+    await testGrokUsageClientBuildsOnlyOfficialRequests()
+    try! testGrokUsageMapperWeeklyCredits()
+    try! testGrokUsageMapperOmitsPercentAsZero()
+    testGrokUsageMapperRejectsNonWeekly()
+    testGrokUsageMapperHTTPErrors()
+    testGrokUsageMapperPlanNameFromSettings()
+    testGrokUsageMapperClampsPercentAndIgnoresOnDemand()
+    await testGrokProviderRefreshSucceedsWithWeeklySnapshot()
+    await testGrokProviderRetriesCredits401WithTokenRefresh()
+    await testGrokProviderNoAuthSignInAgain()
+}
+
+func grokUsageResponse(
+    statusCode: Int = 200,
+    headers: [String: String] = [:],
+    _ body: String
+) -> UsageHTTPResponse {
+    UsageHTTPResponse(statusCode: statusCode, headers: headers, body: Data(body.utf8))
+}
+
+func testGrokUsageClientBuildsOnlyOfficialRequests() async {
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: grokUsageResponse(#"{"config":{}}"#))
+    await http.enqueue(response: grokUsageResponse(#"{"subscription_tier_display":"SuperGrok"}"#))
+    await http.enqueue(response: grokUsageResponse(#"{"access_token":"new-access"}"#))
+    let client = GrokUsageClient(http: http)
+
+    _ = try? await client.fetchCreditsConfig(accessToken: " access token ")
+    _ = try? await client.fetchSettings(accessToken: "access token")
+    _ = try? await client.refreshToken("refresh token+/=", clientID: GrokUsageClient.defaultClientID)
+
+    let requests = await http.capturedRequests
+    expect(requests.count, 3, "Grok client should issue credits, settings, and refresh requests")
+
+    expect(requests[0].method, "GET", "Grok credits method")
+    expect(requests[0].host, "cli-chat-proxy.grok.com", "Grok credits official host")
+    expect(requests[0].path, "/v1/billing?format=credits", "Grok credits official path with format query")
+    expect(requests[0].timeout, 10, "Grok credits timeout")
+    expect(requests[0].headers["authorization"], "Bearer access token", "Grok credits bearer header")
+    expect(requests[0].headers["x-xai-token-auth"], "xai-grok-cli", "Grok credits token-auth header")
+    expect(requests[0].headers["accept"], "application/json", "Grok credits accept header")
+    expect(requests[0].headers["user-agent"], "AgentHalo", "Grok credits user agent")
+
+    expect(requests[1].method, "GET", "Grok settings method")
+    expect(requests[1].host, "cli-chat-proxy.grok.com", "Grok settings official host")
+    expect(requests[1].path, "/v1/settings", "Grok settings official path")
+    expect(requests[1].timeout, 10, "Grok settings timeout")
+    expect(requests[1].headers["authorization"], "Bearer access token", "Grok settings bearer header")
+    expect(requests[1].headers["x-xai-token-auth"], GrokUsageClient.tokenAuthHeader, "Grok settings token-auth")
+    expect(requests[1].headers["user-agent"], "AgentHalo", "Grok settings user agent")
+
+    expect(requests[2].method, "POST", "Grok refresh method")
+    expect(requests[2].host, "auth.x.ai", "Grok refresh official host")
+    expect(requests[2].path, "/oauth2/token", "Grok refresh official path")
+    expect(requests[2].timeout, 15, "Grok refresh timeout")
+    expect(requests[2].headers["content-type"], "application/x-www-form-urlencoded", "Grok refresh content type")
+    let form = String(data: requests[2].body ?? Data(), encoding: .utf8) ?? ""
+    expect(form.contains("grant_type=refresh_token"), "Grok refresh grant type")
+    expect(
+        form.contains("client_id=\(GrokUsageClient.defaultClientID)"),
+        "Grok refresh client id"
+    )
+    expect(form.contains("refresh_token=refresh%20token%2B%2F%3D"), "Grok refresh token must be form encoded")
+    expect(
+        GrokUsageClient.defaultClientID,
+        GrokAuthStore.defaultClientID,
+        "GrokUsageClient and GrokAuthStore must share the same default client id"
+    )
+    expect(
+        GrokUsageClient.defaultClientID,
+        "b1a00492-073a-47ea-816f-4c329264a828",
+        "Grok default OIDC client id must match CLI / OpenUsage"
+    )
+    expect(
+        requests.allSatisfy {
+            ["cli-chat-proxy.grok.com", "auth.x.ai"].contains($0.host)
+        },
+        "Grok client must call only approved official endpoints"
+    )
+}
+
+func testGrokUsageMapperWeeklyCredits() throws {
+    let body = """
+    {"config":{
+      "creditUsagePercent": 12.5,
+      "currentPeriod":{
+        "type":"USAGE_PERIOD_TYPE_WEEKLY",
+        "start":"2026-07-24T08:44:29.522745+00:00",
+        "end":"2026-07-31T08:44:29.522745+00:00"
+      },
+      "onDemandCap":{"val":2500},
+      "productUsage":[{"product":"GrokBuild","usagePercent":12.5}]
+    }}
+    """
+    let response = UsageHTTPResponse(statusCode: 200, headers: [:], body: Data(body.utf8))
+    let key = AccountCacheKey(providerID: .grok, digest: String(repeating: "a", count: 64))
+    let now = Date(timeIntervalSince1970: 1_000_000)
+    let snapshot = try GrokUsageMapper.mapCredits(
+        response: response,
+        accountKey: key,
+        planName: "SuperGrok",
+        now: now
+    )
+    expect(snapshot.providerID, .grok, "provider")
+    expect(snapshot.accountKey, key, "account key")
+    expect(snapshot.planName, "SuperGrok", "plan")
+    expect(snapshot.windows.count, 1, "only weekly window")
+    expect(snapshot.windows[0].kind, .weekly, "weekly kind")
+    expect(snapshot.windows[0].usedPercent, 12.5, "percent from total pool")
+    expect(snapshot.windows[0].resetsAt != nil, "resetsAt set")
+    expect(snapshot.refreshedAt, now, "refreshedAt uses now")
+    // duration is end - start (~7 days); onDemand must not produce extra windows
+    expect(snapshot.windows[0].duration, 7 * 24 * 60 * 60, "weekly duration from period bounds")
+}
+
+func testGrokUsageMapperOmitsPercentAsZero() throws {
+    let body = """
+    {"config":{"currentPeriod":{
+      "type":"USAGE_PERIOD_TYPE_WEEKLY",
+      "start":"2026-07-24T00:00:00Z",
+      "end":"2026-07-31T00:00:00Z"
+    }}}
+    """
+    let snapshot = try GrokUsageMapper.mapCredits(
+        response: UsageHTTPResponse(statusCode: 200, headers: [:], body: Data(body.utf8)),
+        accountKey: AccountCacheKey(providerID: .grok, digest: String(repeating: "b", count: 64)),
+        planName: nil,
+        now: Date()
+    )
+    expect(snapshot.windows.count, 1, "weekly window present when percent omitted")
+    expect(snapshot.windows[0].usedPercent, 0, "absent percent is 0")
+    expect(snapshot.planName, nil, "nil planName passes through")
+}
+
+func testGrokUsageMapperRejectsNonWeekly() {
+    let body = """
+    {"config":{"creditUsagePercent":1,"currentPeriod":{
+      "type":"USAGE_PERIOD_TYPE_MONTHLY",
+      "start":"2026-07-01T00:00:00Z",
+      "end":"2026-08-01T00:00:00Z"
+    }}}
+    """
+    do {
+        let snap = try GrokUsageMapper.mapCredits(
+            response: UsageHTTPResponse(statusCode: 200, headers: [:], body: Data(body.utf8)),
+            accountKey: AccountCacheKey(providerID: .grok, digest: String(repeating: "c", count: 64)),
+            planName: nil,
+            now: Date()
+        )
+        expect(snap.windows.isEmpty, "non-weekly must not invent weekly bars")
+        expect(snap.windows.contains { $0.kind == .weekly } == false, "no weekly kind from monthly period")
+    } catch {
+        // invalidResponse is also acceptable for non-weekly periods
+        expect(error is UsageProviderFailure, "non-weekly failure should be UsageProviderFailure")
+    }
+}
+
+func testGrokUsageMapperHTTPErrors() {
+    let key = AccountCacheKey(providerID: .grok, digest: String(repeating: "d", count: 64))
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let cases: [(UsageHTTPResponse, UsageProviderFailure)] = [
+        (grokUsageResponse(statusCode: 401, "{}"), .signInAgain),
+        (grokUsageResponse(statusCode: 429, headers: ["Retry-After": "90"], "{}"),
+         .rateLimited(retryAt: now.addingTimeInterval(90))),
+        (grokUsageResponse(statusCode: 503, "{}"), .serviceUnavailable),
+        (grokUsageResponse("{}"), .invalidResponse),
+        (grokUsageResponse(#"{"config":{}}"#), .invalidResponse),
+        (grokUsageResponse(#"{"config":{"creditUsagePercent":"high","currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-07-24T00:00:00Z","end":"2026-07-31T00:00:00Z"}}}"#),
+         .invalidResponse),
+    ]
+    for (response, expected) in cases {
+        do {
+            _ = try GrokUsageMapper.mapCredits(
+                response: response,
+                accountKey: key,
+                planName: nil,
+                now: now
+            )
+            fatalError("invalid Grok response should fail: \(expected)")
+        } catch let failure as UsageProviderFailure {
+            expect(failure, expected, "Grok mapper failure classification")
+        } catch {
+            fatalError("unexpected Grok mapper error type")
+        }
+    }
+}
+
+func testGrokUsageMapperPlanNameFromSettings() {
+    let ok = grokUsageResponse(#"{"subscription_tier_display":" SuperGrok Heavy "}"#)
+    expect(GrokUsageMapper.planName(from: ok), "SuperGrok Heavy", "settings plan trims whitespace")
+
+    let blank = grokUsageResponse(#"{"subscription_tier_display":"  "}"#)
+    expect(GrokUsageMapper.planName(from: blank), nil, "blank plan is nil")
+
+    let missing = grokUsageResponse(#"{}"#)
+    expect(GrokUsageMapper.planName(from: missing), nil, "missing plan is nil")
+
+    let unauthorized = grokUsageResponse(statusCode: 401, #"{"subscription_tier_display":"SuperGrok"}"#)
+    expect(GrokUsageMapper.planName(from: unauthorized), nil, "non-2xx settings yield nil plan")
+}
+
+func testGrokUsageMapperClampsPercentAndIgnoresOnDemand() {
+    let body = """
+    {"config":{
+      "creditUsagePercent": 140,
+      "currentPeriod":{
+        "type":"USAGE_PERIOD_TYPE_WEEKLY",
+        "start":"2026-07-24T00:00:00Z",
+        "end":"2026-07-31T00:00:00Z"
+      },
+      "onDemandCap":{"val":2500},
+      "onDemandUsed":{"val":100},
+      "prepaidBalance":{"val":50}
+    }}
+    """
+    let snapshot = try? GrokUsageMapper.mapCredits(
+        response: UsageHTTPResponse(statusCode: 200, headers: [:], body: Data(body.utf8)),
+        accountKey: AccountCacheKey(providerID: .grok, digest: String(repeating: "e", count: 64)),
+        planName: nil,
+        now: Date()
+    )
+    expect(snapshot?.windows.count, 1, "onDemand fields must not add windows")
+    expect(snapshot?.windows[0].usedPercent, 100, "percent upper clamp")
+
+    let negative = try? GrokUsageMapper.mapCredits(
+        response: grokUsageResponse("""
+        {"config":{"creditUsagePercent":-5,"currentPeriod":{
+          "type":"USAGE_PERIOD_TYPE_WEEKLY",
+          "start":"2026-07-24T00:00:00Z",
+          "end":"2026-07-31T00:00:00Z"
+        }}}
+        """),
+        accountKey: AccountCacheKey(providerID: .grok, digest: String(repeating: "f", count: 64)),
+        planName: nil,
+        now: Date()
+    )
+    expect(negative?.windows[0].usedPercent, 0, "percent lower clamp")
+}
+
+// MARK: - Grok provider
+
+func grokWeeklyCreditsBody(percent: Double = 12.5) -> String {
+    """
+    {"config":{
+      "creditUsagePercent": \(percent),
+      "currentPeriod":{
+        "type":"USAGE_PERIOD_TYPE_WEEKLY",
+        "start":"2026-07-24T00:00:00Z",
+        "end":"2026-07-31T00:00:00Z"
+      }
+    }}
+    """
+}
+
+func grokCheckISO8601(_ date: Date) -> String {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter.string(from: date)
+}
+
+func makeGrokProviderFixture(
+    accessToken: String,
+    refreshToken: String = "refresh-old",
+    expiresAt: Date,
+    userID: String = "user-fixture",
+    oidcClientID: String = GrokUsageClient.defaultClientID,
+    now: Date,
+    files: (any UsageFileAccessing)? = nil
+) -> (GrokAuthStore, OAuthAccess, any UsageFileAccessing, String) {
+    let home = "/tmp/agent-halo-grok-provider-\(UUID().uuidString)"
+    let path = "\(home)/.grok/auth.json"
+    let entryKey = "https://auth.x.ai::\(oidcClientID)"
+    let entry: [String: Any] = [
+        "key": accessToken,
+        "refresh_token": refreshToken,
+        "expires_at": grokCheckISO8601(expiresAt),
+        "user_id": userID,
+        "email": "fixture@example.com",
+        "oidc_client_id": oidcClientID,
+    ]
+    let root: [String: Any] = [entryKey: entry]
+    let initial = try! JSONSerialization.data(withJSONObject: root, options: [.sortedKeys, .prettyPrinted])
+    let resolvedFiles: any UsageFileAccessing = files ?? FakeUsageFiles(contents: [path: initial])
+    if let failing = resolvedFiles as? CodexCheckFailingFiles {
+        failing.setData(initial, at: path)
+    }
+    let store = GrokAuthStore(
+        homeDirectory: URL(fileURLWithPath: home, isDirectory: true),
+        environment: FakeUsageEnvironment(["HOME": home]),
+        files: resolvedFiles,
+        now: { now }
+    )
+    guard case .oauth(let access) = store.resolveAccess() else {
+        fatalError("Grok provider fixture should resolve OAuth access")
+    }
+    return (store, access, resolvedFiles, path)
+}
+
+func testGrokProviderRefreshSucceedsWithWeeklySnapshot() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeGrokProviderFixture(
+        accessToken: "fresh-access",
+        expiresAt: now.addingTimeInterval(3_600),
+        now: now
+    )
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: grokUsageResponse(grokWeeklyCreditsBody(percent: 18)))
+    await http.enqueue(response: grokUsageResponse(#"{"subscription_tier_display":" SuperGrok "}"#))
+    let provider = GrokUsageProvider(
+        authStore: fixture.0,
+        usageClient: GrokUsageClient(http: http),
+        now: { now }
+    )
+
+    let resolved = await provider.resolveAccess(accountKey: nil)
+    guard case .oauth(let oauth) = resolved else {
+        fatalError("Grok fixture resolveAccess should be oauth")
+    }
+    expect(oauth.providerID, .grok, "Grok provider resolves oauth access")
+
+    let result = await provider.refresh(using: .oauth(oauth))
+    expect(result.providerID, .grok, "Grok refresh result provider")
+    expect(result.failure == nil, "Grok refresh with 200 credits should succeed")
+    expect(result.snapshot?.providerID, .grok, "Grok snapshot provider")
+    expect(result.snapshot?.accountKey, oauth.accountKey, "Grok snapshot binds fixture account")
+    expect(result.snapshot?.planName, "SuperGrok", "Grok plan from settings")
+    expect(result.snapshot?.windows.count, 1, "Grok weekly window present")
+    expect(result.snapshot?.windows.first?.kind, .weekly, "Grok window kind weekly")
+    expect(result.snapshot?.windows.first?.usedPercent, 18, "Grok used percent")
+    expect(result.migrateCacheFrom == nil, "fresh Grok token needs no cache migration")
+
+    let requests = await http.capturedRequests
+    expect(
+        requests.map(\.path),
+        ["/v1/billing?format=credits", "/v1/settings"],
+        "Grok success path: credits then settings"
+    )
+    expect(requests[0].headers["authorization"], "Bearer fresh-access", "Grok credits uses access token")
+}
+
+func testGrokProviderRetriesCredits401WithTokenRefresh() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeGrokProviderFixture(
+        accessToken: "stale-access",
+        refreshToken: "stale-refresh",
+        expiresAt: now.addingTimeInterval(3_600),
+        now: now
+    )
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: grokUsageResponse(statusCode: 401, "{}"))
+    await http.enqueue(response: grokUsageResponse(
+        #"{"access_token":"retry-access","refresh_token":"retry-refresh","expires_in":3600}"#
+    ))
+    await http.enqueue(response: grokUsageResponse(grokWeeklyCreditsBody(percent: 4)))
+    await http.enqueue(response: grokUsageResponse(#"{"subscription_tier_display":"SuperGrok Heavy"}"#))
+    let provider = GrokUsageProvider(
+        authStore: fixture.0,
+        usageClient: GrokUsageClient(http: http),
+        now: { now }
+    )
+
+    let result = await provider.refresh(using: .oauth(fixture.1))
+    expect(result.failure == nil, "first Grok credits 401 should rotate and retry")
+    expect(result.snapshot?.windows.first?.usedPercent, 4, "Grok retry credits map")
+    expect(result.snapshot?.planName, "SuperGrok Heavy", "Grok plan after 401 retry")
+
+    let requests = await http.capturedRequests
+    expect(
+        requests.map(\.path),
+        [
+            "/v1/billing?format=credits",
+            "/oauth2/token",
+            "/v1/billing?format=credits",
+            "/v1/settings",
+        ],
+        "Grok 401 retry order"
+    )
+    expect(
+        requests[2].headers["authorization"],
+        "Bearer retry-access",
+        "Grok second credits uses rotated token"
+    )
+
+    // Second 401 after rotation → sign in again
+    let secondFixture = makeGrokProviderFixture(
+        accessToken: "stale-access-2",
+        expiresAt: now.addingTimeInterval(3_600),
+        now: now
+    )
+    let secondHTTP = RecordingUsageHTTPClient()
+    await secondHTTP.enqueue(response: grokUsageResponse(statusCode: 401, "{}"))
+    await secondHTTP.enqueue(response: grokUsageResponse(
+        #"{"access_token":"once-access","expires_in":3600}"#
+    ))
+    await secondHTTP.enqueue(response: grokUsageResponse(statusCode: 401, "{}"))
+    let secondProvider = GrokUsageProvider(
+        authStore: secondFixture.0,
+        usageClient: GrokUsageClient(http: secondHTTP),
+        now: { now }
+    )
+    let secondResult = await secondProvider.refresh(using: .oauth(secondFixture.1))
+    expect(secondResult.failure, .signInAgain, "second Grok credits 401 requires sign in")
+    let secondRequests = await secondHTTP.capturedRequests
+    expect(
+        secondRequests.filter { $0.path == "/v1/billing?format=credits" }.count,
+        2,
+        "Grok credits retries at most once"
+    )
+}
+
+func testGrokProviderNoAuthSignInAgain() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let home = "/tmp/agent-halo-grok-empty-\(UUID().uuidString)"
+    let store = GrokAuthStore(
+        homeDirectory: URL(fileURLWithPath: home, isDirectory: true),
+        environment: FakeUsageEnvironment(["HOME": home]),
+        files: FakeUsageFiles(),
+        now: { now }
+    )
+    let http = RecordingUsageHTTPClient()
+    let provider = GrokUsageProvider(
+        authStore: store,
+        usageClient: GrokUsageClient(http: http),
+        now: { now }
+    )
+
+    let access = await provider.resolveAccess(accountKey: nil)
+    guard case .oauthNeedsSignIn = access else {
+        fatalError("missing Grok auth should resolve oauthNeedsSignIn")
+    }
+    let result = await provider.refresh(using: access)
+    expect(result.failure, .signInAgain, "Grok without auth requires sign in")
+    expect(await http.capturedRequests.count, 0, "Grok without auth must not reach HTTP")
 }

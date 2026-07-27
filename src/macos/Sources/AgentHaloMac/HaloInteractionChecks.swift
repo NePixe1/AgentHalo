@@ -87,6 +87,9 @@ func runHaloInteractionChecks() {
     testCodexAppDetectorUsesWorkspaceEvents()
     testSessionMonitorsUseFastFileMetadata()
     testClaudePollingIsThrottledWhenCodexFocused()
+    testGrokPollingIsThrottledWhenNotFocused()
+    testGrokPresencePrefersActiveSessionsFile()
+    testGrokLiveStandbyUsesStableGreenAggregate()
     testClaudeLiveSessionsRefreshIsThrottled()
     testHaloUsesShapeLayersNotCpuRasterization()
     testRingSubmissionsAvoidConstantWork()
@@ -106,6 +109,8 @@ func runHaloInteractionChecks() {
     testAgentToggleDimsInactiveIconMoreStrongly()
     testAgentToggleSelectionPillFitsItsIconWidth()
     testAgentToggleKeepsWholeControlClickable()
+    testAgentToggleSupportsThreeAgentsIncludingGrok()
+    testFocusSubmenuIncludesGrok()
     testDetailsPanelSwitchCallbackSelectsClaudeCode()
 }
 
@@ -664,6 +669,27 @@ private func testFocusSubmenuSwitchesToClaudeCode() {
 
     expect(checkedTitles == ["Claude Code"], "Claude Code focus should be checked after selection")
     expect(loaded.focusedAgent, .claudeCode, "focused agent should persist after menu selection")
+}
+
+@MainActor
+private func testFocusSubmenuIncludesGrok() {
+    let store = SettingsStore(settingsURL: temporarySettingsURL())
+    let delegate = AppDelegate(settingsStore: store)
+    let submenu = focusedAgentSubmenu(in: delegate.makeHaloContextMenu())
+    let titles = submenu.items.map(\.title)
+
+    expect(titles.contains("Grok"), "focused-agent submenu should list Grok")
+    expect(titles == ["Codex", "Claude Code", "Grok"], "focus menu order should be Codex, Claude Code, Grok")
+
+    let grokItem = menuItem(titled: "Grok", in: submenu)
+    NSApplication.shared.sendAction(grokItem.action!, to: grokItem.target, from: grokItem)
+
+    let refreshedSubmenu = focusedAgentSubmenu(in: delegate.makeHaloContextMenu())
+    let checkedTitles = refreshedSubmenu.items.filter { $0.state == .on }.map(\.title)
+    let loaded = store.load()
+
+    expect(checkedTitles == ["Grok"], "Grok focus should be checked after selection")
+    expect(loaded.focusedAgent, .grok, "focused agent should persist Grok after menu selection")
 }
 
 @MainActor
@@ -1898,7 +1924,8 @@ private func testUsageMonitoringLifecycleWiring() {
     )
     expect(
         source.contains("case .codex:") && source.contains("return .codex")
-            && source.contains("case .claudeCode:") && source.contains("return .claude"),
+            && source.contains("case .claudeCode:") && source.contains("return .claude")
+            && source.contains("case .grok:") && source.contains("return .grok"),
         "AgentKind should map totally to its Usage Provider"
     )
     expect(
@@ -2130,6 +2157,127 @@ private func testClaudePollingIsThrottledWhenCodexFocused() {
     expect(!appDelegateSource.contains("refreshClaudeSourcesIfNeeded"), "AppDelegate should not poll Claude sources on the main tick")
     expect(!appDelegateSource.contains("claudeHookMonitor.refresh"), "AppDelegate should not refresh Claude hook status on the main thread")
     expect(!appDelegateSource.contains("claudeSessionMonitor.refresh"), "AppDelegate should not refresh Claude transcripts on the main thread")
+}
+
+private func testGrokPollingIsThrottledWhenNotFocused() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let monitorURL = sourceDirectory.appendingPathComponent("GrokActivityMonitor.swift")
+    guard let monitorSource = try? String(contentsOf: monitorURL, encoding: .utf8) else {
+        fatalError("GrokActivityMonitor source should be readable")
+    }
+    let appDelegateURL = sourceDirectory.appendingPathComponent("AppDelegate.swift")
+    guard let appDelegateSource = try? String(contentsOf: appDelegateURL, encoding: .utf8) else {
+        fatalError("AppDelegate source should be readable")
+    }
+
+    expect(monitorSource.contains("idleIntervalMilliseconds"), "Grok activity monitor should define a slower idle cadence")
+    expect(monitorSource.contains("activeIntervalMilliseconds"), "Grok activity monitor should define an active cadence")
+    expect(monitorSource.contains("focusedAgent == .grok"), "Grok polling should slow down when Grok is not focused")
+    expect(monitorSource.contains("detailsPanelVisible"), "Grok polling should stay active while the details panel is visible")
+    expect(monitorSource.contains("dispatchThrottleSeconds"), "Grok activity dispatch should throttle main-thread wakeups")
+    expect(monitorSource.contains("GrokHookStatusMonitor"), "Grok activity monitor should own the hook status monitor")
+    expect(monitorSource.contains("active_sessions.json") || monitorSource.contains("GrokActiveSessionsReader"), "Grok presence should prefer ~/.grok/active_sessions.json")
+    expect(monitorSource.contains("processPresenceProbe: @escaping () -> Bool = { false }")
+        || monitorSource.contains("processPresenceProbe: () -> Bool = { false }")
+        || !monitorSource.contains("defaultProcessPresenceProbe"),
+        "Grok presence must not spawn a ps-based process probe (hangs the activity queue)")
+    expect(!monitorSource.contains("/bin/ps"), "Grok presence must never shell out to /bin/ps")
+    expect(appDelegateSource.contains("grokActivityMonitor"), "AppDelegate should delegate Grok polling to a background monitor")
+    expect(appDelegateSource.contains("grokSnapshots()"), "AppDelegate should merge Grok snapshots into the aggregate")
+    expect(
+        appDelegateSource.contains("codexActivitySnapshot.sessions + claudeSnapshots() + grokSnapshots()"),
+        "AppDelegate should aggregate codex + claude + grok snapshots"
+    )
+    expect(appDelegateSource.contains("case .grok:"), "AppDelegate standby/live-session path should handle Grok focus")
+    expect(!appDelegateSource.contains("activateGrok"), "Grok must not gain a click-to-activate terminal path")
+}
+
+private func testGrokPresencePrefersActiveSessionsFile() {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("agent-halo-grok-presence-\(UUID().uuidString)", isDirectory: true)
+    let grokDir = root.appendingPathComponent(".grok", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try? FileManager.default.createDirectory(at: grokDir, withIntermediateDirectories: true)
+
+    expect(
+        !GrokActivityMonitor.hasActiveSessionsFile(homeDirectory: root),
+        "missing active_sessions.json should not report presence"
+    )
+    expect(
+        !GrokActivityMonitor.isPresent(homeDirectory: root, processPresenceProbe: { false }),
+        "absent file and no process should not report presence"
+    )
+
+    let sessionsURL = grokDir.appendingPathComponent("active_sessions.json")
+    try? "[]".write(to: sessionsURL, atomically: true, encoding: .utf8)
+    expect(
+        !GrokActivityMonitor.hasActiveSessionsFile(homeDirectory: root),
+        "empty active_sessions array should not report presence"
+    )
+
+    // Use this process's pid so kill(0) succeeds without a custom probe.
+    let livePid = ProcessInfo.processInfo.processIdentifier
+    let payload = """
+    [{"session_id":"s1","pid":\(livePid),"cwd":"/tmp","opened_at":"2026-07-25T00:00:00Z"}]
+    """
+    try? payload.write(to: sessionsURL, atomically: true, encoding: .utf8)
+    expect(
+        GrokActivityMonitor.hasActiveSessionsFile(homeDirectory: root),
+        "non-empty active_sessions.json should report presence"
+    )
+    expect(
+        GrokActivityMonitor.isPresent(homeDirectory: root, processPresenceProbe: { false }),
+        "live-pid active_sessions should report presence without a process probe"
+    )
+
+    let deadPayload = #"""
+    [{"session_id":"s1","pid":99999999,"cwd":"/tmp","opened_at":"2026-07-25T00:00:00Z"}]
+    """#
+    try? deadPayload.write(to: sessionsURL, atomically: true, encoding: .utf8)
+    expect(
+        GrokActivityMonitor.hasActiveSessionsFile(homeDirectory: root),
+        "dead-pid entries still appear in the sessions file"
+    )
+    expect(
+        !GrokActivityMonitor.isPresent(homeDirectory: root, processPresenceProbe: { false }),
+        "dead-pid-only active_sessions should not report presence"
+    )
+
+    try? "[]".write(to: sessionsURL, atomically: true, encoding: .utf8)
+    expect(
+        !GrokActivityMonitor.isPresent(homeDirectory: root, processPresenceProbe: { false }),
+        "empty sessions and no process should stay absent"
+    )
+    expect(
+        GrokActivityMonitor.isPresent(homeDirectory: root, processPresenceProbe: { true }),
+        "test override processPresenceProbe still works when file is empty"
+    )
+
+    // Entries without pid: non-empty file remains a presence signal.
+    try? #"[{"session_id":"legacy"}]"#.write(to: sessionsURL, atomically: true, encoding: .utf8)
+    expect(
+        GrokActivityMonitor.isPresent(homeDirectory: root, processPresenceProbe: { false }),
+        "legacy active_sessions entries without pid still report presence"
+    )
+}
+
+@MainActor
+private func testGrokLiveStandbyUsesStableGreenAggregate() {
+    let idle = AggregateSnapshot(
+        state: .idle,
+        label: "OFFLINE",
+        detail: AgentKind.grok.offlineDetail,
+        sessions: [],
+        focusedAgent: .grok
+    )
+
+    let standby = AppDelegate.standbyAggregate(aggregate: idle, hasLiveSession: true)
+    expect(standby.state, .done, "present idle Grok should use the stable green state")
+    expect(standby.label, "STANDBY", "present idle Grok label")
+    expect(standby.detail, AgentKind.grok.localizedStandbyDetail, "present idle Grok detail")
+
+    let offline = AppDelegate.standbyAggregate(aggregate: idle, hasLiveSession: false)
+    expect(offline, idle, "absent Grok should retain the normal idle aggregate")
 }
 
 private func testHaloUsesShapeLayersNotCpuRasterization() {
@@ -2578,6 +2726,7 @@ private func testDetailsPanelLocalizesClaudeActivityDetails() {
 private func testUsageProviderMappingIsTotal() {
     expect(AppDelegate.usageProviderID(for: .codex), .codex, "Codex Provider mapping")
     expect(AppDelegate.usageProviderID(for: .claudeCode), .claude, "Claude Provider mapping")
+    expect(AppDelegate.usageProviderID(for: .grok), .grok, "grok focus maps to grok usage")
 }
 
 @MainActor
@@ -2590,6 +2739,7 @@ private func testAgentToggleUsesSharedSVGAssets() {
     let assetDirectory = srcRoot.appendingPathComponent("shared/assets/agent-switch", isDirectory: true)
     let codexURL = assetDirectory.appendingPathComponent("codex.svg")
     let claudeURL = assetDirectory.appendingPathComponent("claude-code.svg")
+    let grokURL = assetDirectory.appendingPathComponent("grok.svg")
     let detailsSourceURL = sourceDirectory.appendingPathComponent("DetailsPanel.swift")
     let buildScriptURL = srcRoot
         .deletingLastPathComponent()
@@ -2597,20 +2747,30 @@ private func testAgentToggleUsesSharedSVGAssets() {
 
     expect(FileManager.default.fileExists(atPath: codexURL.path), "Codex SVG should live in shared assets")
     expect(FileManager.default.fileExists(atPath: claudeURL.path), "Claude SVG should live in shared assets")
+    expect(FileManager.default.fileExists(atPath: grokURL.path), "Grok SVG should live in shared assets")
 
     let detailsSource = try? String(contentsOf: detailsSourceURL, encoding: .utf8)
     expect(detailsSource?.contains("<svg") == false, "DetailsPanel should not embed SVG markup")
+    expect(
+        detailsSource?.contains("agentToggle.widthAnchor.constraint(equalToConstant: 108)") == true,
+        "details panel agent toggle should be wide enough for three icons"
+    )
 
     let buildScript = try? String(contentsOf: buildScriptURL, encoding: .utf8)
     expect(
         buildScript?.contains("src/shared/assets/agent-switch") == true,
         "macOS packaging should copy the shared agent icons"
     )
+    expect(
+        buildScript?.contains("agent-switch") == true
+            && buildScript?.contains("*.svg") == true,
+        "macOS packaging should copy all agent-switch SVGs including grok.svg"
+    )
 }
 
 @MainActor
 private func testAgentToggleUsesCodexAndClaudeIcons() {
-    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 110, height: 24))
+    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 108, height: 24))
     let descendants = allDescendants(of: toggle)
     let visibleLabels = descendants
         .compactMap { $0 as? NSTextField }
@@ -2620,49 +2780,86 @@ private func testAgentToggleUsesCodexAndClaudeIcons() {
 
     expect(!visibleLabels.contains("Codex"), "agent toggle should replace the Codex text with an icon")
     expect(!visibleLabels.contains("CC"), "agent toggle should replace the CC text with an icon")
-    expect(icons.count == 2, "agent toggle should render one icon for each agent")
-    expect(icons.allSatisfy { $0.image != nil }, "agent toggle should load both shared SVG images")
+    expect(!visibleLabels.contains("Grok"), "agent toggle should replace the Grok text with an icon")
+    expect(icons.count == 3, "agent toggle should render one icon for each agent")
+    expect(icons.allSatisfy { $0.image != nil }, "agent toggle should load all shared SVG images")
 }
 
 @MainActor
 private func testAgentToggleDimsInactiveIconMoreStrongly() {
-    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 110, height: 24))
+    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 108, height: 24))
     let icons = allDescendants(of: toggle).compactMap { $0 as? NSImageView }
 
-    expect(icons.count == 2, "agent toggle should expose both agent icons for opacity checks")
-    guard icons.count == 2 else { return }
+    expect(icons.count == 3, "agent toggle should expose all agent icons for opacity checks")
+    guard icons.count == 3 else { return }
 
     expect(icons[0].alphaValue, 1, "selected Codex icon should remain fully opaque")
     expect(icons[1].alphaValue, 0.40, "inactive Claude Code icon should use stronger dimming")
+    expect(icons[2].alphaValue, 0.40, "inactive Grok icon should use stronger dimming")
 
     toggle.setAgent(.claudeCode)
 
     expect(icons[0].alphaValue, 0.40, "inactive Codex icon should use stronger dimming")
     expect(icons[1].alphaValue, 1, "selected Claude Code icon should remain fully opaque")
+    expect(icons[2].alphaValue, 0.40, "inactive Grok icon should stay dimmed")
+
+    toggle.setAgent(.grok)
+
+    expect(icons[0].alphaValue, 0.40, "inactive Codex icon should stay dimmed")
+    expect(icons[1].alphaValue, 0.40, "inactive Claude Code icon should stay dimmed")
+    expect(icons[2].alphaValue, 1, "selected Grok icon should remain fully opaque")
 }
 
 @MainActor
 private func testAgentToggleSelectionPillFitsItsIconWidth() {
-    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 110, height: 24))
+    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 108, height: 24))
     toggle.layoutSubtreeIfNeeded()
 
     let selectionPill = toggle.subviews.first?.subviews.first
     expect(
         selectionPill?.frame.width ?? 0,
-        51,
+        34,
         "selected agent pill should fit the icon width without extra horizontal expansion"
     )
 }
 
 @MainActor
 private func testAgentToggleKeepsWholeControlClickable() {
-    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 110, height: 24))
+    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 108, height: 24))
     toggle.layoutSubtreeIfNeeded()
 
     expect(
-        toggle.hitTest(NSPoint(x: 82, y: 12)) === toggle,
+        toggle.hitTest(NSPoint(x: 90, y: 12)) === toggle,
         "agent icons should not intercept clicks from the toggle"
     )
+}
+
+@MainActor
+private func testAgentToggleSupportsThreeAgentsIncludingGrok() {
+    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 108, height: 24))
+    toggle.layoutSubtreeIfNeeded()
+
+    expect(toggle.bounds.width, 108, "three-way agent toggle should use a wider control")
+
+    toggle.setAgent(.grok)
+    expect(toggle.selectedAgent, .grok, "setAgent(.grok) should select Grok")
+
+    toggle.setAgent(.codex)
+    expect(toggle.selectedAgent, .codex, "setAgent should restore Codex")
+
+    var selected: AgentKind?
+    toggle.onAgentSelected = { selected = $0 }
+    toggle.selectAgentAtXForTesting(90)
+    expect(toggle.selectedAgent, .grok, "clicking the right third should select Grok")
+    expect(selected, .grok, "right-third click should emit Grok")
+
+    toggle.selectAgentAtXForTesting(18)
+    expect(toggle.selectedAgent, .codex, "clicking the left third should select Codex")
+    expect(selected, .codex, "left-third click should emit Codex")
+
+    toggle.selectAgentAtXForTesting(54)
+    expect(toggle.selectedAgent, .claudeCode, "clicking the middle third should select Claude Code")
+    expect(selected, .claudeCode, "middle-third click should emit Claude Code")
 }
 
 @MainActor
