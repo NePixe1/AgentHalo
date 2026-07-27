@@ -584,6 +584,10 @@ public static class Diagnostics
                 HaloWindow.ConfigureLocalization(new HaloSettings { Language = "en" });
                 Assert(L10n.Instance.CurrentLanguage == "en",
                     "saved Windows language initializes L10n before UI text is built");
+                Assert(L10n.Instance.Format("quota.remaining", 92) == "92% left",
+                    "English quota remaining copy");
+                Assert(L10n.Instance.Format("quota.resets", "Aug 2") == "Resets Aug 2",
+                    "English quota reset copy");
                 Assert(HaloWindow.IsLanguageMenuItemChecked(null, null),
                     "auto language item is checked when preference follows system");
                 Assert(!HaloWindow.IsLanguageMenuItemChecked("en", null),
@@ -1222,6 +1226,34 @@ public static class Diagnostics
                 Assert(!CodexSessionMonitor.IsSessionVisible(recentActive,
                     presenceSettings, true, supersessionNow),
                     "stale active session cannot leave the halo permanently working");
+
+                SessionSnapshot recentDone = new SessionSnapshot
+                {
+                    ThreadId = "recent-done",
+                    State = HaloState.Done,
+                    Active = false,
+                    CompletedUtc = supersessionNow.AddSeconds(-2),
+                    LastEventUtc = supersessionNow.AddSeconds(-2)
+                };
+                Assert(CodexSessionMonitor.IsSessionVisible(recentDone,
+                    presenceSettings, true, supersessionNow),
+                    "fresh Codex completion remains visible briefly while the app runs");
+                Assert(!CodexSessionMonitor.IsSessionVisible(recentDone,
+                    presenceSettings, false, supersessionNow),
+                    "quitting Codex must hide done so offline can surface");
+                recentDone.CompletedUtc = supersessionNow.AddSeconds(-12);
+                recentDone.LastEventUtc = recentDone.CompletedUtc;
+                Assert(!CodexSessionMonitor.IsSessionVisible(recentDone,
+                    presenceSettings, true, supersessionNow),
+                    "Codex completion settles after ~8s so standby can appear");
+                Assert(CodexRuntimeReader.IsPrimaryCodexProcessName("Codex"),
+                    "exact Codex process name is primary");
+                Assert(CodexRuntimeReader.IsPrimaryCodexProcessName("codex"),
+                    "exact lowercase codex process name is primary");
+                Assert(!CodexRuntimeReader.IsPrimaryCodexProcessName("codex-code-mode-host"),
+                    "helper process names must not count as Codex presence");
+                Assert(!CodexRuntimeReader.IsPrimaryCodexProcessName("CodexHelper"),
+                    "substring Codex names must not count as Codex presence");
 
                 string watcherRoot = Path.Combine(Path.GetTempPath(),
                     "agent-halo-session-watch-" + Guid.NewGuid().ToString("N"));

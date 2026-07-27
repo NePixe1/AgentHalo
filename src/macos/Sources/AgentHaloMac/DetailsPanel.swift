@@ -141,8 +141,12 @@ class DetailsPanel: NSPanel {
             topRow.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
             titleField.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
             detailField.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
+            quotaGroup.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 17),
             quotaGroup.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
+            quotaGroup.heightAnchor.constraint(equalToConstant: 70),
+            primaryQuota.leadingAnchor.constraint(equalTo: quotaGroup.leadingAnchor),
             primaryQuota.trailingAnchor.constraint(equalTo: quotaGroup.trailingAnchor),
+            secondaryQuota.leadingAnchor.constraint(equalTo: quotaGroup.leadingAnchor),
             secondaryQuota.trailingAnchor.constraint(equalTo: quotaGroup.trailingAnchor),
             metadataGroup.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 17),
             metadataGroup.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17)
@@ -282,7 +286,7 @@ class DetailsPanel: NSPanel {
         } else {
             formatter.dateFormat = L10n.shared["date.other_format"]
         }
-        return formatter.string(from: date)
+        return L10n.shared.format("quota.resets", formatter.string(from: date))
     }
 
     static func compactTokenCount(_ count: Int64?) -> String {
@@ -429,6 +433,10 @@ class DetailsPanel: NSPanel {
         detailField.stringValue
     }
 
+    var detailFrameForTesting: CGRect {
+        detailField.convert(detailField.bounds, to: contentView)
+    }
+
     var contextPillHiddenForTesting: Bool {
         contextPill.isHidden
     }
@@ -517,6 +525,30 @@ class DetailsPanel: NSPanel {
 
     var secondaryQuotaMeterFillForTesting: Double {
         secondaryQuota.meterFillForTesting
+    }
+
+    var primaryQuotaFrameForTesting: CGRect {
+        primaryQuota.convert(primaryQuota.bounds, to: contentView)
+    }
+
+    var primaryQuotaNameFrameForTesting: CGRect {
+        primaryQuota.convert(primaryQuota.nameFrameForTesting, to: contentView)
+    }
+
+    var secondaryQuotaFrameForTesting: CGRect {
+        secondaryQuota.convert(secondaryQuota.bounds, to: contentView)
+    }
+
+    var secondaryQuotaResetFrameForTesting: CGRect {
+        secondaryQuota.convert(secondaryQuota.resetFrameForTesting, to: contentView)
+    }
+
+    var primaryQuotaHasAmbiguousLayoutForTesting: Bool {
+        primaryQuota.hasAmbiguousLayout
+    }
+
+    var secondaryQuotaHasAmbiguousLayoutForTesting: Bool {
+        secondaryQuota.hasAmbiguousLayout
     }
 
     var sessionTitleValueForTesting: String {
@@ -763,6 +795,14 @@ private final class QuotaRowView: NSView {
 
     var meterFillForTesting: Double {
         meter.value
+    }
+
+    var nameFrameForTesting: CGRect {
+        nameField.frame
+    }
+
+    var resetFrameForTesting: CGRect {
+        resetField.frame
     }
 
     private func setup() {

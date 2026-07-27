@@ -37,7 +37,8 @@
   "quota.5h": "5-Hour",
   "quota.weekly": "Weekly",
   "quota.monthly": "Monthly Quota",
-  "quota.remaining": "{0}% Remaining",
+  "quota.remaining": "{0}% left",
+  "quota.resets": "Resets {0}",
   "quota.no_data": "No Data",
   "quota.waiting_refresh": "Waiting for Refresh",
 

@@ -38,6 +38,7 @@
   "quota.weekly": "每周",
   "quota.monthly": "月额度",
   "quota.remaining": "剩余 {0}%",
+  "quota.resets": "{0}",
   "quota.no_data": "暂无数据",
   "quota.waiting_refresh": "等待刷新",
 
