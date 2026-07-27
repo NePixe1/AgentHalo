@@ -51,6 +51,7 @@ public sealed class HaloWindow : Window
         private HaloState? demoState;
         private ErrorPresentation? demoErrorPresentation;
         private bool codexWasForeground;
+        private bool? lastCodexRunning;
         private DateTime activeErrorUtc;
         private DateTime errorDimmedUtc;
         private ErrorPresentation errorPresentation = ErrorPresentation.Flashing;
@@ -229,6 +230,14 @@ public sealed class HaloWindow : Window
             {
                 RefreshState();
             }
+            // Re-evaluate presence on every tick so offline becomes visible as
+            // soon as the main Codex process exits — even if residual helpers
+            // previously kept a false-positive "running" flag until later.
+            bool codexRunning = CodexRuntimeReader.IsRunning();
+            bool codexRunningChanged = !lastCodexRunning.HasValue ||
+                lastCodexRunning.Value != codexRunning;
+            lastCodexRunning = codexRunning;
+
             bool codexIsForeground = IsCodexForeground();
             if (settings.GetFocusedAgent() == AgentKind.Codex &&
                 codexIsForeground && !codexWasForeground && !demoState.HasValue &&
@@ -248,8 +257,15 @@ public sealed class HaloWindow : Window
                     errorDimmedUtc = DateTime.UtcNow;
                 }
             }
-            if (codexIsForeground != codexWasForeground ||
-                errorPresentation == ErrorPresentation.Dim)
+            // Keep refreshing while COMPLETE so the short done window can settle
+            // to STANDBY without requiring a foreground or process edge.
+            bool doneNeedsSettle = aggregate != null &&
+                aggregate.State == HaloState.Done &&
+                settings.GetFocusedAgent() == AgentKind.Codex;
+            if (codexRunningChanged ||
+                codexIsForeground != codexWasForeground ||
+                errorPresentation == ErrorPresentation.Dim ||
+                doneNeedsSettle)
             {
                 RefreshState();
             }

@@ -1176,14 +1176,25 @@ public sealed class CodexSessionMonitor : IDisposable
             }
         }
 
+        // Brief green flash after a turn ends, then settle to STANDBY/OFFLINE.
+        // Codex previously held done for 24h, which blocked offline and standby.
+        internal static readonly TimeSpan CompletedVisibleDuration =
+            TimeSpan.FromSeconds(8);
+
         internal static bool IsSessionVisible(SessionSnapshot snapshot,
             HaloSettings settings, bool codexRunning, DateTime now)
         {
             if (snapshot.State == HaloState.Done)
             {
+                // Done is only meaningful while Codex is still present; quitting
+                // the app must surface OFFLINE instead of a sticky COMPLETE.
+                if (!codexRunning)
+                {
+                    return false;
+                }
                 return snapshot.CompletedUtc > settings.GetAcknowledgedUtc(snapshot.ThreadId) &&
                     snapshot.CompletedUtc >= settings.GetInstalledUtc() &&
-                    snapshot.CompletedUtc >= now.AddDays(-1);
+                    snapshot.CompletedUtc >= now - CompletedVisibleDuration;
             }
             if (snapshot.Active)
             {
@@ -1570,35 +1581,37 @@ public sealed class CodexRealtimeActivityReader
 
 public static class CodexRuntimeReader
     {
+        /// <summary>
+        /// True only when the main Codex desktop process is running.
+        /// Helper hosts such as "codex-code-mode-host" must not keep presence online
+        /// after the user quits Codex from the taskbar.
+        /// </summary>
         public static bool IsRunning()
         {
             try
             {
-                if (Process.GetProcessesByName("Codex").Length > 0 ||
-                    Process.GetProcessesByName("codex").Length > 0)
-                {
-                    return true;
-                }
-                foreach (Process process in Process.GetProcesses())
-                {
-                    try
-                    {
-                        string name = process.ProcessName;
-                        if (!String.IsNullOrEmpty(name) &&
-                            name.IndexOf("codex", StringComparison.OrdinalIgnoreCase) >= 0)
-                        {
-                            return true;
-                        }
-                    }
-                    catch
-                    {
-                    }
-                }
+                // Exact process-name match only. Do not scan for substring "codex"
+                // — that previously matched residual background helpers forever.
+                return Process.GetProcessesByName("Codex").Length > 0 ||
+                    Process.GetProcessesByName("codex").Length > 0;
             }
             catch
             {
             }
             return false;
+        }
+
+        /// <summary>
+        /// Whether a process name should count as the main Codex desktop app.
+        /// Exposed for diagnostics / self-tests.
+        /// </summary>
+        internal static bool IsPrimaryCodexProcessName(string processName)
+        {
+            if (String.IsNullOrEmpty(processName))
+            {
+                return false;
+            }
+            return String.Equals(processName, "Codex", StringComparison.OrdinalIgnoreCase);
         }
     }
 
