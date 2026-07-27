@@ -777,7 +777,7 @@ public sealed class DetailsWindow : Window
             var format = local.Date == DateTime.Now.Date
                 ? L10n.Instance["date.today_format"]
                 : L10n.Instance["date.other_format"];
-            return local.ToString(format, culture);
+            return L10n.Instance.Format("quota.resets", local.ToString(format, culture));
         }
 
         private static Grid CreateQuotaRow(string title, out TextBlock name,

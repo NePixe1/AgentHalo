@@ -59,6 +59,7 @@ func runHaloInteractionChecks() {
     testLiveCodexErrorCyclesThroughBrightAndDimPresentations()
     testDetailsPanelHidesProviderPlanAndWarning()
     testDetailsPanelShowsFiveHourAndWeeklyRemainingUsage()
+    testEnglishQuotaResetCopyPreservesRowLayout()
     testQuotaMeterUsesApprovedSoftFadePalette()
     testQuotaMeterRendersApprovedSoftFadeOutput()
     testDetailsPanelShowsMissingAndExpiredUsageWindows()
@@ -884,6 +885,59 @@ private func testDetailsPanelShowsFiveHourAndWeeklyRemainingUsage() {
     expect(meters.allSatisfy { abs($0.frame.height - 4) < 0.001 }, "usage panel quota meters should remain 4pt high")
     expect(!panel.primaryQuotaResetHiddenForTesting, "future short-window reset should be visible")
     expect(!panel.secondaryQuotaResetHiddenForTesting, "future weekly reset should be visible")
+}
+
+@MainActor
+private func testEnglishQuotaResetCopyPreservesRowLayout() {
+    L10n.shared.setLanguage("en")
+    defer { L10n.shared.setLanguage("zh") }
+
+    var components = DateComponents()
+    components.year = 2099
+    components.month = 8
+    components.day = 2
+    components.hour = 14
+    components.minute = 30
+    guard let reset = Calendar.current.date(from: components) else {
+        fatalError("English quota reset test date should be constructible")
+    }
+
+    let panel = DetailsPanel()
+    panel.render(
+        aggregate: detailsAggregate(),
+        model: usageDetailsModel(windows: [
+            UsageWindow(kind: .weekly, usedPercent: 9, resetsAt: reset, duration: 604_800),
+        ])
+    )
+    panel.contentView?.layoutSubtreeIfNeeded()
+
+    expect(
+        panel.detailFrameForTesting.minY - panel.primaryQuotaFrameForTesting.maxY,
+        16,
+        "English quota copy should preserve the subtitle-to-first-row gap"
+    )
+    expect(
+        panel.detailFrameForTesting.minY - panel.primaryQuotaNameFrameForTesting.maxY,
+        16,
+        "English quota title should stay inside the first row instead of overlapping the subtitle"
+    )
+    expect(
+        panel.primaryQuotaFrameForTesting.minY - panel.secondaryQuotaFrameForTesting.maxY,
+        4,
+        "English quota copy should preserve spacing between quota rows"
+    )
+    expect(
+        panel.secondaryQuotaFrameForTesting.contains(panel.secondaryQuotaResetFrameForTesting),
+        "English reset text should stay inside the weekly quota row"
+    )
+    expect(
+        !panel.primaryQuotaHasAmbiguousLayoutForTesting,
+        "English no-data quota row should have an unambiguous layout"
+    )
+    expect(
+        !panel.secondaryQuotaHasAmbiguousLayoutForTesting,
+        "English reset quota row should have an unambiguous layout"
+    )
 }
 
 @MainActor
@@ -2648,7 +2702,8 @@ private func testL10nEnglishSwitchProducesEnglishStrings() {
     expect(L10n.shared.currentLanguage, "en", "explicit en language should be honored")
     expect(L10n.shared["menu.quit"], "Quit", "menu.quit should be English after switch")
     expect(L10n.shared["status.offline_codex"], "Codex Not Running", "Codex offline copy should be English after switch")
-    expect(L10n.shared.format("quota.remaining", 42), "42% Remaining", "quota.remaining English formatting")
+    expect(L10n.shared.format("quota.remaining", 42), "42% left", "quota.remaining English formatting")
+    expect(L10n.shared.format("quota.resets", "Aug 2"), "Resets Aug 2", "quota.resets English formatting")
     expect(L10n.shared.format("context.label", 58), "Context 58%", "context.label English formatting")
     expect(L10n.shared["date.culture"], "en-US", "date.culture should switch alongside language")
 
@@ -2667,9 +2722,8 @@ private func testL10nEnglishSwitchProducesEnglishStrings() {
         "DetailsPanel.localizedDetail should follow the active language"
     )
 
-    // formatResetTime must honor date.culture (en-US) rather than zh-CN.
-    // Pin to a known instant so the English locale produces "Jan 5",
-    // not the Chinese "1月5日".
+    // formatResetTime must honor date.culture (en-US) and include the
+    // English quota reset prefix rather than the Chinese refresh suffix.
     var components = DateComponents()
     components.year = 2026
     components.month = 1
@@ -2682,8 +2736,8 @@ private func testL10nEnglishSwitchProducesEnglishStrings() {
     }
     let formatted = DetailsPanel.formatResetTime(reset)
     expect(
-        formatted.contains("Jan") && !formatted.contains("刷新") && !formatted.contains("refresh"),
-        "formatResetTime should render English date without refresh suffix when language=en (got: \(formatted))"
+        formatted == "Resets Jan 5",
+        "formatResetTime should render the English quota reset label when language=en (got: \(formatted))"
     )
 }
 

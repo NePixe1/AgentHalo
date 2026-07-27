@@ -584,6 +584,10 @@ public static class Diagnostics
                 HaloWindow.ConfigureLocalization(new HaloSettings { Language = "en" });
                 Assert(L10n.Instance.CurrentLanguage == "en",
                     "saved Windows language initializes L10n before UI text is built");
+                Assert(L10n.Instance.Format("quota.remaining", 92) == "92% left",
+                    "English quota remaining copy");
+                Assert(L10n.Instance.Format("quota.resets", "Aug 2") == "Resets Aug 2",
+                    "English quota reset copy");
                 Assert(HaloWindow.IsLanguageMenuItemChecked(null, null),
                     "auto language item is checked when preference follows system");
                 Assert(!HaloWindow.IsLanguageMenuItemChecked("en", null),
