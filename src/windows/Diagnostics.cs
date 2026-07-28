@@ -1288,6 +1288,63 @@ public static class Diagnostics
                 }
                 Directory.Delete(watcherRoot, true);
 
+                // Context pill STANDBY soft-hold (parity with macOS DetailsPanel).
+                DateTime holdT0 = new DateTime(2026, 7, 28, 12, 0, 0, DateTimeKind.Utc);
+                DetailsWindow.ContextDisplayResolution liveHold =
+                    DetailsWindow.ResolveContextDisplay(
+                        42.0, false, false, null, null, holdT0,
+                        DetailsWindow.StandbyContextHoldDuration);
+                Assert(liveHold.DisplayPercent.HasValue &&
+                    Math.Abs(liveHold.DisplayPercent.Value - 42.0) < 0.001 &&
+                    liveHold.HeldPercent.HasValue &&
+                    !liveHold.HoldExpiresUtc.HasValue,
+                    "live context displays and is remembered without starting hold timer");
+                DetailsWindow.ContextDisplayResolution startHold =
+                    DetailsWindow.ResolveContextDisplay(
+                        null, false, true, 42.0, null, holdT0,
+                        DetailsWindow.StandbyContextHoldDuration);
+                Assert(startHold.DisplayPercent.HasValue &&
+                    Math.Abs(startHold.DisplayPercent.Value - 42.0) < 0.001 &&
+                    startHold.HoldExpiresUtc.HasValue &&
+                    startHold.HoldExpiresUtc.Value ==
+                        holdT0.Add(DetailsWindow.StandbyContextHoldDuration),
+                    "first STANDBY tick soft-holds the last live context percent");
+                DetailsWindow.ContextDisplayResolution midHold =
+                    DetailsWindow.ResolveContextDisplay(
+                        null, false, true, 42.0,
+                        holdT0.Add(DetailsWindow.StandbyContextHoldDuration),
+                        holdT0.Add(TimeSpan.FromSeconds(5)),
+                        DetailsWindow.StandbyContextHoldDuration);
+                Assert(midHold.DisplayPercent.HasValue,
+                    "mid-hold keeps the context pill visible");
+                DetailsWindow.ContextDisplayResolution expiredHold =
+                    DetailsWindow.ResolveContextDisplay(
+                        null, false, true, 42.0,
+                        holdT0.Add(DetailsWindow.StandbyContextHoldDuration),
+                        holdT0.Add(DetailsWindow.StandbyContextHoldDuration)
+                            .Add(TimeSpan.FromMilliseconds(10)),
+                        DetailsWindow.StandbyContextHoldDuration);
+                Assert(!expiredHold.DisplayPercent.HasValue &&
+                    !expiredHold.HeldPercent.HasValue,
+                    "STANDBY hold expires and hides the context pill");
+                DetailsWindow.ContextDisplayResolution offlineHold =
+                    DetailsWindow.ResolveContextDisplay(
+                        null, true, false, 42.0,
+                        holdT0.Add(DetailsWindow.StandbyContextHoldDuration),
+                        holdT0, DetailsWindow.StandbyContextHoldDuration);
+                Assert(!offlineHold.DisplayPercent.HasValue &&
+                    !offlineHold.HeldPercent.HasValue,
+                    "OFFLINE clears context immediately without soft-hold");
+                // Frozen disk/usage readings during STANDBY must not re-arm live
+                // display: callers pass null live while isStandby (ApplyContextSource).
+                DetailsWindow.ContextDisplayResolution standbyIgnoresLive =
+                    DetailsWindow.ResolveContextDisplay(
+                        null, false, true, 55.0, null, holdT0,
+                        DetailsWindow.StandbyContextHoldDuration);
+                Assert(standbyIgnoresLive.DisplayPercent.HasValue &&
+                    Math.Abs(standbyIgnoresLive.DisplayPercent.Value - 55.0) < 0.001,
+                    "STANDBY soft-hold uses remembered percent only");
+
                 File.Delete(temp);
                 File.WriteAllText(outputPath,
                     "PASS\nLifecycle, usage metrics, panel formatting, and animation checks passed.\n",

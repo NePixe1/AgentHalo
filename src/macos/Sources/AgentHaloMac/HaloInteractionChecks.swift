@@ -103,6 +103,12 @@ func runHaloInteractionChecks() {
     testDetailsPanelShowsAnswerStreamingCopy()
     testDetailsPanelRefreshesStatusFromLatestAggregate()
     testDetailsPanelShowsContextWhenLiveCodexUsageArrives()
+    testDetailsPanelHoldsThenClearsGrokContextOnStandby()
+    testDetailsPanelHoldsThenClearsClaudeContextOnStandby()
+    testDetailsPanelClearsContextHoldImmediatelyWhenOffline()
+    testContextPillStandbyHoldResolve()
+    testGrokContextPillHidesWithoutDisplayedSession()
+    testClaudeContextPillHidesWithoutDisplayedSession()
     testDetailsPanelLocalizesClaudeActivityDetails()
     testAgentToggleUsesSharedSVGAssets()
     testAgentToggleUsesCodexAndClaudeIcons()
@@ -1663,6 +1669,322 @@ private func testDetailsPanelShowsContextWhenLiveCodexUsageArrives() {
 
     expect(!panel.contextPillHiddenForTesting, "live Codex context should reveal the pill without reopening details")
     expect(panel.contextValueForTesting == "42%", "live Codex context should show its real percentage")
+}
+
+@MainActor
+private func testDetailsPanelHoldsThenClearsGrokContextOnStandby() {
+    let panel = DetailsPanel()
+    let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+    let activeSession = SessionSnapshot(
+        threadId: "grok-active",
+        projectName: "AgentHalo",
+        workingDirectory: "/tmp/AgentHalo",
+        state: .working,
+        action: "Running command",
+        lastEventAt: t0,
+        completedAt: nil,
+        active: true,
+        agent: .grok,
+        contextUsedPercent: 55
+    )
+    panel.render(
+        aggregate: AggregateSnapshot(
+            state: .working,
+            label: "EXECUTING",
+            detail: "AgentHalo - Running command",
+            sessions: [activeSession],
+            focusedAgent: .grok
+        ),
+        model: usageDetailsModel(provider: "Grok", context: 55)
+    )
+    expect(!panel.contextPillHiddenForTesting, "active Grok turn should show the context pill")
+    expect(panel.contextValueForTesting == "55%", "active Grok context percent")
+
+    let standby = AggregateSnapshot(
+        state: .done,
+        label: "STANDBY",
+        detail: AgentKind.grok.localizedStandbyDetail,
+        sessions: [],
+        focusedAgent: .grok
+    )
+    // First STANDBY tick starts the soft hold — pill stays with the last live value.
+    panel.updateStatus(aggregate: standby, now: t0)
+    expect(!panel.contextPillHiddenForTesting, "STANDBY should soft-hold the last context percent")
+    expect(panel.contextValueForTesting == "55%", "held Grok context should keep the last live percent")
+
+    // Mid-hold status tick keeps it.
+    panel.updateStatus(
+        aggregate: standby,
+        now: t0.addingTimeInterval(DetailsPanel.standbyContextHoldDuration - 0.5)
+    )
+    expect(!panel.contextPillHiddenForTesting, "pill should remain through the STANDBY hold window")
+
+    // After the hold window the next status tick drops it.
+    panel.updateStatus(
+        aggregate: standby,
+        now: t0.addingTimeInterval(DetailsPanel.standbyContextHoldDuration + 0.1)
+    )
+    expect(
+        panel.contextPillHiddenForTesting,
+        "Grok STANDBY should hide the context pill after the soft-hold window"
+    )
+}
+
+@MainActor
+private func testDetailsPanelHoldsThenClearsClaudeContextOnStandby() {
+    let panel = DetailsPanel()
+    let t0 = Date(timeIntervalSince1970: 1_800_000_050)
+    panel.render(
+        aggregate: AggregateSnapshot(
+            state: .working,
+            label: "EXECUTING",
+            detail: "AgentHalo - Running command",
+            sessions: [
+                SessionSnapshot(
+                    threadId: "claude-active",
+                    projectName: "AgentHalo",
+                    workingDirectory: "/tmp/AgentHalo",
+                    state: .working,
+                    action: "Running command",
+                    lastEventAt: t0,
+                    completedAt: nil,
+                    active: true,
+                    agent: .claudeCode
+                )
+            ],
+            focusedAgent: .claudeCode
+        ),
+        model: sessionDetailsModel(context: 48)
+    )
+    expect(!panel.contextPillHiddenForTesting, "active Claude turn should show the context pill")
+    expect(panel.contextValueForTesting == "48%", "active Claude context percent")
+
+    let standby = AggregateSnapshot(
+        state: .done,
+        label: "STANDBY",
+        detail: AgentKind.claudeCode.localizedStandbyDetail,
+        sessions: [],
+        focusedAgent: .claudeCode
+    )
+    panel.updateStatus(aggregate: standby, now: t0)
+    expect(!panel.contextPillHiddenForTesting, "Claude STANDBY should soft-hold the last context percent")
+    expect(panel.contextValueForTesting == "48%", "held Claude context should keep the last live percent")
+
+    panel.updateStatus(
+        aggregate: standby,
+        now: t0.addingTimeInterval(DetailsPanel.standbyContextHoldDuration + 0.1)
+    )
+    expect(
+        panel.contextPillHiddenForTesting,
+        "Claude STANDBY should hide the context pill after the soft-hold window"
+    )
+}
+
+@MainActor
+private func testDetailsPanelClearsContextHoldImmediatelyWhenOffline() {
+    let panel = DetailsPanel()
+    let t0 = Date(timeIntervalSince1970: 1_800_000_100)
+    panel.render(
+        aggregate: AggregateSnapshot(
+            state: .working,
+            label: "EXECUTING",
+            detail: "AgentHalo - Running command",
+            sessions: [],
+            focusedAgent: .codex
+        ),
+        model: usageDetailsModel(context: 40)
+    )
+    expect(!panel.contextPillHiddenForTesting, "live context should show")
+
+    // Enter STANDBY to arm the hold.
+    panel.updateStatus(
+        aggregate: AggregateSnapshot(
+            state: .done,
+            label: "STANDBY",
+            detail: AgentKind.codex.localizedStandbyDetail,
+            sessions: [],
+            focusedAgent: .codex
+        ),
+        now: t0
+    )
+    expect(!panel.contextPillHiddenForTesting, "STANDBY should still hold context briefly")
+
+    // OFFLINE must not inherit the STANDBY hold.
+    panel.updateStatus(
+        aggregate: AggregateSnapshot(
+            state: .idle,
+            label: "OFFLINE",
+            detail: AgentKind.codex.localizedOfflineDetail,
+            sessions: [],
+            focusedAgent: .codex
+        ),
+        now: t0.addingTimeInterval(1)
+    )
+    expect(panel.contextPillHiddenForTesting, "OFFLINE clears context immediately without soft-hold")
+}
+
+private func testContextPillStandbyHoldResolve() {
+    let t0 = Date(timeIntervalSince1970: 1_800_000_200)
+    let live = DetailsPanel.resolveContextDisplay(
+        contextUsedPercent: 33,
+        isOffline: false,
+        isStandby: false,
+        heldPercent: nil,
+        holdExpiresAt: nil,
+        now: t0
+    )
+    expect(live.display, 33, "live percent should display")
+    expect(live.heldPercent, 33, "live percent is remembered for STANDBY hold")
+    expect(live.holdExpiresAt == nil, "live path does not start the hold timer")
+
+    let startHold = DetailsPanel.resolveContextDisplay(
+        contextUsedPercent: nil,
+        isOffline: false,
+        isStandby: true,
+        heldPercent: 33,
+        holdExpiresAt: nil,
+        now: t0
+    )
+    expect(startHold.display, 33, "first STANDBY tick should display the held percent")
+    expect(
+        startHold.holdExpiresAt,
+        t0.addingTimeInterval(DetailsPanel.standbyContextHoldDuration),
+        "first STANDBY tick arms the hold expiry"
+    )
+
+    let midHold = DetailsPanel.resolveContextDisplay(
+        contextUsedPercent: nil,
+        isOffline: false,
+        isStandby: true,
+        heldPercent: 33,
+        holdExpiresAt: t0.addingTimeInterval(DetailsPanel.standbyContextHoldDuration),
+        now: t0.addingTimeInterval(5)
+    )
+    expect(midHold.display, 33, "mid-hold should keep the percent")
+
+    let expired = DetailsPanel.resolveContextDisplay(
+        contextUsedPercent: nil,
+        isOffline: false,
+        isStandby: true,
+        heldPercent: 33,
+        holdExpiresAt: t0.addingTimeInterval(DetailsPanel.standbyContextHoldDuration),
+        now: t0.addingTimeInterval(DetailsPanel.standbyContextHoldDuration + 0.01)
+    )
+    expect(expired.display == nil, "expired hold should hide")
+    expect(expired.heldPercent == nil, "expired hold clears remembered percent")
+
+    let offline = DetailsPanel.resolveContextDisplay(
+        contextUsedPercent: nil,
+        isOffline: true,
+        isStandby: false,
+        heldPercent: 33,
+        holdExpiresAt: t0.addingTimeInterval(DetailsPanel.standbyContextHoldDuration),
+        now: t0
+    )
+    expect(offline.display == nil, "offline never soft-holds")
+    expect(offline.heldPercent == nil, "offline clears held state")
+}
+
+private func testGrokContextPillHidesWithoutDisplayedSession() {
+    // Disk-backed Grok signals.json remains after Stop; the pill must still
+    // follow the aggregate's displayed sessions (Codex parity).
+    expect(
+        AppDelegate.contextUsedPercentForGrokDetails(
+            displayedSessions: [],
+            diskContextPercent: 42
+        ) == nil,
+        "STANDBY/OFFLINE (no displayed sessions) must not surface frozen Grok context"
+    )
+
+    let active = SessionSnapshot(
+        threadId: "grok-1",
+        projectName: "AgentHalo",
+        workingDirectory: "/tmp/AgentHalo",
+        state: .thinking,
+        action: "Thinking",
+        lastEventAt: Date(),
+        completedAt: nil,
+        active: true,
+        agent: .grok
+    )
+    expect(
+        AppDelegate.contextUsedPercentForGrokDetails(
+            displayedSessions: [active],
+            diskContextPercent: 42
+        ),
+        42,
+        "visible Grok session should keep disk-backed context"
+    )
+
+    let placeholder = SessionSnapshot(
+        threadId: "grok",
+        projectName: "Grok",
+        workingDirectory: "",
+        state: .thinking,
+        action: "Thinking",
+        lastEventAt: Date(),
+        completedAt: nil,
+        active: true,
+        agent: .grok
+    )
+    expect(
+        AppDelegate.contextUsedPercentForGrokDetails(
+            displayedSessions: [placeholder],
+            diskContextPercent: 42
+        ) == nil,
+        "placeholder grok thread id is not a real session for the pill"
+    )
+}
+
+private func testClaudeContextPillHidesWithoutDisplayedSession() {
+    // Statusline snapshots remain for live idle Claude sessions; the pill must
+    // still follow the aggregate's displayed sessions (Codex/Grok parity).
+    expect(
+        AppDelegate.contextUsedPercentForClaudeDetails(
+            displayedSessions: [],
+            resolvedContextPercent: 37
+        ) == nil,
+        "STANDBY/OFFLINE (no displayed sessions) must not surface frozen Claude context"
+    )
+
+    let active = SessionSnapshot(
+        threadId: "claude-1",
+        projectName: "AgentHalo",
+        workingDirectory: "/tmp/AgentHalo",
+        state: .thinking,
+        action: "Thinking",
+        lastEventAt: Date(),
+        completedAt: nil,
+        active: true,
+        agent: .claudeCode
+    )
+    expect(
+        AppDelegate.contextUsedPercentForClaudeDetails(
+            displayedSessions: [active],
+            resolvedContextPercent: 37
+        ),
+        37,
+        "visible Claude session should keep statusline-backed context"
+    )
+
+    let placeholder = SessionSnapshot(
+        threadId: "claude-code",
+        projectName: "Claude Code",
+        workingDirectory: "",
+        state: .thinking,
+        action: "Thinking",
+        lastEventAt: Date(),
+        completedAt: nil,
+        active: true,
+        agent: .claudeCode
+    )
+    expect(
+        AppDelegate.contextUsedPercentForClaudeDetails(
+            displayedSessions: [placeholder],
+            resolvedContextPercent: 37
+        ) == nil,
+        "placeholder claude-code thread id is not a real session for the pill"
+    )
 }
 
 private func testVisibleDetailsPanelStatusRefreshIsWiredToTick() {

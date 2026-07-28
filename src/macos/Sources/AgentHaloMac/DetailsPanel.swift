@@ -23,6 +23,9 @@ class DetailsPanel: NSPanel {
     private static let panelWidth: CGFloat = 278
     private static let contextPillWidth: CGFloat = 42
     private static let contextPillHorizontalPadding: CGFloat = 3
+    /// After COMPLETE settles into STANDBY (empty sessions), keep the last live
+    /// context percent for this long before hiding. OFFLINE still clears immediately.
+    nonisolated static let standbyContextHoldDuration: TimeInterval = 12
 
     private let stack = NSStackView()
     private let contextValue = NSTextField(labelWithString: L10n.shared["context.empty"])
@@ -47,6 +50,11 @@ class DetailsPanel: NSPanel {
         valueFont: .systemFont(ofSize: 11.5, weight: .medium)
     )
     private var topRow: NSView?
+    /// Last live context percent used to soft-hold the pill after STANDBY.
+    private var heldContextPercent: Double?
+    /// When the standby hold started/should end; `nil` means not currently holding.
+    private var contextHoldExpiresAt: Date?
+    private var contextHoldAgent: AgentKind?
     var onMouseEntered: (() -> Void)?
     var onMouseExited: (() -> Void)?
     var onAgentSelected: ((AgentKind) -> Void)?
@@ -166,7 +174,13 @@ class DetailsPanel: NSPanel {
 
         updateStatus(aggregate: aggregate)
         let isOffline = aggregate.state == .idle && aggregate.label == "OFFLINE"
-        updateContext(model.contextUsedPercent, isOffline: isOffline)
+        let isStandby = aggregate.label == "STANDBY"
+        updateContext(
+            model.contextUsedPercent,
+            isOffline: isOffline,
+            isStandby: isStandby,
+            focusedAgent: aggregate.focusedAgent
+        )
 
         quotaGroup.isHidden = true
         metadataGroup.isHidden = true
@@ -186,10 +200,64 @@ class DetailsPanel: NSPanel {
         resizeToFitContent()
     }
 
-    private func updateContext(_ contextUsedPercent: Double?, isOffline: Bool) {
-        contextPill.isHidden = isOffline || contextUsedPercent == nil
-        contextValue.stringValue = contextUsedPercent.map(Self.compactContextPercent)
+    private func updateContext(
+        _ contextUsedPercent: Double?,
+        isOffline: Bool,
+        isStandby: Bool = false,
+        focusedAgent: AgentKind? = nil,
+        now: Date = Date()
+    ) {
+        if let focusedAgent {
+            if let contextHoldAgent, contextHoldAgent != focusedAgent {
+                heldContextPercent = nil
+                contextHoldExpiresAt = nil
+            }
+            contextHoldAgent = focusedAgent
+        }
+
+        let resolved = Self.resolveContextDisplay(
+            contextUsedPercent: contextUsedPercent,
+            isOffline: isOffline,
+            isStandby: isStandby,
+            heldPercent: heldContextPercent,
+            holdExpiresAt: contextHoldExpiresAt,
+            now: now,
+            holdDuration: Self.standbyContextHoldDuration
+        )
+        heldContextPercent = resolved.heldPercent
+        contextHoldExpiresAt = resolved.holdExpiresAt
+        contextPill.isHidden = resolved.display == nil
+        contextValue.stringValue = resolved.display.map(Self.compactContextPercent)
             ?? L10n.shared["context.empty"]
+    }
+
+    /// Pure display/hold state machine for the context pill.
+    /// - Live percent: show and remember for a future STANDBY hold.
+    /// - STANDBY + remembered percent: keep showing until `holdDuration` elapses.
+    /// - OFFLINE: clear immediately (no hold).
+    nonisolated static func resolveContextDisplay(
+        contextUsedPercent: Double?,
+        isOffline: Bool,
+        isStandby: Bool,
+        heldPercent: Double?,
+        holdExpiresAt: Date?,
+        now: Date,
+        holdDuration: TimeInterval = standbyContextHoldDuration
+    ) -> (display: Double?, heldPercent: Double?, holdExpiresAt: Date?) {
+        if isOffline {
+            return (nil, nil, nil)
+        }
+        if let contextUsedPercent {
+            return (contextUsedPercent, contextUsedPercent, nil)
+        }
+        guard isStandby, let heldPercent else {
+            return (nil, nil, nil)
+        }
+        let expiresAt = holdExpiresAt ?? now.addingTimeInterval(holdDuration)
+        if now < expiresAt {
+            return (heldPercent, heldPercent, expiresAt)
+        }
+        return (nil, nil, nil)
     }
 
     private func renderUsage(_ usage: UsageDetailsModel) {
@@ -262,15 +330,40 @@ class DetailsPanel: NSPanel {
         return ceil(pixelAlignedHeight / 2) * 2
     }
 
-    func updateStatus(aggregate: AggregateSnapshot) {
+    func updateStatus(aggregate: AggregateSnapshot, now: Date = Date()) {
         titleField.stringValue = aggregate.label
         let rgb = HaloVisualModel.stateColor(aggregate.state)
         titleField.textColor = NSColor(calibratedRed: rgb.red / 255, green: rgb.green / 255, blue: rgb.blue / 255, alpha: 1)
         detailField.stringValue = Self.localizedDetail(for: aggregate)
         agentToggle.setAgent(aggregate.focusedAgent)
-        if aggregate.focusedAgent == .codex {
-            let isOffline = aggregate.state == .idle && aggregate.label == "OFFLINE"
-            updateContext(aggregate.sessions.first?.contextUsedPercent, isOffline: isOffline)
+        let isOffline = aggregate.state == .idle && aggregate.label == "OFFLINE"
+        let isStandby = aggregate.label == "STANDBY"
+        switch aggregate.focusedAgent {
+        case .codex:
+            // Codex streams context on the status-only path from live snapshots.
+            // Empty sessions on STANDBY soft-hold the last percent briefly.
+            updateContext(
+                aggregate.sessions.first?.contextUsedPercent,
+                isOffline: isOffline,
+                isStandby: isStandby,
+                focusedAgent: .codex,
+                now: now
+            )
+        case .grok, .claudeCode:
+            // Grok/Claude context is disk- or statusline-backed on full content
+            // refresh. Only STANDBY/OFFLINE status ticks should touch the pill:
+            // STANDBY soft-holds the last live percent; OFFLINE clears immediately.
+            // Active labels leave existing metadata alone (status-only path must
+            // not wipe context when sessions briefly look empty).
+            if isOffline || isStandby {
+                updateContext(
+                    nil,
+                    isOffline: isOffline,
+                    isStandby: isStandby,
+                    focusedAgent: aggregate.focusedAgent,
+                    now: now
+                )
+            }
         }
     }
 

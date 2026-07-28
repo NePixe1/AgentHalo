@@ -179,6 +179,20 @@ public sealed class DetailsWindow : Window
         private AgentKind currentAgent;
         private AggregateSnapshot currentAggregate;
         private List<SessionSnapshot> currentSessions;
+        /// <summary>
+        /// Last live context percent soft-held after the aggregate enters STANDBY.
+        /// </summary>
+        private double? heldContextPercent;
+        private DateTime? contextHoldExpiresUtc;
+        private AgentKind? contextHoldAgent;
+
+        /// <summary>
+        /// After COMPLETE settles into STANDBY, keep the last live context percent
+        /// for this long before hiding. OFFLINE still clears immediately.
+        /// Matches macOS <c>DetailsPanel.standbyContextHoldDuration</c>.
+        /// </summary>
+        internal static readonly TimeSpan StandbyContextHoldDuration =
+            TimeSpan.FromSeconds(12);
 
         public event Action<AgentKind> AgentSelected;
 
@@ -402,7 +416,6 @@ public sealed class DetailsWindow : Window
                 ApplyOfflinePlaceholders();
                 return;
             }
-            contextMeter.Visibility = Visibility.Visible;
             if (currentAgent == AgentKind.ClaudeCode)
             {
                 RefreshClaudeDetails();
@@ -424,8 +437,17 @@ public sealed class DetailsWindow : Window
                     StringComparison.OrdinalIgnoreCase);
         }
 
+        private static bool IsStandbyAggregate(AggregateSnapshot aggregate)
+        {
+            return aggregate != null
+                && String.Equals(aggregate.Label, "STANDBY",
+                    StringComparison.OrdinalIgnoreCase);
+        }
+
         private void ApplyOfflinePlaceholders()
         {
+            heldContextPercent = null;
+            contextHoldExpiresUtc = null;
             CodexCustomApiMetrics codexMetrics = currentAgent == AgentKind.Codex
                 ? ReadCodexCustomMetrics() : null;
             if (currentAgent == AgentKind.ClaudeCode ||
@@ -444,11 +466,17 @@ public sealed class DetailsWindow : Window
             }
             else
             {
+                // RefreshQuota may try to set context from cached usage metrics;
+                // offline must still drop the pill (and clear hold state).
                 RefreshQuota();
             }
             // Drop the context pill rather than echoing a percentage from the
             // session that just went offline. Done after RefreshQuota since
-            // that path resets context-pill visibility.
+            // that path may reset context-pill visibility.
+            heldContextPercent = null;
+            contextHoldExpiresUtc = null;
+            contextMeter.IsAvailable = false;
+            contextMeter.Value = 0;
             contextMeter.Visibility = Visibility.Collapsed;
         }
 
@@ -633,9 +661,113 @@ public sealed class DetailsWindow : Window
 
         private void SetContextPercent(bool available, double value)
         {
-            contextMeter.IsAvailable = available;
-            contextMeter.Value = available
-                ? Math.Max(0, Math.Min(100, Math.Round(value))) : 0;
+            ApplyContextSource(available ? (double?)value : null);
+        }
+
+        /// <summary>
+        /// Apply a live (or missing) context reading through the shared
+        /// STANDBY soft-hold state machine used on macOS.
+        /// </summary>
+        private void ApplyContextSource(double? sourcePercent)
+        {
+            ApplyContextSource(sourcePercent, DateTime.UtcNow);
+        }
+
+        internal void ApplyContextSource(double? sourcePercent, DateTime nowUtc)
+        {
+            bool isOffline = IsOfflineAggregate(currentAggregate);
+            bool isStandby = IsStandbyAggregate(currentAggregate);
+
+            if (contextHoldAgent.HasValue && contextHoldAgent.Value != currentAgent)
+            {
+                heldContextPercent = null;
+                contextHoldExpiresUtc = null;
+            }
+            contextHoldAgent = currentAgent;
+
+            // STANDBY ignores frozen disk/usage occupancy so the pill does not
+            // stick forever while the agent process is merely idle. Soft-hold
+            // the last live percent instead (Codex / Claude parity with macOS).
+            double? livePercent = (isOffline || isStandby) ? null : sourcePercent;
+
+            ContextDisplayResolution resolved = ResolveContextDisplay(
+                livePercent,
+                isOffline,
+                isStandby,
+                heldContextPercent,
+                contextHoldExpiresUtc,
+                nowUtc,
+                StandbyContextHoldDuration);
+
+            heldContextPercent = resolved.HeldPercent;
+            contextHoldExpiresUtc = resolved.HoldExpiresUtc;
+
+            if (resolved.DisplayPercent.HasValue)
+            {
+                contextMeter.Visibility = Visibility.Visible;
+                contextMeter.IsAvailable = true;
+                contextMeter.Value = Math.Max(0, Math.Min(100,
+                    Math.Round(resolved.DisplayPercent.Value)));
+            }
+            else
+            {
+                contextMeter.Visibility = Visibility.Collapsed;
+                contextMeter.IsAvailable = false;
+                contextMeter.Value = 0;
+            }
+        }
+
+        /// <summary>
+        /// Pure display/hold state machine for the context pill.
+        /// Live percent: show and remember for a future STANDBY hold.
+        /// STANDBY + remembered percent: keep showing until holdDuration elapses.
+        /// OFFLINE: clear immediately (no hold).
+        /// </summary>
+        internal static ContextDisplayResolution ResolveContextDisplay(
+            double? livePercent,
+            bool isOffline,
+            bool isStandby,
+            double? heldPercent,
+            DateTime? holdExpiresUtc,
+            DateTime nowUtc,
+            TimeSpan holdDuration)
+        {
+            if (isOffline)
+            {
+                return new ContextDisplayResolution();
+            }
+            if (livePercent.HasValue)
+            {
+                return new ContextDisplayResolution
+                {
+                    DisplayPercent = livePercent,
+                    HeldPercent = livePercent,
+                    HoldExpiresUtc = null
+                };
+            }
+            if (isStandby && heldPercent.HasValue)
+            {
+                DateTime expires = holdExpiresUtc.HasValue
+                    ? holdExpiresUtc.Value
+                    : nowUtc.Add(holdDuration);
+                if (nowUtc < expires)
+                {
+                    return new ContextDisplayResolution
+                    {
+                        DisplayPercent = heldPercent,
+                        HeldPercent = heldPercent,
+                        HoldExpiresUtc = expires
+                    };
+                }
+            }
+            return new ContextDisplayResolution();
+        }
+
+        internal sealed class ContextDisplayResolution
+        {
+            public double? DisplayPercent;
+            public double? HeldPercent;
+            public DateTime? HoldExpiresUtc;
         }
 
         public void SetPreviewMetrics(UsageMetrics metrics)

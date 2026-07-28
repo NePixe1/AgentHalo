@@ -962,7 +962,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 usage: claudeUsage
             )
             exactSessionDetails = resolved.sessionDetails
-            exactContextUsedPercent = resolved.contextUsedPercent
+            // Statusline snapshots remain for live/standby sessions; only surface
+            // the pill while the aggregate still displays this Claude session
+            // (active turn or brief COMPLETE). STANDBY empties sessions — match
+            // Codex/Grok so the pill soft-holds then drops instead of sticking.
+            exactContextUsedPercent = Self.contextUsedPercentForClaudeDetails(
+                displayedSessions: displayedAggregate.sessions,
+                resolvedContextPercent: resolved.contextUsedPercent
+            )
         case .grok:
             let activeSessions = GrokActiveSessionsReader.read()
             let (sessionId, cwd) = Self.grokSessionIdentityForDetails(
@@ -981,7 +988,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 sessionTitle: context?.sessionTitle ?? hookSession?.sessionTitle,
                 modelName: context?.modelName ?? hookSession?.modelName
             )
-            exactContextUsedPercent = context?.contextUsedPercent
+            // Disk signals stay after Stop; only surface them while the aggregate
+            // still displays this Grok session (active turn or brief COMPLETE).
+            // STANDBY empties sessions by design — match Codex so the pill drops.
+            exactContextUsedPercent = Self.contextUsedPercentForGrokDetails(
+                displayedSessions: displayedAggregate.sessions,
+                diskContextPercent: context?.contextUsedPercent
+            )
         }
         let model = DetailsContentResolver.resolve(
             providerID: providerID,
@@ -992,6 +1005,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             now: Date()
         )
         detailsPanel.render(aggregate: displayedAggregate, model: model)
+    }
+
+    /// Context pill for Claude is statusline-backed, but visibility must follow
+    /// the aggregate the same way Codex/Grok do: only while a real Claude
+    /// session is currently displayed. STANDBY/OFFLINE deliberately use empty
+    /// `sessions` after COMPLETE settles — do not keep the pill up forever from
+    /// a live idle session's last statusline snapshot.
+    nonisolated static func contextUsedPercentForClaudeDetails(
+        displayedSessions: [SessionSnapshot],
+        resolvedContextPercent: Double?
+    ) -> Double? {
+        let hasVisibleClaudeSession = displayedSessions.contains {
+            $0.agent == .claudeCode && $0.threadId != "claude-code" && !$0.threadId.isEmpty
+        }
+        guard hasVisibleClaudeSession else {
+            return nil
+        }
+        return resolvedContextPercent
+    }
+
+    /// Context pill for Grok is disk-backed (`signals.json` / live `totalTokens`),
+    /// but visibility must follow the aggregate the same way Codex does:
+    /// only while a real Grok session is currently displayed. STANDBY/OFFLINE
+    /// deliberately use empty `sessions` after COMPLETE settles — do not keep
+    /// the pill up from frozen end-of-turn occupancy via hook/active fallbacks.
+    nonisolated static func contextUsedPercentForGrokDetails(
+        displayedSessions: [SessionSnapshot],
+        diskContextPercent: Double?
+    ) -> Double? {
+        let hasVisibleGrokSession = displayedSessions.contains {
+            $0.agent == .grok && $0.threadId != "grok" && !$0.threadId.isEmpty
+        }
+        guard hasVisibleGrokSession else {
+            return nil
+        }
+        return diskContextPercent
     }
 
     /// Prefer the hook/aggregate thread id, then the first live active_sessions entry.
