@@ -358,20 +358,27 @@ public sealed class CodexUsageMonitor : IDisposable
             }
             catch (Exception ex)
             {
-                lock (gate)
+                if (!UsageFocusGate.IsCurrent(lease))
                 {
-                    if (String.Equals(ex.Message, "sign-in-required",
-                        StringComparison.Ordinal))
-                    {
-                        status = CodexUsageDataStatus.SignInAgain;
-                    }
-                    else
-                    {
-                        MarkStaleLocked();
-                    }
+                    cancelledByFocus = true;
                 }
-                SettingsStorage.Log("Codex usage refresh failed: " + SafeError(ex));
-                notify = true;
+                else
+                {
+                    lock (gate)
+                    {
+                        if (String.Equals(ex.Message, "sign-in-required",
+                            StringComparison.Ordinal))
+                        {
+                            status = CodexUsageDataStatus.SignInAgain;
+                        }
+                        else
+                        {
+                            MarkStaleLocked();
+                        }
+                    }
+                    SettingsStorage.Log("Codex usage refresh failed: " + SafeError(ex));
+                    notify = true;
+                }
             }
             finally
             {
@@ -560,9 +567,17 @@ public sealed class CodexUsageMonitor : IDisposable
                 if (body != null)
                 {
                     request.ContentLength = body.Length;
-                    using (Stream stream = request.GetRequestStream())
+                    try
                     {
-                        stream.Write(body, 0, body.Length);
+                        using (Stream stream = request.GetRequestStream())
+                        {
+                            stream.Write(body, 0, body.Length);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        UsageFocusGate.ThrowIfInactive(lease, ex);
+                        throw;
                     }
                 }
 
@@ -579,7 +594,7 @@ public sealed class CodexUsageMonitor : IDisposable
                     HttpWebResponse response = ex.Response as HttpWebResponse;
                     if (response == null)
                     {
-                        UsageFocusGate.ThrowIfInactive(lease);
+                        UsageFocusGate.ThrowIfInactive(lease, ex);
                         throw;
                     }
                     using (response)

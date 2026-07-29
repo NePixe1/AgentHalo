@@ -1639,6 +1639,37 @@ public static class Diagnostics
                 UsageFocusGate.Activate(AgentKind.Codex);
                 Assert(!UsageFocusGate.IsCurrent(focusedCodexLease),
                     "switching back does not revive an old authorization");
+                bool abortMappedToCancel = false;
+                try
+                {
+                    UsageFocusGate.ThrowIfInactive(
+                        focusedCodexLease,
+                        new System.Net.WebException("aborted"));
+                }
+                catch (OperationCanceledException)
+                {
+                    abortMappedToCancel = true;
+                }
+                Assert(abortMappedToCancel,
+                    "inactive lease maps transport abort to focus cancel");
+                UsageFocusLease liveCodexLease;
+                Assert(UsageFocusGate.TryAcquire(
+                    AgentKind.Codex, out liveCodexLease),
+                    "focused Codex reacquires after switch-back");
+                bool liveLeaseKeepsTransportError = false;
+                try
+                {
+                    UsageFocusGate.ThrowIfInactive(
+                        liveCodexLease,
+                        new System.Net.WebException("network"));
+                    liveLeaseKeepsTransportError = true;
+                }
+                catch (OperationCanceledException)
+                {
+                    liveLeaseKeepsTransportError = false;
+                }
+                Assert(liveLeaseKeepsTransportError,
+                    "active lease does not rewrite transport errors as cancel");
                 UsageFocusGate.DeactivateAll();
 
                 // DetailsWindow offline copy for focused Grok (three-way switch).

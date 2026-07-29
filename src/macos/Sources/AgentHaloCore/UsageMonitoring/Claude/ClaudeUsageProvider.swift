@@ -4,6 +4,7 @@ private enum ClaudeGenerationChecked<Value: Sendable>: Sendable {
     case value(Value)
     case externalAccessChanged
     case failure(UsageProviderFailure)
+    case cancelled
 }
 
 public struct ClaudeUsageProvider: UsageProvider, Sendable {
@@ -32,10 +33,11 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
     }
 
     public func refresh(using access: ResolvedProviderAccess) async -> UsageRefreshResult {
-        guard case .oauth(let initialAccess) = access,
-              let authorization = focusController.authorization(for: providerID)
-        else {
+        guard case .oauth(let initialAccess) = access else {
             return failure(.signInAgain)
+        }
+        guard let authorization = focusController.authorization(for: providerID) else {
+            return cancelled()
         }
         return await refresh(
             initialAccess: initialAccess,
@@ -83,6 +85,8 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
                     return externalAccessChanged()
                 case .failure(let failure):
                     return self.failure(failure)
+                case .cancelled:
+                    return cancelled()
                 }
                 current = rotated.access
                 migrateCacheFrom = rotated.migrateCacheFrom
@@ -105,6 +109,8 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
                 return externalAccessChanged()
             case .failure(let failure):
                 return self.failure(failure)
+            case .cancelled:
+                return cancelled()
             }
             if response.statusCode == 401 {
                 let requestCandidate = current
@@ -127,6 +133,8 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
                     return externalAccessChanged()
                 case .failure(let failure):
                     return self.failure(failure)
+                case .cancelled:
+                    return cancelled()
                 }
                 current = rotated.access
                 migrateCacheFrom = migrateCacheFrom ?? rotated.migrateCacheFrom
@@ -146,6 +154,8 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
                     return externalAccessChanged()
                 case .failure(let failure):
                     return self.failure(failure)
+                case .cancelled:
+                    return cancelled()
                 }
                 if response.statusCode == 401 { return failure(.signInAgain) }
             }
@@ -164,6 +174,10 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
             )
         } catch let failure as UsageProviderFailure {
             return self.failure(failure)
+        } catch is CancellationError {
+            return cancelled()
+        } catch is UsageProviderFocusError {
+            return cancelled()
         } catch {
             return failure(.network)
         }
@@ -220,6 +234,10 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
                 return .externalAccessChanged
             }
             return .value(value)
+        } catch is CancellationError {
+            return .cancelled
+        } catch is UsageProviderFocusError {
+            return .cancelled
         } catch let failure as UsageProviderFailure {
             if sourceHasChanged(since: candidate) {
                 return .externalAccessChanged
@@ -242,6 +260,10 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
 
     private func failure(_ failure: UsageProviderFailure) -> UsageRefreshResult {
         UsageRefreshResult(providerID: providerID, snapshot: nil, failure: failure)
+    }
+
+    private func cancelled() -> UsageRefreshResult {
+        UsageRefreshResult(providerID: providerID, outcome: .cancelled)
     }
 
     private func externalAccessChanged() -> UsageRefreshResult {

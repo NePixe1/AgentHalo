@@ -15,6 +15,12 @@ namespace CodexHalo
     /// Focus changes invalidate old leases, abort registered requests, and hold
     /// the same lock used by credential persistence so no old provider can
     /// write after the focus transition completes.
+    ///
+    /// Credential writes run while the focus lock is held (see
+    /// <see cref="RunCredentialWrite{T}"/>). That serializes persistence
+    /// against Activate/Deactivate so a completed focus transition never races
+    /// an older write, at the cost of delaying abort until disk I/O finishes.
+    /// Callers must not re-enter the gate from the write callback.
     /// </summary>
     internal static class UsageFocusGate
     {
@@ -92,6 +98,11 @@ namespace CodexHalo
             }
         }
 
+        /// <summary>
+        /// Runs <paramref name="operation"/> while holding the focus lock after
+        /// verifying <paramref name="lease"/> is still current. Prefer short
+        /// file I/O only — long work postpones focus transitions and HTTP abort.
+        /// </summary>
         internal static T RunCredentialWrite<T>(
             UsageFocusLease lease, Func<T> operation)
         {
@@ -103,6 +114,22 @@ namespace CodexHalo
                         "usage provider is no longer focused");
                 }
                 return operation();
+            }
+        }
+
+        /// <summary>
+        /// If the lease is no longer focused, throw
+        /// <see cref="OperationCanceledException"/> (optionally wrapping
+        /// <paramref name="inner"/>). Used so HTTP abort / transport failures
+        /// during a focus switch are not treated as stale usage errors.
+        /// </summary>
+        internal static void ThrowIfInactive(
+            UsageFocusLease lease, Exception inner)
+        {
+            if (!IsCurrent(lease))
+            {
+                throw new OperationCanceledException(
+                    "usage provider is no longer focused", inner);
             }
         }
 

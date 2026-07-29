@@ -497,9 +497,17 @@ namespace CodexHalo
                 if (body != null)
                 {
                     request.ContentLength = body.Length;
-                    using (Stream stream = request.GetRequestStream())
+                    try
                     {
-                        stream.Write(body, 0, body.Length);
+                        using (Stream stream = request.GetRequestStream())
+                        {
+                            stream.Write(body, 0, body.Length);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        UsageFocusGate.ThrowIfInactive(lease, ex);
+                        throw;
                     }
                 }
 
@@ -516,7 +524,7 @@ namespace CodexHalo
                     HttpWebResponse response = ex.Response as HttpWebResponse;
                     if (response == null)
                     {
-                        UsageFocusGate.ThrowIfInactive(lease);
+                        UsageFocusGate.ThrowIfInactive(lease, ex);
                         throw;
                     }
                     using (response)
@@ -930,20 +938,27 @@ namespace CodexHalo
             }
             catch (Exception ex)
             {
-                lock (gate)
+                if (!UsageFocusGate.IsCurrent(lease))
                 {
-                    if (String.Equals(ex.Message, "sign-in-required",
-                        StringComparison.Ordinal))
-                    {
-                        status = GrokUsageDataStatus.SignInAgain;
-                    }
-                    else
-                    {
-                        MarkStaleLocked();
-                    }
+                    cancelledByFocus = true;
                 }
-                SettingsStorage.Log("Grok usage refresh failed: " + SafeError(ex));
-                notify = true;
+                else
+                {
+                    lock (gate)
+                    {
+                        if (String.Equals(ex.Message, "sign-in-required",
+                            StringComparison.Ordinal))
+                        {
+                            status = GrokUsageDataStatus.SignInAgain;
+                        }
+                        else
+                        {
+                            MarkStaleLocked();
+                        }
+                    }
+                    SettingsStorage.Log("Grok usage refresh failed: " + SafeError(ex));
+                    notify = true;
+                }
             }
             finally
             {

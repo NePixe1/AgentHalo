@@ -732,6 +732,7 @@ func runUsageMonitoringCoordinatorChecks() async {
     await testCoordinatorSupersededFirstEnsureFreshAwaitsCommittedContext()
     await testCoordinatorDeduplicatesOneProviderAndRefreshesProvidersIndependently()
     await testCoordinatorFocusSwitchDoesNotJoinOldGeneration()
+    await testCoordinatorFocusSwitchClearsStaleRefreshingState()
     await testCoordinatorAccountSwitchDoesNotJoinOrCommitOldRefresh()
     await testCoordinatorNonOAuthPrepareInvalidatesOldRefresh()
     await testCoordinatorInvalidatedMigrationHasNoCacheSideEffects()
@@ -1026,6 +1027,56 @@ func testCoordinatorFocusSwitchDoesNotJoinOldGeneration() async {
         (await coordinator.state(for: .codex)).snapshot,
         currentSnapshot,
         "old focus generation must not overwrite the current snapshot"
+    )
+    expect(
+        (await coordinator.state(for: .codex)).isRefreshing,
+        false,
+        "completed focus-generation handoff must clear isRefreshing"
+    )
+}
+
+func testCoordinatorFocusSwitchClearsStaleRefreshingState() async {
+    let date = Date(timeIntervalSince1970: 2_100_003_260)
+    let now = LockedBox(date)
+    let key = AccountCacheKey(providerID: .codex, digest: "focus-clear-refreshing")
+    let provider = SequencedCoordinatorProvider(providerID: .codex)
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(key)))
+    await provider.enqueueRefresh(
+        UsageRefreshResult(
+            providerID: .codex,
+            snapshot: coordinatorSnapshot(key, at: date, planName: "Abandoned"),
+            failure: nil
+        ),
+        gated: true
+    )
+    let focus = UsageProviderFocusController()
+    focus.activate(.codex)
+    let coordinator = UsageMonitoringCoordinator(
+        providers: [provider],
+        cache: coordinatorCache(
+            files: FakeUsageFiles(),
+            path: "/tmp/agent-halo-coordinator-focus-clear-refreshing.json",
+            now: now
+        ),
+        focusController: focus,
+        now: { now.value }
+    )
+
+    let abandoned = Task { await coordinator.ensureFresh(.codex) }
+    await waitForRefreshCount(provider, 1, "focus-clear refresh did not start")
+    focus.activate(.claude)
+    await provider.resumeRefresh(call: 1)
+    let finished = await abandoned.value
+    expect(finished.isRefreshing, false, "abandoned refresh result is not refreshing")
+    expect(
+        finished.lastFailure,
+        nil as UsageFailureReason?,
+        "abandoned focus refresh must not surface a failure"
+    )
+    expect(
+        (await coordinator.state(for: .codex)).isRefreshing,
+        false,
+        "unfocused provider must clear isRefreshing after discard"
     )
 }
 
@@ -3998,10 +4049,14 @@ func testCodexProviderFocusSwitchBlocksCredentialWrite() async {
     await waitForHTTPRequestCount(http, 1, "focused Codex refresh did not enter gate")
     focus.activate(.claude)
     await http.resume()
-    _ = await request.value
+    let abandoned = await request.value
+    expect(abandoned.outcome.isCancelled, true, "focus switch cancels Codex refresh outcome")
+    expect(abandoned.failure == nil, "focus cancel must not surface as provider failure")
 
     expect(files.capturedWrites().isEmpty, "unfocused Codex must not write rotated credentials")
-    _ = await provider.refresh(using: .oauth(fixture.1))
+    let unfocused = await provider.refresh(using: .oauth(fixture.1))
+    expect(unfocused.outcome.isCancelled, true, "unfocused Codex refresh is cancelled")
+    expect(unfocused.failure == nil, "unfocused Codex must not report sign-in-again")
     expect(
         await http.capturedRequests.count,
         1,
@@ -4695,7 +4750,9 @@ func testClaudeProviderFocusSwitchBlocksCredentialWrite() async {
     _ = await request.value
 
     expect(files.capturedWrites().isEmpty, "unfocused Claude must not write rotated credentials")
-    _ = await provider.refresh(using: .oauth(fixture.1))
+    let unfocused = await provider.refresh(using: .oauth(fixture.1))
+    expect(unfocused.outcome.isCancelled, true, "unfocused Claude refresh is cancelled")
+    expect(unfocused.failure == nil, "unfocused Claude must not report sign-in-again")
     expect(
         await http.capturedRequests.count,
         1,
@@ -5330,7 +5387,9 @@ func testGrokProviderFocusSwitchBlocksCredentialWrite() async {
     _ = await request.value
 
     expect(files.capturedWrites().isEmpty, "unfocused Grok must not write rotated credentials")
-    _ = await provider.refresh(using: .oauth(fixture.1))
+    let unfocused = await provider.refresh(using: .oauth(fixture.1))
+    expect(unfocused.outcome.isCancelled, true, "unfocused Grok refresh is cancelled")
+    expect(unfocused.failure == nil, "unfocused Grok must not report sign-in-again")
     expect(
         await http.capturedRequests.count,
         1,

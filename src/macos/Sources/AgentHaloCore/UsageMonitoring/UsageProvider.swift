@@ -26,6 +26,11 @@ public struct UsageProviderFocusAuthorization: Sendable {
 /// providers. A focus transition invalidates every previously issued
 /// authorization, including authorizations for the same provider from an older
 /// focus generation.
+///
+/// Credential writes run while the focus lock is held (see
+/// `performCredentialWrite`). That serializes persistence against activate /
+/// deactivate so a completed focus transition never races an older write, at
+/// the cost of delaying abort handlers until disk/Keychain I/O finishes.
 public final class UsageProviderFocusController: @unchecked Sendable {
     private struct CancellationRegistration {
         let providerID: UsageProviderID
@@ -131,6 +136,10 @@ public final class UsageProviderFocusController: @unchecked Sendable {
         }
     }
 
+    /// Runs `operation` while holding the focus lock after verifying
+    /// `authorization` is still current. Callers must not re-enter the
+    /// controller from `operation` (would deadlock). Prefer short file /
+    /// Keychain work only — long I/O postpones focus transitions and abort.
     fileprivate func performCredentialWrite<T>(
         _ authorization: UsageProviderFocusAuthorization,
         _ operation: () throws -> T
@@ -159,10 +168,19 @@ public final class UsageProviderFocusController: @unchecked Sendable {
 /// A Provider-to-Coordinator outcome. An external login/source replacement is
 /// deliberately distinct from both a request failure and internal cache-key
 /// migration: only the Coordinator may establish the new access generation.
+///
+/// `cancelled` means focus became inactive or the refresh task was cancelled;
+/// it must not surface as sign-in-again or a network failure in the UI.
 public enum UsageRefreshOutcome: Sendable {
     case snapshot(UsageSnapshot, migrateCacheFrom: AccountCacheKey?)
     case failure(UsageProviderFailure)
     case externalAccessChanged
+    case cancelled
+
+    public var isCancelled: Bool {
+        if case .cancelled = self { return true }
+        return false
+    }
 }
 
 /// The result of a single provider usage refresh. Never carries partial

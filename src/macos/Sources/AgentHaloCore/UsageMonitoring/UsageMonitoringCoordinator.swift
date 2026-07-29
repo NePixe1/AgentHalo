@@ -137,23 +137,21 @@ public actor UsageMonitoringCoordinator {
         }
         cooldownUntil.removeValue(forKey: access.accountKey)
 
-        var refreshing = prepared
-        refreshing.state.isRefreshing = true
         guard !isCancelling,
-              refreshing.cancellationGeneration == cancellationGeneration,
+              prepared.cancellationGeneration == cancellationGeneration,
               focusController.isActive(providerID),
-              !Task.isCancelled
+              !Task.isCancelled,
+              let authorization = focusController.authorization(for: providerID)
         else {
             return cancellationContext(for: providerID).state
         }
+
+        var refreshing = prepared
+        refreshing.state.isRefreshing = true
         commit(refreshing, for: providerID)
 
         let token = UUID()
         let provider = providers[providerID]!
-        guard let authorization = focusController.authorization(for: providerID)
-        else {
-            return prepared.state
-        }
         let task = Task<UsageRefreshResult, Never> {
             await provider.refresh(using: .oauth(access))
         }
@@ -495,10 +493,12 @@ public actor UsageMonitoringCoordinator {
         guard isCurrent(expected, providerID: providerID),
               let context = contexts[providerID]
         else {
-            return state(for: providerID)
+            return discardOwnedRefresh(providerID: providerID, expected: expected)
         }
 
         switch result.outcome {
+        case .cancelled:
+            return discardOwnedRefresh(providerID: providerID, expected: expected)
         case .externalAccessChanged:
             removeInFlight(providerID)
             var stopped = context
@@ -560,11 +560,11 @@ public actor UsageMonitoringCoordinator {
             try? await cache.migrate(from: oldKey, to: snapshot.accountKey)
         }
         guard isCurrent(expected, providerID: providerID) else {
-            return state(for: providerID)
+            return discardOwnedRefresh(providerID: providerID, expected: expected)
         }
         try? await cache.store(snapshot)
         guard isCurrent(expected, providerID: providerID) else {
-            return state(for: providerID)
+            return discardOwnedRefresh(providerID: providerID, expected: expected)
         }
 
         removeInFlight(providerID)
@@ -600,7 +600,7 @@ public actor UsageMonitoringCoordinator {
         expected: InFlightRecord
     ) -> UsageMonitorState {
         guard isCurrent(expected, providerID: providerID) else {
-            return state(for: providerID)
+            return discardOwnedRefresh(providerID: providerID, expected: expected)
         }
         removeInFlight(providerID)
         if case .rateLimited(let retryAt) = failure {
@@ -654,6 +654,21 @@ public actor UsageMonitoringCoordinator {
         removeInFlight(providerID, cancel: true)
         states[providerID]?.isRefreshing = false
         contexts[providerID]?.state.isRefreshing = false
+    }
+
+    /// Drop an owned in-flight refresh without applying its outcome.
+    /// Only removes `inFlight` when the token still matches `expected`, so a
+    /// newer generation started after focus switch is never cleared.
+    private func discardOwnedRefresh(
+        providerID: UsageProviderID,
+        expected: InFlightRecord
+    ) -> UsageMonitorState {
+        if let record = inFlight[providerID], record.token == expected.token {
+            removeInFlight(providerID)
+            states[providerID]?.isRefreshing = false
+            contexts[providerID]?.state.isRefreshing = false
+        }
+        return state(for: providerID)
     }
 
     private func removeInFlight(_ providerID: UsageProviderID, cancel: Bool = false) {
