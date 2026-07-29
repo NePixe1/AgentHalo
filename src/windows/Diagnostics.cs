@@ -1643,6 +1643,121 @@ public static class Diagnostics
                 {
                 }
 
+                // Grok session context reader (Task 7) — signals / token ratio / live updates
+                Assert(String.Equals(
+                    GrokSessionContextReader.EncodeWorkspaceDirectory(
+                        "/Users/example/work/AgentHalo"),
+                    "%2FUsers%2Fexample%2Fwork%2FAgentHalo",
+                    StringComparison.Ordinal),
+                    "workspace dirs must match Grok percent-encoding");
+
+                string ctxRoot = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-grok-ctx-" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    string cwd = Path.Combine(ctxRoot, "proj");
+                    string sessionId = "sess-1";
+                    string enc = GrokSessionContextReader.EncodeWorkspaceDirectory(cwd);
+                    string sessionDir = Path.Combine(ctxRoot, ".grok", "sessions",
+                        enc, sessionId);
+                    Directory.CreateDirectory(sessionDir);
+                    File.WriteAllText(Path.Combine(sessionDir, "signals.json"),
+                        "{\"contextWindowUsage\":26,\"contextTokensUsed\":130000," +
+                        "\"contextWindowTokens\":500000,\"primaryModelId\":\"grok-4.5\"}",
+                        new UTF8Encoding(false));
+                    Dictionary<string, object> summaryInfo =
+                        new Dictionary<string, object>();
+                    summaryInfo["id"] = sessionId;
+                    summaryInfo["cwd"] = cwd;
+                    Dictionary<string, object> summaryRoot =
+                        new Dictionary<string, object>();
+                    summaryRoot["info"] = summaryInfo;
+                    summaryRoot["generated_title"] = "Wire Grok context pill";
+                    summaryRoot["session_summary"] = "fallback title";
+                    summaryRoot["current_model_id"] = "grok-4.5";
+                    File.WriteAllText(Path.Combine(sessionDir, "summary.json"),
+                        new JavaScriptSerializer().Serialize(summaryRoot),
+                        new UTF8Encoding(false));
+                    GrokSessionContextSnapshot snap =
+                        new GrokSessionContextReader(
+                            Path.Combine(ctxRoot, ".grok", "sessions"))
+                        .Read(sessionId, cwd);
+                    Assert(snap != null && Math.Abs(snap.ContextUsedPercent - 26) < 0.1,
+                        "signals percent");
+                    Assert(snap.ContextTokensUsed == 130000, "token counters preserved");
+                    Assert(snap.ContextWindowTokens == 500000, "window size preserved");
+                    Assert(String.Equals(snap.ModelName, "grok-4.5",
+                        StringComparison.Ordinal), "model");
+                    Assert(String.Equals(snap.SessionTitle, "Wire Grok context pill",
+                        StringComparison.Ordinal), "title from summary");
+                    Assert(String.Equals(snap.ProjectName, "proj",
+                        StringComparison.Ordinal), "project from cwd leaf");
+
+                    GrokSessionContextSnapshot scanned =
+                        new GrokSessionContextReader(
+                            Path.Combine(ctxRoot, ".grok", "sessions"))
+                        .Read(sessionId, null);
+                    Assert(scanned != null &&
+                        Math.Abs(scanned.ContextUsedPercent - 26) < 0.1,
+                        "scan fallback finds the session without cwd");
+
+                    // Token-ratio fallback (no contextWindowUsage field)
+                    string ratioSessionId = "session-ratio";
+                    string ratioDir = Path.Combine(ctxRoot, ".grok", "sessions",
+                        "%2Ftmp", ratioSessionId);
+                    Directory.CreateDirectory(ratioDir);
+                    File.WriteAllText(Path.Combine(ratioDir, "signals.json"),
+                        "{\"contextTokensUsed\":50,\"contextWindowTokens\":200}",
+                        new UTF8Encoding(false));
+                    GrokSessionContextSnapshot ratioSnap =
+                        new GrokSessionContextReader(
+                            Path.Combine(ctxRoot, ".grok", "sessions"))
+                        .Read(ratioSessionId, null);
+                    Assert(ratioSnap != null &&
+                        Math.Abs(ratioSnap.ContextUsedPercent - 25) < 0.01,
+                        "token ratio fallback");
+
+                    // Live updates.jsonl totalTokens preferred over frozen signals
+                    string liveSessionId = "session-live";
+                    string liveDir = Path.Combine(ctxRoot, ".grok", "sessions",
+                        "%2Ftmp", liveSessionId);
+                    Directory.CreateDirectory(liveDir);
+                    File.WriteAllText(Path.Combine(liveDir, "signals.json"),
+                        "{\"contextWindowUsage\":26,\"contextTokensUsed\":130000," +
+                        "\"contextWindowTokens\":500000,\"primaryModelId\":\"grok-4.5\"}",
+                        new UTF8Encoding(false));
+                    File.WriteAllText(Path.Combine(liveDir, "updates.jsonl"),
+                        "{\"timestamp\":1,\"method\":\"session/update\",\"params\":" +
+                        "{\"_meta\":{\"totalTokens\":40000},\"update\":" +
+                        "{\"sessionUpdate\":\"agent_thought_chunk\"}}}\n" +
+                        "{\"timestamp\":2,\"method\":\"session/update\",\"params\":" +
+                        "{\"_meta\":{\"totalTokens\":65000},\"update\":" +
+                        "{\"sessionUpdate\":\"tool_call\"}}}\n" +
+                        "{\"timestamp\":3,\"method\":\"session/update\",\"params\":" +
+                        "{\"update\":{\"sessionUpdate\":\"tool_call_update\"}}}\n",
+                        new UTF8Encoding(false));
+                    GrokSessionContextSnapshot liveSnap =
+                        new GrokSessionContextReader(
+                            Path.Combine(ctxRoot, ".grok", "sessions"))
+                        .Read(liveSessionId, null);
+                    Assert(liveSnap != null && liveSnap.ContextTokensUsed == 65000,
+                        "live totalTokens must override stale signals counters");
+                    Assert(Math.Abs(liveSnap.ContextUsedPercent - 13) < 0.01,
+                        "pill percent = liveTokens / contextWindowTokens");
+                    Assert(liveSnap.ContextWindowTokens == 500000,
+                        "window size still comes from signals");
+                }
+                finally
+                {
+                    try
+                    {
+                        Directory.Delete(ctxRoot, true);
+                    }
+                    catch
+                    {
+                    }
+                }
+
                 File.Delete(temp);
                 File.WriteAllText(outputPath,
                     "PASS\nLifecycle, usage metrics, panel formatting, and animation checks passed.\n",

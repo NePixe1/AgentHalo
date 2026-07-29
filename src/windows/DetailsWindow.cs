@@ -548,7 +548,10 @@ public sealed class DetailsWindow : Window
 
         /// <summary>
         /// Weekly OAuth credits from <see cref="GrokUsageMonitor"/> only (no 5h row).
-        /// Context pill is Task 7; keep collapsed until a real Grok session exists.
+        /// Context pill is disk-backed (signals.json / live updates.jsonl) and only
+        /// surfaces while a real Grok session (not the "grok" placeholder) is
+        /// displayed. STANDBY soft-holds via <see cref="ApplyContextSource"/>;
+        /// OFFLINE clears immediately in <see cref="ApplyOfflinePlaceholders"/>.
         /// </summary>
         private void RefreshGrokDetails()
         {
@@ -578,8 +581,43 @@ public sealed class DetailsWindow : Window
                 weekBar.Value = 0;
             }
 
-            // Task 7 wires GrokSessionContextReader; keep pill collapsed for now.
-            SetContextPercent(false, 0);
+            SessionSnapshot primary = FindDisplayedGrokSession(currentSessions);
+            GrokSessionContextSnapshot context = null;
+            if (primary != null)
+            {
+                string cwd = String.IsNullOrEmpty(primary.WorkingDirectory)
+                    ? null : primary.WorkingDirectory;
+                context = new GrokSessionContextReader().Read(primary.ThreadId, cwd);
+            }
+            if (context != null)
+            {
+                SetContextPercent(true, context.ContextUsedPercent);
+            }
+            else
+            {
+                SetContextPercent(false, 0);
+            }
+        }
+
+        /// <summary>
+        /// Real Grok thread currently shown in the details aggregate — not the
+        /// "grok" placeholder used when session id is unknown.
+        /// </summary>
+        private static SessionSnapshot FindDisplayedGrokSession(
+            List<SessionSnapshot> sessions)
+        {
+            if (sessions == null)
+            {
+                return null;
+            }
+            return sessions.FirstOrDefault(delegate(SessionSnapshot session)
+            {
+                return session != null
+                    && session.Agent == AgentKind.Grok
+                    && !String.IsNullOrEmpty(session.ThreadId)
+                    && !String.Equals(session.ThreadId, "grok",
+                        StringComparison.Ordinal);
+            });
         }
 
         private CodexCustomApiMetrics ReadCodexCustomMetrics()

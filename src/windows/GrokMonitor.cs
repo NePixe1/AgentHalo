@@ -1129,4 +1129,414 @@ namespace CodexHalo
             public int ProcessId;
         }
     }
+
+    /// <summary>
+    /// Live Grok Build session context occupancy from the session store.
+    /// End-of-turn occupancy lives in
+    /// %USERPROFILE%\.grok\sessions\&lt;percent-encoded-cwd&gt;\&lt;sessionId&gt;\signals.json.
+    /// During a long turn those fields freeze, so the reader also tails
+    /// updates.jsonl for streaming params._meta.totalTokens.
+    /// </summary>
+    public sealed class GrokSessionContextSnapshot
+    {
+        public string SessionId;
+        public double ContextUsedPercent;
+        public long? ContextTokensUsed;
+        public long? ContextWindowTokens;
+        public string ModelName;
+        public string ProjectName;
+        public string SessionTitle;
+        public string WorkingDirectory;
+    }
+
+    public sealed class GrokSessionContextReader
+    {
+        /// <summary>
+        /// How much of the (often multi-MB) updates.jsonl to scan for the latest
+        /// totalTokens. Large enough for a long tool/thought burst, small enough
+        /// for the details refresh path.
+        /// </summary>
+        private const int UpdatesTailByteLimit = 256 * 1024;
+
+        private static readonly JavaScriptSerializer Serializer =
+            new JavaScriptSerializer();
+
+        private readonly string sessionsRoot;
+
+        public GrokSessionContextReader()
+            : this(DefaultSessionsRoot())
+        {
+        }
+
+        public GrokSessionContextReader(string sessionsRoot)
+        {
+            this.sessionsRoot = sessionsRoot ?? String.Empty;
+        }
+
+        public static string DefaultSessionsRoot()
+        {
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".grok", "sessions");
+        }
+
+        /// <summary>
+        /// Grok stores workspace folders as fully percent-encoded absolute paths
+        /// (every / becomes %2F), matching Python urllib.parse.quote(path, safe="")
+        /// and macOS CharacterSet unreserved (alphanumerics + -._~).
+        /// Uri.EscapeDataString is the .NET equivalent.
+        /// </summary>
+        public static string EncodeWorkspaceDirectory(string cwd)
+        {
+            if (String.IsNullOrEmpty(cwd))
+            {
+                return cwd ?? String.Empty;
+            }
+            return Uri.EscapeDataString(cwd);
+        }
+
+        /// <summary>
+        /// Read context occupancy for an exact session id.
+        /// When <paramref name="cwd"/> is present, resolves the percent-encoded
+        /// session directory without scanning.
+        /// </summary>
+        public GrokSessionContextSnapshot Read(string sessionId, string cwd)
+        {
+            if (String.IsNullOrEmpty(sessionId))
+            {
+                return null;
+            }
+            string sessionDirectory = ResolveSessionDirectory(sessionId, cwd);
+            if (String.IsNullOrEmpty(sessionDirectory))
+            {
+                return null;
+            }
+            return ReadFromSessionDirectory(sessionId, sessionDirectory);
+        }
+
+        private GrokSessionContextSnapshot ReadFromSessionDirectory(
+            string sessionId, string sessionDirectory)
+        {
+            string signalsPath = Path.Combine(sessionDirectory, "signals.json");
+            if (!File.Exists(signalsPath))
+            {
+                return null;
+            }
+            Dictionary<string, object> root;
+            try
+            {
+                root = Serializer.DeserializeObject(File.ReadAllText(signalsPath,
+                    Encoding.UTF8)) as Dictionary<string, object>;
+            }
+            catch
+            {
+                return null;
+            }
+            if (root == null)
+            {
+                return null;
+            }
+
+            double? percent = ContextUsedPercent(root);
+            if (!percent.HasValue)
+            {
+                return null;
+            }
+            long? tokensUsed = AsInt64(Get(root, "contextTokensUsed"));
+            long? windowTokens = AsInt64(Get(root, "contextWindowTokens"));
+
+            // Prefer the live streaming estimate while a turn is in progress.
+            // signals.json is only rewritten at turn boundaries.
+            if (windowTokens.HasValue && windowTokens.Value > 0)
+            {
+                long? liveTokens = LatestLiveContextTokens(sessionDirectory);
+                if (liveTokens.HasValue && liveTokens.Value >= 0)
+                {
+                    tokensUsed = liveTokens;
+                    percent = Math.Min(100, Math.Max(0,
+                        liveTokens.Value * 100.0 / windowTokens.Value));
+                }
+            }
+
+            string modelName = AsString(Get(root, "primaryModelId"));
+            string sessionTitle = null;
+            string workingDirectory = null;
+            string projectName = null;
+
+            string summaryPath = Path.Combine(sessionDirectory, "summary.json");
+            if (File.Exists(summaryPath))
+            {
+                try
+                {
+                    Dictionary<string, object> summary =
+                        Serializer.DeserializeObject(File.ReadAllText(summaryPath,
+                            Encoding.UTF8)) as Dictionary<string, object>;
+                    if (summary != null)
+                    {
+                        if (String.IsNullOrEmpty(modelName))
+                        {
+                            modelName = AsString(Get(summary, "current_model_id"));
+                        }
+                        sessionTitle = FirstNonEmpty(
+                            AsString(Get(summary, "generated_title")),
+                            AsString(Get(summary, "session_summary")));
+                        Dictionary<string, object> info =
+                            Get(summary, "info") as Dictionary<string, object>;
+                        if (info != null)
+                        {
+                            workingDirectory = AsString(Get(info, "cwd"));
+                        }
+                        if (String.IsNullOrEmpty(workingDirectory))
+                        {
+                            workingDirectory = AsString(
+                                Get(summary, "working_directory"));
+                        }
+                    }
+                }
+                catch
+                {
+                    // Optional metadata — signals alone still yield a pill.
+                }
+            }
+
+            if (!String.IsNullOrEmpty(workingDirectory))
+            {
+                string trimmed = workingDirectory.TrimEnd(
+                    Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                string leaf = Path.GetFileName(trimmed);
+                if (!String.IsNullOrEmpty(leaf))
+                {
+                    projectName = leaf;
+                }
+            }
+
+            return new GrokSessionContextSnapshot
+            {
+                SessionId = sessionId,
+                ContextUsedPercent = percent.Value,
+                ContextTokensUsed = tokensUsed,
+                ContextWindowTokens = windowTokens,
+                ModelName = String.IsNullOrEmpty(modelName) ? null : modelName,
+                ProjectName = projectName,
+                SessionTitle = sessionTitle,
+                WorkingDirectory = workingDirectory
+            };
+        }
+
+        private string ResolveSessionDirectory(string sessionId, string cwd)
+        {
+            if (!String.IsNullOrEmpty(cwd))
+            {
+                string encoded = EncodeWorkspaceDirectory(cwd);
+                string candidate = Path.Combine(sessionsRoot, encoded, sessionId);
+                if (Directory.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+
+            if (!Directory.Exists(sessionsRoot))
+            {
+                return null;
+            }
+            try
+            {
+                foreach (string workspace in Directory.GetDirectories(sessionsRoot))
+                {
+                    string candidate = Path.Combine(workspace, sessionId);
+                    if (File.Exists(Path.Combine(candidate, "signals.json")))
+                    {
+                        return candidate;
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return null;
+        }
+
+        private static double? ContextUsedPercent(Dictionary<string, object> root)
+        {
+            double? raw = AsDouble(Get(root, "contextWindowUsage"));
+            if (raw.HasValue && raw.Value >= 0 && raw.Value <= 100)
+            {
+                return raw.Value;
+            }
+            double? used = AsDouble(Get(root, "contextTokensUsed"));
+            double? window = AsDouble(Get(root, "contextWindowTokens"));
+            if (used.HasValue && window.HasValue && window.Value > 0)
+            {
+                return Math.Min(100, Math.Max(0, used.Value * 100.0 / window.Value));
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Tail-scan updates.jsonl for the newest params._meta.totalTokens.
+        /// </summary>
+        private long? LatestLiveContextTokens(string sessionDirectory)
+        {
+            string updatesPath = Path.Combine(sessionDirectory, "updates.jsonl");
+            if (!File.Exists(updatesPath))
+            {
+                return null;
+            }
+            try
+            {
+                using (FileStream stream = new FileStream(updatesPath, FileMode.Open,
+                    FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                {
+                    long endOffset = stream.Length;
+                    if (endOffset <= 0)
+                    {
+                        return null;
+                    }
+                    long startOffset = endOffset > UpdatesTailByteLimit
+                        ? endOffset - UpdatesTailByteLimit : 0;
+                    stream.Seek(startOffset, SeekOrigin.Begin);
+                    int length = (int)(endOffset - startOffset);
+                    byte[] bytes = new byte[length];
+                    int read = stream.Read(bytes, 0, bytes.Length);
+                    if (read <= 0)
+                    {
+                        return null;
+                    }
+                    string text = Encoding.UTF8.GetString(bytes, 0, read);
+                    string[] lines = text.Split('\n');
+                    int minIndex = startOffset > 0 ? 1 : 0;
+                    for (int i = lines.Length - 1; i >= minIndex; i--)
+                    {
+                        string line = lines[i].TrimEnd('\r');
+                        if (line.IndexOf("totalTokens", StringComparison.Ordinal) < 0)
+                        {
+                            continue;
+                        }
+                        long? tokens = TotalTokensFromJsonLine(line);
+                        if (tokens.HasValue)
+                        {
+                            return tokens;
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return null;
+        }
+
+        private long? TotalTokensFromJsonLine(string line)
+        {
+            if (String.IsNullOrWhiteSpace(line))
+            {
+                return null;
+            }
+            try
+            {
+                Dictionary<string, object> root =
+                    Serializer.DeserializeObject(line) as Dictionary<string, object>;
+                if (root == null)
+                {
+                    return null;
+                }
+                Dictionary<string, object> paramsObj =
+                    Get(root, "params") as Dictionary<string, object>;
+                Dictionary<string, object> meta = paramsObj == null
+                    ? null : Get(paramsObj, "_meta") as Dictionary<string, object>;
+                double? raw = AsDouble(Get(meta, "totalTokens"));
+                if (!raw.HasValue || raw.Value < 0)
+                {
+                    return null;
+                }
+                return (long)Math.Round(raw.Value);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static object Get(Dictionary<string, object> dictionary, string key)
+        {
+            object value;
+            return dictionary != null && dictionary.TryGetValue(key, out value)
+                ? value : null;
+        }
+
+        private static double? AsDouble(object value)
+        {
+            if (value == null)
+            {
+                return null;
+            }
+            if (value is double)
+            {
+                return (double)value;
+            }
+            if (value is float)
+            {
+                return (float)value;
+            }
+            if (value is decimal)
+            {
+                return (double)(decimal)value;
+            }
+            if (value is int)
+            {
+                return (int)value;
+            }
+            if (value is long)
+            {
+                return (long)value;
+            }
+            if (value is short)
+            {
+                return (short)value;
+            }
+            double parsed;
+            if (Double.TryParse(Convert.ToString(value, CultureInfo.InvariantCulture),
+                NumberStyles.Float, CultureInfo.InvariantCulture, out parsed))
+            {
+                return parsed;
+            }
+            return null;
+        }
+
+        private static long? AsInt64(object value)
+        {
+            double? number = AsDouble(value);
+            if (!number.HasValue)
+            {
+                return null;
+            }
+            return (long)Math.Round(number.Value);
+        }
+
+        private static string AsString(object value)
+        {
+            if (value == null)
+            {
+                return null;
+            }
+            string text = Convert.ToString(value, CultureInfo.InvariantCulture);
+            return String.IsNullOrEmpty(text) ? null : text;
+        }
+
+        private static string FirstNonEmpty(params string[] values)
+        {
+            if (values == null)
+            {
+                return null;
+            }
+            foreach (string value in values)
+            {
+                if (!String.IsNullOrEmpty(value))
+                {
+                    return value;
+                }
+            }
+            return null;
+        }
+    }
 }
