@@ -3,7 +3,7 @@
 ## Product promise
 
 Agent Halo is a quiet, always-visible desktop vital sign for coding agents. The
-current release monitors Codex and macOS Claude Code transcripts. It answers
+current release monitors Codex, Claude Code, and Grok Build. It answers
 one question without making the user return to the agent window: "What needs me
 right now?"
 
@@ -31,20 +31,21 @@ right now?"
 - Windows desktop, native WPF, transparent and always on top.
 - Smooth composition-clock animation.
 - Real-time monitoring of `%USERPROFILE%\.codex\sessions`.
-- macOS Claude Code transcript monitoring from `~/.claude/projects`.
+- Claude Code hook-based lifecycle monitoring (Windows and macOS).
+- Grok Build OAuth weekly usage and minimal lifecycle monitoring (Windows and macOS; no Pay-as-you-go UI).
 - Multiple-session aggregation with priority ordering.
 - Click-to-inspect compact session panel.
 - Persistent completion acknowledgement.
 - Tray controls, pause, live/demo modes, startup toggle, and exit.
 - Position memory and edge snapping.
-- Provider architecture prepared for additional agent lifecycle detection.
+- Three-way focused agent switch: `Codex | CC | Grok`.
 - No pets, chat content, cost meter, or cloud service.
 
 ## Focused Agent
 
-Agent Halo monitors Codex and Claude Code concurrently, but renders one focused agent at a time. The focused agent defaults to Codex and can be changed from the hover details segmented switch or the menu item `监控对象`.
+Agent Halo monitors Codex, Claude Code, and Grok Build concurrently, but renders one focused agent at a time. The focused agent defaults to Codex and can be changed from the hover details `Codex / CC / Grok` segmented switch or the tray menu.
 
-The details panel exposes two modes selected from the focused session's endpoint and credentials: official OAuth mode shows usage, while API-key mode shows session details and includes custom or third-party endpoints. Synthetic Codex failure surfacing and click-to-activate Codex remain scoped to Codex focus; Claude Code focus does not attempt to foreground a Claude Code app.
+The details panel exposes modes selected from the focused session's endpoint and credentials: official OAuth mode shows usage (Codex five-hour + weekly; Grok weekly only), while API-key mode shows session details and includes custom or third-party endpoints. Synthetic Codex failure surfacing and click-to-activate Codex remain scoped to Codex focus; Claude Code and Grok focus do not attempt to foreground those agent apps.
 
 ## Visual language
 

@@ -3,7 +3,7 @@
 ## 文档状态
 
 - 日期：2026-07-29
-- 状态：设计已确认（方案 A）；待写实施计划与实现
+- 状态：**已实现**（方案 A；Tasks 1–8 完成，见 `feat/windows-grok-build-parity`）
 - 实现范围：AgentHalo **Windows only**（C# / WPF，`src/windows/`）
 - 产品原则：见 [PRODUCT.md](../../PRODUCT.md)
 - 跨平台契约：见 [CROSS_PLATFORM_SHARED_CONTRACT.md](../../CROSS_PLATFORM_SHARED_CONTRACT.md)

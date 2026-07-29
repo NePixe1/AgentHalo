@@ -42,7 +42,7 @@ platform-specific rendering remains native. See the
 ## Requirements
 
 - Windows 10 or Windows 11
-- The Codex desktop app installed and in use, or Claude Code / Grok Build on macOS
+- At least one of: Codex desktop, Claude Code, or Grok Build CLI
 - .NET Framework 4.8, normally included with current Windows 10/11 systems
 
 ## macOS development build
@@ -84,9 +84,9 @@ OAuth token rotates, the original Codex `auth.json` is updated atomically.
 - Drag the halo to reposition it; it gently snaps to display edges.
 - Hover to inspect the current state; official Codex OAuth sessions show the five-hour and weekly usage limits.
 - With CCSwitch, a custom model provider, or API-key authentication, the Codex panel automatically shows the project, model, and current-turn input/output tokens instead. API keys, base URLs, and relay tool names are never displayed.
-- Hover details include a `Codex / CC / Grok` switch on macOS (`Codex / CC` on Windows). Agent Halo keeps watching the available tools, while the halo color, status text, and quota rows follow the selected focused agent. macOS also monitors Grok Build weekly usage and minimal lifecycle (no Pay-as-you-go UI).
-- The context pill displays context usage for the focused agent: Codex shows quota-based context usage, Claude Code shows context window usage captured via status line proxy, and Grok Build prefers live `totalTokens` from session `updates.jsonl` (falling back to end-of-turn `signals.json`).
-- Official Codex quota rows appear only in OAuth mode. Custom API mode and the `CC` view use the same fixed-height information rows without presenting fake official quota data.
+- Hover details include a `Codex / CC / Grok` switch on Windows and macOS. Agent Halo keeps watching the available tools, while the halo color, status text, and quota rows follow the selected focused agent. Grok Build focus shows OAuth weekly usage and a minimal lifecycle halo (thinking / working / done / needs you / error; presence STANDBY vs OFFLINE). There is no Pay-as-you-go UI.
+- The context pill displays context usage for the focused agent: Codex shows quota-based context usage, Claude Code shows context window usage (macOS via status line proxy), and Grok Build prefers live `totalTokens` from session `updates.jsonl` (falling back to end-of-turn `signals.json`).
+- Official Codex quota rows appear only in OAuth mode. Custom API mode and the `CC` view use the same fixed-height information rows without presenting fake official quota data. Grok focus shows a single Weekly row when OAuth credentials are available.
 - Completed green breathes until Codex returns to the foreground, then settles
   into a non-glowing standby green.
 - Right-click for state previews, pause, startup, and exit controls.
@@ -137,18 +137,22 @@ still produce a readable execution state.
 ## Privacy
 
 Agent Halo locally reads lifecycle events from `%USERPROFILE%\.codex\sessions`
-and, on macOS, automatically configures Claude Code
-lifecycle hooks and status line proxy in `~/.claude/settings.json`. It writes hook
-events to `~/.agent-halo/claude-code-status.jsonl` and context snapshots to
-`~/.agent-halo/claude-code-context.json`. It also performs read-only structured queries
-against `logs_2.sqlite` for Codex connection and service failures.
+(or `~/.codex/sessions` on macOS). It automatically configures Claude Code lifecycle
+hooks in `~/.claude/settings.json` and Grok Build hooks under `~/.grok/hooks/`. On
+macOS it also configures a Claude Code status line proxy. Claude hook events go to
+`~/.agent-halo/claude-code-status.jsonl`; Grok hook events go to
+`~/.agent-halo/grok-build-status.jsonl`. On macOS, Claude context snapshots are written
+to `~/.agent-halo/claude-code-context.json`. It also performs read-only structured
+queries against `logs_2.sqlite` for Codex connection and service failures.
 
 To refresh Codex usage independently, Agent Halo reads the existing OAuth login and
 makes HTTPS requests only to the official `auth.openai.com` and `chatgpt.com`
-endpoints. OAuth tokens are never stored in Agent Halo's cache; rotated tokens are
-written atomically back to the original Codex credential file. The usage cache stores
-only an account hash, percentages, and reset times. Session content is not uploaded,
-and OpenAI API keys are neither read nor stored.
+endpoints. For Grok Build weekly usage (OAuth), it reads `~/.grok/auth.json` and calls
+only `auth.x.ai` and `cli-chat-proxy.grok.com`. OAuth tokens are never stored in
+Agent Halo's cache; rotated tokens are written atomically back to the original
+credential files. The usage cache stores only an account hash, percentages, and reset
+times. Session content is not uploaded, and provider API keys are neither read nor
+stored.
 
 ## Windows security notice
 

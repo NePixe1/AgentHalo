@@ -47,6 +47,7 @@
 
 - 渲染器是原生 WPF，并作为透明、置顶的桌面覆盖层运行。
 - 完成确认、托盘控制、启动项注册和边缘吸附属于 Windows shell 行为，不与 macOS 共享。
+- 详情面板与托盘菜单支持 `Codex | CC | Grok` 三段焦点切换；光环颜色、状态文案和额度行只跟随当前焦点。
 - 会话状态 reducer 位于 `src/windows/CodexMonitor.cs`；视觉渲染位于
   `src/windows/HaloVisual.cs`；共享 spec 生成的常量位于
   `src/windows/GeneratedHaloSpec.cs`。
