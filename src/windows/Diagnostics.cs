@@ -1497,6 +1497,56 @@ public static class Diagnostics
                 {
                 }
 
+                // HaloWindow Grok focus aggregate filters mixed Claude+Grok sessions
+                DateTime aggNow = DateTime.UtcNow;
+                List<SessionSnapshot> mixedGrokAgg = new List<SessionSnapshot>
+                {
+                    new SessionSnapshot
+                    {
+                        ThreadId = "c1",
+                        Agent = AgentKind.ClaudeCode,
+                        State = HaloState.Working,
+                        Active = true,
+                        LastEventUtc = aggNow,
+                        ProjectName = "C",
+                        Action = "Edit"
+                    },
+                    new SessionSnapshot
+                    {
+                        ThreadId = "g1",
+                        Agent = AgentKind.Grok,
+                        State = HaloState.Working,
+                        Active = true,
+                        LastEventUtc = aggNow,
+                        ProjectName = "GrokProject",
+                        Action = "Running command"
+                    }
+                };
+                AggregateSnapshot grokAgg = HaloWindow.BuildGrokAggregateForTest(
+                    mixedGrokAgg, false, true, aggNow);
+                Assert(grokAgg.FocusedAgent == AgentKind.Grok,
+                    "Grok aggregate stamps FocusedAgent.Grok");
+                Assert(grokAgg.State == HaloState.Working,
+                    "Grok aggregate uses Grok session state");
+                Assert(grokAgg.Sessions != null && grokAgg.Sessions.Count == 1 &&
+                    String.Equals(grokAgg.Sessions[0].ThreadId, "g1",
+                        StringComparison.Ordinal),
+                    "Grok aggregate filters out Claude sessions");
+                AggregateSnapshot idleGrokPresent = HaloWindow.BuildGrokAggregateForTest(
+                    new List<SessionSnapshot>(), false, true, aggNow);
+                Assert(idleGrokPresent.State == HaloState.Idle &&
+                    idleGrokPresent.FocusedAgent == AgentKind.Grok,
+                    "empty Grok sessions → Idle (standby applied in RefreshState)");
+                AggregateSnapshot idleGrokOffline = HaloWindow.BuildGrokAggregateForTest(
+                    new List<SessionSnapshot>(), false, false, aggNow);
+                Assert(idleGrokOffline.State == HaloState.Idle,
+                    "empty Grok offline → Idle");
+                AggregateSnapshot pausedGrok = HaloWindow.BuildGrokAggregateForTest(
+                    mixedGrokAgg, true, true, aggNow);
+                Assert(pausedGrok.State == HaloState.Idle &&
+                    String.Equals(pausedGrok.Label, "PAUSED", StringComparison.Ordinal),
+                    "paused Grok aggregate is PAUSED");
+
                 File.Delete(temp);
                 File.WriteAllText(outputPath,
                     "PASS\nLifecycle, usage metrics, panel formatting, and animation checks passed.\n",
