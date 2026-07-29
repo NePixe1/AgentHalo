@@ -1547,6 +1547,43 @@ public static class Diagnostics
                     String.Equals(pausedGrok.Label, "PAUSED", StringComparison.Ordinal),
                     "paused Grok aggregate is PAUSED");
 
+                // DetailsWindow offline copy for focused Grok (three-way switch).
+                AggregateSnapshot offlineGrok = new AggregateSnapshot
+                {
+                    State = HaloState.Idle,
+                    Label = "OFFLINE",
+                    FocusedAgent = AgentKind.Grok,
+                    Sessions = new List<SessionSnapshot>()
+                };
+                string offlineGrokDetail = DetailsWindow.FriendlyStatusDetailForTest(
+                    offlineGrok, offlineGrok.Sessions);
+                Assert(offlineGrokDetail.IndexOf("Grok",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    offlineGrokDetail == L10n.Instance["status.offline_grok"],
+                    "offline grok detail");
+                AggregateSnapshot offlineCodex = new AggregateSnapshot
+                {
+                    State = HaloState.Idle,
+                    Label = "OFFLINE",
+                    FocusedAgent = AgentKind.Codex,
+                    Sessions = new List<SessionSnapshot>()
+                };
+                Assert(DetailsWindow.FriendlyStatusDetailForTest(
+                        offlineCodex, offlineCodex.Sessions) ==
+                    L10n.Instance["status.offline_codex"],
+                    "offline codex detail still maps to offline_codex");
+                AggregateSnapshot offlineClaude = new AggregateSnapshot
+                {
+                    State = HaloState.Idle,
+                    Label = "OFFLINE",
+                    FocusedAgent = AgentKind.ClaudeCode,
+                    Sessions = new List<SessionSnapshot>()
+                };
+                Assert(DetailsWindow.FriendlyStatusDetailForTest(
+                        offlineClaude, offlineClaude.Sessions) ==
+                    L10n.Instance["status.offline_claude"],
+                    "offline claude detail still maps to offline_claude");
+
                 File.Delete(temp);
                 File.WriteAllText(outputPath,
                     "PASS\nLifecycle, usage metrics, panel formatting, and animation checks passed.\n",
