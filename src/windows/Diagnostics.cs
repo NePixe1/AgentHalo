@@ -1440,6 +1440,63 @@ public static class Diagnostics
                 {
                 }
 
+                // Grok hook configurator + reducer + active sessions (Task 3)
+                string home = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-grok-cfg-" + Guid.NewGuid().ToString("N"));
+                string fakeExe = Path.Combine(home, "AgentHalo.exe");
+                Directory.CreateDirectory(home);
+                File.WriteAllText(fakeExe, "x");
+                GrokHookConfigurator.Configure(home, fakeExe);
+                string hooksPath = Path.Combine(home, ".grok", "hooks",
+                    "agent-halo-status.json");
+                Assert(File.Exists(hooksPath), "writes agent-halo-status.json");
+                string hooksJson = File.ReadAllText(hooksPath);
+                Assert(hooksJson.IndexOf("--claude-hook", StringComparison.Ordinal) >= 0,
+                    "command uses --claude-hook");
+                Assert(hooksJson.IndexOf("UserPromptSubmit", StringComparison.Ordinal) >= 0,
+                    "registers UserPromptSubmit");
+                // Idempotent: second call does not throw; content still valid
+                GrokHookConfigurator.Configure(home, fakeExe);
+                Assert(File.Exists(hooksPath) &&
+                    File.ReadAllText(hooksPath).IndexOf("--claude-hook",
+                        StringComparison.Ordinal) >= 0,
+                    "Grok hook configurator is idempotent");
+
+                GrokHookStatusReducer r = new GrokHookStatusReducer("s1");
+                DateTime t0 = new DateTime(2026, 7, 25, 0, 0, 0, DateTimeKind.Utc);
+                r.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:01Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"s1\",\"cwd\":\"/p/AgentHalo\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(1));
+                Assert(r.Snapshot.Agent == AgentKind.Grok, "agent kind Grok");
+                Assert(r.Snapshot.State == HaloState.Thinking, "prompt -> thinking");
+                r.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:02Z\",\"event\":\"PreToolUse\",\"sessionId\":\"s1\",\"cwd\":\"/p/AgentHalo\",\"toolName\":\"run_terminal_command\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(2));
+                r.ApplyWorkingVisibility(t0.AddSeconds(3));
+                Assert(r.Snapshot.State == HaloState.Working, "tool -> working");
+                r.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:04Z\",\"event\":\"Notification\",\"sessionId\":\"s1\",\"notificationType\":\"permission_prompt\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(4));
+                Assert(r.Snapshot.State == HaloState.Attention, "permission -> attention");
+                r.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:05Z\",\"event\":\"Stop\",\"sessionId\":\"s1\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(5));
+                Assert(r.Snapshot.State == HaloState.Done, "stop -> done");
+
+                string grokDir = Path.Combine(home, ".grok");
+                Directory.CreateDirectory(grokDir);
+                File.WriteAllText(Path.Combine(grokDir, "active_sessions.json"),
+                    "[{\"session_id\":\"abc\",\"cwd\":\"/tmp/x\"}]");
+                Assert(GrokActiveSessionsReader.HasLiveSession(home),
+                    "array entry without pid counts as present");
+                try
+                {
+                    Directory.Delete(home, true);
+                }
+                catch
+                {
+                }
+
                 File.Delete(temp);
                 File.WriteAllText(outputPath,
                     "PASS\nLifecycle, usage metrics, panel formatting, and animation checks passed.\n",
