@@ -437,12 +437,6 @@ namespace CodexHalo
                 "/v1/billing?format=credits", AuthHeaders(accessToken), null, null, 10);
         }
 
-        public static GrokUsageHttpResponse FetchSettings(string accessToken)
-        {
-            return SendRequest("GET", "cli-chat-proxy.grok.com", "/v1/settings",
-                AuthHeaders(accessToken), null, null, 10);
-        }
-
         private static Dictionary<string, string> AuthHeaders(string accessToken)
         {
             Dictionary<string, string> headers = new Dictionary<string, string>();
@@ -847,15 +841,6 @@ namespace CodexHalo
                 {
                     throw new InvalidOperationException("usage-http-" +
                         response.StatusCode.ToString(CultureInfo.InvariantCulture));
-                }
-
-                // Best-effort plan label; settings failure must not fail usage.
-                try
-                {
-                    GrokUsageHttp.FetchSettings(access.AccessToken);
-                }
-                catch
-                {
                 }
 
                 UsageMetrics mapped;

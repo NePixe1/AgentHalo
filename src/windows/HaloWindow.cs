@@ -340,7 +340,9 @@ public sealed class HaloWindow : Window
                     aggregate.Detail = "Preview mode";
                 }
                 int claudeCount = aggregate.Sessions == null ? 0 : aggregate.Sessions.Count;
+                // PAUSED must win over STANDBY (aggregate is Idle when paused).
                 bool showClaudeStandby = !demoState.HasValue &&
+                    !settings.Paused &&
                     aggregate.State == HaloState.Idle &&
                     ClaudeLiveSessionReader.HasStandbySession();
                 visual.SetSteadyDone(showClaudeStandby);
@@ -381,7 +383,9 @@ public sealed class HaloWindow : Window
                     aggregate.Detail = "Preview mode";
                 }
                 int grokCount = aggregate.Sessions == null ? 0 : aggregate.Sessions.Count;
+                // PAUSED must win over STANDBY (aggregate is Idle when paused).
                 bool showGrokStandby = !demoState.HasValue &&
+                    !settings.Paused &&
                     aggregate.State == HaloState.Idle &&
                     GrokActiveSessionsReader.HasLiveSession(
                         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));

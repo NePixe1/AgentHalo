@@ -1201,6 +1201,8 @@ public sealed class DetailsWindow : Window
             hitLayer.Children.Add(claudeBorder);
 
             Viewbox grokIconBox = CreateSwitchIcon(GrokIconPath, 18, out grokIcon);
+            // grok.svg uses fill-rule="evenodd"; WPF Geometry.Parse defaults to Nonzero.
+            SetGeometryFillRule(grokIcon.Data, FillRule.EvenOdd);
             grokBorder = new Border
             {
                 Background = System.Windows.Media.Brushes.Transparent,
@@ -1243,6 +1245,25 @@ public sealed class DetailsWindow : Window
                 Child = canvas
             };
             return viewbox;
+        }
+
+        private static void SetGeometryFillRule(Geometry geometry, FillRule fillRule)
+        {
+            if (geometry == null)
+            {
+                return;
+            }
+            PathGeometry pathGeometry = geometry as PathGeometry;
+            if (pathGeometry != null)
+            {
+                pathGeometry.FillRule = fillRule;
+                return;
+            }
+            StreamGeometry streamGeometry = geometry as StreamGeometry;
+            if (streamGeometry != null)
+            {
+                streamGeometry.FillRule = fillRule;
+            }
         }
 
         private static Viewbox CreateClaudeCodeSwitchIcon(double displaySize,
