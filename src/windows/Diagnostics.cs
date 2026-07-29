@@ -1388,6 +1388,58 @@ public static class Diagnostics
                         StringComparison.OrdinalIgnoreCase),
                     "claudeCode focus still persists");
 
+                // Hook routing: Grok env must write grok-build-status.jsonl only
+                // and normalize snake_case event names to PascalCase.
+                string hookIsoHome = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-hook-iso-" + Guid.NewGuid().ToString("N"));
+                string hookAgentHalo = Path.Combine(hookIsoHome, ".agent-halo");
+                Directory.CreateDirectory(hookAgentHalo);
+                int grokHookCode = ClaudeHookStatusWriter.WriteForTest(
+                    eventName: "pre_tool_use",
+                    home: hookIsoHome,
+                    grokSessionId: "test-grok-session",
+                    grokHookEvent: "PreToolUse",
+                    stdinJson: "{\"sessionId\":\"test-grok-session\",\"cwd\":\"/tmp/proj\"," +
+                        "\"toolName\":\"run_terminal_command\"}");
+                Assert(grokHookCode == 0, "grok hook writer exit 0");
+                string grokStatusPath = Path.Combine(hookAgentHalo, "grok-build-status.jsonl");
+                string claudeStatusPath = Path.Combine(hookAgentHalo, "claude-code-status.jsonl");
+                Assert(File.Exists(grokStatusPath), "Grok path writes grok-build-status.jsonl");
+                string grokHookText = File.ReadAllText(grokStatusPath);
+                Assert(grokHookText.IndexOf("grok-hook", StringComparison.Ordinal) >= 0,
+                    "source grok-hook");
+                Assert(grokHookText.IndexOf("\"PreToolUse\"", StringComparison.Ordinal) >= 0,
+                    "snake_case event normalizes to PreToolUse");
+                Assert(!File.Exists(claudeStatusPath) ||
+                    File.ReadAllText(claudeStatusPath).IndexOf("test-grok-session",
+                        StringComparison.Ordinal) < 0,
+                    "Grok session must not appear in claude jsonl");
+
+                // Claude path without GROK env must not touch grok jsonl.
+                ClaudeHookStatusWriter.WriteForTest("PreToolUse", hookIsoHome, null, null,
+                    "{\"sessionId\":\"claude-1\",\"cwd\":\"/tmp/c\",\"toolName\":\"Bash\"}");
+                string claudeHookText = File.ReadAllText(claudeStatusPath);
+                Assert(claudeHookText.IndexOf("claude-hook", StringComparison.Ordinal) >= 0,
+                    "claude source");
+                Assert(File.ReadAllText(grokStatusPath).IndexOf("claude-1",
+                    StringComparison.Ordinal) < 0,
+                    "Claude session must not appear in grok jsonl");
+                Assert(String.Equals(
+                    ClaudeHookStatusWriter.NormalizeEventName("pre_tool_use"),
+                    "PreToolUse", StringComparison.Ordinal),
+                    "NormalizeEventName pre_tool_use");
+                Assert(String.Equals(
+                    ClaudeHookStatusWriter.NormalizeEventName("PreToolUse"),
+                    "PreToolUse", StringComparison.Ordinal),
+                    "NormalizeEventName keeps PascalCase");
+                try
+                {
+                    Directory.Delete(hookIsoHome, true);
+                }
+                catch
+                {
+                }
+
                 File.Delete(temp);
                 File.WriteAllText(outputPath,
                     "PASS\nLifecycle, usage metrics, panel formatting, and animation checks passed.\n",

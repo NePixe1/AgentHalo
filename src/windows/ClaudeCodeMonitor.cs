@@ -32,14 +32,70 @@ public static class ClaudeHookStatusWriter
     {
         private const long RotateTriggerBytes = 3 * 1024 * 1024;
         private const long RotateKeepBytes = 2 * 1024 * 1024;
+        private const string ClaudeMutexName =
+            "Local\\AgentHalo-ClaudeCodeStatusLog-7A0CE36F";
+        private const string GrokMutexName =
+            "Local\\AgentHalo-GrokBuildStatusLog-7A0CE36F";
         private static readonly JavaScriptSerializer Serializer =
             new JavaScriptSerializer();
 
         public static int WriteFromStandardInput(string eventName)
         {
+            string body = null;
             try
             {
-                string body = Console.In.ReadToEnd();
+                body = Console.In.ReadToEnd();
+            }
+            catch
+            {
+                body = String.Empty;
+            }
+            string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            string grokSessionId = Environment.GetEnvironmentVariable("GROK_SESSION_ID");
+            string grokHookEvent = Environment.GetEnvironmentVariable("GROK_HOOK_EVENT");
+            return WriteCore(eventName, home, grokSessionId, grokHookEvent, body);
+        }
+
+        // Injectable path for Diagnostics self-tests (no Console / Environment).
+        public static int WriteForTest(string eventName, string home,
+            string grokSessionId, string grokHookEvent, string stdinJson)
+        {
+            return WriteCore(eventName, home, grokSessionId, grokHookEvent, stdinJson);
+        }
+
+        internal static string NormalizeEventName(string eventName)
+        {
+            if (String.IsNullOrWhiteSpace(eventName))
+            {
+                return eventName;
+            }
+            if (eventName.IndexOf('_') < 0)
+            {
+                return eventName;
+            }
+            string[] parts = eventName.Split(new[] { '_' },
+                StringSplitOptions.RemoveEmptyEntries);
+            StringBuilder sb = new StringBuilder();
+            foreach (string part in parts)
+            {
+                if (part.Length == 0)
+                {
+                    continue;
+                }
+                sb.Append(Char.ToUpperInvariant(part[0]));
+                if (part.Length > 1)
+                {
+                    sb.Append(part.Substring(1).ToLowerInvariant());
+                }
+            }
+            return sb.ToString();
+        }
+
+        private static int WriteCore(string eventName, string home,
+            string grokSessionId, string grokHookEvent, string body)
+        {
+            try
+            {
                 Dictionary<string, object> payload = null;
                 if (!String.IsNullOrWhiteSpace(body))
                 {
@@ -50,20 +106,27 @@ public static class ClaudeHookStatusWriter
                     payload = new Dictionary<string, object>();
                 }
 
+                bool isGrok = !String.IsNullOrEmpty(grokSessionId) ||
+                    !String.IsNullOrEmpty(grokHookEvent);
+
                 string resolvedEvent = FirstString(eventName, Value(payload, "hook_event_name"),
-                    Value(payload, "event"), Value(payload, "eventName"));
+                    Value(payload, "event"), Value(payload, "eventName"),
+                    isGrok ? grokHookEvent : null);
                 if (String.IsNullOrWhiteSpace(resolvedEvent))
                 {
                     return 0;
                 }
+                resolvedEvent = NormalizeEventName(resolvedEvent);
 
+                string defaultSessionId = isGrok ? "grok" : "claude-code";
                 Dictionary<string, object> record = new Dictionary<string, object>();
                 record["timestamp"] = FirstString(Value(payload, "timestamp"),
                     DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
                 record["event"] = resolvedEvent;
                 record["sessionId"] = FirstString(Value(payload, "session_id"),
                     Value(payload, "sessionId"), Value(payload, "conversation_id"),
-                    "claude-code");
+                    isGrok ? grokSessionId : null,
+                    defaultSessionId);
                 record["cwd"] = FirstString(Value(payload, "cwd"),
                     Nested(payload, "workspace", "current_dir"),
                     Nested(payload, "workspace", "cwd"),
@@ -87,15 +150,17 @@ public static class ClaudeHookStatusWriter
                     ? null : notificationType;
                 record["errorText"] = String.IsNullOrEmpty(errorText) ? null : errorText;
                 record["model"] = String.IsNullOrEmpty(model) ? null : model;
-                record["source"] = "claude-hook";
+                record["source"] = isGrok ? "grok-hook" : "claude-hook";
 
-                string root = AgentHaloDataDirectory();
+                string root = AgentHaloDataDirectory(home);
                 Directory.CreateDirectory(root);
-                string path = Path.Combine(root, "claude-code-status.jsonl");
+                string fileName = isGrok
+                    ? "grok-build-status.jsonl" : "claude-code-status.jsonl";
+                string path = Path.Combine(root, fileName);
                 string line = Serializer.Serialize(record) + Environment.NewLine;
+                string mutexName = isGrok ? GrokMutexName : ClaudeMutexName;
 
-                using (Mutex mutex = new Mutex(false,
-                    "Local\\AgentHalo-ClaudeCodeStatusLog-7A0CE36F"))
+                using (Mutex mutex = new Mutex(false, mutexName))
                 {
                     bool locked = false;
                     try
@@ -125,15 +190,24 @@ public static class ClaudeHookStatusWriter
             }
             catch
             {
-                // Claude hooks must never block or break the user's Claude Code turn.
+                // Hooks must never block or break the user's agent turn.
             }
             return 0;
         }
 
         public static string AgentHaloDataDirectory()
         {
-            return Path.Combine(Environment.GetFolderPath(
-                Environment.SpecialFolder.UserProfile), ".agent-halo");
+            return AgentHaloDataDirectory(Environment.GetFolderPath(
+                Environment.SpecialFolder.UserProfile));
+        }
+
+        public static string AgentHaloDataDirectory(string home)
+        {
+            if (String.IsNullOrEmpty(home))
+            {
+                home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            }
+            return Path.Combine(home, ".agent-halo");
         }
 
         private static void RotateIfNeeded(string path)
