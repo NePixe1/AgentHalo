@@ -1345,6 +1345,49 @@ public static class Diagnostics
                     Math.Abs(standbyIgnoresLive.DisplayPercent.Value - 55.0) < 0.001,
                     "STANDBY soft-hold uses remembered percent only");
 
+                // Focused agent grok persistence
+                HaloSettings grokSettings = new HaloSettings();
+                grokSettings.SetFocusedAgent(AgentKind.Grok);
+                Assert(grokSettings.GetFocusedAgent() == AgentKind.Grok,
+                    "settings should accept grok focus");
+                Assert(String.Equals(grokSettings.FocusedAgent, "grok",
+                    StringComparison.OrdinalIgnoreCase), "serialized focusedAgent is grok");
+
+                JavaScriptSerializer settingsSerializer = new JavaScriptSerializer();
+                HaloSettings grokDeserialized = settingsSerializer.Deserialize<HaloSettings>(
+                    "{\"FocusedAgent\":\"grok\"}");
+                Assert(grokDeserialized != null &&
+                    grokDeserialized.GetFocusedAgent() == AgentKind.Grok,
+                    "deserialized focusedAgent grok maps to AgentKind.Grok");
+
+                HaloSettings invalidFocus = settingsSerializer.Deserialize<HaloSettings>(
+                    "{\"FocusedAgent\":\"nope\"}");
+                Assert(invalidFocus != null &&
+                    invalidFocus.GetFocusedAgent() == AgentKind.Codex,
+                    "invalid focusedAgent falls back to Codex");
+                // Load() repair accepts only codex/claudeCode/grok; "nope" would reset string.
+                Assert(!String.Equals(invalidFocus.FocusedAgent, "grok",
+                    StringComparison.OrdinalIgnoreCase) &&
+                    !String.Equals(invalidFocus.FocusedAgent, "claudeCode",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    !String.Equals(invalidFocus.FocusedAgent, "codex",
+                        StringComparison.OrdinalIgnoreCase),
+                    "invalid focusedAgent is not a known agent string before Load repair");
+
+                // Existing agents still round-trip after Grok support.
+                HaloSettings codexSettings = new HaloSettings();
+                codexSettings.SetFocusedAgent(AgentKind.Codex);
+                Assert(codexSettings.GetFocusedAgent() == AgentKind.Codex &&
+                    String.Equals(codexSettings.FocusedAgent, "codex",
+                        StringComparison.OrdinalIgnoreCase),
+                    "codex focus still persists");
+                HaloSettings claudeSettings = new HaloSettings();
+                claudeSettings.SetFocusedAgent(AgentKind.ClaudeCode);
+                Assert(claudeSettings.GetFocusedAgent() == AgentKind.ClaudeCode &&
+                    String.Equals(claudeSettings.FocusedAgent, "claudeCode",
+                        StringComparison.OrdinalIgnoreCase),
+                    "claudeCode focus still persists");
+
                 File.Delete(temp);
                 File.WriteAllText(outputPath,
                     "PASS\nLifecycle, usage metrics, panel formatting, and animation checks passed.\n",

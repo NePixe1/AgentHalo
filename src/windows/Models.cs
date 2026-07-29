@@ -31,7 +31,8 @@ namespace CodexHalo
 public enum AgentKind
     {
         Codex,
-        ClaudeCode
+        ClaudeCode,
+        Grok
     }
 
 public enum AgentPresenceState
@@ -72,7 +73,8 @@ public enum AgentEvidenceSource
         Process,
         SessionJsonl,
         DiagnosticSqlite,
-        ClaudeHook
+        ClaudeHook,
+        GrokHook
     }
 
 public enum AgentAttentionReason
