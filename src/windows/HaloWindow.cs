@@ -53,6 +53,7 @@ public sealed class HaloWindow : Window
         private ErrorPresentation? demoErrorPresentation;
         private bool codexWasForeground;
         private bool? lastCodexRunning;
+        private bool? lastGrokPresent;
         private DateTime activeErrorUtc;
         private DateTime errorDimmedUtc;
         private ErrorPresentation errorPresentation = ErrorPresentation.Flashing;
@@ -208,6 +209,7 @@ public sealed class HaloWindow : Window
             RestorePosition();
             RecoverHaloIfOffscreen();
             monitor.Start();
+            ConfigureFocusedUsageProvider(settings.GetFocusedAgent());
             RefreshState();
             codexWasForeground = IsCodexForeground();
             foregroundTimer.Start();
@@ -228,16 +230,26 @@ public sealed class HaloWindow : Window
 
         private void OnForegroundTick(object sender, EventArgs e)
         {
+            AgentKind focusedAgent = settings.GetFocusedAgent();
             bool claudeChanged = claudeMonitor.Refresh();
             claudeChanged = claudeTranscriptMonitor.Refresh() || claudeChanged;
-            if (claudeChanged && settings.GetFocusedAgent() == AgentKind.ClaudeCode)
+            if (claudeChanged && focusedAgent == AgentKind.ClaudeCode)
             {
                 RefreshState();
             }
             bool grokChanged = grokMonitor.Refresh();
-            if (grokChanged && settings.GetFocusedAgent() == AgentKind.Grok)
+            if (focusedAgent == AgentKind.Grok)
             {
-                RefreshState();
+                bool grokPresent = GrokActiveSessionsReader.HasLiveSession(
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+                bool grokPresenceChanged = !lastGrokPresent.HasValue ||
+                    lastGrokPresent.Value != grokPresent;
+                lastGrokPresent = grokPresent;
+                if (ShouldRefreshGrokStateForTick(
+                    grokChanged, grokPresenceChanged, aggregate))
+                {
+                    RefreshState();
+                }
             }
             // Re-evaluate presence on every tick so offline becomes visible as
             // soon as the main Codex process exits — even if residual helpers
@@ -375,7 +387,10 @@ public sealed class HaloWindow : Window
             {
                 GrokUsageMonitor.Instance.RequestRefresh();
                 grokMonitor.Refresh();
-                aggregate = GetGrokAggregate();
+                bool grokPresent = GrokActiveSessionsReader.HasLiveSession(
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+                lastGrokPresent = grokPresent;
+                aggregate = GetGrokAggregate(grokPresent);
                 if (demoState.HasValue)
                 {
                     aggregate.State = demoState.Value;
@@ -387,8 +402,7 @@ public sealed class HaloWindow : Window
                 bool showGrokStandby = !demoState.HasValue &&
                     !settings.Paused &&
                     aggregate.State == HaloState.Idle &&
-                    GrokActiveSessionsReader.HasLiveSession(
-                        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+                    grokPresent;
                 visual.SetSteadyDone(showGrokStandby);
                 visual.SetErrorPresentation(demoErrorPresentation ?? ErrorPresentation.Flashing);
                 visual.SetState(showGrokStandby ? HaloState.Done : aggregate.State,
@@ -921,14 +935,48 @@ public sealed class HaloWindow : Window
             return result;
         }
 
-        private AggregateSnapshot GetGrokAggregate()
+        private AggregateSnapshot GetGrokAggregate(bool present)
         {
             return BuildGrokAggregateForTest(
                 grokMonitor.Snapshots(),
                 settings.Paused,
-                GrokActiveSessionsReader.HasLiveSession(
-                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)),
+                present,
                 DateTime.UtcNow);
+        }
+
+        internal static bool ShouldRefreshGrokStateForTick(
+            bool monitorChanged,
+            bool presenceChanged,
+            AggregateSnapshot current)
+        {
+            return monitorChanged || presenceChanged ||
+                (current != null && current.State == HaloState.Done);
+        }
+
+        internal static bool ShouldPollGrokUsageForAgent(AgentKind agent)
+        {
+            return agent == AgentKind.Grok;
+        }
+
+        internal static bool ShouldPollCodexUsageForAgent(AgentKind agent)
+        {
+            return agent == AgentKind.Codex;
+        }
+
+        private static void ConfigureFocusedUsageProvider(AgentKind agent)
+        {
+            UsageFocusGate.Activate(agent);
+            CodexUsageMonitor.Instance.SetActive(
+                ShouldPollCodexUsageForAgent(agent));
+            GrokUsageMonitor.Instance.SetActive(
+                ShouldPollGrokUsageForAgent(agent));
+        }
+
+        private static void SuspendFocusedUsageProviders()
+        {
+            UsageFocusGate.DeactivateAll();
+            CodexUsageMonitor.Instance.SetActive(false);
+            GrokUsageMonitor.Instance.SetActive(false);
         }
 
         /// <summary>
@@ -1143,13 +1191,11 @@ public sealed class HaloWindow : Window
         {
             if (settings.GetFocusedAgent() != agent)
             {
+                SuspendFocusedUsageProviders();
                 settings.SetFocusedAgent(agent);
                 SettingsStorage.Save(settings);
             }
-            if (agent == AgentKind.Grok)
-            {
-                GrokUsageMonitor.Instance.RequestRefresh();
-            }
+            ConfigureFocusedUsageProvider(agent);
             RefreshState();
             if (details.IsVisible)
             {
@@ -1257,6 +1303,7 @@ public sealed class HaloWindow : Window
 
         private void OnClosing(object sender, System.ComponentModel.CancelEventArgs e)
         {
+            SuspendFocusedUsageProviders();
             SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
             foregroundTimer.Stop();
             hoverHideTimer.Stop();

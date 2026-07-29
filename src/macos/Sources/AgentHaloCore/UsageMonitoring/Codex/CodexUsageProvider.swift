@@ -11,15 +11,19 @@ public struct CodexUsageProvider: UsageProvider, Sendable {
 
     private let authStore: CodexAuthStore
     private let usageClient: CodexUsageClient
+    private let focusController: UsageProviderFocusController
     private let now: @Sendable () -> Date
 
     public init(
         authStore: CodexAuthStore = CodexAuthStore(),
         usageClient: CodexUsageClient = CodexUsageClient(),
+        focusController: UsageProviderFocusController =
+            UsageProviderFocusController(),
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         self.authStore = authStore
         self.usageClient = usageClient
+        self.focusController = focusController
         self.now = now
     }
 
@@ -28,11 +32,14 @@ public struct CodexUsageProvider: UsageProvider, Sendable {
     }
 
     public func refresh(using access: ResolvedProviderAccess) async -> UsageRefreshResult {
-        guard case .oauth(let initialAccess) = access else {
+        guard case .oauth(let initialAccess) = access,
+              let authorization = focusController.authorization(for: providerID)
+        else {
             return failure(.signInAgain)
         }
 
         do {
+            try authorization.check()
             guard let exactAccess = authStore.reload(source: initialAccess.source),
                   exactAccess.sourceVersion == initialAccess.sourceVersion
             else {
@@ -46,8 +53,14 @@ public struct CodexUsageProvider: UsageProvider, Sendable {
                 let requestCandidate = current
                 let checked = await generationChecked(
                     candidate: requestCandidate,
+                    authorization: authorization,
                     successCandidate: { $0.access },
-                    operation: { try await rotate(requestCandidate) }
+                    operation: {
+                        try await rotate(
+                            requestCandidate,
+                            authorization: authorization
+                        )
+                    }
                 )
                 let rotated: (access: OAuthAccess, migrateCacheFrom: AccountCacheKey?)
                 switch checked {
@@ -65,6 +78,7 @@ public struct CodexUsageProvider: UsageProvider, Sendable {
             let firstUsageCandidate = current
             let firstUsage = await generationChecked(
                 candidate: firstUsageCandidate,
+                authorization: authorization,
                 successCandidate: { _ in firstUsageCandidate },
                 operation: {
                     try await usageClient.fetchUsage(
@@ -86,8 +100,14 @@ public struct CodexUsageProvider: UsageProvider, Sendable {
                 let requestCandidate = current
                 let checkedRotation = await generationChecked(
                     candidate: requestCandidate,
+                    authorization: authorization,
                     successCandidate: { $0.access },
-                    operation: { try await rotate(requestCandidate) }
+                    operation: {
+                        try await rotate(
+                            requestCandidate,
+                            authorization: authorization
+                        )
+                    }
                 )
                 let rotated: (access: OAuthAccess, migrateCacheFrom: AccountCacheKey?)
                 switch checkedRotation {
@@ -103,6 +123,7 @@ public struct CodexUsageProvider: UsageProvider, Sendable {
                 let secondUsageCandidate = current
                 let secondUsage = await generationChecked(
                     candidate: secondUsageCandidate,
+                    authorization: authorization,
                     successCandidate: { _ in secondUsageCandidate },
                     operation: {
                         try await usageClient.fetchUsage(
@@ -143,12 +164,15 @@ public struct CodexUsageProvider: UsageProvider, Sendable {
     }
 
     private func rotate(
-        _ expected: OAuthAccess
+        _ expected: OAuthAccess,
+        authorization: UsageProviderFocusAuthorization
     ) async throws -> (access: OAuthAccess, migrateCacheFrom: AccountCacheKey?) {
+        try authorization.check()
         guard let refreshToken = expected.refreshToken, !refreshToken.isEmpty else {
             throw UsageProviderFailure.signInAgain
         }
         let response = try await usageClient.refreshToken(refreshToken)
+        try authorization.check()
         let refreshedAt = now()
         let rotation = CodexTokenRotation(
             accessToken: response.accessToken,
@@ -161,10 +185,17 @@ public struct CodexUsageProvider: UsageProvider, Sendable {
         var persistedAccess: OAuthAccess?
 
         do {
-            if let persisted = try authStore.persist(rotation: rotation, replacing: expected) {
+            let persisted = try authorization.performCredentialWrite {
+                try authStore.persist(rotation: rotation, replacing: expected)
+            }
+            if let persisted {
                 requestAccess = persisted
                 persistedAccess = persisted
             }
+        } catch let error as UsageProviderFocusError {
+            throw error
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             // Deliberately omit the underlying error: it may contain a path or
             // Keychain diagnostic. The in-memory token remains valid now.
@@ -179,11 +210,14 @@ public struct CodexUsageProvider: UsageProvider, Sendable {
 
     private func generationChecked<Value: Sendable>(
         candidate: OAuthAccess,
+        authorization: UsageProviderFocusAuthorization,
         successCandidate: @Sendable (Value) -> OAuthAccess,
         operation: @Sendable () async throws -> Value
     ) async -> CodexGenerationChecked<Value> {
         do {
+            try authorization.check()
             let value = try await operation()
+            try authorization.check()
             guard sourceIsCurrent(successCandidate(value)) else {
                 return .externalAccessChanged
             }

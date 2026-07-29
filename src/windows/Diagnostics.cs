@@ -32,9 +32,12 @@ public static class Diagnostics
     {
         public static int WriteCodexUsageSnapshot(string outputPath)
         {
+            CodexUsageMonitor monitor = null;
             try
             {
-                CodexUsageMonitor monitor = CodexUsageMonitor.Instance;
+                UsageFocusGate.Activate(AgentKind.Codex);
+                monitor = CodexUsageMonitor.Instance;
+                monitor.SetActive(true);
                 monitor.RequestRefreshForTest();
                 DateTime deadline = DateTime.UtcNow.AddSeconds(20);
                 while (monitor.IsRefreshing && DateTime.UtcNow < deadline)
@@ -72,6 +75,14 @@ public static class Diagnostics
                 File.WriteAllText(outputPath, "{\"status\":\"Error\",\"detail\":\"" +
                     EscapeJson(ex.GetType().Name) + "\"}", new UTF8Encoding(false));
                 return 1;
+            }
+            finally
+            {
+                UsageFocusGate.DeactivateAll();
+                if (monitor != null)
+                {
+                    monitor.SetActive(false);
+                }
             }
         }
 
@@ -1381,10 +1392,10 @@ public static class Diagnostics
                     String.Equals(codexSettings.FocusedAgent, "codex",
                         StringComparison.OrdinalIgnoreCase),
                     "codex focus still persists");
-                HaloSettings claudeSettings = new HaloSettings();
-                claudeSettings.SetFocusedAgent(AgentKind.ClaudeCode);
-                Assert(claudeSettings.GetFocusedAgent() == AgentKind.ClaudeCode &&
-                    String.Equals(claudeSettings.FocusedAgent, "claudeCode",
+                HaloSettings claudeFocusSettings = new HaloSettings();
+                claudeFocusSettings.SetFocusedAgent(AgentKind.ClaudeCode);
+                Assert(claudeFocusSettings.GetFocusedAgent() == AgentKind.ClaudeCode &&
+                    String.Equals(claudeFocusSettings.FocusedAgent, "claudeCode",
                         StringComparison.OrdinalIgnoreCase),
                     "claudeCode focus still persists");
 
@@ -1461,6 +1472,21 @@ public static class Diagnostics
                     File.ReadAllText(hooksPath).IndexOf("--claude-hook",
                         StringComparison.Ordinal) >= 0,
                     "Grok hook configurator is idempotent");
+                Assert(GrokHookConfigurator.IsConfiguredForTest(
+                    hooksPath, fakeExe), "current Grok hook executable is configured");
+                string movedExe = Path.Combine(home, "moved", "AgentHalo.exe");
+                Directory.CreateDirectory(Path.GetDirectoryName(movedExe));
+                File.WriteAllText(movedExe, "x");
+                Assert(!GrokHookConfigurator.IsConfiguredForTest(
+                    hooksPath, movedExe),
+                    "stale Grok hook executable path is not accepted");
+                GrokHookConfigurator.Configure(home, movedExe);
+                Assert(GrokHookConfigurator.IsConfiguredForTest(
+                    hooksPath, movedExe),
+                    "Grok hook executable path is rewritten after move");
+                Assert(!GrokHookConfigurator.IsConfiguredForTest(
+                    hooksPath, fakeExe),
+                    "old Grok hook executable path is removed after rewrite");
 
                 GrokHookStatusReducer r = new GrokHookStatusReducer("s1");
                 DateTime t0 = new DateTime(2026, 7, 25, 0, 0, 0, DateTimeKind.Utc);
@@ -1482,6 +1508,19 @@ public static class Diagnostics
                     "{\"timestamp\":\"2026-07-25T00:00:05Z\",\"event\":\"Stop\",\"sessionId\":\"s1\",\"source\":\"grok-hook\"}",
                     t0.AddSeconds(5));
                 Assert(r.Snapshot.State == HaloState.Done, "stop -> done");
+                GrokHookStatusReducer failed =
+                    new GrokHookStatusReducer("failed-session");
+                failed.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:06Z\",\"event\":\"StopFailure\",\"sessionId\":\"failed-session\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(6));
+                Assert(failed.Snapshot.State == HaloState.Error,
+                    "stop failure -> error");
+                Assert(!GrokHookStatusMonitor.ShouldPruneSnapshot(
+                    failed.Snapshot, t0.AddMinutes(30)),
+                    "Grok error snapshot is retained for 30 minutes");
+                Assert(GrokHookStatusMonitor.ShouldPruneSnapshot(
+                    failed.Snapshot, t0.AddHours(1).AddSeconds(7)),
+                    "Grok error snapshot expires after one hour");
 
                 string grokDir = Path.Combine(home, ".grok");
                 Directory.CreateDirectory(grokDir);
@@ -1546,6 +1585,61 @@ public static class Diagnostics
                 Assert(pausedGrok.State == HaloState.Idle &&
                     String.Equals(pausedGrok.Label, "PAUSED", StringComparison.Ordinal),
                     "paused Grok aggregate is PAUSED");
+                AggregateSnapshot doneGrok = new AggregateSnapshot
+                {
+                    State = HaloState.Done,
+                    FocusedAgent = AgentKind.Grok
+                };
+                Assert(HaloWindow.ShouldRefreshGrokStateForTick(
+                    false, false, doneGrok),
+                    "Grok done state keeps refreshing until it settles");
+                Assert(HaloWindow.ShouldRefreshGrokStateForTick(
+                    false, true, idleGrokPresent),
+                    "Grok presence changes refresh standby/offline state");
+                Assert(!HaloWindow.ShouldRefreshGrokStateForTick(
+                    false, false, idleGrokPresent),
+                    "stable idle Grok state does not refresh unnecessarily");
+                Assert(HaloWindow.ShouldPollGrokUsageForAgent(AgentKind.Grok) &&
+                    !HaloWindow.ShouldPollGrokUsageForAgent(AgentKind.Codex) &&
+                    !HaloWindow.ShouldPollGrokUsageForAgent(AgentKind.ClaudeCode),
+                    "Grok usage polling is focused-agent gated");
+                Assert(HaloWindow.ShouldPollCodexUsageForAgent(AgentKind.Codex) &&
+                    !HaloWindow.ShouldPollCodexUsageForAgent(AgentKind.Grok) &&
+                    !HaloWindow.ShouldPollCodexUsageForAgent(AgentKind.ClaudeCode),
+                    "Codex usage polling is focused-agent gated");
+                Assert(!GrokUsageMonitor.Instance.IsActiveForTest,
+                    "Grok usage polling starts inactive");
+                Assert(!CodexUsageMonitor.Instance.IsActiveForTest,
+                    "Codex OAuth usage polling starts inactive");
+
+                UsageFocusGate.Activate(AgentKind.Codex);
+                UsageFocusLease focusedCodexLease;
+                Assert(UsageFocusGate.TryAcquire(
+                    AgentKind.Codex, out focusedCodexLease),
+                    "focused Codex acquires OAuth authorization");
+                UsageFocusLease inactiveGrokLease;
+                Assert(!UsageFocusGate.TryAcquire(
+                    AgentKind.Grok, out inactiveGrokLease),
+                    "unfocused Grok cannot acquire OAuth authorization");
+                UsageFocusGate.Activate(AgentKind.Grok);
+                Assert(!UsageFocusGate.IsCurrent(focusedCodexLease),
+                    "focus switch invalidates in-flight Codex authorization");
+                bool staleCredentialWriteRejected = false;
+                try
+                {
+                    UsageFocusGate.RunCredentialWrite(
+                        focusedCodexLease, delegate { return true; });
+                }
+                catch (OperationCanceledException)
+                {
+                    staleCredentialWriteRejected = true;
+                }
+                Assert(staleCredentialWriteRejected,
+                    "stale provider cannot write OAuth credentials");
+                UsageFocusGate.Activate(AgentKind.Codex);
+                Assert(!UsageFocusGate.IsCurrent(focusedCodexLease),
+                    "switching back does not revive an old authorization");
+                UsageFocusGate.DeactivateAll();
 
                 // DetailsWindow offline copy for focused Grok (three-way switch).
                 AggregateSnapshot offlineGrok = new AggregateSnapshot

@@ -182,6 +182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             focusedAgent: self.settings.focusedAgent
         )
         super.init()
+        activateFocusedUsageProvider(self.settings.focusedAgent)
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -279,6 +280,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func cancelLocalUsageTasks() {
+        usageCoordinator.focusController.deactivateAll()
         usageRefreshLoopTask?.cancel()
         usageRefreshLoopTask = nil
         usageRequestTasks.values.forEach { $0.task.cancel() }
@@ -720,6 +722,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             requestUsageRefresh(for: Self.usageProviderID(for: agent))
             return
         }
+        activateFocusedUsageProvider(agent)
         settings.focusedAgent = agent
         settingsStore.save(settings)
         switch agent {
@@ -1127,6 +1130,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func requestUsageRefresh(for providerID: UsageProviderID) {
+        guard usageCoordinator.focusController.isActive(providerID) else {
+            return
+        }
         guard usageRequestTasks[providerID] == nil else {
             return
         }
@@ -1135,14 +1141,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let task = Task { @MainActor [weak self] in
             defer { self?.clearUsageRequest(for: providerID, token: token) }
             let prepared = await coordinator.prepare(providerID)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled,
+                  coordinator.focusController.isActive(providerID)
+            else {
+                return
+            }
             self?.publishUsageState(prepared, for: providerID)
 
             let refreshed = await coordinator.ensureFresh(providerID)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled,
+                  coordinator.focusController.isActive(providerID)
+            else {
+                return
+            }
             self?.publishUsageState(refreshed, for: providerID)
         }
         usageRequestTasks[providerID] = UsageRequestRecord(token: token, task: task)
+    }
+
+    private func activateFocusedUsageProvider(_ agent: AgentKind) {
+        let providerID = Self.usageProviderID(for: agent)
+        usageCoordinator.focusController.activate(providerID)
+        let inactiveProviderIDs = usageRequestTasks.keys.filter { $0 != providerID }
+        for inactiveProviderID in inactiveProviderIDs {
+            usageRequestTasks[inactiveProviderID]?.task.cancel()
+            usageRequestTasks[inactiveProviderID] = nil
+        }
     }
 
     private func clearUsageRequest(for providerID: UsageProviderID, token: UUID) {

@@ -21,6 +21,7 @@ func runUsageModelChecks() async {
         body: Data()
     )
     expect(response.header("retry-after"), "120", "headers must be case insensitive")
+    testUsageProviderFocusControllerInvalidatesOldAuthorizations()
 
     testDetailsContentResolverSeparatesOAuthUsageAndAPISessionDetails()
     testDetailsContentResolverKeepsOfflineAndContextDataIndependent()
@@ -50,6 +51,72 @@ func runUsageModelChecks() async {
     await runCodexUsageChecks()
     await runClaudeUsageChecks()
     await runGrokUsageChecks()
+}
+
+func testUsageProviderFocusControllerInvalidatesOldAuthorizations() {
+    let controller = UsageProviderFocusController()
+    controller.activate(.codex)
+    guard let codexAuthorization = controller.authorization(for: .codex) else {
+        fatalError("focused Codex must receive usage authorization")
+    }
+    let cancelled = LockedBox(false)
+    let token = UUID()
+    expect(
+        controller.registerCancellation(
+            token: token,
+            authorization: codexAuthorization,
+            cancel: { cancelled.withValue { $0 = true } }
+        ),
+        true,
+        "focused provider cancellation registration"
+    )
+
+    controller.activate(.claude)
+    expect(cancelled.value, true, "focus switch cancels old provider task")
+    expect(
+        controller.authorization(for: .codex) == nil,
+        true,
+        "inactive provider cannot acquire authorization"
+    )
+
+    var wroteCredential = false
+    do {
+        try codexAuthorization.performCredentialWrite {
+            wroteCredential = true
+        }
+        fatalError("old focus generation must not write credentials")
+    } catch {
+        expect(
+            error as? UsageProviderFocusError,
+            .inactiveProvider,
+            "old focus generation rejection"
+        )
+    }
+    expect(wroteCredential, false, "rejected authorization performs no write")
+
+    controller.activate(.codex)
+    do {
+        try codexAuthorization.check()
+        fatalError("switching back must not revive an old authorization")
+    } catch {
+        expect(
+            error as? UsageProviderFocusError,
+            .inactiveProvider,
+            "old same-provider generation remains invalid"
+        )
+    }
+
+    controller.deactivateAll()
+    expect(
+        controller.authorization(for: .codex) == nil,
+        true,
+        "deactivated controller rejects new authorizations"
+    )
+    expect(
+        controller.isActive(.claude),
+        false,
+        "deactivated controller has no active provider"
+    )
 }
 
 func testUsageMonitoringLocalization() {
@@ -664,6 +731,7 @@ func runUsageMonitoringCoordinatorChecks() async {
     await testCoordinatorLatestConcurrentPrepareWins()
     await testCoordinatorSupersededFirstEnsureFreshAwaitsCommittedContext()
     await testCoordinatorDeduplicatesOneProviderAndRefreshesProvidersIndependently()
+    await testCoordinatorFocusSwitchDoesNotJoinOldGeneration()
     await testCoordinatorAccountSwitchDoesNotJoinOrCommitOldRefresh()
     await testCoordinatorNonOAuthPrepareInvalidatesOldRefresh()
     await testCoordinatorInvalidatedMigrationHasNoCacheSideEffects()
@@ -893,6 +961,72 @@ func testCoordinatorDeduplicatesOneProviderAndRefreshesProvidersIndependently() 
     await claude.resume()
     _ = await (codexFirst.value, codexSecond.value, claudeFirst.value)
     expect(await codex.refreshCallCount, 1, "joined Codex refresh should still call provider once")
+}
+
+func testCoordinatorFocusSwitchDoesNotJoinOldGeneration() async {
+    let date = Date(timeIntervalSince1970: 2_100_003_250)
+    let now = LockedBox(date)
+    let key = AccountCacheKey(providerID: .codex, digest: "focus-generation")
+    let provider = SequencedCoordinatorProvider(providerID: .codex)
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(key)))
+    await provider.enqueueResolve(.oauth(coordinatorOAuthAccess(key)))
+    await provider.enqueueRefresh(
+        UsageRefreshResult(
+            providerID: .codex,
+            snapshot: coordinatorSnapshot(key, at: date, planName: "Old focus"),
+            failure: nil
+        ),
+        gated: true
+    )
+    let currentSnapshot = coordinatorSnapshot(
+        key,
+        at: date.addingTimeInterval(1),
+        planName: "Current focus"
+    )
+    await provider.enqueueRefresh(
+        UsageRefreshResult(
+            providerID: .codex,
+            snapshot: currentSnapshot,
+            failure: nil
+        )
+    )
+    let focus = UsageProviderFocusController()
+    focus.activate(.codex)
+    let coordinator = UsageMonitoringCoordinator(
+        providers: [provider],
+        cache: coordinatorCache(
+            files: FakeUsageFiles(),
+            path: "/tmp/agent-halo-coordinator-focus-generation.json",
+            now: now
+        ),
+        focusController: focus,
+        now: { now.value }
+    )
+
+    let oldRequest = Task { await coordinator.ensureFresh(.codex) }
+    await waitForRefreshCount(provider, 1, "old focus refresh did not start")
+    focus.activate(.claude)
+    focus.activate(.codex)
+
+    let currentRequest = Task { await coordinator.ensureFresh(.codex) }
+    await waitForRefreshCount(
+        provider,
+        2,
+        "new focus generation incorrectly joined the old refresh"
+    )
+    expect(
+        (await currentRequest.value).snapshot,
+        currentSnapshot,
+        "new focus generation should publish its own refresh"
+    )
+
+    await provider.resumeRefresh(call: 1)
+    _ = await oldRequest.value
+    expect(
+        (await coordinator.state(for: .codex)).snapshot,
+        currentSnapshot,
+        "old focus generation must not overwrite the current snapshot"
+    )
 }
 
 func testCoordinatorAccountSwitchDoesNotJoinOrCommitOldRefresh() async {
@@ -3321,6 +3455,7 @@ func runCodexUsageChecks() async {
     await testCodexProviderDetectsExternalSourceOnFirstUnauthorized()
     await testCodexProviderDetectsExternalSourceDuringUnauthorizedRetry()
     await testCodexProviderDetectsExternalSourceDuringUnauthorizedRetryFailure()
+    await testCodexProviderFocusSwitchBlocksCredentialWrite()
     await testCodexProviderRefreshesProactively()
     await testCodexProviderRetriesOneUnauthorizedAndMigratesCache()
     await testCodexProviderStopsAfterSecondUnauthorized()
@@ -3835,6 +3970,45 @@ func testCodexProviderRefreshesProactively() async {
     expect(result.migrateCacheFrom == nil, "stable account id should not require cache migration")
 }
 
+func testCodexProviderFocusSwitchBlocksCredentialWrite() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let expiring = codexCheckJWT(exp: now.addingTimeInterval(60).timeIntervalSince1970)
+    let fixture = makeCodexProviderFixture(token: expiring, now: now)
+    guard let files = fixture.2 as? FakeUsageFiles else {
+        fatalError("expected fake files")
+    }
+    let http = GatedUsageHTTPClient(
+        outcomes: [
+            .response(codexUsageResponse(
+                #"{"access_token":"must-not-persist","refresh_token":"must-not-persist"}"#
+            )),
+        ],
+        gatedPath: "/oauth/token"
+    )
+    let focus = UsageProviderFocusController()
+    focus.activate(.codex)
+    let provider = CodexUsageProvider(
+        authStore: fixture.0,
+        usageClient: CodexUsageClient(http: http),
+        focusController: focus,
+        now: { now }
+    )
+
+    let request = Task { await provider.refresh(using: .oauth(fixture.1)) }
+    await waitForHTTPRequestCount(http, 1, "focused Codex refresh did not enter gate")
+    focus.activate(.claude)
+    await http.resume()
+    _ = await request.value
+
+    expect(files.capturedWrites().isEmpty, "unfocused Codex must not write rotated credentials")
+    _ = await provider.refresh(using: .oauth(fixture.1))
+    expect(
+        await http.capturedRequests.count,
+        1,
+        "unfocused Codex must not start another OAuth request"
+    )
+}
+
 func testCodexProviderRetriesOneUnauthorizedAndMigratesCache() async {
     let now = Date(timeIntervalSince1970: 2_000_000_000)
     let fresh = codexCheckJWT(exp: now.addingTimeInterval(3_600).timeIntervalSince1970)
@@ -3947,6 +4121,7 @@ func runClaudeUsageChecks() async {
     await testClaudeProviderAdoptsExternalSourceAfterUsageTransportFailure()
     await testClaudeProviderRejectsUnderScopedUsageChange()
     await testClaudeProviderAdoptsExternalSourceChangedDuringUnauthorizedRetry()
+    await testClaudeProviderFocusSwitchBlocksCredentialWrite()
     await testClaudeProviderRefreshesProactively()
     await testClaudeProviderRetriesOneUnauthorizedAndMigratesCache()
     await testClaudeProviderClassifiesRefreshFailures()
@@ -4486,6 +4661,48 @@ func testClaudeProviderRefreshesProactively() async {
     expect(result.migrateCacheFrom, fixture.1.accountKey, "Claude internal proactive rotation migrates cache binding")
 }
 
+func testClaudeProviderFocusSwitchBlocksCredentialWrite() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeClaudeProviderFixture(
+        accessToken: "expiring",
+        expiresAt: now.addingTimeInterval(60),
+        now: now
+    )
+    guard let files = fixture.2 as? FakeUsageFiles else {
+        fatalError("expected fake files")
+    }
+    let http = GatedUsageHTTPClient(
+        outcomes: [
+            .response(claudeUsageResponse(
+                #"{"access_token":"must-not-persist","refresh_token":"must-not-persist","expires_in":3600}"#
+            )),
+        ],
+        gatedPath: "/v1/oauth/token"
+    )
+    let focus = UsageProviderFocusController()
+    focus.activate(.claude)
+    let provider = ClaudeUsageProvider(
+        authStore: fixture.0,
+        usageClient: ClaudeUsageClient(http: http),
+        focusController: focus,
+        now: { now }
+    )
+
+    let request = Task { await provider.refresh(using: .oauth(fixture.1)) }
+    await waitForHTTPRequestCount(http, 1, "focused Claude refresh did not enter gate")
+    focus.activate(.grok)
+    await http.resume()
+    _ = await request.value
+
+    expect(files.capturedWrites().isEmpty, "unfocused Claude must not write rotated credentials")
+    _ = await provider.refresh(using: .oauth(fixture.1))
+    expect(
+        await http.capturedRequests.count,
+        1,
+        "unfocused Claude must not start another OAuth request"
+    )
+}
+
 func testClaudeProviderRetriesOneUnauthorizedAndMigratesCache() async {
     let now = Date(timeIntervalSince1970: 2_000_000_000)
     let fixture = makeClaudeProviderFixture(accessToken: "fresh", expiresAt: now.addingTimeInterval(3_600), now: now)
@@ -4747,6 +4964,7 @@ func runGrokUsageChecks() async {
     testGrokUsageMapperClampsPercentAndIgnoresOnDemand()
     await testGrokProviderRefreshSucceedsWithWeeklySnapshot()
     await testGrokProviderRetriesCredits401WithTokenRefresh()
+    await testGrokProviderFocusSwitchBlocksCredentialWrite()
     await testGrokProviderNoAuthSignInAgain()
 }
 
@@ -5076,6 +5294,48 @@ func testGrokProviderRefreshSucceedsWithWeeklySnapshot() async {
         "Grok success path: credits then settings"
     )
     expect(requests[0].headers["authorization"], "Bearer fresh-access", "Grok credits uses access token")
+}
+
+func testGrokProviderFocusSwitchBlocksCredentialWrite() async {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fixture = makeGrokProviderFixture(
+        accessToken: "expiring",
+        expiresAt: now.addingTimeInterval(60),
+        now: now
+    )
+    guard let files = fixture.2 as? FakeUsageFiles else {
+        fatalError("expected fake files")
+    }
+    let http = GatedUsageHTTPClient(
+        outcomes: [
+            .response(grokUsageResponse(
+                #"{"access_token":"must-not-persist","refresh_token":"must-not-persist","expires_in":3600}"#
+            )),
+        ],
+        gatedPath: "/oauth2/token"
+    )
+    let focus = UsageProviderFocusController()
+    focus.activate(.grok)
+    let provider = GrokUsageProvider(
+        authStore: fixture.0,
+        usageClient: GrokUsageClient(http: http),
+        focusController: focus,
+        now: { now }
+    )
+
+    let request = Task { await provider.refresh(using: .oauth(fixture.1)) }
+    await waitForHTTPRequestCount(http, 1, "focused Grok refresh did not enter gate")
+    focus.activate(.codex)
+    await http.resume()
+    _ = await request.value
+
+    expect(files.capturedWrites().isEmpty, "unfocused Grok must not write rotated credentials")
+    _ = await provider.refresh(using: .oauth(fixture.1))
+    expect(
+        await http.capturedRequests.count,
+        1,
+        "unfocused Grok must not start another OAuth request"
+    )
 }
 
 func testGrokProviderRetriesCredits401WithTokenRefresh() async {

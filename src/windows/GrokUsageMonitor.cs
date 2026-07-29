@@ -55,18 +55,18 @@ namespace CodexHalo
             Serializer.MaxJsonLength = Int32.MaxValue;
         }
 
-        public static GrokOAuthAccess Resolve()
+        internal static GrokOAuthAccess Resolve()
         {
             return ResolveFromHome(DefaultHome());
         }
 
-        public static GrokOAuthAccess ResolveFromHome(string home)
+        internal static GrokOAuthAccess ResolveFromHome(string home)
         {
             string path = AuthPath(home);
             return Reload(path);
         }
 
-        public static GrokOAuthAccess Reload(string path)
+        internal static GrokOAuthAccess Reload(string path)
         {
             try
             {
@@ -95,7 +95,7 @@ namespace CodexHalo
             return null;
         }
 
-        public static bool NeedsRefresh(GrokOAuthAccess access, DateTime nowUtc)
+        internal static bool NeedsRefresh(GrokOAuthAccess access, DateTime nowUtc)
         {
             if (access == null || access.ExpiresUtc == DateTime.MinValue)
             {
@@ -104,7 +104,7 @@ namespace CodexHalo
             return access.ExpiresUtc - nowUtc <= RefreshWindow;
         }
 
-        public static bool Persist(GrokOAuthAccess expected, string newAccess,
+        internal static bool Persist(GrokOAuthAccess expected, string newAccess,
             string newRefresh, DateTime? expiresAt)
         {
             if (expected == null || String.IsNullOrWhiteSpace(expected.SourcePath))
@@ -421,19 +421,22 @@ namespace CodexHalo
         public const string DefaultClientId = GrokAuthStore.DefaultClientId;
         public const string TokenAuthHeader = "xai-grok-cli";
 
-        public static GrokUsageHttpResponse RefreshToken(string refreshToken,
-            string clientId)
+        internal static GrokUsageHttpResponse RefreshToken(string refreshToken,
+            string clientId, UsageFocusLease lease)
         {
+            UsageFocusGate.ThrowIfInactive(lease);
             string form = "grant_type=refresh_token&client_id=" +
                 Uri.EscapeDataString(clientId ?? DefaultClientId) +
                 "&refresh_token=" + Uri.EscapeDataString(refreshToken ?? String.Empty);
-            return SendRequest("POST", "auth.x.ai", "/oauth2/token", null,
+            return SendRequest(lease, "POST", "auth.x.ai", "/oauth2/token", null,
                 "application/x-www-form-urlencoded", Encoding.UTF8.GetBytes(form), 15);
         }
 
-        public static GrokUsageHttpResponse FetchBilling(string accessToken)
+        internal static GrokUsageHttpResponse FetchBilling(
+            string accessToken, UsageFocusLease lease)
         {
-            return SendRequest("GET", "cli-chat-proxy.grok.com",
+            UsageFocusGate.ThrowIfInactive(lease);
+            return SendRequest(lease, "GET", "cli-chat-proxy.grok.com",
                 "/v1/billing?format=credits", AuthHeaders(accessToken), null, null, 10);
         }
 
@@ -447,10 +450,12 @@ namespace CodexHalo
             return headers;
         }
 
-        private static GrokUsageHttpResponse SendRequest(string method, string host,
+        private static GrokUsageHttpResponse SendRequest(
+            UsageFocusLease lease, string method, string host,
             string path, Dictionary<string, string> headers, string contentType,
             byte[] body, int timeoutSeconds)
         {
+            UsageFocusGate.ThrowIfInactive(lease);
             ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;
             HttpWebRequest request = (HttpWebRequest)WebRequest.Create(
                 "https://" + host + path);
@@ -482,33 +487,47 @@ namespace CodexHalo
                     }
                 }
             }
-            if (body != null)
+            if (!UsageFocusGate.RegisterRequest(lease, request))
             {
-                request.ContentLength = body.Length;
-                using (Stream stream = request.GetRequestStream())
-                {
-                    stream.Write(body, 0, body.Length);
-                }
+                throw new OperationCanceledException(
+                    "usage provider is no longer focused");
             }
-
             try
             {
-                using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+                if (body != null)
                 {
-                    return ReadResponse(response);
+                    request.ContentLength = body.Length;
+                    using (Stream stream = request.GetRequestStream())
+                    {
+                        stream.Write(body, 0, body.Length);
+                    }
+                }
+
+                try
+                {
+                    using (HttpWebResponse response =
+                        (HttpWebResponse)request.GetResponse())
+                    {
+                        return ReadResponse(response);
+                    }
+                }
+                catch (WebException ex)
+                {
+                    HttpWebResponse response = ex.Response as HttpWebResponse;
+                    if (response == null)
+                    {
+                        UsageFocusGate.ThrowIfInactive(lease);
+                        throw;
+                    }
+                    using (response)
+                    {
+                        return ReadResponse(response);
+                    }
                 }
             }
-            catch (WebException ex)
+            finally
             {
-                HttpWebResponse response = ex.Response as HttpWebResponse;
-                if (response == null)
-                {
-                    throw;
-                }
-                using (response)
-                {
-                    return ReadResponse(response);
-                }
+                UsageFocusGate.UnregisterRequest(request);
             }
         }
 
@@ -696,6 +715,7 @@ namespace CodexHalo
         private DateTime lastAttemptUtc;
         private DateTime cooldownUntilUtc;
         private bool refreshInFlight;
+        private bool active;
         private bool disposed;
         private GrokUsageDataStatus status = GrokUsageDataStatus.NoData;
 
@@ -709,7 +729,45 @@ namespace CodexHalo
         private GrokUsageMonitor()
         {
             refreshTimer = new Timer(delegate { RequestRefresh(); }, null,
-                TimeSpan.Zero, RefreshInterval);
+                Timeout.Infinite, Timeout.Infinite);
+        }
+
+        internal bool IsActiveForTest
+        {
+            get
+            {
+                lock (gate)
+                {
+                    return active;
+                }
+            }
+        }
+
+        internal void SetActive(bool value)
+        {
+            bool requestNow = false;
+            lock (gate)
+            {
+                if (disposed || active == value)
+                {
+                    return;
+                }
+                active = value;
+                if (active)
+                {
+                    int interval = (int)RefreshInterval.TotalMilliseconds;
+                    refreshTimer.Change(interval, interval);
+                    requestNow = true;
+                }
+                else
+                {
+                    refreshTimer.Change(Timeout.Infinite, Timeout.Infinite);
+                }
+            }
+            if (requestNow)
+            {
+                RequestRefresh();
+            }
         }
 
         public GrokUsageDataStatus Status
@@ -752,10 +810,13 @@ namespace CodexHalo
 
         public void RequestRefresh()
         {
+            UsageFocusLease lease = null;
             lock (gate)
             {
                 DateTime now = DateTime.UtcNow;
-                if (disposed || refreshInFlight || now < cooldownUntilUtc)
+                if (disposed || !active || refreshInFlight ||
+                    now < cooldownUntilUtc ||
+                    !UsageFocusGate.TryAcquire(AgentKind.Grok, out lease))
                 {
                     return;
                 }
@@ -767,7 +828,7 @@ namespace CodexHalo
                 lastAttemptUtc = now;
                 refreshInFlight = true;
             }
-            ThreadPool.QueueUserWorkItem(delegate { RefreshWorker(); });
+            ThreadPool.QueueUserWorkItem(delegate { RefreshWorker(lease); });
         }
 
         internal void RequestRefreshForTest()
@@ -787,16 +848,19 @@ namespace CodexHalo
                 {
                     return;
                 }
+                active = false;
                 disposed = true;
             }
             refreshTimer.Dispose();
         }
 
-        private void RefreshWorker()
+        private void RefreshWorker(UsageFocusLease lease)
         {
             bool notify = false;
+            bool cancelledByFocus = false;
             try
             {
+                UsageFocusGate.ThrowIfInactive(lease);
                 GrokOAuthAccess access = GrokAuthStore.Resolve();
                 if (access == null)
                 {
@@ -811,15 +875,16 @@ namespace CodexHalo
 
                 if (GrokAuthStore.NeedsRefresh(access, DateTime.UtcNow))
                 {
-                    access = RefreshAccess(access);
+                    access = RefreshAccess(access, lease);
                 }
 
                 GrokUsageHttpResponse response = GrokUsageHttp.FetchBilling(
-                    access.AccessToken);
+                    access.AccessToken, lease);
                 if (response.StatusCode == 401)
                 {
-                    access = RefreshAccess(access);
-                    response = GrokUsageHttp.FetchBilling(access.AccessToken);
+                    access = RefreshAccess(access, lease);
+                    response = GrokUsageHttp.FetchBilling(
+                        access.AccessToken, lease);
                 }
                 if (response.StatusCode == 401)
                 {
@@ -848,6 +913,7 @@ namespace CodexHalo
                 {
                     throw new InvalidDataException("invalid usage response");
                 }
+                UsageFocusGate.ThrowIfInactive(lease);
                 DateTime refreshedAt = DateTime.UtcNow;
                 lock (gate)
                 {
@@ -857,6 +923,10 @@ namespace CodexHalo
                     cooldownUntilUtc = DateTime.MinValue;
                 }
                 notify = true;
+            }
+            catch (OperationCanceledException)
+            {
+                cancelledByFocus = true;
             }
             catch (Exception ex)
             {
@@ -877,19 +947,32 @@ namespace CodexHalo
             }
             finally
             {
+                bool restartAfterFocusCancellation;
                 lock (gate)
                 {
                     refreshInFlight = false;
+                    if (cancelledByFocus)
+                    {
+                        lastAttemptUtc = DateTime.MinValue;
+                    }
+                    restartAfterFocusCancellation =
+                        cancelledByFocus && active;
                 }
-                if (notify)
+                if (notify && UsageFocusGate.IsCurrent(lease))
                 {
                     RaiseUpdated();
+                }
+                if (restartAfterFocusCancellation)
+                {
+                    RequestRefresh();
                 }
             }
         }
 
-        private GrokOAuthAccess RefreshAccess(GrokOAuthAccess expected)
+        private GrokOAuthAccess RefreshAccess(
+            GrokOAuthAccess expected, UsageFocusLease lease)
         {
+            UsageFocusGate.ThrowIfInactive(lease);
             if (String.IsNullOrWhiteSpace(expected.RefreshToken))
             {
                 throw new InvalidOperationException("sign-in-required");
@@ -897,7 +980,9 @@ namespace CodexHalo
             GrokUsageHttpResponse response = GrokUsageHttp.RefreshToken(
                 expected.RefreshToken,
                 String.IsNullOrWhiteSpace(expected.ClientId)
-                    ? GrokUsageHttp.DefaultClientId : expected.ClientId);
+                    ? GrokUsageHttp.DefaultClientId : expected.ClientId,
+                lease);
+            UsageFocusGate.ThrowIfInactive(lease);
             if (response.StatusCode == 400 || response.StatusCode == 401)
             {
                 throw new InvalidOperationException("sign-in-required");
@@ -934,7 +1019,13 @@ namespace CodexHalo
 
             try
             {
-                if (GrokAuthStore.Persist(expected, accessToken, refreshToken, expiresAt))
+                bool persisted = UsageFocusGate.RunCredentialWrite(
+                    lease, delegate
+                    {
+                        return GrokAuthStore.Persist(
+                            expected, accessToken, refreshToken, expiresAt);
+                    });
+                if (persisted)
                 {
                     GrokOAuthAccess reloaded = GrokAuthStore.Reload(expected.SourcePath);
                     if (reloaded != null)
@@ -942,6 +1033,10 @@ namespace CodexHalo
                         return reloaded;
                     }
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
             }
             catch (Exception ex)
             {

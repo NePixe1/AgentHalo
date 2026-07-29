@@ -135,6 +135,12 @@ namespace CodexHalo
             }
         }
 
+        internal static bool IsConfiguredForTest(
+            string hooksPath, string executablePath)
+        {
+            return IsAlreadyConfigured(hooksPath, executablePath);
+        }
+
         private static object CreateHookEntry(HookSpec spec, string command)
         {
             Dictionary<string, object> hook = new Dictionary<string, object>();
@@ -164,11 +170,8 @@ namespace CodexHalo
             }
             return EntryHooks(entry).Any(delegate(Dictionary<string, object> hook)
             {
-                string existing = StringValue(hook, "command");
-                return String.Equals(existing, command, StringComparison.Ordinal) ||
-                    (existing.IndexOf("--claude-hook",
-                        StringComparison.OrdinalIgnoreCase) >= 0 &&
-                     existing.IndexOf(spec.Event, StringComparison.Ordinal) >= 0);
+                return String.Equals(StringValue(hook, "command"), command,
+                    StringComparison.Ordinal);
             });
         }
 
@@ -879,14 +882,10 @@ namespace CodexHalo
                     changed = true;
                 }
             }
-            DateTime activeCutoff = now.AddMinutes(-10);
-            DateTime inactiveCutoff = now.AddMinutes(-5);
             List<string> stale = reducers.Where(delegate(
                 KeyValuePair<string, GrokHookStatusReducer> pair)
             {
-                DateTime cutoff = pair.Value.Snapshot.Active
-                    ? activeCutoff : inactiveCutoff;
-                return pair.Value.Snapshot.LastEventUtc < cutoff;
+                return ShouldPruneSnapshot(pair.Value.Snapshot, now);
             }).Select(delegate(KeyValuePair<string, GrokHookStatusReducer> pair)
             {
                 return pair.Key;
@@ -897,6 +896,23 @@ namespace CodexHalo
                 changed = true;
             }
             return changed;
+        }
+
+        internal static bool ShouldPruneSnapshot(
+            SessionSnapshot snapshot, DateTime now)
+        {
+            if (snapshot == null)
+            {
+                return true;
+            }
+            if (snapshot.State == HaloState.Error)
+            {
+                return snapshot.LastEventUtc < now.AddHours(-1);
+            }
+            DateTime cutoff = snapshot.Active
+                ? now.AddMinutes(-10)
+                : now.AddMinutes(-5);
+            return snapshot.LastEventUtc < cutoff;
         }
 
         private static string SessionIdFromLine(string line)
