@@ -300,6 +300,7 @@ public sealed class DetailsWindow : Window
             {
                 quotaTimer.Stop();
                 CodexUsageMonitor.Instance.Updated -= OnCodexUsageUpdated;
+                GrokUsageMonitor.Instance.Updated -= OnGrokUsageUpdated;
             };
             quotaTimer = new DispatcherTimer();
             quotaTimer.Interval = TimeSpan.FromSeconds(3);
@@ -312,6 +313,7 @@ public sealed class DetailsWindow : Window
             };
             quotaTimer.Start();
             CodexUsageMonitor.Instance.Updated += OnCodexUsageUpdated;
+            GrokUsageMonitor.Instance.Updated += OnGrokUsageUpdated;
 
             L10n.Instance.LanguageChanged += (s, ev) =>
             {
@@ -489,7 +491,6 @@ public sealed class DetailsWindow : Window
             }
             else if (currentAgent == AgentKind.Grok)
             {
-                // Empty quota shell until Task 6 (GrokUsageMonitor).
                 RefreshGrokDetails();
             }
             else
@@ -546,14 +547,38 @@ public sealed class DetailsWindow : Window
         }
 
         /// <summary>
-        /// Placeholder until Task 6 wires GrokUsageMonitor weekly credits.
-        /// Shows the quota group in an empty/no-data state (no Codex metrics).
+        /// Weekly OAuth credits from <see cref="GrokUsageMonitor"/> only (no 5h row).
+        /// Context pill is Task 7; keep collapsed until a real Grok session exists.
         /// </summary>
         private void RefreshGrokDetails()
         {
             quotaGroup.Visibility = Visibility.Visible;
             claudeGroup.Visibility = Visibility.Hidden;
-            ApplyQuotaMetrics(new UsageMetrics { ContextInputTokens = -1 });
+            fiveHourRow.Visibility = Visibility.Collapsed;
+            weekRow.Visibility = Visibility.Visible;
+            weekRow.Margin = new Thickness(0);
+            weekLabel.Text = L10n.Instance["quota.weekly"];
+            quotaGroup.VerticalAlignment = VerticalAlignment.Center;
+
+            UsageMetrics metrics;
+            if (!GrokUsageMonitor.Instance.TryRead(out metrics) || metrics == null)
+            {
+                metrics = new UsageMetrics { ContextInputTokens = -1 };
+            }
+
+            ApplyQuota(metrics.HasWeekly, metrics.WeeklyUsedPercent,
+                metrics.WeeklyResetUtc, weekValue, weekReset, weekBar);
+
+            if (GrokUsageMonitor.Instance.Status == GrokUsageDataStatus.SignInAgain)
+            {
+                // Same warning slot pattern as Codex L10n keys (provider-specific copy).
+                weekValue.Text = L10n.Instance["usage.warning.sign_in_grok"];
+                weekReset.Text = String.Empty;
+                weekReset.Visibility = Visibility.Collapsed;
+                weekBar.Value = 0;
+            }
+
+            // Task 7 wires GrokSessionContextReader; keep pill collapsed for now.
             SetContextPercent(false, 0);
         }
 
@@ -695,6 +720,21 @@ public sealed class DetailsWindow : Window
                     previewMetrics == null)
                 {
                     RefreshCodexDetails();
+                }
+            }));
+        }
+
+        private void OnGrokUsageUpdated()
+        {
+            if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+            {
+                return;
+            }
+            Dispatcher.BeginInvoke(new Action(delegate
+            {
+                if (IsVisible && currentAgent == AgentKind.Grok)
+                {
+                    RefreshGrokDetails();
                 }
             }));
         }

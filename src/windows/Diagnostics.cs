@@ -1584,6 +1584,65 @@ public static class Diagnostics
                     L10n.Instance["status.offline_claude"],
                     "offline claude detail still maps to offline_claude");
 
+                // Grok usage mapper + multi-entry auth persist (Task 6)
+                string weeklyBody =
+                    "{\"config\":{\"creditUsagePercent\":42.5,\"currentPeriod\":{\"type\":\"USAGE_PERIOD_TYPE_WEEKLY\",\"start\":\"2026-07-20T00:00:00Z\",\"end\":\"2026-07-27T00:00:00Z\"}}}";
+                UsageMetrics mapped;
+                Assert(GrokUsageResponseMapper.TryMap(weeklyBody, out mapped), "map weekly");
+                Assert(mapped.HasWeekly && !mapped.HasFiveHour && !mapped.HasMonthly,
+                    "only weekly");
+                Assert(Math.Abs(mapped.WeeklyUsedPercent - 42.5) < 0.01, "percent");
+                Assert(mapped.WeeklyResetUtc.Year == 2026, "reset");
+
+                string zeroBody =
+                    "{\"config\":{\"currentPeriod\":{\"type\":\"USAGE_PERIOD_TYPE_WEEKLY\",\"start\":\"2026-07-20T00:00:00Z\",\"end\":\"2026-07-27T00:00:00Z\"}}}";
+                Assert(GrokUsageResponseMapper.TryMap(zeroBody, out mapped) &&
+                    mapped.WeeklyUsedPercent == 0, "absent percent is 0");
+
+                string monthlyBody =
+                    "{\"config\":{\"creditUsagePercent\":10,\"currentPeriod\":{\"type\":\"USAGE_PERIOD_TYPE_MONTHLY\",\"start\":\"2026-07-01T00:00:00Z\",\"end\":\"2026-08-01T00:00:00Z\"}}}";
+                Assert(GrokUsageResponseMapper.TryMap(monthlyBody, out mapped) &&
+                    !mapped.HasWeekly, "non-weekly does not fake weekly");
+
+                string grokAuthHome = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-grok-auth-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(Path.Combine(grokAuthHome, ".grok"));
+                string authPath = Path.Combine(grokAuthHome, ".grok", "auth.json");
+                File.WriteAllText(authPath,
+                    "{\n  \"iss::client-a\": {\"key\":\"tok-a\",\"refresh_token\":\"ra\",\"expires_at\":\"2099-01-01T00:00:00Z\",\"user_id\":\"u1\"},\n  \"iss::client-b\": {\"key\":\"tok-b\",\"refresh_token\":\"rb\",\"expires_at\":\"2099-01-01T00:00:00Z\",\"user_id\":\"u2\"}\n}\n",
+                    new UTF8Encoding(false));
+                Assert(GrokAuthStore.PersistForTest(grokAuthHome, "tok-a",
+                    "tok-a2", "ra2", DateTime.UtcNow.AddHours(1)),
+                    "persist tok-a rotation");
+                string after = File.ReadAllText(authPath);
+                Assert(after.IndexOf("tok-a2", StringComparison.Ordinal) >= 0,
+                    "updated access");
+                Assert(after.IndexOf("tok-b", StringComparison.Ordinal) >= 0,
+                    "other entry preserved");
+                File.WriteAllText(authPath, "NOT-JSON", new UTF8Encoding(false));
+                bool threw = false;
+                bool persistedCorrupt = false;
+                try
+                {
+                    persistedCorrupt = GrokAuthStore.PersistForTest(grokAuthHome,
+                        "tok-a2", "tok-a3", "ra3", DateTime.UtcNow.AddHours(1));
+                }
+                catch
+                {
+                    threw = true;
+                }
+                Assert(threw || !persistedCorrupt, "corrupt auth not overwritten");
+                Assert(File.ReadAllText(authPath).IndexOf("NOT-JSON",
+                    StringComparison.Ordinal) >= 0,
+                    "corrupt auth.json left intact");
+                try
+                {
+                    Directory.Delete(grokAuthHome, true);
+                }
+                catch
+                {
+                }
+
                 File.Delete(temp);
                 File.WriteAllText(outputPath,
                     "PASS\nLifecycle, usage metrics, panel formatting, and animation checks passed.\n",

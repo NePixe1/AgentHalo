@@ -371,6 +371,7 @@ public sealed class HaloWindow : Window
 
             if (settings.GetFocusedAgent() == AgentKind.Grok)
             {
+                GrokUsageMonitor.Instance.RequestRefresh();
                 grokMonitor.Refresh();
                 aggregate = GetGrokAggregate();
                 if (demoState.HasValue)
@@ -1140,6 +1141,10 @@ public sealed class HaloWindow : Window
             {
                 settings.SetFocusedAgent(agent);
                 SettingsStorage.Save(settings);
+            }
+            if (agent == AgentKind.Grok)
+            {
+                GrokUsageMonitor.Instance.RequestRefresh();
             }
             RefreshState();
             if (details.IsVisible)
