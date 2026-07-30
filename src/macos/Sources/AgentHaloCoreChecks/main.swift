@@ -2231,16 +2231,16 @@ func testGrokHookReducerLifecycle() {
 
 // MARK: - Durable ClaudeCodeStatusHook isolation (Grok vs Claude status files)
 
-/// Locate the shared status-hook binary next to this process or under the package `.build`.
+/// Locate a fresh shared status-hook binary for isolation tests.
+///
+/// Always rebuilds the package product before selecting a candidate so layout
+/// path changes (and other hook logic) cannot leave CoreChecks running a stale
+/// `.build/*/ClaudeCodeStatusHook` that still writes legacy status files.
 private func resolveClaudeCodeStatusHookBinary() throws -> URL {
     let fm = FileManager.default
     let argv0 = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
-    let sibling = argv0.deletingLastPathComponent().appendingPathComponent("ClaudeCodeStatusHook")
-    if fm.isExecutableFile(atPath: sibling.path) {
-        return sibling
-    }
 
-    // Walk up from CWD / argv0 looking for Package.swift + .build product.
+    // Walk up from CWD / argv0 looking for Package.swift, rebuild, then pick product.
     let searchRoots: [URL] = [
         URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true),
         argv0.deletingLastPathComponent(),
@@ -2250,17 +2250,6 @@ private func resolveClaudeCodeStatusHookBinary() throws -> URL {
         for _ in 0..<8 {
             let package = dir.appendingPathComponent("Package.swift")
             if fm.fileExists(atPath: package.path) {
-                let candidates = [
-                    dir.appendingPathComponent(".build/debug/ClaudeCodeStatusHook"),
-                    dir.appendingPathComponent(".build/arm64-apple-macosx/debug/ClaudeCodeStatusHook"),
-                    dir.appendingPathComponent(".build/x86_64-apple-macosx/debug/ClaudeCodeStatusHook"),
-                    dir.appendingPathComponent(".build/release/ClaudeCodeStatusHook"),
-                    dir.appendingPathComponent(".build/arm64-apple-macosx/release/ClaudeCodeStatusHook"),
-                ]
-                for candidate in candidates where fm.isExecutableFile(atPath: candidate.path) {
-                    return candidate
-                }
-                // Build once if missing (slow path; only when sibling/product absent).
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: "/usr/bin/swift")
                 process.arguments = ["build", "--product", "ClaudeCodeStatusHook"]
@@ -2270,6 +2259,16 @@ private func resolveClaudeCodeStatusHookBinary() throws -> URL {
                 try process.run()
                 process.waitUntilExit()
                 expect(process.terminationStatus, 0, "swift build ClaudeCodeStatusHook should succeed")
+
+                let candidates = [
+                    dir.appendingPathComponent(".build/debug/ClaudeCodeStatusHook"),
+                    dir.appendingPathComponent(".build/arm64-apple-macosx/debug/ClaudeCodeStatusHook"),
+                    dir.appendingPathComponent(".build/x86_64-apple-macosx/debug/ClaudeCodeStatusHook"),
+                    dir.appendingPathComponent(".build/release/ClaudeCodeStatusHook"),
+                    dir.appendingPathComponent(".build/arm64-apple-macosx/release/ClaudeCodeStatusHook"),
+                    // After rebuild, sibling of this test process is also valid.
+                    argv0.deletingLastPathComponent().appendingPathComponent("ClaudeCodeStatusHook"),
+                ]
                 for candidate in candidates where fm.isExecutableFile(atPath: candidate.path) {
                     return candidate
                 }

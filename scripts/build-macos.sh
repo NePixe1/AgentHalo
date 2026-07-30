@@ -21,6 +21,10 @@ cp "$shared_locales/zh.json" "$mac_locales/zh.json"
 cp "$shared_locales/en.json" "$mac_locales/en.json"
 
 cd "$mac_root"
+# Rebuild hook/proxy before CoreChecks so isolation tests do not run stale
+# binaries that still write legacy ~/.agent-halo/* paths.
+swift build --product ClaudeCodeStatusHook
+swift build --product ClaudeCodeStatusLineProxy
 swift run AgentHaloCoreChecks
 swift run AgentHaloDiagnostics --self-test "$output_root/diagnostics-self-test.txt"
 swift build -c release --product AgentHaloDiagnostics
