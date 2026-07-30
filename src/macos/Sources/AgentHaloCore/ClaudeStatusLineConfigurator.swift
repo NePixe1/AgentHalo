@@ -35,20 +35,15 @@ public enum ClaudeStatusLineConfigurator {
 
         do {
             try fileManager.createDirectory(
-                at: paths.binDirectory,
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-            try fileManager.createDirectory(
                 at: paths.stateDirectory,
                 withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o700]
             )
-            if fileManager.fileExists(atPath: installedProxy.path) {
-                try fileManager.removeItem(at: installedProxy)
-            }
-            try fileManager.copyItem(at: bundledBinary, to: installedProxy)
-            try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: installedProxy.path)
+            try AgentHaloBinaryStaging.stageStatuslineProxy(
+                from: bundledBinary,
+                homeDirectory: home,
+                fileManager: fileManager
+            )
         } catch {
             AgentHaloLogger.log("ClaudeStatusLineConfigurator: failed to stage proxy: \(error)")
             return
@@ -114,21 +109,7 @@ public enum ClaudeStatusLineConfigurator {
             AgentHaloLogger.log("ClaudeStatusLineConfigurator: file coordination failed: \(error)")
         }
 
-        // Only delete the legacy proxy after settings point at the new path (or
-        // were already correct). Missing bundled binary is handled above by early return.
-        if wroteSettingsSuccessfully || isConfigured(homeDirectory: home) {
-            removeLegacyProxyBinaryIfPresent(paths: paths, fileManager: fileManager)
-        }
-    }
-
-    private static func removeLegacyProxyBinaryIfPresent(paths: AgentHaloPaths, fileManager: FileManager) {
-        guard fileManager.fileExists(atPath: paths.legacyStatuslineProxy.path) else { return }
-        do {
-            try fileManager.removeItem(at: paths.legacyStatuslineProxy)
-            AgentHaloLogger.log("ClaudeStatusLineConfigurator: removed legacy \(paths.legacyStatuslineProxy.path)")
-        } catch {
-            AgentHaloLogger.log("ClaudeStatusLineConfigurator: failed to remove legacy proxy binary: \(error)")
-        }
+        _ = wroteSettingsSuccessfully
     }
 
     private static func bundledProxyBinary() -> URL? {

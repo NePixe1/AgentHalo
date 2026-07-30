@@ -820,22 +820,25 @@ func testGrokHookConfiguratorWritesHooksJSON() throws {
     expect(FileManager.default.fileExists(atPath: hooksURL.path), "hooks json exists")
     let text = try String(contentsOf: hooksURL, encoding: .utf8)
     expect(text.contains("PreToolUse"), "pre tool registered")
-    expect(
-        text.contains("bin/status-hook") || text.contains("status-hook"),
-        "command points to staged binary"
-    )
     expect(text.contains("SessionStart"), "SessionStart registered")
     expect(text.contains("SessionEnd"), "SessionEnd registered")
     expect(text.contains("PostCompact"), "PostCompact registered")
 
-    let staged = home.appendingPathComponent(".agent-halo/bin/status-hook")
-    expect(FileManager.default.fileExists(atPath: staged.path), "hook binary staged under .agent-halo/bin")
+    let paths = AgentHaloPaths(homeDirectory: home)
+    expect(FileManager.default.fileExists(atPath: paths.statusHook.path), "hook binary staged under .agent-halo/bin")
 
-    // Second call must be idempotent: content and mtime stable when already configured.
+    // Parse JSON so escaped slashes (\/) do not break substring checks.
+    let hooksJSON = try JSONSerialization.jsonObject(with: Data(text.utf8)) as! [String: Any]
+    let hooksMap = hooksJSON["hooks"] as! [String: Any]
+    let pre = hooksMap["PreToolUse"] as! [[String: Any]]
+    let preHooks = pre[0]["hooks"] as! [[String: Any]]
+    let command = preHooks[0]["command"] as! String
+    expect(command, paths.statusHook.path, "hooks command is .agent-halo/bin/status-hook")
+
+    // Second call must be idempotent: content and mtime stable when already on preferred path.
     let attrsBefore = try FileManager.default.attributesOfItem(atPath: hooksURL.path)
     let mtimeBefore = attrsBefore[.modificationDate] as? Date
     let contentBefore = try Data(contentsOf: hooksURL)
-    // Brief pause so a non-idempotent rewrite would bump mtime.
     Thread.sleep(forTimeInterval: 0.05)
     GrokHookConfigurator.configure(homeDirectory: home, bundledHookBinary: bundledHook)
     let contentAfter = try Data(contentsOf: hooksURL)
@@ -843,6 +846,312 @@ func testGrokHookConfiguratorWritesHooksJSON() throws {
     let attrsAfter = try FileManager.default.attributesOfItem(atPath: hooksURL.path)
     let mtimeAfter = attrsAfter[.modificationDate] as? Date
     expect(mtimeAfter, mtimeBefore, "second configure should not bump hooks json mtime")
+}
+
+/// v1 flat layout + legacy hook commands → bootstrap leaves every advertised
+/// binary path live and rewrites configs without deleting compat mirrors.
+func testRuntimeBootstrapUpgradesLayoutV1WithoutStrandingHookPaths() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent(
+        "agent-halo-bootstrap-v1-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    defer { try? fm.removeItem(at: home) }
+
+    let paths = AgentHaloPaths(homeDirectory: home)
+    try fm.createDirectory(at: paths.root, withIntermediateDirectories: true)
+
+    // Simulate pre-layout-v2 data + root-level binaries + legacy hook configs.
+    try "grok-old\n".write(to: paths.legacyGrokStatusLog, atomically: true, encoding: .utf8)
+    try "claude-old\n".write(to: paths.legacyClaudeStatusLog, atomically: true, encoding: .utf8)
+    try Data("legacy-hook-bytes".utf8).write(to: paths.legacyStatusHook)
+    try Data("legacy-proxy-bytes".utf8).write(to: paths.legacyStatuslineProxy)
+
+    let claudeDir = home.appendingPathComponent(".claude", isDirectory: true)
+    try fm.createDirectory(at: claudeDir, withIntermediateDirectories: true)
+    let legacyHookCmd = "\(paths.legacyStatusHook.path) PreToolUse"
+    let claudeSettings: [String: Any] = [
+        "hooks": [
+            "PreToolUse": [[
+                "matcher": ".*",
+                "hooks": [["type": "command", "command": legacyHookCmd]],
+            ]],
+        ],
+        "statusLine": [
+            "type": "command",
+            "command": paths.legacyStatuslineProxy.path,
+        ],
+    ]
+    try JSONSerialization.data(withJSONObject: claudeSettings)
+        .write(to: claudeDir.appendingPathComponent("settings.json"))
+
+    let grokHooksDir = home.appendingPathComponent(".grok/hooks", isDirectory: true)
+    try fm.createDirectory(at: grokHooksDir, withIntermediateDirectories: true)
+    let grokHooks: [String: Any] = [
+        "hooks": [
+            "PreToolUse": [[
+                "matcher": ".*",
+                "hooks": [["type": "command", "command": "\(paths.legacyStatusHook.path) PreToolUse"]],
+            ]],
+            // Intentionally incomplete — bootstrap must repair missing events.
+            "SessionStart": [[
+                "hooks": [["type": "command", "command": paths.legacyStatusHook.path]],
+            ]],
+        ],
+    ]
+    try JSONSerialization.data(withJSONObject: grokHooks)
+        .write(to: grokHooksDir.appendingPathComponent("agent-halo-status.json"))
+
+    let bundledHook = home.appendingPathComponent("bundled-hook")
+    let bundledProxy = home.appendingPathComponent("bundled-proxy")
+    try Data("new-hook-v2".utf8).write(to: bundledHook)
+    try Data("new-proxy-v2".utf8).write(to: bundledProxy)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundledHook.path)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundledProxy.path)
+
+    AgentHaloRuntimeBootstrap.bootstrap(
+        homeDirectory: home,
+        bundledHookBinary: bundledHook,
+        bundledStatuslineProxy: bundledProxy,
+        fileManager: fm
+    )
+
+    // Data moved.
+    expect(try String(contentsOf: paths.grokStatusLog, encoding: .utf8), "grok-old\n", "grok log migrated")
+    expect(try String(contentsOf: paths.claudeStatusLog, encoding: .utf8), "claude-old\n", "claude log migrated")
+    expect(!fm.fileExists(atPath: paths.legacyGrokStatusLog.path), "legacy grok log scrubbed")
+
+    // Preferred binaries live; legacy names are rewritten away then scrubbed.
+    expect(fm.isExecutableFile(atPath: paths.statusHook.path), "bin/status-hook live")
+    expect(fm.isExecutableFile(atPath: paths.statuslineProxy.path), "bin/statusline-proxy live")
+    expect(try String(contentsOf: paths.statusHook, encoding: .utf8), "new-hook-v2", "hook content updated")
+    expect(!fm.fileExists(atPath: paths.legacyStatusHook.path), "legacy status-hook scrubbed after rewrite")
+    expect(!fm.fileExists(atPath: paths.legacyStatuslineProxy.path), "legacy statusline proxy scrubbed after rewrite")
+    let grokHooksJSON = try JSONSerialization.jsonObject(
+        with: Data(contentsOf: grokHooksDir.appendingPathComponent("agent-halo-status.json"))
+    ) as! [String: Any]
+    let grokPre = ((grokHooksJSON["hooks"] as! [String: Any])["PreToolUse"] as! [[String: Any]])
+    let grokCmd = ((grokPre[0]["hooks"] as! [[String: Any]])[0]["command"] as! String)
+    expect(grokCmd, paths.statusHook.path, "grok config rewritten to .agent-halo/bin/status-hook")
+
+    // Claude settings prefer bin path.
+    let claudeJSON = try JSONSerialization.jsonObject(
+        with: Data(contentsOf: claudeDir.appendingPathComponent("settings.json"))
+    ) as! [String: Any]
+    let claudeHooks = claudeJSON["hooks"] as! [String: Any]
+    let pre = claudeHooks["PreToolUse"] as! [[String: Any]]
+    let cmds = (pre.flatMap { ($0["hooks"] as? [[String: Any]]) ?? [] }).compactMap { $0["command"] as? String }
+    expect(cmds.contains { $0.contains("bin/status-hook") }, "claude hooks rewritten to bin/status-hook")
+    expect(
+        (claudeJSON["statusLine"] as? [String: Any])?["command"] as? String,
+        paths.statuslineProxy.path,
+        "statusline uses bin proxy"
+    )
+
+    // Grok hooks repaired and healthy.
+    let grokFile = grokHooksDir.appendingPathComponent("agent-halo-status.json")
+    expect(
+        GrokHookConfigurator.isHealthyConfiguration(
+            at: grokFile,
+            paths: paths,
+            homeDirectory: home,
+            fileManager: fm
+        ),
+        "grok hooks healthy after bootstrap"
+    )
+
+    // Second bootstrap is idempotent for Grok config content.
+    let before = try Data(contentsOf: grokFile)
+    AgentHaloRuntimeBootstrap.bootstrap(
+        homeDirectory: home,
+        bundledHookBinary: bundledHook,
+        bundledStatuslineProxy: bundledProxy,
+        fileManager: fm
+    )
+    let after = try Data(contentsOf: grokFile)
+    expect(after, before, "second bootstrap must not thrash healthy grok hooks")
+}
+
+/// Preferred-path Grok config must not be rewritten on routine launches.
+func testGrokHookConfiguratorLeavesPreferredPathConfigAlone() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent(
+        "agent-halo-grok-healthy-bin-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    defer { try? fm.removeItem(at: home) }
+    try fm.createDirectory(at: home, withIntermediateDirectories: true)
+
+    let paths = AgentHaloPaths(homeDirectory: home)
+    let bundled = home.appendingPathComponent("bundle-hook")
+    try Data("hook".utf8).write(to: bundled)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundled.path)
+
+    try AgentHaloBinaryStaging.stageStatusHook(
+        from: bundled,
+        homeDirectory: home,
+        fileManager: fm
+    )
+
+    let hooksDir = home.appendingPathComponent(".grok/hooks", isDirectory: true)
+    try fm.createDirectory(at: hooksDir, withIntermediateDirectories: true)
+    var hooks: [String: Any] = [:]
+    let events: [(String, String?)] = [
+        ("SessionStart", nil), ("UserPromptSubmit", nil),
+        ("PreToolUse", ".*"), ("PostToolUse", ".*"), ("PostToolUseFailure", ".*"),
+        ("Notification", nil), ("Stop", nil), ("StopFailure", nil), ("SessionEnd", nil),
+        ("PreCompact", ""), ("PostCompact", ""),
+    ]
+    for (event, matcher) in events {
+        var entry: [String: Any] = [
+            "hooks": [["type": "command", "command": paths.statusHook.path]],
+        ]
+        if let matcher { entry["matcher"] = matcher }
+        hooks[event] = [entry]
+    }
+    let hooksFile = hooksDir.appendingPathComponent("agent-halo-status.json")
+    try JSONSerialization.data(withJSONObject: ["hooks": hooks], options: [.prettyPrinted])
+        .write(to: hooksFile)
+
+    let before = try Data(contentsOf: hooksFile)
+    GrokHookConfigurator.configure(homeDirectory: home, bundledHookBinary: bundled)
+    let after = try Data(contentsOf: hooksFile)
+    expect(after, before, "preferred-path config must not be rewritten")
+}
+
+/// Legacy root path in Grok hooks must be rewritten to bin/status-hook on launch.
+func testGrokHookConfiguratorRewritesLegacyRootPath() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent(
+        "agent-halo-grok-rewrite-legacy-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    defer { try? fm.removeItem(at: home) }
+    try fm.createDirectory(at: home, withIntermediateDirectories: true)
+
+    let paths = AgentHaloPaths(homeDirectory: home)
+    try fm.createDirectory(at: paths.root, withIntermediateDirectories: true)
+    try Data("legacy-bin".utf8).write(to: paths.legacyStatusHook)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: paths.legacyStatusHook.path)
+
+    let hooksDir = home.appendingPathComponent(".grok/hooks", isDirectory: true)
+    try fm.createDirectory(at: hooksDir, withIntermediateDirectories: true)
+    var hooks: [String: Any] = [:]
+    for event in ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+                  "PostToolUseFailure", "Notification", "Stop", "StopFailure",
+                  "SessionEnd", "PreCompact", "PostCompact"] {
+        var entry: [String: Any] = [
+            "hooks": [["type": "command", "command": "\(paths.legacyStatusHook.path) \(event)"]],
+        ]
+        if event.contains("Tool") { entry["matcher"] = ".*" }
+        if event.contains("Compact") { entry["matcher"] = "" }
+        hooks[event] = [entry]
+    }
+    try JSONSerialization.data(withJSONObject: ["hooks": hooks])
+        .write(to: hooksDir.appendingPathComponent("agent-halo-status.json"))
+
+    let bundled = home.appendingPathComponent("bundle-hook")
+    try Data("new".utf8).write(to: bundled)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundled.path)
+
+    GrokHookConfigurator.configure(homeDirectory: home, bundledHookBinary: bundled)
+    AgentHaloBinaryStaging.scrubUnreferencedLegacyBinaries(homeDirectory: home, fileManager: fm)
+
+    let hooksFile = hooksDir.appendingPathComponent("agent-halo-status.json")
+    expect(
+        GrokHookConfigurator.isOnPreferredPath(
+            at: hooksFile,
+            preferredPath: paths.statusHook.path,
+            fileManager: fm
+        ),
+        "legacy root path rewritten to preferred"
+    )
+    let cmd = try {
+        let json = try JSONSerialization.jsonObject(with: Data(contentsOf: hooksFile)) as! [String: Any]
+        let pre = (json["hooks"] as! [String: Any])["PreToolUse"] as! [[String: Any]]
+        return (pre[0]["hooks"] as! [[String: Any]])[0]["command"] as! String
+    }()
+    expect(cmd, paths.statusHook.path, "command is bin/status-hook")
+    expect(!fm.fileExists(atPath: paths.legacyStatusHook.path), "unreferenced legacy binary removed")
+}
+
+/// Dead executable in hooks config must be repaired on next configure.
+func testGrokHookConfiguratorRepairsDeadExecutableCommand() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent(
+        "agent-halo-grok-dead-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    defer { try? fm.removeItem(at: home) }
+    try fm.createDirectory(at: home, withIntermediateDirectories: true)
+
+    let hooksDir = home.appendingPathComponent(".grok/hooks", isDirectory: true)
+    try fm.createDirectory(at: hooksDir, withIntermediateDirectories: true)
+    let dead = home.appendingPathComponent("missing-binary")
+    let hooks: [String: Any] = [
+        "hooks": [
+            "PreToolUse": [[
+                "matcher": ".*",
+                "hooks": [["type": "command", "command": "\(dead.path) PreToolUse"]],
+            ]],
+            "SessionStart": [[
+                "hooks": [["type": "command", "command": dead.path]],
+            ]],
+        ],
+    ]
+    try JSONSerialization.data(withJSONObject: hooks)
+        .write(to: hooksDir.appendingPathComponent("agent-halo-status.json"))
+
+    let bundled = home.appendingPathComponent("bundle-hook")
+    try Data("live".utf8).write(to: bundled)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundled.path)
+
+    GrokHookConfigurator.configure(homeDirectory: home, bundledHookBinary: bundled)
+
+    let paths = AgentHaloPaths(homeDirectory: home)
+    let hooksFile = hooksDir.appendingPathComponent("agent-halo-status.json")
+    expect(
+        GrokHookConfigurator.isHealthyConfiguration(
+            at: hooksFile,
+            paths: paths,
+            homeDirectory: home,
+            fileManager: fm
+        ),
+        "dead command repaired to healthy config"
+    )
+    let repaired = try JSONSerialization.jsonObject(with: Data(contentsOf: hooksFile)) as! [String: Any]
+    let repairedPre = ((repaired["hooks"] as! [String: Any])["PreToolUse"] as! [[String: Any]])
+    let repairedCmd = ((repairedPre[0]["hooks"] as! [[String: Any]])[0]["command"] as! String)
+    expect(repairedCmd, paths.statusHook.path, "preferred .agent-halo/bin command after repair")
+    expect(!repairedCmd.contains("missing-binary"), "dead path removed")
+}
+
+func testBinaryStagingNeverLeavesDestinationMissing() throws {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent(
+        "agent-halo-stage-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    defer { try? fm.removeItem(at: root) }
+    try fm.createDirectory(at: root, withIntermediateDirectories: true)
+
+    let dest = root.appendingPathComponent("status-hook")
+    let v1 = root.appendingPathComponent("v1")
+    let v2 = root.appendingPathComponent("v2")
+    try Data("version-1".utf8).write(to: v1)
+    try Data("version-2".utf8).write(to: v2)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: v1.path)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: v2.path)
+
+    try AgentHaloBinaryStaging.stageExecutable(from: v1, to: dest, fileManager: fm)
+    expect(try String(contentsOf: dest, encoding: .utf8), "version-1", "initial stage")
+    expect(fm.isExecutableFile(atPath: dest.path), "executable after stage")
+
+    // Replace in place — path must still exist (atomic replace).
+    try AgentHaloBinaryStaging.stageExecutable(from: v2, to: dest, fileManager: fm)
+    expect(try String(contentsOf: dest, encoding: .utf8), "version-2", "atomic upgrade")
+    expect(fm.isExecutableFile(atPath: dest.path), "still executable after replace")
+
 }
 
 func testClaudeStatusLineConfiguratorPreservesAndChainsExistingCommand() throws {
@@ -903,7 +1212,7 @@ func testClaudeStatusLineConfiguratorPreservesAndChainsExistingCommand() throws 
 }
 
 
-func testClaudeHookConfiguratorRewritesLegacyPathAndDeletesOldBinary() throws {
+func testClaudeHookConfiguratorRewritesLegacyPathToPreferred() throws {
     let home = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-hook-rewrite-\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: home) }
@@ -937,7 +1246,8 @@ func testClaudeHookConfiguratorRewritesLegacyPathAndDeletesOldBinary() throws {
     expect(commands.contains { $0.contains("bin/status-hook") }, "settings should point at bin/status-hook")
     expect(!commands.contains { $0.contains("claude-code-status-hook") }, "legacy command should be rewritten away")
     expect(fm.fileExists(atPath: paths.statusHook.path), "new binary staged")
-    expect(!fm.fileExists(atPath: paths.legacyStatusHook.path), "legacy binary deleted after successful rewrite")
+    AgentHaloBinaryStaging.scrubUnreferencedLegacyBinaries(homeDirectory: home, fileManager: fm)
+    expect(!fm.fileExists(atPath: paths.legacyStatusHook.path), "legacy binary scrubbed after rewrite")
 }
 
 func testClaudeHookConfiguratorDoesNotDeleteLegacyBinaryWhenBundledMissing() throws {
@@ -954,7 +1264,7 @@ func testClaudeHookConfiguratorDoesNotDeleteLegacyBinaryWhenBundledMissing() thr
     expect(fm.fileExists(atPath: paths.legacyStatusHook.path), "missing bundle must not delete legacy binary")
 }
 
-func testClaudeStatusLineConfiguratorRewritesLegacyProxyAndDeletesOldBinary() throws {
+func testClaudeStatusLineConfiguratorRewritesLegacyProxyToPreferred() throws {
     let home = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-statusline-rewrite-\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: home) }
@@ -977,7 +1287,8 @@ func testClaudeStatusLineConfiguratorRewritesLegacyProxyAndDeletesOldBinary() th
     let statusLine = configured["statusLine"] as! [String: Any]
     expect(statusLine["command"] as? String, paths.statuslineProxy.path, "statusline uses bin/statusline-proxy")
     expect(fm.fileExists(atPath: paths.statuslineProxy.path), "new proxy staged")
-    expect(!fm.fileExists(atPath: paths.legacyStatuslineProxy.path), "legacy proxy deleted after rewrite")
+    AgentHaloBinaryStaging.scrubUnreferencedLegacyBinaries(homeDirectory: home, fileManager: fm)
+    expect(!fm.fileExists(atPath: paths.legacyStatuslineProxy.path), "legacy proxy scrubbed after rewrite")
 }
 
 extension FileHandle {
@@ -3194,14 +3505,19 @@ do {
 }
 do {
     try testGrokHookConfiguratorWritesHooksJSON()
+    try testRuntimeBootstrapUpgradesLayoutV1WithoutStrandingHookPaths()
+    try testGrokHookConfiguratorLeavesPreferredPathConfigAlone()
+    try testGrokHookConfiguratorRewritesLegacyRootPath()
+    try testGrokHookConfiguratorRepairsDeadExecutableCommand()
+    try testBinaryStagingNeverLeavesDestinationMissing()
 } catch {
     fatalError("\(error)")
 }
 do {
     try testClaudeStatusLineConfiguratorPreservesAndChainsExistingCommand()
-    try testClaudeHookConfiguratorRewritesLegacyPathAndDeletesOldBinary()
+    try testClaudeHookConfiguratorRewritesLegacyPathToPreferred()
     try testClaudeHookConfiguratorDoesNotDeleteLegacyBinaryWhenBundledMissing()
-    try testClaudeStatusLineConfiguratorRewritesLegacyProxyAndDeletesOldBinary()
+    try testClaudeStatusLineConfiguratorRewritesLegacyProxyToPreferred()
 } catch {
     fatalError("\(error)")
 }

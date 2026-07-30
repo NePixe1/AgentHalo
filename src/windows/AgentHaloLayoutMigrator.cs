@@ -6,8 +6,10 @@ namespace CodexHalo
     /// <summary>
     /// Idempotent best-effort migration of %USERPROFILE%\.agent-halo to layout v2.
     /// Moves data into logs/cache, relocates AppData usage-snapshots into cache/,
-    /// deletes legacy flat files and AgentHaloHook.exe. Never touches settings.json
-    /// or halo.log under LocalAppData\CodexHalo.
+    /// deletes legacy flat **data** files. Never deletes staged binaries
+    /// (AgentHaloHook.exe / bin\status-hook.exe) — configurators keep those as
+    /// upgrade-compat mirrors so mid-session hooks do not fail with "not found".
+    /// Never touches settings.json or halo.log under LocalAppData\CodexHalo.
     /// </summary>
     internal static class AgentHaloLayoutMigrator
     {
@@ -49,7 +51,8 @@ namespace CodexHalo
                 RemoveIfExists(AgentHaloPaths.LegacyClaudeContextFile(userProfile));
                 RemoveEmptyDirectoryIfExists(
                     AgentHaloPaths.LegacyClaudeContextsDirectory(userProfile));
-                RemoveIfExists(AgentHaloPaths.LegacyAgentHaloHookExe(userProfile));
+                // Intentionally keep LegacyAgentHaloHookExe — mid-session hooks
+                // may still invoke it until settings are rewritten + reloaded.
 
                 WriteLayoutVersion(AgentHaloPaths.LayoutVersion, userProfile);
                 ScrubLegacyDataPaths(userProfile, legacyAppDataUsagePath);
@@ -123,7 +126,7 @@ namespace CodexHalo
             RemoveIfExists(AgentHaloPaths.LegacyClaudeContextFile(userProfile));
             RemoveDirectoryTreeIfExists(
                 AgentHaloPaths.LegacyClaudeContextsDirectory(userProfile));
-            RemoveIfExists(AgentHaloPaths.LegacyAgentHaloHookExe(userProfile));
+            // Never scrub AgentHaloHook.exe / bin binaries here.
 
             string appDataUsage = legacyAppDataUsagePath ??
                 AgentHaloPaths.LegacyUsageSnapshotsInAppData();

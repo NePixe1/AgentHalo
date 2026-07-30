@@ -200,8 +200,9 @@ public sealed class HaloWindow : Window
 
         private void OnLoaded(object sender, RoutedEventArgs e)
         {
-            AgentHaloLayoutMigrator.MigrateIfNeeded();
-            ClaudeHookConfigurator.Configure();
+            // Single upgrade path: migrate data → stage stable hook binaries →
+            // rewrite Claude settings only when unhealthy.
+            AgentHaloRuntimeBootstrap.Bootstrap();
             RestorePosition();
             RecoverHaloIfOffscreen();
             monitor.Start();

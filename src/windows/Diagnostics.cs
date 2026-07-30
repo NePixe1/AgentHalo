@@ -1011,9 +1011,9 @@ public static class Diagnostics
                 string mainExe = Path.Combine(claudeHome, "bundle",
                     "AgentHalo.exe");
                 Directory.CreateDirectory(Path.GetDirectoryName(mainExe));
+                // Real-looking PE is unnecessary; File.Exists is enough for staging.
                 File.WriteAllText(mainExe, "fake exe", Encoding.UTF8);
-                string legacyHelper = Path.Combine(claudeHome, ".agent-halo",
-                    "AgentHaloHook.exe");
+                string legacyHelper = AgentHaloPaths.LegacyAgentHaloHookExe(claudeHome);
                 Directory.CreateDirectory(Path.GetDirectoryName(legacyHelper));
                 File.WriteAllText(legacyHelper, "legacy", Encoding.UTF8);
                 string claudeSettings = Path.Combine(claudeHome, ".claude",
@@ -1025,22 +1025,28 @@ public static class Diagnostics
                     Encoding.UTF8);
                 ClaudeHookConfigurator.Configure(claudeHome, mainExe);
                 string configured = File.ReadAllText(claudeSettings, Encoding.UTF8);
-                Assert(!File.Exists(legacyHelper),
-                    "Claude hook configurator removes legacy helper");
-                Assert(configured.Contains("AgentHalo.exe") &&
+                string stagedHook = AgentHaloPaths.StatusHookExe(claudeHome);
+                Assert(File.Exists(stagedHook),
+                    "Claude hook configurator stages bin\\status-hook.exe");
+                Assert(configured.Contains("status-hook.exe") &&
                     configured.Contains("--claude-hook") &&
                     configured.Contains("PreToolUse") &&
                     configured.Contains("PostToolBatch") &&
                     configured.Contains("PermissionRequest") &&
                     configured.Contains("PermissionDenied") &&
                     configured.Contains("user-command") &&
+                    !configured.Contains("old.exe AgentHaloHook.exe") &&
                     !configured.Contains("AgentHaloHook.exe"),
-                    "Claude hook configurator merges settings");
+                    "Claude hook configurator rewrites settings onto preferred path");
                 ClaudeHookConfigurator.Configure(claudeHome, mainExe);
                 string configuredAgain = File.ReadAllText(claudeSettings, Encoding.UTF8);
                 Assert(CountOccurrences(configuredAgain, "--claude-hook") ==
                     CountOccurrences(configured, "--claude-hook"),
                     "Claude hook configurator is idempotent");
+                AgentHaloRuntimeBootstrap.Bootstrap(claudeHome, mainExe);
+                Assert(File.Exists(stagedHook), "bootstrap keeps status-hook.exe");
+                Assert(!File.Exists(legacyHelper),
+                    "bootstrap scrubs unreferenced AgentHaloHook.exe after rewrite");
 
                 string liveHome = Path.Combine(Path.GetTempPath(),
                     "agent-halo-claude-live-" + Guid.NewGuid().ToString("N"));
@@ -1385,12 +1391,17 @@ public static class Diagnostics
                     "migrator moves AppData usage into cache");
                 Assert(!File.Exists(fakeAppDataUsage),
                     "migrator deletes AppData usage after move");
-                Assert(!File.Exists(legacyHelper), "migrator deletes AgentHaloHook.exe");
+                // Migrator only moves data; it must not delete staged binaries.
+                Assert(File.Exists(legacyHelper),
+                    "migrator leaves AgentHaloHook.exe for configurators to scrub after rewrite");
                 Assert(File.ReadAllText(AgentHaloPaths.LayoutVersionFile(layoutHome))
                     .Trim() == "2", "layout version written");
                 AgentHaloLayoutMigrator.MigrateIfNeeded(layoutHome, fakeAppDataUsage);
                 Assert(File.ReadAllText(AgentHaloPaths.LayoutVersionFile(layoutHome))
                     .Trim() == "2", "migrator is idempotent");
+                Assert(AgentHaloPaths.StatusHookExe(layoutHome).EndsWith(
+                    Path.Combine("bin", "status-hook.exe")),
+                    "stable status-hook path under bin");
                 Directory.Delete(layoutHome, true);
 
                 File.Delete(temp);

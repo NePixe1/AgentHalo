@@ -3,33 +3,18 @@ import Foundation
 /// Writes (or updates) Claude Code hook configuration on first launch so the user
 /// never has to manually edit ``~/.claude/settings.json``.
 ///
-/// Design:
-/// - Copies the bundled ``ClaudeCodeStatusHook`` binary to
-///   ``~/.agent-halo/bin/status-hook`` — a stable path that survives app-bundle moves.
-/// - Merges hook entries into ``~/.claude/settings.json`` at the **user** level so every
-///   Claude Code project inherits the hooks automatically.
-/// - Settings that still point at the legacy root binary are rewritten to the new path
-///   (no short-circuit on legacy-only configuration).
-/// - After a successful settings write, removes the root-level legacy binary.
-/// - Catches all errors — a broken config write must never prevent the app from
-///   starting.
+/// On every launch:
+/// 1. Atomically stage preferred ``bin/status-hook``.
+/// 2. Rewrite any Agent Halo hook still on a legacy path to that preferred path.
 public enum ClaudeHookConfigurator {
 
     // MARK: - Public API
 
-    /// Ensure the hook binary and user-level ``~/.claude/settings.json`` are configured.
-    ///
-    /// Safe to call on every launch; the implementation short-circuits when
-    /// everything is already in place at the **new** path.
     public static func configure() {
         let home = FileManager.default.homeDirectoryForCurrentUser
         configure(homeDirectory: home, bundledHookBinary: bundledHookBinary())
     }
 
-    /// Ensure hook configuration for a specific home directory.
-    ///
-    /// Exposed for the self-check target so configuration behavior can be tested
-    /// without touching the user's real Claude Code settings.
     public static func configure(homeDirectory home: URL, bundledHookBinary bundledBinary: URL?) {
         let paths = AgentHaloPaths(homeDirectory: home)
         let destBinary = paths.statusHook
@@ -37,7 +22,6 @@ public enum ClaudeHookConfigurator {
             .appendingPathComponent("settings.json")
         let fileManager = FileManager.default
 
-        // -- 1. Stage the hook binary -------------------------------------------
         guard let bundledBinary,
               fileManager.fileExists(atPath: bundledBinary.path) else {
             AgentHaloLogger.log("ClaudeHookConfigurator: bundled binary not found — skipping hook setup (development mode?)")
@@ -45,19 +29,10 @@ public enum ClaudeHookConfigurator {
         }
 
         do {
-            try fileManager.createDirectory(
-                at: paths.binDirectory,
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-            // Always overwrite so the binary stays up-to-date across app upgrades.
-            if fileManager.fileExists(atPath: destBinary.path) {
-                try fileManager.removeItem(at: destBinary)
-            }
-            try fileManager.copyItem(at: bundledBinary, to: destBinary)
-            try fileManager.setAttributes(
-                [.posixPermissions: 0o755],
-                ofItemAtPath: destBinary.path
+            try AgentHaloBinaryStaging.stageStatusHook(
+                from: bundledBinary,
+                homeDirectory: home,
+                fileManager: fileManager
             )
             AgentHaloLogger.log("ClaudeHookConfigurator: staged \(destBinary.path)")
         } catch {
@@ -67,7 +42,6 @@ public enum ClaudeHookConfigurator {
 
         let hookCommand = destBinary.path
 
-        // -- 2. Read existing ~/.claude/settings.json --------------------------
         var config: [String: Any]
         if let data = try? Data(contentsOf: claudeSettings),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -77,18 +51,22 @@ public enum ClaudeHookConfigurator {
         }
 
         var hooks = (config["hooks"] as? [String: Any]) ?? [:]
-
-        // -- 3. Merge our lifecycle events --------------------------------------
         var changed = false
+
         for spec in hookSpecs {
             var entries = (hooks[spec.event] as? [[String: Any]]) ?? []
 
-            // Idempotency: only treat the **new** staged path as configured.
-            // Legacy `claude-code-status-hook` paths must be rewritten.
-            let alreadyConfigured = entries.contains { entry in
+            // Preferred path only — legacy names must be rewritten on launch.
+            let alreadyOnPreferred = entries.contains { entry in
                 guard let entryHooks = entry["hooks"] as? [[String: Any]] else { return false }
                 let hasHook = entryHooks.contains { hook in
-                    commandReferencesPath(hook["command"] as? String, destBinary.path)
+                    guard let command = hook["command"] as? String else { return false }
+                    let exe = AgentHaloBinaryStaging.commandExecutablePath(command)
+                    guard exe == destBinary.path else { return false }
+                    return AgentHaloBinaryStaging.commandPointsToLiveExecutable(
+                        command,
+                        fileManager: fileManager
+                    )
                 }
                 guard hasHook else { return false }
                 if spec.matcher != nil, entry["matcher"] == nil {
@@ -96,13 +74,13 @@ public enum ClaudeHookConfigurator {
                 }
                 return true
             }
-            if alreadyConfigured { continue }
+            if alreadyOnPreferred { continue }
 
-            // Remove stale Agent Halo entries (legacy path or missing matcher).
+            // Drop any Agent Halo entry (legacy or wrong matcher), then append preferred.
             entries.removeAll { entry in
                 guard let entryHooks = entry["hooks"] as? [[String: Any]] else { return false }
                 return entryHooks.contains { hook in
-                    isAgentHaloHookCommand(hook["command"] as? String, paths: paths)
+                    isAgentHaloHookCommand(hook["command"] as? String, paths: paths, home: home)
                 }
             }
 
@@ -121,13 +99,11 @@ public enum ClaudeHookConfigurator {
 
         guard changed || settingsJSONNeedsPrettyPrint(at: claudeSettings) else {
             AgentHaloLogger.log("ClaudeHookConfigurator: hooks already configured — nothing to do")
-            removeLegacyHookBinaryIfPresent(paths: paths, fileManager: fileManager)
             return
         }
 
         config["hooks"] = hooks
 
-        // -- 4. Write back -----------------------------------------------------
         do {
             try fileManager.createDirectory(
                 at: claudeSettings.deletingLastPathComponent(),
@@ -140,7 +116,6 @@ public enum ClaudeHookConfigurator {
             )
             try data.write(to: claudeSettings, options: [.atomic])
             AgentHaloLogger.log("ClaudeHookConfigurator: wrote \(claudeSettings.path)")
-            removeLegacyHookBinaryIfPresent(paths: paths, fileManager: fileManager)
         } catch {
             AgentHaloLogger.log("ClaudeHookConfigurator: failed to write \(claudeSettings.path): \(error)")
         }
@@ -148,9 +123,6 @@ public enum ClaudeHookConfigurator {
 
     // MARK: - Private helpers
 
-    /// Detects a valid `settings.json` that's been written as a single compact
-    /// line. Returning true lets the configurator re-emit it pretty even when
-    /// none of our hook entries changed.
     private static func settingsJSONNeedsPrettyPrint(at url: URL) -> Bool {
         guard let data = try? Data(contentsOf: url),
               let text = String(data: data, encoding: .utf8),
@@ -163,26 +135,18 @@ public enum ClaudeHookConfigurator {
         return (try? JSONSerialization.jsonObject(with: data)) != nil
     }
 
-    private static func commandReferencesPath(_ command: String?, _ path: String) -> Bool {
+    private static func isAgentHaloHookCommand(
+        _ command: String?,
+        paths: AgentHaloPaths,
+        home: URL
+    ) -> Bool {
         guard let command else { return false }
-        return command == path || command.hasPrefix(path + " ") || command.contains(path)
-    }
-
-    private static func isAgentHaloHookCommand(_ command: String?, paths: AgentHaloPaths) -> Bool {
-        guard let command else { return false }
-        return commandReferencesPath(command, paths.statusHook.path)
-            || command.contains("claude-code-status-hook")
-            || command.contains("/bin/status-hook")
-    }
-
-    private static func removeLegacyHookBinaryIfPresent(paths: AgentHaloPaths, fileManager: FileManager) {
-        guard fileManager.fileExists(atPath: paths.legacyStatusHook.path) else { return }
-        do {
-            try fileManager.removeItem(at: paths.legacyStatusHook)
-            AgentHaloLogger.log("ClaudeHookConfigurator: removed legacy \(paths.legacyStatusHook.path)")
-        } catch {
-            AgentHaloLogger.log("ClaudeHookConfigurator: failed to remove legacy hook binary: \(error)")
-        }
+        // Detect both preferred and any legacy Agent Halo paths so we can rewrite them.
+        let roots = [
+            paths.statusHook.path,
+            paths.legacyStatusHook.path,
+        ]
+        return GrokHookConfigurator.isAgentHaloHookCommand(command, acceptedRoots: roots)
     }
 
     private static func bundledHookBinary() -> URL? {
@@ -195,7 +159,7 @@ public enum ClaudeHookConfigurator {
 
     private struct HookSpec {
         let event: String
-        let matcher: String?  // nil = no matcher, fires for every event
+        let matcher: String?
     }
 
     private static let hookSpecs: [HookSpec] = [

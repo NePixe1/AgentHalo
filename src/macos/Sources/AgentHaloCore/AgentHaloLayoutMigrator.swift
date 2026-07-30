@@ -2,10 +2,13 @@ import Foundation
 
 /// Idempotent best-effort migration of `~/.agent-halo` to layout version 2.
 ///
-/// Moves data paths into `state/` / `logs/` / `cache/`, deletes legacy data
-/// paths after success, and writes `.layout-version = 2`. Does **not** delete
-/// staged legacy binaries (`claude-code-status-hook`, `claude-code-statusline-proxy`);
-/// configurators remove those after settings rewrite.
+/// Moves data paths into `state/` / `logs/` / `cache/`, deletes legacy **data**
+/// paths after success, and writes `.layout-version = 2`.
+///
+/// Never deletes staged binaries (`claude-code-status-hook`,
+/// `claude-code-statusline-proxy`, or anything under `bin/`). Configurators keep
+/// those paths populated as upgrade-compat mirrors so running Grok/Claude
+/// sessions do not fail with hook exit 127 mid-upgrade.
 public enum AgentHaloLayoutMigrator {
     public static func migrateIfNeeded(
         paths: AgentHaloPaths = AgentHaloPaths(),

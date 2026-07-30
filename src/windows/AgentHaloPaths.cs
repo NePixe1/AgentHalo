@@ -62,7 +62,17 @@ namespace CodexHalo
             return Path.Combine(CacheDirectory(userProfile), "usage-snapshots-v1.json");
         }
 
-        // MARK: Legacy (migration / scrub only)
+        /// <summary>
+        /// Stable hook launcher under .agent-halo\bin (copy of AgentHalo.exe).
+        /// Claude/Grok settings should prefer this path so install-dir moves
+        /// and mid-upgrade app renames do not strand hook commands.
+        /// </summary>
+        public static string StatusHookExe(string userProfile = null)
+        {
+            return Path.Combine(BinDirectory(userProfile), "status-hook.exe");
+        }
+
+        // MARK: Legacy (migration / scrub only — data paths; binaries stay)
 
         public static string LegacyClaudeStatusLog(string userProfile = null)
         {
@@ -94,6 +104,11 @@ namespace CodexHalo
             return Path.Combine(SettingsStorage.AppDirectory, "usage-snapshots-v1.json");
         }
 
+        /// <summary>
+        /// Pre-layout-v2 helper path. Kept as a live mirror of StatusHookExe so
+        /// mid-session processes that still invoke AgentHaloHook.exe do not get
+        /// exit code 1 / "not found" after upgrade.
+        /// </summary>
         public static string LegacyAgentHaloHookExe(string userProfile = null)
         {
             return Path.Combine(Root(userProfile), "AgentHaloHook.exe");

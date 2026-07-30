@@ -137,14 +137,33 @@ still produce a readable execution state.
 ## Privacy
 
 Agent Halo locally reads lifecycle events from `%USERPROFILE%\.codex\sessions`
-and, on macOS, automatically configures Claude Code
-lifecycle hooks and status line proxy in `~/.claude/settings.json`. Runtime agent
-data under the user home `.agent-halo` directory uses a shared layout:
+and, on macOS, automatically configures:
+
+- Claude Code lifecycle hooks and status line proxy in `~/.claude/settings.json`
+- Grok Build lifecycle hooks in `~/.grok/hooks/agent-halo-status.json`
+
+Runtime agent data under the user home `.agent-halo` directory uses a shared layout:
 
 - `bin/` — macOS staged hook / statusline proxy binaries (Windows may leave this empty)
 - `state/` — small durable state such as the chained statusline command (macOS)
 - `logs/` — recent lifecycle events (`claude-status.jsonl`, `grok-status.jsonl`; rotated)
 - `cache/` — disposable cache (Claude context snapshots, usage snapshots)
+
+Grok Build also loads hooks from Claude's `settings.json` by default (Claude
+compatibility). That can make the same Agent Halo `status-hook` appear twice in a
+Grok session (`agent-halo-status` and `settings`). Behavior stays correct; the
+extra run is only redundant. To keep only the Grok-native path, set in
+`~/.grok/config.toml`:
+
+```toml
+[compat.claude]
+hooks = false
+```
+
+This disables Claude hook import only (not skills, rules, MCP, or Claude Code
+itself). Restart the Grok session for the change to take effect. Note that any
+*other* hooks you keep solely in `~/.claude/settings.json` will also stop running
+under Grok after this change.
 
 Windows keeps app settings and `halo.log` in `%LOCALAPPDATA%\CodexHalo\`; usage
 snapshots live under `.agent-halo\cache\`. Windows Claude hooks still invoke

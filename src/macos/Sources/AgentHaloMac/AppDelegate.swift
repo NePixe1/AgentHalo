@@ -189,11 +189,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.terminate(nil)
             return
         }
-        AgentHaloLayoutMigrator.migrateIfNeeded()
-        ClaudeContextUsageStorage.prune(force: true)
-        ClaudeHookConfigurator.configure()
-        GrokHookConfigurator.configure()
-        ClaudeStatusLineConfigurator.configure()
+        // Single upgrade path: migrate data → stage all hook binaries (no gap)
+        // → rewrite configs only when unhealthy. See AgentHaloRuntimeBootstrap.
+        AgentHaloRuntimeBootstrap.bootstrap()
         NSApp.setActivationPolicy(.accessory)
         createStatusItem()
         createHaloPanel()

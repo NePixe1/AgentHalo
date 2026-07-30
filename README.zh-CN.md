@@ -113,13 +113,31 @@ swift run AgentHaloDiagnostics --transition-strip /tmp/agent-halo-transitions
 ## 隐私
 
 Agent Halo 只在本机读取 `%USERPROFILE%\.codex\sessions` 中的生命周期事件，
-并在 macOS 上自动配置 `~/.claude/settings.json` 中的 Claude Code
-生命周期 hooks 和 status line proxy。用户主目录下的 `.agent-halo` 使用统一布局：
+并在 macOS 上自动配置：
+
+- Claude Code：`~/.claude/settings.json` 中的生命周期 hooks 与 status line proxy
+- Grok Build：`~/.grok/hooks/agent-halo-status.json` 中的生命周期 hooks
+
+用户主目录下的 `.agent-halo` 使用统一布局：
 
 - `bin/` — macOS 的 staged hook / statusline 代理（Windows 可为空）
 - `state/` — 小型持久状态（如 macOS statusline 下游命令）
 - `logs/` — 近期生命周期事件（`claude-status.jsonl`、`grok-status.jsonl`，自动轮转）
 - `cache/` — 可安全删除的缓存（Claude context 快照、用量快照）
+
+Grok Build 默认也会加载 Claude 的 `settings.json` hooks（兼容扫描），因此同一条
+Agent Halo `status-hook` 在 Grok 会话里可能出现两次（`agent-halo-status` 与
+`settings`）。功能正常，只是重复执行。若只想保留 Grok 原生路径，可在
+`~/.grok/config.toml` 中设置：
+
+```toml
+[compat.claude]
+hooks = false
+```
+
+这只关闭 Claude hooks 导入，不影响 skills / rules / MCP，也不影响 Claude Code
+本身。修改后需重启 Grok 会话才会生效。注意：若你还有**仅**写在
+`~/.claude/settings.json` 中的其它 hooks，关闭后它们在 Grok 中也不会再运行。
 
 Windows 应用设置与 `halo.log` 仍在 `%LOCALAPPDATA%\CodexHalo\`；**用量快照**
 在 `.agent-halo\cache\`。Windows 的 Claude hooks 仍调用

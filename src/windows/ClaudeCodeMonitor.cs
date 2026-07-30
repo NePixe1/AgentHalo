@@ -247,9 +247,13 @@ public static class ClaudeHookConfigurator
         {
             try
             {
-                string exe = Process.GetCurrentProcess().MainModule.FileName;
-                Configure(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                    exe);
+                string home = Environment.GetFolderPath(
+                    Environment.SpecialFolder.UserProfile);
+                string staged = AgentHaloPaths.StatusHookExe(home);
+                string exe = File.Exists(staged)
+                    ? staged
+                    : Process.GetCurrentProcess().MainModule.FileName;
+                Configure(home, exe);
             }
             catch (Exception ex)
             {
@@ -257,9 +261,33 @@ public static class ClaudeHookConfigurator
             }
         }
 
+        /// <summary>
+        /// Merge Agent Halo lifecycle hooks into ~/.claude/settings.json.
+        /// <paramref name="executablePath"/> should be the stable staged
+        /// .agent-halo\bin\status-hook.exe when available. Never deletes the
+        /// legacy AgentHaloHook.exe compat path.
+        /// </summary>
         public static void Configure(string home, string executablePath)
         {
-            RemoveLegacyHookHelper(home);
+            // Stage preferred bin\status-hook.exe before settings point at it.
+            string primary = AgentHaloPaths.StatusHookExe(home);
+            if (!String.IsNullOrEmpty(executablePath) && File.Exists(executablePath))
+            {
+                try
+                {
+                    AgentHaloBinaryStaging.StageStatusHookEverywhere(executablePath, home);
+                    if (File.Exists(primary))
+                    {
+                        executablePath = primary;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    SettingsStorage.Log(
+                        "ClaudeHookConfigurator: stage failed: " + ex.Message);
+                }
+            }
+
             string claudeDir = Path.Combine(home, ".claude");
             string settingsPath = Path.Combine(claudeDir, "settings.json");
             Dictionary<string, object> config = ReadSettings(settingsPath);
@@ -269,6 +297,8 @@ public static class ClaudeHookConfigurator
                 hooks = new Dictionary<string, object>();
             }
 
+            // Preferred path only — legacy / install-dir paths are rewritten on launch.
+            string preferredCommandPrefix = Quote(executablePath) + " --claude-hook ";
             bool changed = false;
             foreach (HookSpec spec in HookSpecs)
             {
@@ -277,30 +307,51 @@ public static class ClaudeHookConfigurator
                     ? existing as object[] : null;
                 List<object> list = entries == null
                     ? new List<object>() : entries.ToList();
-                string command = Quote(executablePath) + " --claude-hook " + spec.Event;
-                bool already = false;
+                string command = preferredCommandPrefix + spec.Event;
+
+                bool alreadyOnPreferred = false;
+                for (int i = 0; i < list.Count; i++)
+                {
+                    Dictionary<string, object> entry =
+                        list[i] as Dictionary<string, object>;
+                    if (EntryIsPreferredAgentHaloHook(entry, spec, executablePath))
+                    {
+                        alreadyOnPreferred = true;
+                        break;
+                    }
+                }
+
+                if (alreadyOnPreferred)
+                {
+                    // Drop non-preferred Agent Halo siblings if any.
+                    for (int i = list.Count - 1; i >= 0; i--)
+                    {
+                        Dictionary<string, object> entry =
+                            list[i] as Dictionary<string, object>;
+                        if (EntryHasAgentHaloHook(entry) &&
+                            !EntryIsPreferredAgentHaloHook(entry, spec, executablePath))
+                        {
+                            list.RemoveAt(i);
+                            changed = true;
+                        }
+                    }
+                    hooks[spec.Event] = list.ToArray();
+                    continue;
+                }
+
+                // Remove any Agent Halo entry (legacy or wrong path), then append preferred.
                 for (int i = list.Count - 1; i >= 0; i--)
                 {
                     Dictionary<string, object> entry =
                         list[i] as Dictionary<string, object>;
                     if (EntryHasAgentHaloHook(entry))
                     {
-                        if (EntryMatches(entry, spec, command))
-                        {
-                            already = true;
-                        }
-                        else
-                        {
-                            list.RemoveAt(i);
-                            changed = true;
-                        }
+                        list.RemoveAt(i);
+                        changed = true;
                     }
                 }
-                if (!already)
-                {
-                    list.Add(CreateHookEntry(spec, command));
-                    changed = true;
-                }
+                list.Add(CreateHookEntry(spec, command));
+                changed = true;
                 hooks[spec.Event] = list.ToArray();
             }
 
@@ -310,9 +361,108 @@ public static class ClaudeHookConfigurator
             }
             config["hooks"] = hooks;
             Directory.CreateDirectory(claudeDir);
-            File.WriteAllText(settingsPath,
-                PrettyPrintJson(Serializer.Serialize(config)),
-                new UTF8Encoding(false));
+            AtomicWriteText(settingsPath,
+                PrettyPrintJson(Serializer.Serialize(config)));
+        }
+
+        private static void AtomicWriteText(string path, string contents)
+        {
+            string parent = Path.GetDirectoryName(path);
+            if (!String.IsNullOrEmpty(parent))
+            {
+                Directory.CreateDirectory(parent);
+            }
+            string temp = path + ".tmp-" + Guid.NewGuid().ToString("N");
+            File.WriteAllText(temp, contents, new UTF8Encoding(false));
+            if (File.Exists(path))
+            {
+                try
+                {
+                    File.Replace(temp, path, null);
+                    return;
+                }
+                catch
+                {
+                    // Fall through.
+                }
+            }
+            File.Copy(temp, path, true);
+            try { File.Delete(temp); }
+            catch { }
+        }
+
+        /// <summary>
+        /// True when the entry uses the preferred executable path + --claude-hook
+        /// and the binary is live. Legacy AgentHaloHook.exe paths are not accepted.
+        /// </summary>
+        private static bool EntryIsPreferredAgentHaloHook(
+            Dictionary<string, object> entry,
+            HookSpec spec,
+            string preferredExecutable)
+        {
+            if (entry == null || String.IsNullOrEmpty(preferredExecutable))
+            {
+                return false;
+            }
+            if (spec.Matcher != null &&
+                !String.Equals(StringValue(entry, "matcher"), spec.Matcher,
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+            string preferredFull;
+            try
+            {
+                preferredFull = Path.GetFullPath(preferredExecutable);
+            }
+            catch
+            {
+                preferredFull = preferredExecutable;
+            }
+            foreach (Dictionary<string, object> hook in EntryHooks(entry))
+            {
+                string command = StringValue(hook, "command");
+                if (command.IndexOf("--claude-hook", StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    continue;
+                }
+                string exe = AgentHaloBinaryStaging.CommandExecutablePath(command);
+                if (String.IsNullOrEmpty(exe))
+                {
+                    continue;
+                }
+                string exeFull;
+                try
+                {
+                    exeFull = Path.GetFullPath(exe);
+                }
+                catch
+                {
+                    exeFull = exe;
+                }
+                if (!String.Equals(exeFull, preferredFull, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                if (AgentHaloBinaryStaging.CommandPointsToLiveExecutable(command))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static bool IsAgentHaloHookCommand(string command)
+        {
+            if (String.IsNullOrEmpty(command))
+            {
+                return false;
+            }
+            return command.IndexOf("--claude-hook", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                command.IndexOf("AgentHaloHook.exe", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                command.IndexOf("status-hook", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                command.IndexOf("claude-code-status-hook",
+                    StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         // Detects a settings.json that is valid JSON but written as a single
@@ -489,21 +639,6 @@ public static class ClaudeHookConfigurator
             }
         }
 
-        private static void RemoveLegacyHookHelper(string home)
-        {
-            try
-            {
-                string legacy = AgentHaloPaths.LegacyAgentHaloHookExe(home);
-                if (File.Exists(legacy))
-                {
-                    File.Delete(legacy);
-                }
-            }
-            catch
-            {
-            }
-        }
-
         private static Dictionary<string, object> ReadSettings(string path)
         {
             try
@@ -546,6 +681,7 @@ public static class ClaudeHookConfigurator
                 if (command.IndexOf("--claude-hook", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     command.IndexOf("AgentHaloHook.exe",
                         StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    command.IndexOf("status-hook", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     command.IndexOf("claude-code-status-hook",
                         StringComparison.OrdinalIgnoreCase) >= 0)
                 {
