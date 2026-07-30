@@ -790,7 +790,7 @@ func testClaudeHookConfiguratorWritesUserSettingsNotLegacyClaudeJson() throws {
     expect(existingCommand, "/usr/local/bin/existing-hook PreToolUse", "existing user hook should not be overwritten")
     let agentHaloHooks = preToolUse?.last?["hooks"] as? [[String: Any]]
     let command = agentHaloHooks?.first?["command"] as? String
-    expect(command, "\(home.path)/.agent-halo/claude-code-status-hook PreToolUse", "Agent Halo hook should be appended to ~/.claude/settings.json")
+    expect(command, "\(home.path)/.agent-halo/bin/status-hook PreToolUse", "Agent Halo hook should be appended to ~/.claude/settings.json")
     expect(hooks?["PostToolBatch"] != nil, true, "PostToolBatch hook should be configured")
     expect(hooks?["PermissionRequest"] != nil, true, "PermissionRequest hook should be configured")
     expect(hooks?["PermissionDenied"] != nil, true, "PermissionDenied hook should be configured")
@@ -821,15 +821,15 @@ func testGrokHookConfiguratorWritesHooksJSON() throws {
     let text = try String(contentsOf: hooksURL, encoding: .utf8)
     expect(text.contains("PreToolUse"), "pre tool registered")
     expect(
-        text.contains("claude-code-status-hook") || text.contains("agent-halo"),
+        text.contains("bin/status-hook") || text.contains("status-hook"),
         "command points to staged binary"
     )
     expect(text.contains("SessionStart"), "SessionStart registered")
     expect(text.contains("SessionEnd"), "SessionEnd registered")
     expect(text.contains("PostCompact"), "PostCompact registered")
 
-    let staged = home.appendingPathComponent(".agent-halo/claude-code-status-hook")
-    expect(FileManager.default.fileExists(atPath: staged.path), "hook binary staged under .agent-halo")
+    let staged = home.appendingPathComponent(".agent-halo/bin/status-hook")
+    expect(FileManager.default.fileExists(atPath: staged.path), "hook binary staged under .agent-halo/bin")
 
     // Second call must be idempotent: content and mtime stable when already configured.
     let attrsBefore = try FileManager.default.attributesOfItem(atPath: hooksURL.path)
@@ -869,8 +869,8 @@ func testClaudeStatusLineConfiguratorPreservesAndChainsExistingCommand() throws 
     let configuredData = try Data(contentsOf: settingsURL)
     let configured = try JSONSerialization.jsonObject(with: configuredData) as! [String: Any]
     let statusLine = configured["statusLine"] as! [String: Any]
-    let installedProxy = home.appendingPathComponent(".agent-halo/claude-code-statusline-proxy")
-    let storedCommand = home.appendingPathComponent(".agent-halo/claude-code-statusline-original-command")
+    let installedProxy = home.appendingPathComponent(".agent-halo/bin/statusline-proxy")
+    let storedCommand = home.appendingPathComponent(".agent-halo/state/statusline-original-command")
 
     expect(statusLine["command"] as? String, installedProxy.path, "Claude statusline should use AgentHalo proxy")
     expect(statusLine["padding"] as? Int, 0, "Claude statusline padding should be preserved")
@@ -900,6 +900,84 @@ func testClaudeStatusLineConfiguratorPreservesAndChainsExistingCommand() throws 
     expect(repairedStatusLine["command"] as? String, installedProxy.path, "proxy should be restored")
     expect(try String(contentsOf: storedCommand, encoding: .utf8), originalCommand, "ccline should remain downstream")
     expect(repaired["theme"] as? String, "dark", "unrelated settings should survive repair")
+}
+
+
+func testClaudeHookConfiguratorRewritesLegacyPathAndDeletesOldBinary() throws {
+    let home = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-hook-rewrite-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: home) }
+    let fm = FileManager.default
+    let claudeDir = home.appendingPathComponent(".claude", isDirectory: true)
+    try fm.createDirectory(at: claudeDir, withIntermediateDirectories: true)
+    let paths = AgentHaloPaths(homeDirectory: home)
+    try fm.createDirectory(at: paths.root, withIntermediateDirectories: true)
+    try Data("old-binary".utf8).write(to: paths.legacyStatusHook)
+    try Data("bundled".utf8).write(to: home.appendingPathComponent("bundle-hook"))
+    let legacyCommand = "\(paths.legacyStatusHook.path) PreToolUse"
+    let settings: [String: Any] = [
+        "hooks": [
+            "PreToolUse": [[
+                "matcher": ".*",
+                "hooks": [["type": "command", "command": legacyCommand]]
+            ]]
+        ]
+    ]
+    try JSONSerialization.data(withJSONObject: settings).write(to: claudeDir.appendingPathComponent("settings.json"))
+
+    ClaudeHookConfigurator.configure(
+        homeDirectory: home,
+        bundledHookBinary: home.appendingPathComponent("bundle-hook")
+    )
+
+    let settingsJSON = try JSONSerialization.jsonObject(with: Data(contentsOf: claudeDir.appendingPathComponent("settings.json"))) as! [String: Any]
+    let hooks = settingsJSON["hooks"] as! [String: Any]
+    let pre = hooks["PreToolUse"] as! [[String: Any]]
+    let commands = (pre.flatMap { ($0["hooks"] as? [[String: Any]]) ?? [] }).compactMap { $0["command"] as? String }
+    expect(commands.contains { $0.contains("bin/status-hook") }, "settings should point at bin/status-hook")
+    expect(!commands.contains { $0.contains("claude-code-status-hook") }, "legacy command should be rewritten away")
+    expect(fm.fileExists(atPath: paths.statusHook.path), "new binary staged")
+    expect(!fm.fileExists(atPath: paths.legacyStatusHook.path), "legacy binary deleted after successful rewrite")
+}
+
+func testClaudeHookConfiguratorDoesNotDeleteLegacyBinaryWhenBundledMissing() throws {
+    let home = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-hook-no-bundle-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: home) }
+    let fm = FileManager.default
+    let paths = AgentHaloPaths(homeDirectory: home)
+    try fm.createDirectory(at: paths.root, withIntermediateDirectories: true)
+    try Data("old-binary".utf8).write(to: paths.legacyStatusHook)
+
+    ClaudeHookConfigurator.configure(homeDirectory: home, bundledHookBinary: nil)
+
+    expect(fm.fileExists(atPath: paths.legacyStatusHook.path), "missing bundle must not delete legacy binary")
+}
+
+func testClaudeStatusLineConfiguratorRewritesLegacyProxyAndDeletesOldBinary() throws {
+    let home = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-statusline-rewrite-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: home) }
+    let fm = FileManager.default
+    let claude = home.appendingPathComponent(".claude", isDirectory: true)
+    try fm.createDirectory(at: claude, withIntermediateDirectories: true)
+    let paths = AgentHaloPaths(homeDirectory: home)
+    try fm.createDirectory(at: paths.root, withIntermediateDirectories: true)
+    try Data("old-proxy".utf8).write(to: paths.legacyStatuslineProxy)
+    let settings: [String: Any] = [
+        "statusLine": ["type": "command", "command": paths.legacyStatuslineProxy.path]
+    ]
+    try JSONSerialization.data(withJSONObject: settings).write(to: claude.appendingPathComponent("settings.json"))
+    let bundled = home.appendingPathComponent("bundled-proxy")
+    try Data("proxy".utf8).write(to: bundled)
+
+    ClaudeStatusLineConfigurator.configure(homeDirectory: home, bundledProxyBinary: bundled)
+
+    let configured = try JSONSerialization.jsonObject(with: Data(contentsOf: claude.appendingPathComponent("settings.json"))) as! [String: Any]
+    let statusLine = configured["statusLine"] as! [String: Any]
+    expect(statusLine["command"] as? String, paths.statuslineProxy.path, "statusline uses bin/statusline-proxy")
+    expect(fm.fileExists(atPath: paths.statuslineProxy.path), "new proxy staged")
+    expect(!fm.fileExists(atPath: paths.legacyStatuslineProxy.path), "legacy proxy deleted after rewrite")
 }
 
 extension FileHandle {
@@ -1288,9 +1366,8 @@ func testClaudeContextUsageReaderKeepsLastKnownUsageForMatchingSession() throws 
         try? FileManager.default.removeItem(at: root)
     }
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    let snapshotURL = root.appendingPathComponent("claude-code-context.json")
     let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
-    let reader = ClaudeContextUsageReader(snapshotURL: snapshotURL)
+    let reader = ClaudeContextUsageReader(snapshotsDirectory: root)
 
     let fresh = ClaudeContextUsageSnapshot(
         sessionId: "cc-session",
@@ -1298,7 +1375,7 @@ func testClaudeContextUsageReaderKeepsLastKnownUsageForMatchingSession() throws 
         contextWindowSize: 200_000,
         updatedAt: now.addingTimeInterval(-30)
     )
-    try JSONEncoder().encode(fresh).write(to: snapshotURL)
+    try ClaudeContextUsageStorage.write(fresh, directory: root)
 
     expect(reader.read(sessionIds: ["cc-session"], now: now)?.usedPercent, 52.75, "matching fresh Claude context")
     expect(reader.read(sessionIds: ["other-session"], now: now) == nil, "mismatched Claude session should be rejected")
@@ -1310,26 +1387,25 @@ func testClaudeContextUsageReaderKeepsLastKnownUsageForMatchingSession() throws 
 }
 
 func testClaudeContextUsageReaderDoesNotShareSnapshotsAcrossFiles() throws {
-    let root = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("agent-halo-claude-context-cache-\(UUID().uuidString)", isDirectory: true)
+    let firstRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-claude-context-a-\(UUID().uuidString)", isDirectory: true)
+    let secondRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-claude-context-b-\(UUID().uuidString)", isDirectory: true)
     defer {
-        try? FileManager.default.removeItem(at: root)
+        try? FileManager.default.removeItem(at: firstRoot)
+        try? FileManager.default.removeItem(at: secondRoot)
     }
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    let firstURL = root.appendingPathComponent("first.json")
-    let secondURL = root.appendingPathComponent("second.json")
+    try FileManager.default.createDirectory(at: firstRoot, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: secondRoot, withIntermediateDirectories: true)
     let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
     let first = ClaudeContextUsageSnapshot(sessionId: "shared-session", usedPercent: 10, updatedAt: now)
     let second = ClaudeContextUsageSnapshot(sessionId: "shared-session", usedPercent: 90, updatedAt: now)
 
-    try JSONEncoder().encode(first).write(to: firstURL)
-    try JSONEncoder().encode(second).write(to: secondURL)
-    let sharedModificationDate = ISO8601DateFormatter().date(from: "2026-06-21T07:59:00Z")!
-    try FileManager.default.setAttributes([.modificationDate: sharedModificationDate], ofItemAtPath: firstURL.path)
-    try FileManager.default.setAttributes([.modificationDate: sharedModificationDate], ofItemAtPath: secondURL.path)
+    try ClaudeContextUsageStorage.write(first, directory: firstRoot)
+    try ClaudeContextUsageStorage.write(second, directory: secondRoot)
 
-    let firstRead = ClaudeContextUsageReader(snapshotURL: firstURL).read(sessionIds: ["shared-session"], now: now)
-    let secondRead = ClaudeContextUsageReader(snapshotURL: secondURL).read(sessionIds: ["shared-session"], now: now)
+    let firstRead = ClaudeContextUsageReader(snapshotsDirectory: firstRoot).read(sessionIds: ["shared-session"], now: now)
+    let secondRead = ClaudeContextUsageReader(snapshotsDirectory: secondRoot).read(sessionIds: ["shared-session"], now: now)
 
     expect(firstRead?.usedPercent, 10, "first Claude context reader should read its own snapshot")
     expect(secondRead?.usedPercent, 90, "second Claude context reader should not reuse another file's snapshot")
@@ -1371,7 +1447,7 @@ func testClaudeContextUsageReaderRequiresExactFreshSession() throws {
     try ClaudeContextUsageStorage.write(first, directory: root)
     try ClaudeContextUsageStorage.write(second, directory: root)
 
-    let reader = ClaudeContextUsageReader(snapshotsDirectory: root, legacySnapshotURL: nil)
+    let reader = ClaudeContextUsageReader(snapshotsDirectory: root)
     expect(reader.read(sessionId: "session-a", now: now)?.usedPercent, 26.5, "exact session usage")
     expect(reader.read(sessionId: "missing", now: now) == nil, "another session must not be substituted")
     expect(
@@ -1397,7 +1473,7 @@ func testClaudeContextUsageReaderRetainsExactUsageWhileSessionIsLive() throws {
     )
     try ClaudeContextUsageStorage.write(stale, directory: root)
 
-    let reader = ClaudeContextUsageReader(snapshotsDirectory: root, legacySnapshotURL: nil)
+    let reader = ClaudeContextUsageReader(snapshotsDirectory: root)
     expect(
         reader.read(sessionId: "live-main", now: now, freshness: .whileSessionIsLive)?.modelName,
         "glm-5.2",
@@ -1413,23 +1489,24 @@ func testClaudeContextUsageReaderRetainsExactUsageWhileSessionIsLive() throws {
     )
 }
 
-func testClaudeContextUsageReaderMigratesMatchingLegacySnapshot() throws {
+func testClaudeContextUsageReaderDoesNotReadLegacySingleFile() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("agent-halo-legacy-usage-\(UUID().uuidString)", isDirectory: true)
+        .appendingPathComponent("agent-halo-context-no-legacy-\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: root) }
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-
     let legacyURL = root.appendingPathComponent("claude-code-context.json")
-    let now = ISO8601DateFormatter().date(from: "2026-06-23T02:00:00Z")!
-    let legacy = ClaudeContextUsageSnapshot(sessionId: "legacy-main", usedPercent: 31, updatedAt: now)
-    try JSONEncoder().encode(legacy).write(to: legacyURL)
-
-    let reader = ClaudeContextUsageReader(
-        snapshotsDirectory: root.appendingPathComponent("contexts", isDirectory: true),
-        legacySnapshotURL: legacyURL
+    let now = Date()
+    let snapshot = ClaudeContextUsageSnapshot(
+        sessionId: "sess-legacy",
+        usedPercent: 42,
+        updatedAt: now
     )
-    expect(reader.read(sessionId: "legacy-main", now: now)?.usedPercent, 31, "matching legacy fallback")
-    expect(reader.read(sessionId: "other-main", now: now) == nil, "mismatched legacy fallback")
+    try JSONEncoder().encode(snapshot).write(to: legacyURL)
+    let reader = ClaudeContextUsageReader(snapshotsDirectory: root)
+    expect(
+        reader.read(sessionId: "sess-legacy", now: now) == nil,
+        "layout v2 reader must not fall back to legacy single-file context"
+    )
 }
 
 func testClaudeStatusLineProxyRuntimeCapturesUsageAndForwardsInput() throws {
@@ -2191,9 +2268,9 @@ func testClaudeCodeStatusHookIsolatesGrokAndClaudeStatusFiles() throws {
     try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
 
     let binary = try resolveClaudeCodeStatusHookBinary()
-    let agentHalo = home.appendingPathComponent(".agent-halo", isDirectory: true)
-    let grokStatus = agentHalo.appendingPathComponent("grok-build-status.jsonl")
-    let claudeStatus = agentHalo.appendingPathComponent("claude-code-status.jsonl")
+    let paths = AgentHaloPaths(homeDirectory: home)
+    let grokStatus = paths.grokStatusLog
+    let claudeStatus = paths.claudeStatusLog
 
     // Grok path: GROK_SESSION_ID set; snake_case CLI event should become PreToolUse.
     try runClaudeCodeStatusHook(
@@ -2207,14 +2284,14 @@ func testClaudeCodeStatusHookIsolatesGrokAndClaudeStatusFiles() throws {
         stdinJSON: #"{"sessionId":"test-grok-session","cwd":"/tmp/proj","toolName":"run_terminal_command","timestamp":"2026-07-25T00:00:00Z"}"#
     )
 
-    expect(FileManager.default.fileExists(atPath: grokStatus.path), "Grok path should write grok-build-status.jsonl")
+    expect(FileManager.default.fileExists(atPath: grokStatus.path), "Grok path should write logs/grok-status.jsonl")
     let grokText = try String(contentsOf: grokStatus, encoding: .utf8)
     expect(grokText.contains("grok-hook"), "Grok record source should be grok-hook")
     expect(grokText.contains("test-grok-session"), "Grok record should include session id")
     expect(grokText.contains("\"PreToolUse\""), "snake_case pre_tool_use should normalize to PreToolUse")
     if FileManager.default.fileExists(atPath: claudeStatus.path) {
         let existingClaude = try String(contentsOf: claudeStatus, encoding: .utf8)
-        expect(!existingClaude.contains("test-grok-session"), "Grok session id must not appear in claude-code-status.jsonl")
+        expect(!existingClaude.contains("test-grok-session"), "Grok session id must not appear in logs/claude-status.jsonl")
     }
 
     // Claude path: no GROK_* env — must write claude file only (for this session).
@@ -2226,13 +2303,13 @@ func testClaudeCodeStatusHookIsolatesGrokAndClaudeStatusFiles() throws {
         stdinJSON: #"{"session_id":"claude-1","cwd":"/tmp/c","tool_name":"Bash"}"#
     )
 
-    expect(FileManager.default.fileExists(atPath: claudeStatus.path), "Claude path should write claude-code-status.jsonl")
+    expect(FileManager.default.fileExists(atPath: claudeStatus.path), "Claude path should write logs/claude-status.jsonl")
     let claudeText = try String(contentsOf: claudeStatus, encoding: .utf8)
     expect(claudeText.contains("claude-hook"), "Claude record source should be claude-hook")
     expect(claudeText.contains("claude-1"), "Claude record should include session id")
     expect(claudeText.contains("\"PreToolUse\""), "Claude PreToolUse event should be PascalCase")
     let grokAfterClaude = try String(contentsOf: grokStatus, encoding: .utf8)
-    expect(!grokAfterClaude.contains("claude-1"), "Claude session id must not be written to grok-build-status.jsonl")
+    expect(!grokAfterClaude.contains("claude-1"), "Claude session id must not be written to logs/grok-status.jsonl")
     expect(!claudeText.contains("test-grok-session"), "Grok session must not leak into Claude status file")
 }
 
@@ -3056,6 +3133,9 @@ do {
 }
 do {
     try testClaudeStatusLineConfiguratorPreservesAndChainsExistingCommand()
+    try testClaudeHookConfiguratorRewritesLegacyPathAndDeletesOldBinary()
+    try testClaudeHookConfiguratorDoesNotDeleteLegacyBinaryWhenBundledMissing()
+    try testClaudeStatusLineConfiguratorRewritesLegacyProxyAndDeletesOldBinary()
 } catch {
     fatalError("\(error)")
 }
@@ -3114,7 +3194,7 @@ do {
     try testClaudeContextUsageStorageSeparatesSessionsAndRejectsUnsafeIds()
     try testClaudeContextUsageReaderRequiresExactFreshSession()
     try testClaudeContextUsageReaderRetainsExactUsageWhileSessionIsLive()
-    try testClaudeContextUsageReaderMigratesMatchingLegacySnapshot()
+    try testClaudeContextUsageReaderDoesNotReadLegacySingleFile()
 } catch {
     fatalError("\(error)")
 }

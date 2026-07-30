@@ -5,57 +5,49 @@ import Foundation
 ///
 /// Design:
 /// - Stages the same bundled ``ClaudeCodeStatusHook`` binary used for Claude to
-///   ``~/.agent-halo/claude-code-status-hook`` (shared path; the binary routes
-///   Grok vs Claude via ``GROK_*`` env at runtime — see Task 6).
-/// - Writes lifecycle hooks into ``~/.grok/hooks/agent-halo-status.json`` so
-///   Grok Build loads them even when Claude-compat mode is off.
-/// - Idempotent: if the hook command is already present for all lifecycle events,
-///   the file is left untouched (mtime stable).
+///   ``~/.agent-halo/bin/status-hook`` (shared path; the binary routes Grok vs Claude
+///   via ``GROK_*`` env at runtime).
+/// - Writes lifecycle hooks into ``~/.grok/hooks/agent-halo-status.json``.
+/// - Settings that still point at the legacy root binary are rewritten.
+/// - After a successful hooks write (or when already on the new path), removes the
+///   root-level legacy hook binary.
 /// - Catches all errors — a broken config write must never prevent the app from
 ///   starting.
 public enum GrokHookConfigurator {
 
     // MARK: - Public API
 
-    /// Ensure the hook binary and ``~/.grok/hooks/agent-halo-status.json`` are configured.
-    ///
-    /// Safe to call on every launch; the implementation short-circuits when
-    /// everything is already in place.
     public static func configure() {
         let home = FileManager.default.homeDirectoryForCurrentUser
         configure(homeDirectory: home, bundledHookBinary: bundledHookBinary())
     }
 
-    /// Ensure hook configuration for a specific home directory.
-    ///
-    /// Exposed for the self-check target so configuration behavior can be tested
-    /// without touching the user's real Grok settings.
     public static func configure(homeDirectory home: URL, bundledHookBinary bundledBinary: URL?) {
-        let destDir = home.appendingPathComponent(".agent-halo", isDirectory: true)
-        let destBinary = destDir.appendingPathComponent("claude-code-status-hook")
+        let paths = AgentHaloPaths(homeDirectory: home)
+        let destBinary = paths.statusHook
         let hooksDir = home.appendingPathComponent(".grok", isDirectory: true)
             .appendingPathComponent("hooks", isDirectory: true)
         let hooksFile = hooksDir.appendingPathComponent("agent-halo-status.json")
+        let fileManager = FileManager.default
 
         // -- 1. Stage the hook binary -------------------------------------------
         guard let bundledBinary,
-              FileManager.default.fileExists(atPath: bundledBinary.path) else {
+              fileManager.fileExists(atPath: bundledBinary.path) else {
             AgentHaloLogger.log("GrokHookConfigurator: bundled binary not found — skipping hook setup (development mode?)")
             return
         }
 
         do {
-            try FileManager.default.createDirectory(
-                at: destDir,
+            try fileManager.createDirectory(
+                at: paths.binDirectory,
                 withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o700]
             )
-            // Always overwrite so the binary stays up-to-date across app upgrades.
-            if FileManager.default.fileExists(atPath: destBinary.path) {
-                try FileManager.default.removeItem(at: destBinary)
+            if fileManager.fileExists(atPath: destBinary.path) {
+                try fileManager.removeItem(at: destBinary)
             }
-            try FileManager.default.copyItem(at: bundledBinary, to: destBinary)
-            try FileManager.default.setAttributes(
+            try fileManager.copyItem(at: bundledBinary, to: destBinary)
+            try fileManager.setAttributes(
                 [.posixPermissions: 0o755],
                 ofItemAtPath: destBinary.path
             )
@@ -82,15 +74,16 @@ public enum GrokHookConfigurator {
         }
         let config: [String: Any] = ["hooks": hooks]
 
-        // -- 3. Idempotency: skip write when already fully configured ----------
+        // -- 3. Idempotency: skip write when already fully configured at new path
         if isAlreadyConfigured(at: hooksFile, hookCommand: hookCommand) {
             AgentHaloLogger.log("GrokHookConfigurator: hooks already configured — nothing to do")
+            removeLegacyHookBinaryIfPresent(paths: paths, fileManager: fileManager)
             return
         }
 
         // -- 4. Write ----------------------------------------------------------
         do {
-            try FileManager.default.createDirectory(
+            try fileManager.createDirectory(
                 at: hooksDir,
                 withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o700]
@@ -101,6 +94,7 @@ public enum GrokHookConfigurator {
             )
             try data.write(to: hooksFile, options: [.atomic])
             AgentHaloLogger.log("GrokHookConfigurator: wrote \(hooksFile.path)")
+            removeLegacyHookBinaryIfPresent(paths: paths, fileManager: fileManager)
         } catch {
             AgentHaloLogger.log("GrokHookConfigurator: failed to write \(hooksFile.path): \(error)")
         }
@@ -108,8 +102,8 @@ public enum GrokHookConfigurator {
 
     // MARK: - Private helpers
 
-    /// Returns true when ``agent-halo-status.json`` already registers our staged
-    /// binary for every lifecycle event we care about (including matchers).
+    /// Returns true when hooks already register the **new** staged binary for every
+    /// lifecycle event. Legacy `claude-code-status-hook` paths are not considered configured.
     private static func isAlreadyConfigured(at url: URL, hookCommand: String) -> Bool {
         guard let data = try? Data(contentsOf: url),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -124,12 +118,13 @@ public enum GrokHookConfigurator {
             let configured = entries.contains { entry in
                 guard let entryHooks = entry["hooks"] as? [[String: Any]] else { return false }
                 let hasCommand = entryHooks.contains { hook in
-                    (hook["command"] as? String)?.contains(hookCommand) == true
-                        || (hook["command"] as? String)?.contains("claude-code-status-hook") == true
+                    guard let command = hook["command"] as? String else { return false }
+                    return command == "\(hookCommand) \(spec.event)"
+                        || command.hasPrefix(hookCommand + " ")
+                        || command.contains(hookCommand)
                 }
                 guard hasCommand else { return false }
                 if let matcher = spec.matcher {
-                    // Matcher must be present (including empty string for Pre/PostCompact).
                     guard let existing = entry["matcher"] as? String, existing == matcher else {
                         return false
                     }
@@ -139,6 +134,16 @@ public enum GrokHookConfigurator {
             if !configured { return false }
         }
         return true
+    }
+
+    private static func removeLegacyHookBinaryIfPresent(paths: AgentHaloPaths, fileManager: FileManager) {
+        guard fileManager.fileExists(atPath: paths.legacyStatusHook.path) else { return }
+        do {
+            try fileManager.removeItem(at: paths.legacyStatusHook)
+            AgentHaloLogger.log("GrokHookConfigurator: removed legacy \(paths.legacyStatusHook.path)")
+        } catch {
+            AgentHaloLogger.log("GrokHookConfigurator: failed to remove legacy hook binary: \(error)")
+        }
     }
 
     private static func bundledHookBinary() -> URL? {
@@ -151,10 +156,9 @@ public enum GrokHookConfigurator {
 
     private struct HookSpec {
         let event: String
-        let matcher: String?  // nil = no matcher, fires for every event
+        let matcher: String?
     }
 
-    /// Minimal Grok Build lifecycle event set (design §GrokHookConfigurator).
     private static let hookSpecs: [HookSpec] = [
         HookSpec(event: "SessionStart", matcher: nil),
         HookSpec(event: "UserPromptSubmit", matcher: nil),
