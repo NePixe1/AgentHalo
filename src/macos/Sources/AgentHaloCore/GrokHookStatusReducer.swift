@@ -245,6 +245,39 @@ public struct GrokHookStatusReducer: Sendable {
         }
     }
 
+    /// Grok skips `Stop` / `StopFailure` hooks on user interrupt (Esc / Ctrl+C).
+    /// Session `events.jsonl` records `turn_ended` with `outcome: "cancelled"`
+    /// instead — map that to the same fault ring Codex uses for interruptions.
+    public mutating func applyTurnCancelled(at eventAt: Date = Date()) {
+        applyInterruptedTurn(at: eventAt, action: "Interrupted")
+    }
+
+    /// Non-cancel terminal failures observed in `events.jsonl` (e.g. outcome
+    /// `error` / `failed`) when hooks did not emit `StopFailure`.
+    public mutating func applyTurnFailed(at eventAt: Date = Date()) {
+        applyInterruptedTurn(at: eventAt, action: "Grok stopped with an error")
+    }
+
+    private mutating func applyInterruptedTurn(at eventAt: Date, action: String) {
+        // Only override an in-flight turn. Idle/done/error already terminal.
+        guard snapshot.active
+            || snapshot.state == .thinking
+            || snapshot.state == .working
+            || snapshot.state == .attention else {
+            return
+        }
+        wasActiveBeforeCompaction = nil
+        isPermissionPrompt = false
+        workingVisibleUntil = nil
+        thinkingVisibleUntil = nil
+        pendingWorkingAction = nil
+        snapshot.active = false
+        snapshot.state = .error
+        snapshot.action = action
+        snapshot.lastEventAt = eventAt
+        snapshot.completedAt = nil
+    }
+
     public mutating func applyWorkingVisibility(now: Date = Date()) {
         guard snapshot.active else { return }
 

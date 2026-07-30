@@ -2702,6 +2702,116 @@ func testGrokHookReducerLifecycle() {
     expect(r.snapshot.state, .done, "stop → done")
 }
 
+func testGrokHookReducerMapsEscCancelToInterrupted() {
+    var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p/AgentHalo","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:02Z","event":"PreToolUse","sessionId":"s1","cwd":"/p/AgentHalo","toolName":"read_file","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 2)
+    )
+    expect(r.snapshot.state, .working, "precondition: working")
+    expect(r.snapshot.active, true, "precondition: active")
+
+    // Esc cancel does not emit Stop/StopFailure — only session events do.
+    r.applyTurnCancelled(at: Date(timeIntervalSince1970: 3))
+    expect(r.snapshot.state, .error, "esc cancel → error ring")
+    expect(r.snapshot.action, "Interrupted", "esc cancel action matches Codex interrupt")
+    expect(r.snapshot.active, false, "esc cancel clears active turn")
+    expect(r.snapshot.completedAt == nil, "interrupt is not a done completion")
+
+    // Idle Ready should not be overwritten by a late cancel.
+    var idle = GrokHookStatusReducer(threadId: "s2", now: Date(timeIntervalSince1970: 0))
+    idle.applyTurnCancelled(at: Date(timeIntervalSince1970: 1))
+    expect(idle.snapshot.state, .idle, "cancel on idle Ready is a no-op")
+}
+
+func testGrokSessionTurnEventsReaderDetectsCancelledTurnEnded() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-grok-turn-events-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let eventsURL = root.appendingPathComponent("events.jsonl")
+
+    let seed = """
+    {"ts":"2026-07-30T08:00:00.000Z","type":"turn_started"}
+    {"ts":"2026-07-30T08:00:01.000Z","type":"phase_changed","phase":"thinking"}
+
+    """
+    try Data(seed.utf8).write(to: eventsURL)
+
+    let reader = GrokSessionTurnEventsReader()
+    expect(reader.poll(eventsURL: eventsURL) == nil, "no turn_ended yet")
+
+    // Append without rewriting: mirrors Grok's live jsonl growth.
+    let cancelLine = #"{"ts":"2026-07-30T08:00:05.000Z","type":"turn_ended","outcome":"cancelled","cancellation_category":"mid_turn_abort","cancellation_context":{"trigger":"esc"}}"# + "\n"
+    let handle = try FileHandle(forWritingTo: eventsURL)
+    defer { try? handle.close() }
+    _ = try handle.seekToEnd()
+    try handle.write(contentsOf: Data(cancelLine.utf8))
+    try handle.synchronize()
+
+    let ended = reader.poll(eventsURL: eventsURL)
+    expect(ended != nil, "cancelled turn_ended is not nil")
+    expect(ended?.outcome, Optional.some(GrokSessionTurnEndOutcome.cancelled), "poll surfaces cancelled turn_ended")
+
+    expect(reader.poll(eventsURL: eventsURL) == nil, "second poll with no growth is nil")
+}
+
+func testGrokHookStatusMonitorMapsSessionEscCancelToError() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-grok-monitor-cancel-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let logs = root.appendingPathComponent("logs", isDirectory: true)
+    let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+    let cwd = "/tmp/AgentHaloCancelTest"
+    let sessionId = "sess-esc-1"
+    let encoded = GrokSessionContextReader.encodeWorkspaceDirectory(cwd)
+    let sessionDir = sessions
+        .appendingPathComponent(encoded, isDirectory: true)
+        .appendingPathComponent(sessionId, isDirectory: true)
+    try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+
+    let statusURL = logs.appendingPathComponent("grok-status.jsonl")
+    let eventsURL = sessionDir.appendingPathComponent("events.jsonl")
+
+    // Space PreToolUse past the 0.7s thinking hold so the ring is clearly .working.
+    let hookLines = """
+    {"timestamp":"2026-07-30T08:00:01.000Z","event":"UserPromptSubmit","sessionId":"\(sessionId)","cwd":"\(cwd)","source":"grok-hook"}
+    {"timestamp":"2026-07-30T08:00:03.000Z","event":"PreToolUse","sessionId":"\(sessionId)","cwd":"\(cwd)","toolName":"read_file","source":"grok-hook"}
+
+    """
+    try Data(hookLines.utf8).write(to: statusURL)
+    try Data(#"{"ts":"2026-07-30T08:00:01.500Z","type":"turn_started"}"#.utf8 + Data([0x0A]))
+        .write(to: eventsURL)
+
+    let monitor = GrokHookStatusMonitor(statusURL: statusURL, sessionsRoot: sessions)
+    let now = ISO8601DateFormatter().date(from: "2026-07-30T08:00:03Z") ?? Date()
+    expect(monitor.refresh(now: now), true, "hooks load")
+    let working = monitor.snapshots().first
+    expect(working?.state, .working, "precondition: working from PreToolUse")
+    expect(working?.active == true, "precondition: active")
+
+    // Esc cancel: no Stop hook, only events.jsonl turn_ended cancelled.
+    let cancel = #"{"ts":"2026-07-30T08:00:04.000Z","type":"turn_ended","outcome":"cancelled","cancellation_category":"mid_turn_abort","cancellation_context":{"trigger":"esc"}}"# + "\n"
+    let handle = try FileHandle(forWritingTo: eventsURL)
+    defer { try? handle.close() }
+    _ = try handle.seekToEnd()
+    try handle.write(contentsOf: Data(cancel.utf8))
+    try handle.synchronize()
+
+    let cancelNow = ISO8601DateFormatter().date(from: "2026-07-30T08:00:04Z") ?? Date()
+    expect(monitor.refresh(now: cancelNow), true, "cancel via events should change state")
+    let interrupted = monitor.snapshots().first
+    expect(interrupted?.state, .error, "esc cancel → error")
+    expect(interrupted?.action, "Interrupted", "esc cancel action")
+    expect(interrupted?.active == false, "esc cancel not active")
+}
+
 // MARK: - Durable ClaudeCodeStatusHook isolation (Grok vs Claude status files)
 
 /// Locate a fresh shared status-hook binary for isolation tests.
@@ -3724,6 +3834,8 @@ do {
     try testGrokSessionContextReaderPrefersLiveUpdatesTotalTokens()
     try testGrokSessionContextReaderLiveTokensWithoutSignals()
     try testGrokActiveSessionsReaderParsesArrayEntries()
+    try testGrokSessionTurnEventsReaderDetectsCancelledTurnEnded()
+    try testGrokHookStatusMonitorMapsSessionEscCancelToError()
 } catch {
     fatalError("\(error)")
 }
@@ -3781,6 +3893,7 @@ testClaudeHookReducerIdlePromptReturnsToReady()
 testClaudeHookIdlePromptDoesNotDriveThinkingAggregate()
 testClaudeHookReducerStopFailureMapsToError()
 testGrokHookReducerLifecycle()
+testGrokHookReducerMapsEscCancelToInterrupted()
 do {
     try testClaudeCodeStatusHookIsolatesGrokAndClaudeStatusFiles()
 } catch {
