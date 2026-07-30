@@ -2326,8 +2326,8 @@ private func runClaudeCodeStatusHook(
     expect(process.terminationStatus, 0, "ClaudeCodeStatusHook should exit 0")
 }
 
-/// End-to-end: shared hook binary routes Grok env to grok-build-status.jsonl only,
-/// Claude path to claude-code-status.jsonl, and normalizes snake_case events.
+/// End-to-end: shared hook binary routes Grok env to logs/grok-status.jsonl only,
+/// Claude path to logs/claude-status.jsonl, and normalizes snake_case events.
 func testClaudeCodeStatusHookIsolatesGrokAndClaudeStatusFiles() throws {
     let home = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-hook-isolation-\(UUID().uuidString)", isDirectory: true)
@@ -2500,7 +2500,7 @@ func testClaudeHookMonitorPrunesStaleReducers() throws {
         try? FileManager.default.removeItem(at: root)
     }
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    let statusFile = root.appendingPathComponent("claude-code-status.jsonl")
+    let statusFile = root.appendingPathComponent("claude-status.jsonl")
     let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
 
     // Write two completions from different sessions, both long ago.
@@ -2565,7 +2565,7 @@ func testClaudeHookMonitorHandlesPendingLinesAndTruncation() throws {
         try? FileManager.default.removeItem(at: root)
     }
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    let statusFile = root.appendingPathComponent("claude-code-status.jsonl")
+    let statusFile = root.appendingPathComponent("claude-status.jsonl")
     let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
 
     try Data(#"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"hook-monitor","cwd":"/Users/wjs/work/pyproj/AgentHalo","source":"claude-hook"}"#.utf8).write(to: statusFile)
