@@ -36,6 +36,11 @@ public enum AgentHaloLayoutMigrator {
 
         writeLayoutVersion(AgentHaloPaths.layoutVersion, paths: paths, fileManager: fileManager)
         scrubLegacyDataPaths(paths: paths, fileManager: fileManager)
+        ClaudeContextUsageStorage.prune(
+            directory: paths.claudeContextsDirectory,
+            force: true,
+            fileManager: fileManager
+        )
     }
 
     // MARK: - Version

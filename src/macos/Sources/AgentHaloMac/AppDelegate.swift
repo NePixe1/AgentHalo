@@ -190,6 +190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         AgentHaloLayoutMigrator.migrateIfNeeded()
+        ClaudeContextUsageStorage.prune(force: true)
         ClaudeHookConfigurator.configure()
         GrokHookConfigurator.configure()
         ClaudeStatusLineConfigurator.configure()

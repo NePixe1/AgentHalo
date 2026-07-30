@@ -93,6 +93,10 @@ public enum ClaudeStatusLineUsageParser {
 }
 
 public enum ClaudeContextUsageStorage {
+    private static let pruneLock = NSLock()
+    // Protected by `pruneLock`; process-local write throttle only.
+    nonisolated(unsafe) private static var lastPruneAt: Date?
+
     public static func snapshotURL(directory: URL, sessionId: String) -> URL? {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_."))
         guard !sessionId.isEmpty,
@@ -113,6 +117,117 @@ public enum ClaudeContextUsageStorage {
             attributes: [.posixPermissions: 0o700]
         )
         try JSONEncoder().encode(snapshot).write(to: url, options: [.atomic])
+        prune(directory: directory, force: false)
+    }
+
+    /// Best-effort GC for `cache/claude-contexts`.
+    ///
+    /// - Age: delete files older than ``ClaudeContextUsageConstants.diskMaxAge``
+    ///   (prefer JSON `updatedAt`, else mtime).
+    /// - Count: if more than ``maxFiles`` remain, delete oldest entries that are
+    ///   older than ``minRetainAge`` until under the cap.
+    /// - Throttle: when `force` is false, at most once per ``pruneThrottle`` per process.
+    @discardableResult
+    public static func prune(
+        directory: URL = AgentHaloPaths().claudeContextsDirectory,
+        force: Bool = false,
+        now: Date = Date(),
+        fileManager: FileManager = .default
+    ) -> Int {
+        pruneLock.lock()
+        defer { pruneLock.unlock() }
+
+        if !force {
+            if let last = lastPruneAt,
+               now.timeIntervalSince(last) < ClaudeContextUsageConstants.pruneThrottle {
+                return 0
+            }
+        }
+
+        var isDir: ObjCBool = false
+        guard fileManager.fileExists(atPath: directory.path, isDirectory: &isDir),
+              isDir.boolValue else {
+            lastPruneAt = now
+            return 0
+        }
+
+        let children: [URL]
+        do {
+            children = try fileManager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            )
+        } catch {
+            AgentHaloLogger.log("ClaudeContextUsageStorage.prune: list failed: \(error)")
+            lastPruneAt = now
+            return 0
+        }
+
+        struct Entry {
+            let url: URL
+            let ageAnchor: Date
+        }
+
+        var entries: [Entry] = []
+        for url in children {
+            guard url.pathExtension == "json" else { continue }
+            let resourceValues = try? url.resourceValues(forKeys: [.isRegularFileKey, .contentModificationDateKey])
+            guard resourceValues?.isRegularFile == true else { continue }
+            let mtime = resourceValues?.contentModificationDate ?? now
+            let ageAnchor = decodeUpdatedAt(url) ?? mtime
+            entries.append(Entry(url: url, ageAnchor: ageAnchor))
+        }
+
+        var deleted = 0
+        var remaining = entries
+
+        // 1) Age prune
+        remaining = remaining.filter { entry in
+            let age = now.timeIntervalSince(entry.ageAnchor)
+            if age > ClaudeContextUsageConstants.diskMaxAge {
+                if (try? fileManager.removeItem(at: entry.url)) != nil {
+                    deleted += 1
+                    return false
+                }
+            }
+            return true
+        }
+
+        // 2) Count prune (protect young files)
+        if remaining.count > ClaudeContextUsageConstants.maxFiles {
+            let sortedOldestFirst = remaining.sorted { $0.ageAnchor < $1.ageAnchor }
+            var keep = remaining.count
+            for entry in sortedOldestFirst {
+                if keep <= ClaudeContextUsageConstants.maxFiles { break }
+                let age = now.timeIntervalSince(entry.ageAnchor)
+                if age < ClaudeContextUsageConstants.minRetainAge {
+                    continue
+                }
+                if (try? fileManager.removeItem(at: entry.url)) != nil {
+                    deleted += 1
+                    keep -= 1
+                }
+            }
+        }
+
+        lastPruneAt = now
+        return deleted
+    }
+
+    private static func decodeUpdatedAt(_ url: URL) -> Date? {
+        guard let data = try? Data(contentsOf: url),
+              let snapshot = try? JSONDecoder().decode(ClaudeContextUsageSnapshot.self, from: data) else {
+            return nil
+        }
+        return snapshot.updatedAt
+    }
+
+    /// Test helper: clear process-local prune throttle.
+    public static func resetPruneThrottleForTests() {
+        pruneLock.lock()
+        lastPruneAt = nil
+        pruneLock.unlock()
     }
 }
 

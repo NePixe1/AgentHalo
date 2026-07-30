@@ -1489,6 +1489,72 @@ func testClaudeContextUsageReaderRetainsExactUsageWhileSessionIsLive() throws {
     )
 }
 
+
+func testClaudeContextUsageGCAgeCountProtectAndThrottle() throws {
+    ClaudeContextUsageStorage.resetPruneThrottleForTests()
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("agent-halo-context-gc2-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: root) }
+    try fm.createDirectory(at: root, withIntermediateDirectories: true)
+    let now = ISO8601DateFormatter().date(from: "2026-06-23T12:00:00Z")!
+
+    let stale = ClaudeContextUsageSnapshot(
+        sessionId: "stale",
+        usedPercent: 1,
+        updatedAt: now.addingTimeInterval(-(ClaudeContextUsageConstants.diskMaxAge + 60))
+    )
+    try JSONEncoder().encode(stale).write(
+        to: root.appendingPathComponent("stale.json"),
+        options: [.atomic]
+    )
+
+    for i in 0..<(ClaudeContextUsageConstants.maxFiles + 5) {
+        let snap = ClaudeContextUsageSnapshot(
+            sessionId: "young-\(i)",
+            usedPercent: Double(i),
+            updatedAt: now.addingTimeInterval(-30)
+        )
+        try JSONEncoder().encode(snap).write(
+            to: root.appendingPathComponent("young-\(i).json"),
+            options: [.atomic]
+        )
+    }
+    for i in 0..<10 {
+        let snap = ClaudeContextUsageSnapshot(
+            sessionId: "mid-\(i)",
+            usedPercent: Double(i),
+            updatedAt: now.addingTimeInterval(-(ClaudeContextUsageConstants.minRetainAge + 60 + TimeInterval(i)))
+        )
+        try JSONEncoder().encode(snap).write(
+            to: root.appendingPathComponent("mid-\(i).json"),
+            options: [.atomic]
+        )
+    }
+
+    let deleted = ClaudeContextUsageStorage.prune(directory: root, force: true, now: now, fileManager: fm)
+    expect(deleted > 0, "prune should delete something")
+    expect(!fm.fileExists(atPath: root.appendingPathComponent("stale.json").path), "age prune removes stale")
+
+    let remaining = try fm.contentsOfDirectory(atPath: root.path).filter { $0.hasSuffix(".json") }
+    let youngLeft = remaining.filter { $0.hasPrefix("young-") }.count
+    expect(youngLeft, ClaudeContextUsageConstants.maxFiles + 5, "young files protected by minRetainAge")
+    expect(remaining.count >= youngLeft, "cannot delete young to meet count")
+
+    let stale2 = ClaudeContextUsageSnapshot(
+        sessionId: "stale2",
+        usedPercent: 2,
+        updatedAt: now.addingTimeInterval(-(ClaudeContextUsageConstants.diskMaxAge + 120))
+    )
+    try JSONEncoder().encode(stale2).write(to: root.appendingPathComponent("stale2.json"), options: [.atomic])
+    let throttled = ClaudeContextUsageStorage.prune(directory: root, force: false, now: now, fileManager: fm)
+    expect(throttled, 0, "non-force prune within throttle window is no-op")
+    expect(fm.fileExists(atPath: root.appendingPathComponent("stale2.json").path), "stale2 survives throttle")
+
+    let forced = ClaudeContextUsageStorage.prune(directory: root, force: true, now: now, fileManager: fm)
+    expect(forced >= 1, "force prune bypasses throttle")
+    expect(!fm.fileExists(atPath: root.appendingPathComponent("stale2.json").path), "force prune removes stale2")
+}
+
 func testClaudeContextUsageReaderDoesNotReadLegacySingleFile() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-context-no-legacy-\(UUID().uuidString)", isDirectory: true)
@@ -1516,7 +1582,8 @@ func testClaudeStatusLineProxyRuntimeCapturesUsageAndForwardsInput() throws {
         try? FileManager.default.removeItem(at: root)
     }
     let snapshotsDirectory = root.appendingPathComponent("claude-code-contexts", isDirectory: true)
-    let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
+    // Use wall-clock time so post-write contexts GC does not treat fixtures as >24h old.
+    let now = Date()
     let input = Data(#"{"session_id":"cc-session","context_window":{"used_percentage":61.5,"context_window_size":200000}}"#.utf8)
     let otherInput = Data(#"{"session_id":"other-session","context_window":{"used_percentage":18,"context_window_size":200000}}"#.utf8)
 
@@ -3194,6 +3261,7 @@ do {
     try testClaudeContextUsageStorageSeparatesSessionsAndRejectsUnsafeIds()
     try testClaudeContextUsageReaderRequiresExactFreshSession()
     try testClaudeContextUsageReaderRetainsExactUsageWhileSessionIsLive()
+    try testClaudeContextUsageGCAgeCountProtectAndThrottle()
     try testClaudeContextUsageReaderDoesNotReadLegacySingleFile()
 } catch {
     fatalError("\(error)")
