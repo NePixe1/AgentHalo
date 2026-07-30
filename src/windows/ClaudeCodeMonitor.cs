@@ -89,9 +89,8 @@ public static class ClaudeHookStatusWriter
                 record["model"] = String.IsNullOrEmpty(model) ? null : model;
                 record["source"] = "claude-hook";
 
-                string root = AgentHaloDataDirectory();
-                Directory.CreateDirectory(root);
-                string path = Path.Combine(root, "claude-code-status.jsonl");
+                string path = AgentHaloPaths.ClaudeStatusLog();
+                Directory.CreateDirectory(AgentHaloPaths.LogsDirectory());
                 string line = Serializer.Serialize(record) + Environment.NewLine;
 
                 using (Mutex mutex = new Mutex(false,
@@ -132,8 +131,7 @@ public static class ClaudeHookStatusWriter
 
         public static string AgentHaloDataDirectory()
         {
-            return Path.Combine(Environment.GetFolderPath(
-                Environment.SpecialFolder.UserProfile), ".agent-halo");
+            return AgentHaloPaths.Root();
         }
 
         private static void RotateIfNeeded(string path)
@@ -495,7 +493,7 @@ public static class ClaudeHookConfigurator
         {
             try
             {
-                string legacy = Path.Combine(home, ".agent-halo", "AgentHaloHook.exe");
+                string legacy = AgentHaloPaths.LegacyAgentHaloHookExe(home);
                 if (File.Exists(legacy))
                 {
                     File.Delete(legacy);
@@ -1019,8 +1017,7 @@ public sealed class ClaudeHookStatusMonitor
         private DateTime lastModifiedUtc;
 
         public ClaudeHookStatusMonitor()
-            : this(Path.Combine(ClaudeHookStatusWriter.AgentHaloDataDirectory(),
-                "claude-code-status.jsonl"))
+            : this(AgentHaloPaths.ClaudeStatusLog())
         {
         }
 

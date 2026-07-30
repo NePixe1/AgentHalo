@@ -1345,6 +1345,54 @@ public static class Diagnostics
                     Math.Abs(standbyIgnoresLive.DisplayPercent.Value - 55.0) < 0.001,
                     "STANDBY soft-hold uses remembered percent only");
 
+
+                // Layout v2: paths + migrator + AppData usage relocation
+                string layoutHome = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-paths-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(layoutHome);
+                string layoutRoot = AgentHaloPaths.Root(layoutHome);
+                Assert(AgentHaloPaths.ClaudeStatusLog(layoutHome) ==
+                    Path.Combine(layoutRoot, "logs", "claude-status.jsonl"),
+                    "claude log path");
+                Assert(AgentHaloPaths.GrokStatusLog(layoutHome) ==
+                    Path.Combine(layoutRoot, "logs", "grok-status.jsonl"),
+                    "grok log path");
+                Assert(AgentHaloPaths.UsageSnapshots(layoutHome) ==
+                    Path.Combine(layoutRoot, "cache", "usage-snapshots-v1.json"),
+                    "usage cache path");
+                Assert(AgentHaloPaths.LegacyClaudeStatusLog(layoutHome) ==
+                    Path.Combine(layoutRoot, "claude-code-status.jsonl"),
+                    "legacy claude log");
+                Assert(AgentHaloPaths.LayoutVersion == 2, "layout version");
+                Assert(AgentHaloPaths.LegacyUsageSnapshotsInAppData().EndsWith(
+                    "usage-snapshots-v1.json"),
+                    "appdata legacy usage name");
+
+                Directory.CreateDirectory(layoutRoot);
+                string legacyClaude = AgentHaloPaths.LegacyClaudeStatusLog(layoutHome);
+                File.WriteAllText(legacyClaude, "claude-old", Encoding.UTF8);
+                string fakeAppDataUsage = Path.Combine(layoutHome,
+                    "appdata-usage-snapshots-v1.json");
+                File.WriteAllText(fakeAppDataUsage, "{\"version\":1}", Encoding.UTF8);
+                string legacyHelper = AgentHaloPaths.LegacyAgentHaloHookExe(layoutHome);
+                File.WriteAllText(legacyHelper, "legacy", Encoding.UTF8);
+
+                AgentHaloLayoutMigrator.MigrateIfNeeded(layoutHome, fakeAppDataUsage);
+                Assert(File.Exists(AgentHaloPaths.ClaudeStatusLog(layoutHome)),
+                    "migrator moves claude status log");
+                Assert(!File.Exists(legacyClaude), "migrator deletes legacy claude log");
+                Assert(File.Exists(AgentHaloPaths.UsageSnapshots(layoutHome)),
+                    "migrator moves AppData usage into cache");
+                Assert(!File.Exists(fakeAppDataUsage),
+                    "migrator deletes AppData usage after move");
+                Assert(!File.Exists(legacyHelper), "migrator deletes AgentHaloHook.exe");
+                Assert(File.ReadAllText(AgentHaloPaths.LayoutVersionFile(layoutHome))
+                    .Trim() == "2", "layout version written");
+                AgentHaloLayoutMigrator.MigrateIfNeeded(layoutHome, fakeAppDataUsage);
+                Assert(File.ReadAllText(AgentHaloPaths.LayoutVersionFile(layoutHome))
+                    .Trim() == "2", "migrator is idempotent");
+                Directory.Delete(layoutHome, true);
+
                 File.Delete(temp);
                 File.WriteAllText(outputPath,
                     "PASS\nLifecycle, usage metrics, panel formatting, and animation checks passed.\n",

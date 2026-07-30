@@ -114,10 +114,17 @@ swift run AgentHaloDiagnostics --transition-strip /tmp/agent-halo-transitions
 
 Agent Halo 只在本机读取 `%USERPROFILE%\.codex\sessions` 中的生命周期事件，
 并在 macOS 上自动配置 `~/.claude/settings.json` 中的 Claude Code
-生命周期 hooks 和 status line proxy。它会将 hook 事件写入
-`~/.agent-halo/claude-code-status.jsonl`，上下文快照写入
-`~/.agent-halo/claude-code-context.json`。它还会只读查询 `logs_2.sqlite`
-中结构化的 Codex 连接和服务故障记录。
+生命周期 hooks 和 status line proxy。用户主目录下的 `.agent-halo` 使用统一布局：
+
+- `bin/` — macOS 的 staged hook / statusline 代理（Windows 可为空）
+- `state/` — 小型持久状态（如 macOS statusline 下游命令）
+- `logs/` — 近期生命周期事件（`claude-status.jsonl`、`grok-status.jsonl`，自动轮转）
+- `cache/` — 可安全删除的缓存（Claude context 快照、用量快照）
+
+Windows 应用设置与 `halo.log` 仍在 `%LOCALAPPDATA%\CodexHalo\`；**用量快照**
+在 `.agent-halo\cache\`。Windows 的 Claude hooks 仍调用
+`AgentHalo.exe --claude-hook`，不使用独立 staged 二进制。Agent Halo 还会只读查询
+`logs_2.sqlite` 中结构化的 Codex 连接和服务故障记录。
 
 为了独立刷新 Codex 额度，程序会读取现有 OAuth 登录凭据，并仅向
 `auth.openai.com` 与 `chatgpt.com` 的官方接口发起 HTTPS 请求。OAuth Token

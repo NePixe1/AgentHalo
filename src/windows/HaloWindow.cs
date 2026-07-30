@@ -200,6 +200,7 @@ public sealed class HaloWindow : Window
 
         private void OnLoaded(object sender, RoutedEventArgs e)
         {
+            AgentHaloLayoutMigrator.MigrateIfNeeded();
             ClaudeHookConfigurator.Configure();
             RestorePosition();
             RecoverHaloIfOffscreen();

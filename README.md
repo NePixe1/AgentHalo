@@ -138,10 +138,19 @@ still produce a readable execution state.
 
 Agent Halo locally reads lifecycle events from `%USERPROFILE%\.codex\sessions`
 and, on macOS, automatically configures Claude Code
-lifecycle hooks and status line proxy in `~/.claude/settings.json`. It writes hook
-events to `~/.agent-halo/claude-code-status.jsonl` and context snapshots to
-`~/.agent-halo/claude-code-context.json`. It also performs read-only structured queries
-against `logs_2.sqlite` for Codex connection and service failures.
+lifecycle hooks and status line proxy in `~/.claude/settings.json`. Runtime agent
+data under the user home `.agent-halo` directory uses a shared layout:
+
+- `bin/` — macOS staged hook / statusline proxy binaries (Windows may leave this empty)
+- `state/` — small durable state such as the chained statusline command (macOS)
+- `logs/` — recent lifecycle events (`claude-status.jsonl`, `grok-status.jsonl`; rotated)
+- `cache/` — disposable cache (Claude context snapshots, usage snapshots)
+
+Windows keeps app settings and `halo.log` in `%LOCALAPPDATA%\CodexHalo\`; usage
+snapshots live under `.agent-halo\cache\`. Windows Claude hooks still invoke
+`AgentHalo.exe --claude-hook` rather than a staged helper binary. Agent Halo also
+performs read-only structured queries against `logs_2.sqlite` for Codex connection
+and service failures.
 
 To refresh Codex usage independently, Agent Halo reads the existing OAuth login and
 makes HTTPS requests only to the official `auth.openai.com` and `chatgpt.com`

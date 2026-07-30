@@ -1095,8 +1095,7 @@ internal static class CodexUsageSnapshotCache
 
         private static string CachePath
         {
-            get { return Path.Combine(SettingsStorage.AppDirectory,
-                "usage-snapshots-v1.json"); }
+            get { return AgentHaloPaths.UsageSnapshots(); }
         }
 
         public static bool TryLoad(string accountKey, out UsageMetrics metrics,
@@ -1139,7 +1138,7 @@ internal static class CodexUsageSnapshotCache
         {
             try
             {
-                Directory.CreateDirectory(SettingsStorage.AppDirectory);
+                Directory.CreateDirectory(AgentHaloPaths.CacheDirectory());
                 Dictionary<string, object> root = ReadRoot();
                 root["version"] = 1;
                 Dictionary<string, object> accounts = Child(root, "accounts");
