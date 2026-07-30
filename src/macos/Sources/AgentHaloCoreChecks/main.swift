@@ -91,8 +91,60 @@ func testAgentHaloLayoutMigratorScrubsResidueWhenAlreadyVersion2() throws {
 
     AgentHaloLayoutMigrator.migrateIfNeeded(paths: paths, fileManager: fm)
 
-    expect(!fm.fileExists(atPath: paths.legacyClaudeStatusLog.path), "scrub residual jsonl")
+    expect(
+        try String(contentsOf: paths.claudeStatusLog, encoding: .utf8),
+        "residue",
+        "version 2 residue should still be reconciled into the live path"
+    )
+    expect(!fm.fileExists(atPath: paths.legacyClaudeStatusLog.path), "move residual jsonl")
     expect(fm.fileExists(atPath: paths.legacyStatusHook.path), "scrub must not delete binary")
+}
+
+func testAgentHaloLayoutMigratorPreservesLegacyDataUntilDestinationIsUsable() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent(
+        "agent-halo-migrate-failure-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    defer { try? fm.removeItem(at: home) }
+    let paths = AgentHaloPaths(homeDirectory: home)
+    try fm.createDirectory(at: paths.logsDirectory, withIntermediateDirectories: true)
+    try "legacy-claude".write(
+        to: paths.legacyClaudeStatusLog,
+        atomically: true,
+        encoding: .utf8
+    )
+    try fm.createDirectory(at: paths.claudeStatusLog, withIntermediateDirectories: true)
+
+    AgentHaloLayoutMigrator.migrateIfNeeded(paths: paths, fileManager: fm)
+
+    expect(
+        fm.fileExists(atPath: paths.legacyClaudeStatusLog.path),
+        "failed migration must preserve the only legacy copy"
+    )
+    expect(
+        !fm.fileExists(atPath: paths.layoutVersionFile.path),
+        "failed migration must not commit layout version"
+    )
+
+    try fm.removeItem(at: paths.claudeStatusLog)
+    AgentHaloLayoutMigrator.migrateIfNeeded(paths: paths, fileManager: fm)
+
+    expect(
+        try String(contentsOf: paths.claudeStatusLog, encoding: .utf8),
+        "legacy-claude",
+        "retry should migrate preserved legacy data"
+    )
+    expect(
+        !fm.fileExists(atPath: paths.legacyClaudeStatusLog.path),
+        "successful retry should remove the legacy copy"
+    )
+    expect(
+        try String(contentsOf: paths.layoutVersionFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+        "2",
+        "successful retry should commit layout version"
+    )
 }
 
 func testAgentHaloPathsLayoutV2() {
@@ -1154,6 +1206,36 @@ func testBinaryStagingNeverLeavesDestinationMissing() throws {
 
 }
 
+func testStatuslineProxyRecursionCheckUsesExactExecutablePaths() {
+    let home = URL(
+        fileURLWithPath: "/tmp/agent-halo-statusline-command-check",
+        isDirectory: true
+    )
+    let paths = AgentHaloPaths(homeDirectory: home)
+
+    expect(
+        AgentHaloBinaryStaging.commandReferencesExecutable(
+            "\"\(paths.statuslineProxy.path)\" --ignored",
+            candidates: [paths.statuslineProxy, paths.legacyStatuslineProxy]
+        ),
+        "preferred proxy executable should be detected exactly"
+    )
+    expect(
+        AgentHaloBinaryStaging.commandReferencesExecutable(
+            paths.legacyStatuslineProxy.path,
+            candidates: [paths.statuslineProxy, paths.legacyStatuslineProxy]
+        ),
+        "legacy proxy executable should be detected exactly"
+    )
+    expect(
+        !AgentHaloBinaryStaging.commandReferencesExecutable(
+            "/usr/local/bin/my-statusline-proxy --theme statusline-proxy",
+            candidates: [paths.statuslineProxy, paths.legacyStatuslineProxy]
+        ),
+        "unrelated commands containing statusline-proxy must remain runnable"
+    )
+}
+
 func testClaudeStatusLineConfiguratorPreservesAndChainsExistingCommand() throws {
     let home = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-statusline-config-\(UUID().uuidString)", isDirectory: true)
@@ -1519,7 +1601,7 @@ func testRateLimitReaderDoesNotReturnEarlyOnContextOnlySnapshot() {
 }
 
 func testClaudeStatusLineUsageParserReadsAuthoritativeContextPercent() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
+    let now = Date()
     let data = Data(#"{"session_id":"cc-session","model":{"id":"claude-sonnet-4","display_name":"Sonnet 4"},"context_window":{"used_percentage":52.75,"remaining_percentage":47.25,"context_window_size":200000,"total_input_tokens":38000,"total_output_tokens":1200}}"#.utf8)
 
     let snapshot = ClaudeStatusLineUsageParser.parse(data: data, updatedAt: now)
@@ -1677,7 +1759,7 @@ func testClaudeContextUsageReaderKeepsLastKnownUsageForMatchingSession() throws 
         try? FileManager.default.removeItem(at: root)
     }
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
+    let now = Date()
     let reader = ClaudeContextUsageReader(snapshotsDirectory: root)
 
     let fresh = ClaudeContextUsageSnapshot(
@@ -1708,7 +1790,7 @@ func testClaudeContextUsageReaderDoesNotShareSnapshotsAcrossFiles() throws {
     }
     try FileManager.default.createDirectory(at: firstRoot, withIntermediateDirectories: true)
     try FileManager.default.createDirectory(at: secondRoot, withIntermediateDirectories: true)
-    let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
+    let now = Date()
     let first = ClaudeContextUsageSnapshot(sessionId: "shared-session", usedPercent: 10, updatedAt: now)
     let second = ClaudeContextUsageSnapshot(sessionId: "shared-session", usedPercent: 90, updatedAt: now)
 
@@ -1745,7 +1827,7 @@ func testClaudeContextUsageReaderRequiresExactFreshSession() throws {
     defer { try? FileManager.default.removeItem(at: root) }
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
 
-    let now = ISO8601DateFormatter().date(from: "2026-06-23T02:00:00Z")!
+    let now = Date()
     let first = ClaudeContextUsageSnapshot(
         sessionId: "session-a",
         usedPercent: 26.5,
@@ -1773,7 +1855,7 @@ func testClaudeContextUsageReaderRetainsExactUsageWhileSessionIsLive() throws {
     defer { try? FileManager.default.removeItem(at: root) }
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
 
-    let now = ISO8601DateFormatter().date(from: "2026-06-24T09:30:00Z")!
+    let now = Date()
     let stale = ClaudeContextUsageSnapshot(
         sessionId: "live-main",
         usedPercent: 27,
@@ -1845,6 +1927,10 @@ func testClaudeContextUsageGCAgeCountProtectAndThrottle() throws {
     let deleted = ClaudeContextUsageStorage.prune(directory: root, force: true, now: now, fileManager: fm)
     expect(deleted > 0, "prune should delete something")
     expect(!fm.fileExists(atPath: root.appendingPathComponent("stale.json").path), "age prune removes stale")
+    expect(
+        fm.fileExists(atPath: root.appendingPathComponent(".last-prune").path),
+        "successful prune should persist a cross-process throttle marker"
+    )
 
     let remaining = try fm.contentsOfDirectory(atPath: root.path).filter { $0.hasSuffix(".json") }
     let youngLeft = remaining.filter { $0.hasPrefix("young-") }.count
@@ -1864,6 +1950,32 @@ func testClaudeContextUsageGCAgeCountProtectAndThrottle() throws {
     let forced = ClaudeContextUsageStorage.prune(directory: root, force: true, now: now, fileManager: fm)
     expect(forced >= 1, "force prune bypasses throttle")
     expect(!fm.fileExists(atPath: root.appendingPathComponent("stale2.json").path), "force prune removes stale2")
+
+    let stale3 = ClaudeContextUsageSnapshot(
+        sessionId: "stale3",
+        usedPercent: 3,
+        updatedAt: now.addingTimeInterval(-(ClaudeContextUsageConstants.diskMaxAge + 180))
+    )
+    try JSONEncoder().encode(stale3).write(
+        to: root.appendingPathComponent("stale3.json"),
+        options: [.atomic]
+    )
+    try "\(now.addingTimeInterval(3600).timeIntervalSince1970)\n".write(
+        to: root.appendingPathComponent(".last-prune"),
+        atomically: true,
+        encoding: .utf8
+    )
+    let afterClockRollback = ClaudeContextUsageStorage.prune(
+        directory: root,
+        force: false,
+        now: now,
+        fileManager: fm
+    )
+    expect(afterClockRollback >= 1, "future prune marker must not block GC after clock rollback")
+    expect(
+        !fm.fileExists(atPath: root.appendingPathComponent("stale3.json").path),
+        "clock rollback recovery should still remove stale snapshots"
+    )
 }
 
 func testClaudeContextUsageReaderDoesNotReadLegacySingleFile() throws {
@@ -1909,10 +2021,19 @@ func testClaudeStatusLineProxyRuntimeCapturesUsageAndForwardsInput() throws {
         updatedAt: now
     )
     let forwarded = try ClaudeStatusLineProxyRuntime.runOriginalCommand(command: "cat", input: input)
+    let guardedEnvironment = try ClaudeStatusLineProxyRuntime.runOriginalCommand(
+        command: "printf \"$AGENT_HALO_STATUSLINE_PROXY_ACTIVE\"",
+        input: Data()
+    )
 
     expect(captured?.usedPercent, 61.5, "statusline proxy should capture Claude context")
     expect(forwarded.standardOutput, input, "statusline proxy should forward input unchanged")
     expect(forwarded.terminationStatus, 0, "statusline proxy should preserve successful command status")
+    expect(
+        guardedEnvironment.standardOutput,
+        Data("1".utf8),
+        "downstream commands should inherit the recursion guard"
+    )
     let snapshotURL = ClaudeContextUsageStorage.snapshotURL(
         directory: snapshotsDirectory,
         sessionId: "cc-session"
@@ -3462,6 +3583,7 @@ do {
     try testAgentHaloLayoutMigratorMovesFlatLayoutToV2AndKeepsLegacyBinaries()
     try testAgentHaloLayoutMigratorPrefersExistingNewPathsAndDeletesOld()
     try testAgentHaloLayoutMigratorScrubsResidueWhenAlreadyVersion2()
+    try testAgentHaloLayoutMigratorPreservesLegacyDataUntilDestinationIsUsable()
 } catch {
     fatalError("layout migrator checks failed: \(error)")
 }
@@ -3510,6 +3632,7 @@ do {
     try testGrokHookConfiguratorRewritesLegacyRootPath()
     try testGrokHookConfiguratorRepairsDeadExecutableCommand()
     try testBinaryStagingNeverLeavesDestinationMissing()
+    testStatuslineProxyRecursionCheckUsesExactExecutablePaths()
 } catch {
     fatalError("\(error)")
 }

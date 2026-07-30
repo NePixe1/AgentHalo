@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public struct ClaudeContextUsageSnapshot: Codable, Equatable, Sendable {
@@ -94,8 +95,8 @@ public enum ClaudeStatusLineUsageParser {
 
 public enum ClaudeContextUsageStorage {
     private static let pruneLock = NSLock()
-    // Protected by `pruneLock`; process-local write throttle only.
-    nonisolated(unsafe) private static var lastPruneAt: Date?
+    private static let pruneLockFilename = ".prune.lock"
+    private static let pruneMarkerFilename = ".last-prune"
 
     public static func snapshotURL(directory: URL, sessionId: String) -> URL? {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_."))
@@ -126,7 +127,8 @@ public enum ClaudeContextUsageStorage {
     ///   (prefer JSON `updatedAt`, else mtime).
     /// - Count: if more than ``maxFiles`` remain, delete oldest entries that are
     ///   older than ``minRetainAge`` until under the cap.
-    /// - Throttle: when `force` is false, at most once per ``pruneThrottle`` per process.
+    /// - Throttle: when `force` is false, at most once per ``pruneThrottle``
+    ///   across statusline-proxy processes.
     @discardableResult
     public static func prune(
         directory: URL = AgentHaloPaths().claudeContextsDirectory,
@@ -137,17 +139,30 @@ public enum ClaudeContextUsageStorage {
         pruneLock.lock()
         defer { pruneLock.unlock() }
 
-        if !force {
-            if let last = lastPruneAt,
-               now.timeIntervalSince(last) < ClaudeContextUsageConstants.pruneThrottle {
-                return 0
-            }
-        }
-
         var isDir: ObjCBool = false
         guard fileManager.fileExists(atPath: directory.path, isDirectory: &isDir),
-              isDir.boolValue else {
-            lastPruneAt = now
+              isDir.boolValue else { return 0 }
+
+        let lockURL = directory.appendingPathComponent(pruneLockFilename)
+        let lockDescriptor = open(lockURL.path, O_CREAT | O_RDWR, mode_t(0o600))
+        guard lockDescriptor >= 0 else {
+            AgentHaloLogger.log(
+                "ClaudeContextUsageStorage.prune: open lock failed: \(String(cString: strerror(errno)))"
+            )
+            return 0
+        }
+        defer { close(lockDescriptor) }
+        _ = fchmod(lockDescriptor, mode_t(0o600))
+        guard flock(lockDescriptor, LOCK_EX | LOCK_NB) == 0 else {
+            return 0
+        }
+        defer { flock(lockDescriptor, LOCK_UN) }
+
+        let markerURL = directory.appendingPathComponent(pruneMarkerFilename)
+        if !force,
+           let last = readPruneMarker(markerURL),
+           now.timeIntervalSince(last) >= 0,
+           now.timeIntervalSince(last) < ClaudeContextUsageConstants.pruneThrottle {
             return 0
         }
 
@@ -160,7 +175,6 @@ public enum ClaudeContextUsageStorage {
             )
         } catch {
             AgentHaloLogger.log("ClaudeContextUsageStorage.prune: list failed: \(error)")
-            lastPruneAt = now
             return 0
         }
 
@@ -211,7 +225,7 @@ public enum ClaudeContextUsageStorage {
             }
         }
 
-        lastPruneAt = now
+        writePruneMarker(now, to: markerURL, fileManager: fileManager)
         return deleted
     }
 
@@ -223,11 +237,42 @@ public enum ClaudeContextUsageStorage {
         return snapshot.updatedAt
     }
 
-    /// Test helper: clear process-local prune throttle.
+    private static func readPruneMarker(_ url: URL) -> Date? {
+        guard let raw = try? String(contentsOf: url, encoding: .utf8),
+              let seconds = TimeInterval(
+                  raw.trimmingCharacters(in: .whitespacesAndNewlines)
+              ) else {
+            return nil
+        }
+        return Date(timeIntervalSince1970: seconds)
+    }
+
+    private static func writePruneMarker(
+        _ date: Date,
+        to url: URL,
+        fileManager: FileManager
+    ) {
+        do {
+            try "\(date.timeIntervalSince1970)\n".write(
+                to: url,
+                atomically: true,
+                encoding: .utf8
+            )
+            try fileManager.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: url.path
+            )
+        } catch {
+            AgentHaloLogger.log(
+                "ClaudeContextUsageStorage.prune: write marker failed: \(error)"
+            )
+        }
+    }
+
+    /// Compatibility test helper. Throttle state now lives in each cache
+    /// directory's `.last-prune` marker instead of process memory.
     public static func resetPruneThrottleForTests() {
-        pruneLock.lock()
-        lastPruneAt = nil
-        pruneLock.unlock()
+        // No process-global state remains.
     }
 }
 

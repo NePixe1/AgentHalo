@@ -144,7 +144,8 @@ and, on macOS, automatically configures:
 
 Runtime agent data under the user home `.agent-halo` directory uses a shared layout:
 
-- `bin/` — macOS staged hook / statusline proxy binaries (Windows may leave this empty)
+- `bin/` — staged hook binaries (`status-hook` / `statusline-proxy` on macOS,
+  `status-hook.exe` on Windows)
 - `state/` — small durable state such as the chained statusline command (macOS)
 - `logs/` — recent lifecycle events (`claude-status.jsonl`, `grok-status.jsonl`; rotated)
 - `cache/` — disposable cache (Claude context snapshots, usage snapshots)
@@ -166,10 +167,12 @@ itself). Restart the Grok session for the change to take effect. Note that any
 under Grok after this change.
 
 Windows keeps app settings and `halo.log` in `%LOCALAPPDATA%\CodexHalo\`; usage
-snapshots live under `.agent-halo\cache\`. Windows Claude hooks still invoke
-`AgentHalo.exe --claude-hook` rather than a staged helper binary. Agent Halo also
-performs read-only structured queries against `logs_2.sqlite` for Codex connection
-and service failures.
+snapshots live under `.agent-halo\cache\`. At launch, Windows atomically stages a
+stable copy of the current app executable as
+`%USERPROFILE%\.agent-halo\bin\status-hook.exe`; Claude hooks invoke that copy as
+`status-hook.exe --claude-hook <event>`. It is not a separately downloaded
+component. Agent Halo also performs read-only structured queries against
+`logs_2.sqlite` for Codex connection and service failures.
 
 To refresh Codex usage independently, Agent Halo reads the existing OAuth login and
 makes HTTPS requests only to the official `auth.openai.com` and `chatgpt.com`

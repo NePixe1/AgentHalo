@@ -8,13 +8,21 @@ let paths = AgentHaloPaths(homeDirectory: home)
 let snapshotsDirectory = paths.claudeContextsDirectory
 let originalCommandURL = paths.statuslineOriginalCommand
 
+guard ProcessInfo.processInfo.environment[
+    ClaudeStatusLineProxyRuntime.recursionGuardEnvironmentKey
+] != "1" else {
+    exit(0)
+}
+
 _ = try? ClaudeStatusLineProxyRuntime.capture(input: input, snapshotsDirectory: snapshotsDirectory)
 
 guard let commandData = try? Data(contentsOf: originalCommandURL),
       let command = String(data: commandData, encoding: .utf8),
       !command.isEmpty,
-      !command.contains("claude-code-statusline-proxy"),
-      !command.contains("statusline-proxy") else {
+      !AgentHaloBinaryStaging.commandReferencesExecutable(
+          command,
+          candidates: [paths.statuslineProxy, paths.legacyStatuslineProxy]
+      ) else {
     exit(0)
 }
 

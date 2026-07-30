@@ -19,43 +19,54 @@ namespace CodexHalo
         {
             try
             {
-                EnsureLayoutDirectories(userProfile);
-
-                if (ReadVersion(userProfile) >= AgentHaloPaths.LayoutVersion)
+                if (!EnsureLayoutDirectories(userProfile))
                 {
-                    // Still relocate residual AppData usage if the cache file is missing.
-                    string residualAppData = legacyAppDataUsagePath ??
-                        AgentHaloPaths.LegacyUsageSnapshotsInAppData();
-                    MoveOrReplace(residualAppData, AgentHaloPaths.UsageSnapshots(userProfile));
-                    ScrubLegacyDataPaths(userProfile, legacyAppDataUsagePath);
                     return;
                 }
 
-                MoveOrReplace(
+                int currentVersion = ReadVersion(userProfile);
+                bool migrated = true;
+                migrated = MoveOrReplace(
                     AgentHaloPaths.LegacyClaudeStatusLog(userProfile),
-                    AgentHaloPaths.ClaudeStatusLog(userProfile));
-                MoveOrReplace(
+                    AgentHaloPaths.ClaudeStatusLog(userProfile)) && migrated;
+                migrated = MoveOrReplace(
                     AgentHaloPaths.LegacyGrokStatusLog(userProfile),
-                    AgentHaloPaths.GrokStatusLog(userProfile));
-                MoveDirectoryContents(
+                    AgentHaloPaths.GrokStatusLog(userProfile)) && migrated;
+                migrated = MoveDirectoryContents(
                     AgentHaloPaths.LegacyClaudeContextsDirectory(userProfile),
-                    AgentHaloPaths.ClaudeContextsDirectory(userProfile));
-                MoveOrReplace(
+                    AgentHaloPaths.ClaudeContextsDirectory(userProfile)) && migrated;
+                migrated = MoveOrReplace(
                     AgentHaloPaths.LegacyUsageSnapshotsInAgentHalo(userProfile),
-                    AgentHaloPaths.UsageSnapshots(userProfile));
+                    AgentHaloPaths.UsageSnapshots(userProfile)) && migrated;
 
                 string appDataUsage = legacyAppDataUsagePath ??
                     AgentHaloPaths.LegacyUsageSnapshotsInAppData();
-                MoveOrReplace(appDataUsage, AgentHaloPaths.UsageSnapshots(userProfile));
+                migrated = MoveOrReplace(
+                    appDataUsage,
+                    AgentHaloPaths.UsageSnapshots(userProfile)) && migrated;
 
-                RemoveIfExists(AgentHaloPaths.LegacyClaudeContextFile(userProfile));
-                RemoveEmptyDirectoryIfExists(
-                    AgentHaloPaths.LegacyClaudeContextsDirectory(userProfile));
+                migrated = RemoveIfExists(
+                    AgentHaloPaths.LegacyClaudeContextFile(userProfile)) && migrated;
+                migrated = RemoveEmptyDirectoryIfExists(
+                    AgentHaloPaths.LegacyClaudeContextsDirectory(userProfile)) && migrated;
                 // Intentionally keep LegacyAgentHaloHookExe — mid-session hooks
                 // may still invoke it until settings are rewritten + reloaded.
 
-                WriteLayoutVersion(AgentHaloPaths.LayoutVersion, userProfile);
-                ScrubLegacyDataPaths(userProfile, legacyAppDataUsagePath);
+                if (!migrated)
+                {
+                    SettingsStorage.Log(
+                        "AgentHaloLayoutMigrator: migration incomplete; " +
+                        "preserving legacy data for retry");
+                    return;
+                }
+
+                if (currentVersion < AgentHaloPaths.LayoutVersion)
+                {
+                    if (!WriteLayoutVersion(AgentHaloPaths.LayoutVersion, userProfile))
+                    {
+                        return;
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -82,22 +93,24 @@ namespace CodexHalo
             }
         }
 
-        private static void WriteLayoutVersion(int version, string userProfile)
+        private static bool WriteLayoutVersion(int version, string userProfile)
         {
             try
             {
                 string path = AgentHaloPaths.LayoutVersionFile(userProfile);
                 Directory.CreateDirectory(Path.GetDirectoryName(path));
                 File.WriteAllText(path, version.ToString() + Environment.NewLine);
+                return true;
             }
             catch (Exception ex)
             {
                 SettingsStorage.Log(
                     "AgentHaloLayoutMigrator: write version failed: " + ex.Message);
+                return false;
             }
         }
 
-        private static void EnsureLayoutDirectories(string userProfile)
+        private static bool EnsureLayoutDirectories(string userProfile)
         {
             try
             {
@@ -108,38 +121,17 @@ namespace CodexHalo
                 Directory.CreateDirectory(AgentHaloPaths.CacheDirectory(userProfile));
                 Directory.CreateDirectory(
                     AgentHaloPaths.ClaudeContextsDirectory(userProfile));
+                return true;
             }
             catch (Exception ex)
             {
                 SettingsStorage.Log(
                     "AgentHaloLayoutMigrator: ensure dirs failed: " + ex.Message);
+                return false;
             }
         }
 
-        private static void ScrubLegacyDataPaths(
-            string userProfile,
-            string legacyAppDataUsagePath)
-        {
-            RemoveIfExists(AgentHaloPaths.LegacyClaudeStatusLog(userProfile));
-            RemoveIfExists(AgentHaloPaths.LegacyGrokStatusLog(userProfile));
-            RemoveIfExists(AgentHaloPaths.LegacyUsageSnapshotsInAgentHalo(userProfile));
-            RemoveIfExists(AgentHaloPaths.LegacyClaudeContextFile(userProfile));
-            RemoveDirectoryTreeIfExists(
-                AgentHaloPaths.LegacyClaudeContextsDirectory(userProfile));
-            // Never scrub AgentHaloHook.exe / bin binaries here.
-
-            string appDataUsage = legacyAppDataUsagePath ??
-                AgentHaloPaths.LegacyUsageSnapshotsInAppData();
-            // If new cache already has usage (or we just moved it), drop AppData leftover.
-            // Safe even when new is missing: scrub only when AppData file still exists
-            // after migration pass; if move failed, leave AppData for next retry.
-            if (File.Exists(AgentHaloPaths.UsageSnapshots(userProfile)))
-            {
-                RemoveIfExists(appDataUsage);
-            }
-        }
-
-        private static void MoveOrReplace(string from, string to)
+        private static bool MoveOrReplace(string from, string to)
         {
             try
             {
@@ -149,13 +141,13 @@ namespace CodexHalo
                 {
                     if (fromExists)
                     {
-                        RemoveIfExists(from);
+                        return RemoveIfExists(from);
                     }
-                    return;
+                    return true;
                 }
                 if (!fromExists)
                 {
-                    return;
+                    return true;
                 }
 
                 string parent = Path.GetDirectoryName(to);
@@ -167,7 +159,7 @@ namespace CodexHalo
                 try
                 {
                     File.Move(from, to);
-                    return;
+                    return File.Exists(to);
                 }
                 catch
                 {
@@ -175,50 +167,57 @@ namespace CodexHalo
                 }
 
                 File.Copy(from, to, true);
-                RemoveIfExists(from);
+                if (!File.Exists(to))
+                {
+                    return false;
+                }
+                return RemoveIfExists(from);
             }
             catch (Exception ex)
             {
                 SettingsStorage.Log(
                     "AgentHaloLayoutMigrator: move failed " + from + " -> " + to +
                     ": " + ex.Message);
+                return false;
             }
         }
 
-        private static void MoveDirectoryContents(string from, string to)
+        private static bool MoveDirectoryContents(string from, string to)
         {
             try
             {
                 if (!Directory.Exists(from))
                 {
-                    return;
+                    return !File.Exists(from);
                 }
                 Directory.CreateDirectory(to);
+                bool succeeded = true;
                 foreach (string child in Directory.GetFileSystemEntries(from))
                 {
                     string name = Path.GetFileName(child);
                     string dest = Path.Combine(to, name);
                     if (Directory.Exists(child))
                     {
-                        MoveDirectoryContents(child, dest);
-                        RemoveEmptyDirectoryIfExists(child);
+                        succeeded = MoveDirectoryContents(child, dest) && succeeded;
+                        succeeded = RemoveEmptyDirectoryIfExists(child) && succeeded;
                     }
                     else
                     {
-                        MoveOrReplace(child, dest);
+                        succeeded = MoveOrReplace(child, dest) && succeeded;
                     }
                 }
-                RemoveEmptyDirectoryIfExists(from);
+                return RemoveEmptyDirectoryIfExists(from) && succeeded;
             }
             catch (Exception ex)
             {
                 SettingsStorage.Log(
                     "AgentHaloLayoutMigrator: move dir failed " + from + ": " +
                     ex.Message);
+                return false;
             }
         }
 
-        private static void RemoveIfExists(string path)
+        private static bool RemoveIfExists(string path)
         {
             try
             {
@@ -226,47 +225,35 @@ namespace CodexHalo
                 {
                     File.Delete(path);
                 }
+                return true;
             }
             catch (Exception ex)
             {
                 SettingsStorage.Log(
                     "AgentHaloLayoutMigrator: remove failed " + path + ": " +
                     ex.Message);
+                return false;
             }
         }
 
-        private static void RemoveDirectoryTreeIfExists(string path)
-        {
-            try
-            {
-                if (Directory.Exists(path))
-                {
-                    Directory.Delete(path, true);
-                }
-            }
-            catch (Exception ex)
-            {
-                SettingsStorage.Log(
-                    "AgentHaloLayoutMigrator: remove dir failed " + path + ": " +
-                    ex.Message);
-            }
-        }
-
-        private static void RemoveEmptyDirectoryIfExists(string path)
+        private static bool RemoveEmptyDirectoryIfExists(string path)
         {
             try
             {
                 if (!Directory.Exists(path))
                 {
-                    return;
+                    return !File.Exists(path);
                 }
                 if (Directory.GetFileSystemEntries(path).Length == 0)
                 {
                     Directory.Delete(path, false);
+                    return true;
                 }
+                return false;
             }
             catch
             {
+                return false;
             }
         }
     }

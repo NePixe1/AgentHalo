@@ -11,6 +11,9 @@ public struct ClaudeStatusLineCommandResult: Equatable, Sendable {
 }
 
 public enum ClaudeStatusLineProxyRuntime {
+    public static let recursionGuardEnvironmentKey =
+        "AGENT_HALO_STATUSLINE_PROXY_ACTIVE"
+
     @discardableResult
     public static func capture(
         input: Data,
@@ -33,6 +36,9 @@ public enum ClaudeStatusLineProxyRuntime {
         process.standardInput = standardInput
         process.standardOutput = standardOutput
         process.standardError = FileHandle.standardError
+        var environment = ProcessInfo.processInfo.environment
+        environment[recursionGuardEnvironmentKey] = "1"
+        process.environment = environment
 
         try process.run()
         try standardInput.fileHandleForWriting.write(contentsOf: input)

@@ -1043,6 +1043,16 @@ public static class Diagnostics
                 Assert(CountOccurrences(configuredAgain, "--claude-hook") ==
                     CountOccurrences(configured, "--claude-hook"),
                     "Claude hook configurator is idempotent");
+                File.WriteAllText(
+                    claudeSettings,
+                    configuredAgain.Replace(
+                        "--claude-hook PreToolUse",
+                        "--claude-hook Stop"),
+                    Encoding.UTF8);
+                ClaudeHookConfigurator.Configure(claudeHome, mainExe);
+                string repairedEvent = File.ReadAllText(claudeSettings, Encoding.UTF8);
+                Assert(CountOccurrences(repairedEvent, "--claude-hook PreToolUse") == 1,
+                    "Claude hook configurator repairs a mismatched event argument");
                 AgentHaloRuntimeBootstrap.Bootstrap(claudeHome, mainExe);
                 Assert(File.Exists(stagedHook), "bootstrap keeps status-hook.exe");
                 Assert(!File.Exists(legacyHelper),
@@ -1403,6 +1413,38 @@ public static class Diagnostics
                     Path.Combine("bin", "status-hook.exe")),
                     "stable status-hook path under bin");
                 Directory.Delete(layoutHome, true);
+
+                string failedLayoutHome = Path.Combine(
+                    Path.GetTempPath(),
+                    "agent-halo-paths-failure-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(AgentHaloPaths.LogsDirectory(failedLayoutHome));
+                string failedLegacyClaude =
+                    AgentHaloPaths.LegacyClaudeStatusLog(failedLayoutHome);
+                File.WriteAllText(failedLegacyClaude, "preserve-me", Encoding.UTF8);
+                Directory.CreateDirectory(
+                    AgentHaloPaths.ClaudeStatusLog(failedLayoutHome));
+
+                AgentHaloLayoutMigrator.MigrateIfNeeded(failedLayoutHome);
+                Assert(File.Exists(failedLegacyClaude),
+                    "failed migration preserves the legacy source");
+                Assert(!File.Exists(AgentHaloPaths.LayoutVersionFile(failedLayoutHome)),
+                    "failed migration does not commit layout version");
+
+                Directory.Delete(
+                    AgentHaloPaths.ClaudeStatusLog(failedLayoutHome),
+                    true);
+                AgentHaloLayoutMigrator.MigrateIfNeeded(failedLayoutHome);
+                Assert(File.ReadAllText(
+                    AgentHaloPaths.ClaudeStatusLog(failedLayoutHome),
+                    Encoding.UTF8) == "preserve-me",
+                    "migration retry restores preserved data");
+                Assert(!File.Exists(failedLegacyClaude),
+                    "successful retry removes the legacy source");
+                Assert(File.ReadAllText(
+                    AgentHaloPaths.LayoutVersionFile(failedLayoutHome),
+                    Encoding.UTF8).Trim() == "2",
+                    "successful retry commits layout version");
+                Directory.Delete(failedLayoutHome, true);
 
                 File.Delete(temp);
                 File.WriteAllText(outputPath,

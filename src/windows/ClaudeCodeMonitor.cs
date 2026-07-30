@@ -404,9 +404,18 @@ public static class ClaudeHookConfigurator
             {
                 return false;
             }
-            if (spec.Matcher != null &&
-                !String.Equals(StringValue(entry, "matcher"), spec.Matcher,
-                    StringComparison.Ordinal))
+            object matcherValue;
+            bool hasMatcher = entry.TryGetValue("matcher", out matcherValue);
+            if (spec.Matcher == null)
+            {
+                if (hasMatcher)
+                {
+                    return false;
+                }
+            }
+            else if (!hasMatcher ||
+                !String.Equals(Convert.ToString(matcherValue, CultureInfo.InvariantCulture),
+                    spec.Matcher, StringComparison.Ordinal))
             {
                 return false;
             }
@@ -422,10 +431,6 @@ public static class ClaudeHookConfigurator
             foreach (Dictionary<string, object> hook in EntryHooks(entry))
             {
                 string command = StringValue(hook, "command");
-                if (command.IndexOf("--claude-hook", StringComparison.OrdinalIgnoreCase) < 0)
-                {
-                    continue;
-                }
                 string exe = AgentHaloBinaryStaging.CommandExecutablePath(command);
                 if (String.IsNullOrEmpty(exe))
                 {
@@ -444,12 +449,48 @@ public static class ClaudeHookConfigurator
                 {
                     continue;
                 }
-                if (AgentHaloBinaryStaging.CommandPointsToLiveExecutable(command))
+                string[] arguments = HookCommandArguments(command);
+                if (arguments.Length == 2 &&
+                    String.Equals(arguments[0], "--claude-hook",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    String.Equals(arguments[1], spec.Event,
+                        StringComparison.Ordinal) &&
+                    AgentHaloBinaryStaging.CommandPointsToLiveExecutable(command))
                 {
                     return true;
                 }
             }
             return false;
+        }
+
+        private static string[] HookCommandArguments(string command)
+        {
+            if (String.IsNullOrWhiteSpace(command))
+            {
+                return new string[0];
+            }
+            string trimmed = command.Trim();
+            int argumentStart;
+            if (trimmed.StartsWith("\"", StringComparison.Ordinal))
+            {
+                int closingQuote = trimmed.IndexOf('"', 1);
+                if (closingQuote < 0)
+                {
+                    return new string[0];
+                }
+                argumentStart = closingQuote + 1;
+            }
+            else
+            {
+                int firstWhitespace = trimmed.IndexOfAny(new[] { ' ', '\t' });
+                if (firstWhitespace < 0)
+                {
+                    return new string[0];
+                }
+                argumentStart = firstWhitespace;
+            }
+            return trimmed.Substring(argumentStart)
+                .Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
         }
 
         private static bool IsAgentHaloHookCommand(string command)

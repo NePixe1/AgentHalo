@@ -115,6 +115,18 @@ public enum AgentHaloBinaryStaging {
         return exe == path || command == path || command.hasPrefix(path + " ") || command.contains(path)
     }
 
+    public static func commandReferencesExecutable(
+        _ command: String,
+        candidates: [URL]
+    ) -> Bool {
+        let executable = commandExecutablePath(command)
+        guard !executable.isEmpty else { return false }
+        let executableURL = URL(fileURLWithPath: executable).standardizedFileURL
+        return candidates.contains {
+            $0.standardizedFileURL == executableURL
+        }
+    }
+
     /// After settings have been rewritten to preferred paths, drop root-level
     /// legacy binaries that nothing still references.
     public static func scrubUnreferencedLegacyBinaries(

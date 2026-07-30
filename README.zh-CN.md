@@ -120,7 +120,8 @@ Agent Halo 只在本机读取 `%USERPROFILE%\.codex\sessions` 中的生命周期
 
 用户主目录下的 `.agent-halo` 使用统一布局：
 
-- `bin/` — macOS 的 staged hook / statusline 代理（Windows 可为空）
+- `bin/` — staged hook 二进制（macOS 为 `status-hook` /
+  `statusline-proxy`，Windows 为 `status-hook.exe`）
 - `state/` — 小型持久状态（如 macOS statusline 下游命令）
 - `logs/` — 近期生命周期事件（`claude-status.jsonl`、`grok-status.jsonl`，自动轮转）
 - `cache/` — 可安全删除的缓存（Claude context 快照、用量快照）
@@ -140,9 +141,10 @@ hooks = false
 `~/.claude/settings.json` 中的其它 hooks，关闭后它们在 Grok 中也不会再运行。
 
 Windows 应用设置与 `halo.log` 仍在 `%LOCALAPPDATA%\CodexHalo\`；**用量快照**
-在 `.agent-halo\cache\`。Windows 的 Claude hooks 仍调用
-`AgentHalo.exe --claude-hook`，不使用独立 staged 二进制。Agent Halo 还会只读查询
-`logs_2.sqlite` 中结构化的 Codex 连接和服务故障记录。
+在 `.agent-halo\cache\`。应用启动时会把当前 `AgentHalo.exe` 原子暂存为稳定副本
+`%USERPROFILE%\.agent-halo\bin\status-hook.exe`，Claude hooks 通过
+`status-hook.exe --claude-hook <event>` 调用该副本；它不是需要单独下载的组件。
+Agent Halo 还会只读查询 `logs_2.sqlite` 中结构化的 Codex 连接和服务故障记录。
 
 为了独立刷新 Codex 额度，程序会读取现有 OAuth 登录凭据，并仅向
 `auth.openai.com` 与 `chatgpt.com` 的官方接口发起 HTTPS 请求。OAuth Token

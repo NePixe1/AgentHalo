@@ -105,9 +105,9 @@ namespace CodexHalo
         }
 
         /// <summary>
-        /// Pre-layout-v2 helper path. Kept as a live mirror of StatusHookExe so
-        /// mid-session processes that still invoke AgentHaloHook.exe do not get
-        /// exit code 1 / "not found" after upgrade.
+        /// Pre-layout-v2 helper path. Retained during migration until settings
+        /// have been rewritten to the staged StatusHookExe path, then scrubbed
+        /// when no on-disk configuration references it.
         /// </summary>
         public static string LegacyAgentHaloHookExe(string userProfile = null)
         {
