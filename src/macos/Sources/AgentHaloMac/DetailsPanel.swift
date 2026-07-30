@@ -82,7 +82,8 @@ class DetailsPanel: NSPanel {
         container.layer?.cornerRadius = 18
         container.layer?.borderWidth = 1
         container.layer?.borderColor = NSColor(calibratedRed: 0.70, green: 0.78, blue: 0.82, alpha: 0.35).cgColor
-        container.layer?.backgroundColor = NSColor(calibratedRed: 0.98, green: 0.99, blue: 1.0, alpha: 0.90).cgColor
+        // Higher opacity so muted secondary text (e.g. "Resets …") stays readable over dark desktops.
+        container.layer?.backgroundColor = NSColor(calibratedRed: 0.98, green: 0.99, blue: 1.0, alpha: 0.96).cgColor
         container.translatesAutoresizingMaskIntoConstraints = false
 
         stack.orientation = .vertical
@@ -924,7 +925,8 @@ private final class QuotaRowView: NSView {
         nameField.setContentCompressionResistancePriority(.required, for: .horizontal)
         nameField.setContentHuggingPriority(.required, for: .horizontal)
         resetField.font = .systemFont(ofSize: 11, weight: .regular)
-        resetField.textColor = NSColor(calibratedRed: 0.49, green: 0.56, blue: 0.60, alpha: 1)
+        // Darker than the old muted gray so "Resets …" remains legible on dark desktops.
+        resetField.textColor = NSColor(calibratedRed: 0.40, green: 0.46, blue: 0.50, alpha: 1)
         resetField.lineBreakMode = .byTruncatingTail
         resetField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         valueField.font = .systemFont(ofSize: 12, weight: .semibold)
