@@ -613,6 +613,48 @@ namespace CodexHalo
             }
         }
 
+        /// <summary>
+        /// Grok skips Stop / StopFailure hooks on user interrupt (Esc / Ctrl+C).
+        /// Session events.jsonl records turn_ended with outcome "cancelled" —
+        /// map that to the same fault ring Codex uses for interruptions.
+        /// </summary>
+        public void ApplyTurnCancelled(DateTime eventUtc)
+        {
+            ApplyInterruptedTurn(eventUtc, "Interrupted");
+        }
+
+        /// <summary>
+        /// Non-cancel terminal failures observed in events.jsonl when hooks did
+        /// not emit StopFailure.
+        /// </summary>
+        public void ApplyTurnFailed(DateTime eventUtc)
+        {
+            ApplyInterruptedTurn(eventUtc, "Grok stopped with an error");
+        }
+
+        private void ApplyInterruptedTurn(DateTime eventUtc, string action)
+        {
+            // Only override an in-flight turn. Idle/done/error already terminal.
+            if (!Snapshot.Active &&
+                Snapshot.State != HaloState.Thinking &&
+                Snapshot.State != HaloState.Working &&
+                Snapshot.State != HaloState.Attention)
+            {
+                return;
+            }
+            wasActiveBeforeCompaction = null;
+            permissionPrompt = false;
+            workingVisibleUntilUtc = DateTime.MinValue;
+            thinkingVisibleUntilUtc = DateTime.MinValue;
+            pendingWorkingAction = null;
+            Snapshot.Active = false;
+            Snapshot.State = HaloState.Error;
+            Snapshot.Action = action;
+            Snapshot.LastEventUtc = eventUtc == DateTime.MinValue
+                ? DateTime.UtcNow : eventUtc;
+            Snapshot.CompletedUtc = DateTime.MinValue;
+        }
+
         public void ApplyWorkingVisibility(DateTime nowUtc)
         {
             if (!Snapshot.Active)
@@ -760,33 +802,51 @@ namespace CodexHalo
     public sealed class GrokHookStatusMonitor
     {
         private readonly string statusPath;
+        private readonly string sessionsRoot;
         private readonly Dictionary<string, GrokHookStatusReducer> reducers;
+        private readonly GrokSessionTurnEventsReader turnEventsReader;
         private long offset;
         private string pending;
         private DateTime lastModifiedUtc;
 
         public GrokHookStatusMonitor()
             : this(Path.Combine(ClaudeHookStatusWriter.AgentHaloDataDirectory(),
-                "grok-build-status.jsonl"))
+                "grok-build-status.jsonl"),
+                GrokSessionContextReader.DefaultSessionsRoot())
         {
         }
 
         public GrokHookStatusMonitor(string path)
+            : this(path, GrokSessionContextReader.DefaultSessionsRoot())
+        {
+        }
+
+        public GrokHookStatusMonitor(string path, string sessionsRoot)
         {
             statusPath = path;
+            this.sessionsRoot = String.IsNullOrEmpty(sessionsRoot)
+                ? GrokSessionContextReader.DefaultSessionsRoot()
+                : sessionsRoot;
             reducers = new Dictionary<string, GrokHookStatusReducer>(
                 StringComparer.OrdinalIgnoreCase);
+            turnEventsReader = new GrokSessionTurnEventsReader();
             pending = String.Empty;
         }
 
         public bool Refresh()
         {
             DateTime now = DateTime.UtcNow;
+            bool hooksChanged = RefreshHooks(now);
+            bool turnChanged = ApplySessionTurnEvents(now);
+            return ApplyAndPrune(now) || hooksChanged || turnChanged;
+        }
+
+        private bool RefreshHooks(DateTime now)
+        {
             bool changed = false;
             FileInfo info = new FileInfo(statusPath);
             if (!info.Exists)
             {
-                ApplyAndPrune(now);
                 return false;
             }
             if (info.Length < offset ||
@@ -796,6 +856,7 @@ namespace CodexHalo
                 offset = 0;
                 pending = String.Empty;
                 reducers.Clear();
+                turnEventsReader.Reset();
                 changed = true;
             }
             if (info.Length > offset)
@@ -839,7 +900,138 @@ namespace CodexHalo
                     }
                 }
             }
-            return ApplyAndPrune(now) || changed;
+            return changed;
+        }
+
+        /// <summary>
+        /// Esc cancel does not emit Stop hooks. For still-active sessions, poll
+        /// events.jsonl and map cancelled/failed turn_ended onto the fault ring.
+        /// </summary>
+        private bool ApplySessionTurnEvents(DateTime now)
+        {
+            bool changed = false;
+            foreach (KeyValuePair<string, GrokHookStatusReducer> pair in reducers)
+            {
+                GrokHookStatusReducer reducer = pair.Value;
+                SessionSnapshot snapshot = reducer.Snapshot;
+                bool needsWatch = snapshot.Active ||
+                    snapshot.State == HaloState.Thinking ||
+                    snapshot.State == HaloState.Working ||
+                    snapshot.State == HaloState.Attention;
+                if (!needsWatch)
+                {
+                    continue;
+                }
+                string eventsPath = EventsPathFor(snapshot);
+                if (String.IsNullOrEmpty(eventsPath))
+                {
+                    continue;
+                }
+                GrokSessionTurnEnd turnEnd = turnEventsReader.Poll(eventsPath);
+                if (turnEnd == null)
+                {
+                    continue;
+                }
+                if (turnEnd.Outcome != GrokSessionTurnEndOutcome.Cancelled &&
+                    turnEnd.Outcome != GrokSessionTurnEndOutcome.Failed)
+                {
+                    continue;
+                }
+                // Newer hook activity means the session already moved on
+                // (e.g. UserPromptSubmit after a prior Esc cancel).
+                if (turnEnd.EndedAtUtc.AddSeconds(0.25) < snapshot.LastEventUtc)
+                {
+                    continue;
+                }
+                HaloState beforeState = reducer.Snapshot.State;
+                string beforeAction = reducer.Snapshot.Action;
+                bool beforeActive = reducer.Snapshot.Active;
+                if (turnEnd.Outcome == GrokSessionTurnEndOutcome.Cancelled)
+                {
+                    reducer.ApplyTurnCancelled(turnEnd.EndedAtUtc);
+                }
+                else
+                {
+                    reducer.ApplyTurnFailed(turnEnd.EndedAtUtc);
+                }
+                if (beforeState != reducer.Snapshot.State ||
+                    beforeActive != reducer.Snapshot.Active ||
+                    !String.Equals(beforeAction, reducer.Snapshot.Action,
+                        StringComparison.Ordinal))
+                {
+                    changed = true;
+                }
+            }
+            return changed;
+        }
+
+        private string EventsPathFor(SessionSnapshot snapshot)
+        {
+            string cwd = snapshot == null ? null : snapshot.WorkingDirectory;
+            string sessionId = snapshot == null ? null : snapshot.ThreadId;
+            if (String.IsNullOrEmpty(sessionId))
+            {
+                return null;
+            }
+            string directory = ResolveSessionDirectory(sessionId, cwd);
+            if (String.IsNullOrEmpty(directory))
+            {
+                return null;
+            }
+            return Path.Combine(directory, "events.jsonl");
+        }
+
+        private string ResolveSessionDirectory(string sessionId, string cwd)
+        {
+            if (!String.IsNullOrEmpty(cwd))
+            {
+                string encoded = GrokSessionContextReader.EncodeWorkspaceDirectory(cwd);
+                string candidate = Path.Combine(sessionsRoot, encoded, sessionId);
+                if (IsSessionDirectory(candidate))
+                {
+                    return candidate;
+                }
+            }
+            if (!Directory.Exists(sessionsRoot))
+            {
+                return null;
+            }
+            try
+            {
+                foreach (string workspace in Directory.GetDirectories(sessionsRoot))
+                {
+                    string candidate = Path.Combine(workspace, sessionId);
+                    if (IsSessionDirectory(candidate))
+                    {
+                        return candidate;
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return null;
+        }
+
+        private static bool IsSessionDirectory(string path)
+        {
+            if (String.IsNullOrEmpty(path) || !Directory.Exists(path))
+            {
+                return false;
+            }
+            string[] markers = new string[]
+            {
+                "events.jsonl", "signals.json", "updates.jsonl",
+                "summary.json", "chat_history.jsonl"
+            };
+            for (int i = 0; i < markers.Length; i++)
+            {
+                if (File.Exists(Path.Combine(path, markers[i])))
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         public List<SessionSnapshot> Snapshots()
@@ -937,6 +1129,262 @@ namespace CodexHalo
             {
             }
             return "grok";
+        }
+    }
+
+    /// <summary>
+    /// Terminal outcomes from Grok session events.jsonl (turn_ended).
+    /// Esc / Ctrl+C cancel skips Stop hooks; the durable signal is
+    /// turn_ended with outcome "cancelled".
+    /// </summary>
+    public enum GrokSessionTurnEndOutcome
+    {
+        Completed,
+        Cancelled,
+        Failed,
+        Other
+    }
+
+    public sealed class GrokSessionTurnEnd
+    {
+        public DateTime EndedAtUtc;
+        public GrokSessionTurnEndOutcome Outcome;
+    }
+
+    /// <summary>
+    /// Incrementally tails events.jsonl for turn_ended / turn_started lines.
+    /// Stateful per session path so the (often multi-hundred-KB) phase stream is
+    /// not fully re-read every poll. First open seeks near EOF and only catch-up
+    /// scans a short tail for an already-active turn cancelled mid-poll.
+    /// </summary>
+    public sealed class GrokSessionTurnEventsReader
+    {
+        private const long FirstAttachTailByteLimit = 256 * 1024;
+
+        private sealed class TailState
+        {
+            public long Offset;
+            public string Pending = String.Empty;
+            public DateTime LastModifiedUtc = DateTime.MinValue;
+            public bool SawFile;
+        }
+
+        private readonly Dictionary<string, TailState> tails =
+            new Dictionary<string, TailState>(StringComparer.OrdinalIgnoreCase);
+        private readonly JavaScriptSerializer serializer = new JavaScriptSerializer();
+
+        public void Reset()
+        {
+            tails.Clear();
+        }
+
+        public GrokSessionTurnEnd Poll(string eventsPath)
+        {
+            if (String.IsNullOrEmpty(eventsPath) || !File.Exists(eventsPath))
+            {
+                if (!String.IsNullOrEmpty(eventsPath))
+                {
+                    tails.Remove(eventsPath);
+                }
+                return null;
+            }
+
+            TailState state;
+            if (!tails.TryGetValue(eventsPath, out state) || state == null)
+            {
+                state = new TailState();
+                tails[eventsPath] = state;
+            }
+
+            FileInfo info;
+            try
+            {
+                info = new FileInfo(eventsPath);
+            }
+            catch
+            {
+                return null;
+            }
+            long size = info.Length;
+            DateTime mtime = info.LastWriteTimeUtc;
+            if (size <= 0)
+            {
+                tails[eventsPath] = new TailState();
+                return null;
+            }
+
+            bool mtimeChanged = state.LastModifiedUtc != DateTime.MinValue &&
+                mtime != state.LastModifiedUtc;
+            bool truncated = size < state.Offset ||
+                (mtimeChanged && size <= state.Offset);
+            if (truncated)
+            {
+                state = new TailState();
+                tails[eventsPath] = state;
+            }
+
+            bool isFirstAttach = !state.SawFile;
+            state.SawFile = true;
+            state.LastModifiedUtc = mtime;
+
+            long readFrom;
+            if (isFirstAttach)
+            {
+                readFrom = size > FirstAttachTailByteLimit
+                    ? size - FirstAttachTailByteLimit
+                    : 0;
+                state.Offset = readFrom;
+                state.Pending = String.Empty;
+            }
+            else if (size <= state.Offset)
+            {
+                return null;
+            }
+            else
+            {
+                readFrom = state.Offset;
+            }
+
+            try
+            {
+                using (FileStream stream = new FileStream(eventsPath, FileMode.Open,
+                    FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                {
+                    stream.Seek(readFrom, SeekOrigin.Begin);
+                    byte[] bytes = new byte[(int)(stream.Length - stream.Position)];
+                    int read = stream.Read(bytes, 0, bytes.Length);
+                    state.Offset = size;
+                    string chunk = Encoding.UTF8.GetString(bytes, 0, read);
+                    string text = state.Pending + chunk;
+                    string[] lines = text.Split('\n');
+                    int complete = lines.Length;
+                    if (!text.EndsWith("\n", StringComparison.Ordinal))
+                    {
+                        state.Pending = lines[lines.Length - 1];
+                        complete--;
+                    }
+                    else
+                    {
+                        state.Pending = String.Empty;
+                    }
+
+                    int startIndex = 0;
+                    if (isFirstAttach && readFrom > 0 && complete > 0)
+                    {
+                        startIndex = 1;
+                    }
+
+                    GrokSessionTurnEnd latest = null;
+                    DateTime lastStartedAt = DateTime.MinValue;
+                    for (int i = startIndex; i < complete; i++)
+                    {
+                        string line = lines[i].TrimEnd('\r').TrimStart('\ufeff');
+                        if (String.IsNullOrWhiteSpace(line))
+                        {
+                            continue;
+                        }
+                        Dictionary<string, object> root = null;
+                        try
+                        {
+                            root = serializer.DeserializeObject(line)
+                                as Dictionary<string, object>;
+                        }
+                        catch
+                        {
+                            continue;
+                        }
+                        if (root == null)
+                        {
+                            continue;
+                        }
+                        string type = StringValue(root, "type");
+                        DateTime at = ParseDate(StringValue(root, "ts"));
+                        if (at == DateTime.MinValue)
+                        {
+                            at = ParseDate(StringValue(root, "timestamp"));
+                        }
+                        if (at == DateTime.MinValue)
+                        {
+                            at = DateTime.UtcNow;
+                        }
+                        if (String.Equals(type, "turn_started",
+                            StringComparison.OrdinalIgnoreCase))
+                        {
+                            lastStartedAt = at;
+                            continue;
+                        }
+                        if (!String.Equals(type, "turn_ended",
+                            StringComparison.OrdinalIgnoreCase))
+                        {
+                            continue;
+                        }
+                        GrokSessionTurnEndOutcome outcome =
+                            ParseOutcome(StringValue(root, "outcome"));
+                        if (lastStartedAt != DateTime.MinValue && lastStartedAt > at)
+                        {
+                            continue;
+                        }
+                        latest = new GrokSessionTurnEnd
+                        {
+                            EndedAtUtc = at,
+                            Outcome = outcome
+                        };
+                    }
+                    return latest;
+                }
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        public static GrokSessionTurnEndOutcome ParseOutcome(string raw)
+        {
+            if (String.IsNullOrEmpty(raw))
+            {
+                return GrokSessionTurnEndOutcome.Other;
+            }
+            switch (raw.Trim().ToLowerInvariant())
+            {
+                case "completed":
+                case "complete":
+                case "success":
+                case "ok":
+                    return GrokSessionTurnEndOutcome.Completed;
+                case "cancelled":
+                case "canceled":
+                case "interrupted":
+                case "aborted":
+                    return GrokSessionTurnEndOutcome.Cancelled;
+                case "error":
+                case "failed":
+                case "failure":
+                    return GrokSessionTurnEndOutcome.Failed;
+                default:
+                    return GrokSessionTurnEndOutcome.Other;
+            }
+        }
+
+        private static DateTime ParseDate(string value)
+        {
+            DateTime parsed;
+            if (DateTime.TryParse(value, CultureInfo.InvariantCulture,
+                DateTimeStyles.RoundtripKind, out parsed))
+            {
+                return parsed.ToUniversalTime();
+            }
+            return DateTime.MinValue;
+        }
+
+        private static string StringValue(Dictionary<string, object> dictionary,
+            string key)
+        {
+            object value;
+            return dictionary != null && dictionary.TryGetValue(key, out value) &&
+                value != null
+                ? Convert.ToString(value, CultureInfo.InvariantCulture)
+                : String.Empty;
         }
     }
 
@@ -1358,8 +1806,8 @@ namespace CodexHalo
         }
 
         /// <summary>
-        /// Session dirs may exist with only live updates.jsonl before the first
-        /// end-of-turn signals.json is written.
+        /// Session dirs may exist with only live updates.jsonl / events.jsonl
+        /// before the first end-of-turn signals.json is written.
         /// </summary>
         private static bool IsSessionDirectory(string path)
         {
@@ -1369,7 +1817,8 @@ namespace CodexHalo
             }
             string[] markers = new string[]
             {
-                "signals.json", "updates.jsonl", "summary.json", "chat_history.jsonl"
+                "events.jsonl", "signals.json", "updates.jsonl",
+                "summary.json", "chat_history.jsonl"
             };
             for (int i = 0; i < markers.Length; i++)
             {

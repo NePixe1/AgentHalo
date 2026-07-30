@@ -1522,6 +1522,109 @@ public static class Diagnostics
                     failed.Snapshot, t0.AddHours(1).AddSeconds(7)),
                     "Grok error snapshot expires after one hour");
 
+                // Esc cancel skips Stop hooks; map turn cancel onto fault ring.
+                GrokHookStatusReducer cancelReducer =
+                    new GrokHookStatusReducer("esc-session");
+                cancelReducer.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:10Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"esc-session\",\"cwd\":\"/p/AgentHalo\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(10));
+                cancelReducer.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:12Z\",\"event\":\"PreToolUse\",\"sessionId\":\"esc-session\",\"cwd\":\"/p/AgentHalo\",\"toolName\":\"read_file\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(12));
+                cancelReducer.ApplyWorkingVisibility(t0.AddSeconds(13));
+                Assert(cancelReducer.Snapshot.State == HaloState.Working,
+                    "precondition working before esc cancel");
+                cancelReducer.ApplyTurnCancelled(t0.AddSeconds(14));
+                Assert(cancelReducer.Snapshot.State == HaloState.Error,
+                    "esc cancel -> error ring");
+                Assert(String.Equals(cancelReducer.Snapshot.Action, "Interrupted",
+                    StringComparison.Ordinal),
+                    "esc cancel action is Interrupted");
+                Assert(!cancelReducer.Snapshot.Active,
+                    "esc cancel clears active turn");
+                GrokHookStatusReducer idleCancel =
+                    new GrokHookStatusReducer("idle-esc");
+                idleCancel.ApplyTurnCancelled(t0.AddSeconds(15));
+                Assert(idleCancel.Snapshot.State == HaloState.Idle,
+                    "cancel on idle Ready is a no-op");
+
+                // Incremental events.jsonl tail + monitor wiring.
+                string cancelHome = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-grok-esc-" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    string statusPath = Path.Combine(cancelHome, "grok-status.jsonl");
+                    string sessionsRoot = Path.Combine(cancelHome, "sessions");
+                    string cwd = "/tmp/AgentHaloCancelTest";
+                    string sessionId = "sess-esc-1";
+                    string encoded =
+                        GrokSessionContextReader.EncodeWorkspaceDirectory(cwd);
+                    string sessionDir = Path.Combine(sessionsRoot, encoded, sessionId);
+                    Directory.CreateDirectory(sessionDir);
+                    File.WriteAllText(statusPath,
+                        "{\"timestamp\":\"2026-07-30T08:00:01.000Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"source\":\"grok-hook\"}\n" +
+                        "{\"timestamp\":\"2026-07-30T08:00:03.000Z\",\"event\":\"PreToolUse\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"toolName\":\"read_file\",\"source\":\"grok-hook\"}\n",
+                        Encoding.UTF8);
+                    File.WriteAllText(Path.Combine(sessionDir, "events.jsonl"),
+                        "{\"ts\":\"2026-07-30T08:00:01.500Z\",\"type\":\"turn_started\"}\n",
+                        Encoding.UTF8);
+
+                    GrokHookStatusMonitor cancelMonitor =
+                        new GrokHookStatusMonitor(statusPath, sessionsRoot);
+                    Assert(cancelMonitor.Refresh(), "hooks load for esc monitor");
+                    SessionSnapshot workingSnap =
+                        cancelMonitor.Snapshots().FirstOrDefault();
+                    Assert(workingSnap != null &&
+                        workingSnap.State == HaloState.Working,
+                        "precondition: working from PreToolUse");
+
+                    File.AppendAllText(Path.Combine(sessionDir, "events.jsonl"),
+                        "{\"ts\":\"2026-07-30T08:00:04.000Z\",\"type\":\"turn_ended\",\"outcome\":\"cancelled\",\"cancellation_category\":\"mid_turn_abort\",\"cancellation_context\":{\"trigger\":\"esc\"}}\n",
+                        Encoding.UTF8);
+                    Assert(cancelMonitor.Refresh(),
+                        "cancel via events should change state");
+                    SessionSnapshot interruptedSnap =
+                        cancelMonitor.Snapshots().FirstOrDefault();
+                    Assert(interruptedSnap != null &&
+                        interruptedSnap.State == HaloState.Error,
+                        "esc cancel via events.jsonl -> error");
+                    Assert(interruptedSnap != null &&
+                        String.Equals(interruptedSnap.Action, "Interrupted",
+                            StringComparison.Ordinal),
+                        "esc cancel action Interrupted");
+                    Assert(interruptedSnap != null && !interruptedSnap.Active,
+                        "esc cancel not active");
+
+                    GrokSessionTurnEventsReader turnReader =
+                        new GrokSessionTurnEventsReader();
+                    string seedPath = Path.Combine(cancelHome, "seed-events.jsonl");
+                    File.WriteAllText(seedPath,
+                        "{\"ts\":\"2026-07-30T08:00:00.000Z\",\"type\":\"turn_started\"}\n" +
+                        "{\"ts\":\"2026-07-30T08:00:01.000Z\",\"type\":\"phase_changed\",\"phase\":\"thinking\"}\n",
+                        Encoding.UTF8);
+                    Assert(turnReader.Poll(seedPath) == null,
+                        "no turn_ended yet");
+                    File.AppendAllText(seedPath,
+                        "{\"ts\":\"2026-07-30T08:00:05.000Z\",\"type\":\"turn_ended\",\"outcome\":\"cancelled\"}\n",
+                        Encoding.UTF8);
+                    GrokSessionTurnEnd ended = turnReader.Poll(seedPath);
+                    Assert(ended != null &&
+                        ended.Outcome == GrokSessionTurnEndOutcome.Cancelled,
+                        "poll surfaces cancelled turn_ended");
+                    Assert(turnReader.Poll(seedPath) == null,
+                        "second poll with no growth is nil");
+                }
+                finally
+                {
+                    try
+                    {
+                        Directory.Delete(cancelHome, true);
+                    }
+                    catch
+                    {
+                    }
+                }
+
                 string grokDir = Path.Combine(home, ".grok");
                 Directory.CreateDirectory(grokDir);
                 File.WriteAllText(Path.Combine(grokDir, "active_sessions.json"),
