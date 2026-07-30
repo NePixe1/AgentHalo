@@ -189,6 +189,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.terminate(nil)
             return
         }
+        AgentHaloLayoutMigrator.migrateIfNeeded()
         ClaudeHookConfigurator.configure()
         GrokHookConfigurator.configure()
         ClaudeStatusLineConfigurator.configure()
