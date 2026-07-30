@@ -21,6 +21,10 @@ namespace CodexHalo
 
                 if (ReadVersion(userProfile) >= AgentHaloPaths.LayoutVersion)
                 {
+                    // Still relocate residual AppData usage if the cache file is missing.
+                    string residualAppData = legacyAppDataUsagePath ??
+                        AgentHaloPaths.LegacyUsageSnapshotsInAppData();
+                    MoveOrReplace(residualAppData, AgentHaloPaths.UsageSnapshots(userProfile));
                     ScrubLegacyDataPaths(userProfile, legacyAppDataUsagePath);
                     return;
                 }
