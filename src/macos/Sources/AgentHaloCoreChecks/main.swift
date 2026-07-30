@@ -1713,6 +1713,47 @@ func testGrokSessionContextReaderPrefersLiveUpdatesTotalTokens() throws {
     expect(snapshot?.contextWindowTokens, 500_000, "window size still comes from signals")
 }
 
+func testGrokSessionContextReaderLiveTokensWithoutSignals() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-grok-context-no-signals-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
+    let cwd = "/Users/example/work/AgentHalo"
+    let sessionId = "session-first-turn"
+    let sessionDir = root
+        .appendingPathComponent(GrokSessionContextReader.encodeWorkspaceDirectory(cwd), isDirectory: true)
+        .appendingPathComponent(sessionId, isDirectory: true)
+    try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+
+    // Brand-new session: Grok streams totalTokens before writing end-of-turn signals.
+    let updates = """
+    {"timestamp":1,"method":"session/update","params":{"_meta":{"totalTokens":25000},"update":{"sessionUpdate":"agent_thought_chunk"}}}
+    {"timestamp":2,"method":"session/update","params":{"_meta":{"totalTokens":50000},"update":{"sessionUpdate":"tool_call"}}}
+    """
+    try Data(updates.utf8).write(to: sessionDir.appendingPathComponent("updates.jsonl"))
+
+    let summary = """
+    {"info":{"id":"\(sessionId)","cwd":"\(cwd)"},"generated_title":"First turn pill","current_model_id":"grok-4.5"}
+    """
+    try Data(summary.utf8).write(to: sessionDir.appendingPathComponent("summary.json"))
+
+    let snapshot = GrokSessionContextReader(sessionsRoot: root).read(sessionId: sessionId, cwd: cwd)
+    expect(snapshot?.contextTokensUsed, 50_000, "live totalTokens alone must drive the pill")
+    expect(snapshot?.contextWindowTokens, GrokSessionContextReader.defaultContextWindowTokens, "default window when signals missing")
+    expectAlmost(
+        snapshot?.contextUsedPercent ?? -1,
+        10,
+        tolerance: 0.01,
+        "percent = liveTokens / default window"
+    )
+    expect(snapshot?.sessionTitle, "First turn pill", "summary still loads without signals")
+    expect(snapshot?.modelName, "grok-4.5", "model from summary without signals")
+
+    let scanned = GrokSessionContextReader(sessionsRoot: root).read(sessionId: sessionId)
+    expect(scanned?.contextTokensUsed, 50_000, "scan must find sessions that only have updates.jsonl")
+}
+
 func testGrokActiveSessionsReaderParsesArrayEntries() throws {
     let home = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-grok-active-\(UUID().uuidString)", isDirectory: true)
@@ -3681,6 +3722,7 @@ do {
     try testGrokSessionContextReaderReadsSignalsPercentAndSummary()
     try testGrokSessionContextReaderFallsBackToTokenRatio()
     try testGrokSessionContextReaderPrefersLiveUpdatesTotalTokens()
+    try testGrokSessionContextReaderLiveTokensWithoutSignals()
     try testGrokActiveSessionsReaderParsesArrayEntries()
 } catch {
     fatalError("\(error)")

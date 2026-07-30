@@ -200,6 +200,25 @@ class DetailsPanel: NSPanel {
         resizeToFitContent()
     }
 
+    /// Disk-/statusline-backed agents (Grok, Claude) only refresh context on
+    /// full content render. While the panel stays open mid-turn, AppDelegate
+    /// can push a fresh percent without rebuilding quota/session rows.
+    func updateLiveContextPercent(
+        _ contextUsedPercent: Double?,
+        aggregate: AggregateSnapshot,
+        now: Date = Date()
+    ) {
+        let isOffline = aggregate.state == .idle && aggregate.label == "OFFLINE"
+        let isStandby = aggregate.label == "STANDBY"
+        updateContext(
+            contextUsedPercent,
+            isOffline: isOffline,
+            isStandby: isStandby,
+            focusedAgent: aggregate.focusedAgent,
+            now: now
+        )
+    }
+
     private func updateContext(
         _ contextUsedPercent: Double?,
         isOffline: Bool,

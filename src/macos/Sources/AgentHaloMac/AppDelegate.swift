@@ -151,6 +151,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         label: "com.agenthalo.context-reader",
         qos: .userInteractive
     )
+    /// While details stay open on Grok, re-read disk context on this cadence so
+    /// the pill appears as soon as `updates.jsonl` has totalTokens (new sessions
+    /// often lack `signals.json` until the first turn ends).
+    private let grokContextRefreshInterval: TimeInterval = 1.0
+    private var lastGrokContextRefreshAt = Date.distantPast
     private let instanceLock = InstanceLock()
     private let codexActivator: @MainActor () -> Void
     private var liveErrorPresentationState = LiveErrorPresentationState()
@@ -971,17 +976,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 resolvedContextPercent: resolved.contextUsedPercent
             )
         case .grok:
-            let activeSessions = GrokActiveSessionsReader.read()
-            let (sessionId, cwd) = Self.grokSessionIdentityForDetails(
-                displayedAggregate: displayedAggregate,
-                hookSessions: grokActivitySnapshot.sessions,
-                activeSessions: activeSessions
-            )
-            let context = sessionId.flatMap { id in
-                contextReaderQueue.sync {
-                    grokSessionContextReader.read(sessionId: id, cwd: cwd)
-                }
-            }
+            let context = readGrokSessionContext(displayedAggregate: displayedAggregate)
             let hookSession = displayedAggregate.sessions.first
             exactSessionDetails = SessionDetailsSnapshot(
                 projectName: context?.projectName ?? hookSession?.projectName,
@@ -1173,6 +1168,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         detailsPanel.updateStatus(aggregate: displayAggregate())
+        // Status-only path intentionally skips Grok/Claude context while active.
+        // Re-read Grok disk occupancy on a 1s throttle so a panel opened before
+        // the first totalTokens (or before signals.json exists) still lights up.
+        refreshVisibleGrokContextPillIfNeeded()
+    }
+
+    private func refreshVisibleGrokContextPillIfNeeded(now: Date = Date()) {
+        guard settings.focusedAgent == .grok else {
+            return
+        }
+        guard now.timeIntervalSince(lastGrokContextRefreshAt) >= grokContextRefreshInterval else {
+            return
+        }
+        lastGrokContextRefreshAt = now
+        let displayedAggregate = displayAggregate()
+        let context = readGrokSessionContext(displayedAggregate: displayedAggregate)
+        let percent = Self.contextUsedPercentForGrokDetails(
+            displayedSessions: displayedAggregate.sessions,
+            diskContextPercent: context?.contextUsedPercent
+        )
+        detailsPanel.updateLiveContextPercent(percent, aggregate: displayedAggregate, now: now)
+    }
+
+    private func readGrokSessionContext(
+        displayedAggregate: AggregateSnapshot
+    ) -> GrokSessionContextSnapshot? {
+        let activeSessions = GrokActiveSessionsReader.read()
+        let (sessionId, cwd) = Self.grokSessionIdentityForDetails(
+            displayedAggregate: displayedAggregate,
+            hookSessions: grokActivitySnapshot.sessions,
+            activeSessions: activeSessions
+        )
+        return sessionId.flatMap { id in
+            contextReaderQueue.sync {
+                grokSessionContextReader.read(sessionId: id, cwd: cwd)
+            }
+        }
     }
 
     private func scheduleHideDetails() {
