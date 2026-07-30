@@ -118,26 +118,11 @@ public enum ClaudeContextUsageStorage {
 
 public struct ClaudeContextUsageReader: Sendable {
     public var snapshotsDirectory: URL
-    public var legacySnapshotURL: URL?
 
     public init(
-        snapshotsDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".agent-halo", isDirectory: true)
-            .appendingPathComponent("claude-code-contexts", isDirectory: true),
-        legacySnapshotURL: URL? = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".agent-halo", isDirectory: true)
-            .appendingPathComponent("claude-code-context.json", isDirectory: false)
+        snapshotsDirectory: URL = AgentHaloPaths().claudeContextsDirectory
     ) {
         self.snapshotsDirectory = snapshotsDirectory
-        self.legacySnapshotURL = legacySnapshotURL
-    }
-
-    /// Compatibility initializer for callers that still provide the legacy
-    /// single-file location. Reads remain exact-session and freshness checked.
-    public init(snapshotURL: URL) {
-        snapshotsDirectory = snapshotURL.deletingLastPathComponent()
-            .appendingPathComponent("claude-code-contexts", isDirectory: true)
-        legacySnapshotURL = snapshotURL
     }
 
     public func read(
@@ -153,12 +138,6 @@ public struct ClaudeContextUsageReader: Sendable {
         }
 
         if let snapshot = decode(snapshotURL),
-           isUsable(snapshot, sessionId: sessionId, now: now, freshness: freshness) {
-            return snapshot
-        }
-
-        if let legacySnapshotURL,
-           let snapshot = decode(legacySnapshotURL),
            isUsable(snapshot, sessionId: sessionId, now: now, freshness: freshness) {
             return snapshot
         }

@@ -248,9 +248,7 @@ public actor UsageMonitoringCoordinator {
             authStore: grokAuthStore,
             usageClient: GrokUsageClient(http: http)
         )
-        let cacheURL = homeDirectory
-            .appendingPathComponent(".agent-halo", isDirectory: true)
-            .appendingPathComponent("usage-snapshots-v1.json")
+        let cacheURL = AgentHaloPaths(homeDirectory: homeDirectory).usageSnapshots
         let cache = UsageSnapshotCache(cacheURL: cacheURL, files: files)
         return UsageMonitoringCoordinator(
             providers: [codexProvider, claudeProvider, grokProvider],

@@ -9,9 +9,7 @@ public final class ClaudeHookStatusMonitor {
     private let fileManager: FileManager
 
     public init(
-        statusURL: URL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".agent-halo", isDirectory: true)
-            .appendingPathComponent("claude-code-status.jsonl"),
+        statusURL: URL = AgentHaloPaths().claudeStatusLog,
         fileManager: FileManager = .default
     ) {
         self.statusURL = statusURL

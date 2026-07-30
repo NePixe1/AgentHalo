@@ -1,3 +1,4 @@
+import AgentHaloCore
 import Darwin
 import Foundation
 
@@ -135,7 +136,7 @@ let timestamp = firstString(
 // MARK: - Build record
 
 let source = isGrok ? "grok-hook" : "claude-hook"
-let statusFileName = isGrok ? "grok-build-status.jsonl" : "claude-code-status.jsonl"
+
 
 var record: [String: Any?] = [
     "timestamp": timestamp,
@@ -165,16 +166,17 @@ let homeURL: URL = {
     return FileManager.default.homeDirectoryForCurrentUser
 }()
 
-let root = homeURL.appendingPathComponent(".agent-halo", isDirectory: true)
+let paths = AgentHaloPaths(homeDirectory: homeURL)
+let statusURL = isGrok ? paths.grokStatusLog : paths.claudeStatusLog
 
-// Create directory with 0o700
+// Create logs directory with 0o700
 try? FileManager.default.createDirectory(
-    at: root,
+    at: paths.logsDirectory,
     withIntermediateDirectories: true,
     attributes: [.posixPermissions: 0o700]
 )
 
-let statusFilePath = root.appendingPathComponent(statusFileName).path
+let statusFilePath = statusURL.path
 
 // Always use open() — mixing FileHandle and POSIX fd risks the fd being
 // closed when the FileHandle is deallocated by ARC.

@@ -9,9 +9,7 @@ public final class GrokHookStatusMonitor {
     private let fileManager: FileManager
 
     public init(
-        statusURL: URL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".agent-halo", isDirectory: true)
-            .appendingPathComponent("grok-build-status.jsonl"),
+        statusURL: URL = AgentHaloPaths().grokStatusLog,
         fileManager: FileManager = .default
     ) {
         self.statusURL = statusURL

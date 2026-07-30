@@ -44,7 +44,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "ClaudeCodeStatusHook",
-            dependencies: []
+            dependencies: ["AgentHaloCore"]
         ),
         .executableTarget(
             name: "ClaudeCodeStatusLineProxy",
