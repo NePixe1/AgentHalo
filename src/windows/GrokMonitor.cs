@@ -1174,6 +1174,13 @@ namespace CodexHalo
         /// </summary>
         private const int UpdatesTailByteLimit = 256 * 1024;
 
+        /// <summary>
+        /// Grok Build commonly reports a 500k window in signals.json. Used when a
+        /// brand-new session has live totalTokens but no end-of-turn signals yet
+        /// (parity with macOS GrokSessionContextReader.defaultContextWindowTokens).
+        /// </summary>
+        public const long DefaultContextWindowTokens = 500000L;
+
         private static readonly JavaScriptSerializer Serializer =
             new JavaScriptSerializer();
 
@@ -1233,85 +1240,63 @@ namespace CodexHalo
         private GrokSessionContextSnapshot ReadFromSessionDirectory(
             string sessionId, string sessionDirectory)
         {
-            string signalsPath = Path.Combine(sessionDirectory, "signals.json");
-            if (!File.Exists(signalsPath))
+            // signals.json is end-of-turn only. New sessions and long mid-turn
+            // windows may have only streaming updates.jsonl totalTokens — still
+            // enough to drive the context pill (macOS parity).
+            Dictionary<string, object> signalsRoot =
+                LoadJsonObject(Path.Combine(sessionDirectory, "signals.json"));
+            long? liveTokens = LatestLiveContextTokens(sessionDirectory);
+
+            long? tokensUsed = signalsRoot == null
+                ? null : AsInt64(Get(signalsRoot, "contextTokensUsed"));
+            long? windowTokens = signalsRoot == null
+                ? null : AsInt64(Get(signalsRoot, "contextWindowTokens"));
+            double? percent = signalsRoot == null
+                ? null : ContextUsedPercent(signalsRoot);
+            string modelName = signalsRoot == null
+                ? null : AsString(Get(signalsRoot, "primaryModelId"));
+
+            if (liveTokens.HasValue && liveTokens.Value >= 0)
             {
-                return null;
-            }
-            Dictionary<string, object> root;
-            try
-            {
-                root = Serializer.DeserializeObject(File.ReadAllText(signalsPath,
-                    Encoding.UTF8)) as Dictionary<string, object>;
-            }
-            catch
-            {
-                return null;
-            }
-            if (root == null)
-            {
-                return null;
+                tokensUsed = liveTokens;
+                long window = (windowTokens.HasValue && windowTokens.Value > 0)
+                    ? windowTokens.Value
+                    : DefaultContextWindowTokens;
+                windowTokens = window;
+                percent = Math.Min(100, Math.Max(0,
+                    liveTokens.Value * 100.0 / window));
             }
 
-            double? percent = ContextUsedPercent(root);
             if (!percent.HasValue)
             {
                 return null;
             }
-            long? tokensUsed = AsInt64(Get(root, "contextTokensUsed"));
-            long? windowTokens = AsInt64(Get(root, "contextWindowTokens"));
 
-            // Prefer the live streaming estimate while a turn is in progress.
-            // signals.json is only rewritten at turn boundaries.
-            if (windowTokens.HasValue && windowTokens.Value > 0)
-            {
-                long? liveTokens = LatestLiveContextTokens(sessionDirectory);
-                if (liveTokens.HasValue && liveTokens.Value >= 0)
-                {
-                    tokensUsed = liveTokens;
-                    percent = Math.Min(100, Math.Max(0,
-                        liveTokens.Value * 100.0 / windowTokens.Value));
-                }
-            }
-
-            string modelName = AsString(Get(root, "primaryModelId"));
             string sessionTitle = null;
             string workingDirectory = null;
             string projectName = null;
 
-            string summaryPath = Path.Combine(sessionDirectory, "summary.json");
-            if (File.Exists(summaryPath))
+            Dictionary<string, object> summary =
+                LoadJsonObject(Path.Combine(sessionDirectory, "summary.json"));
+            if (summary != null)
             {
-                try
+                if (String.IsNullOrEmpty(modelName))
                 {
-                    Dictionary<string, object> summary =
-                        Serializer.DeserializeObject(File.ReadAllText(summaryPath,
-                            Encoding.UTF8)) as Dictionary<string, object>;
-                    if (summary != null)
-                    {
-                        if (String.IsNullOrEmpty(modelName))
-                        {
-                            modelName = AsString(Get(summary, "current_model_id"));
-                        }
-                        sessionTitle = FirstNonEmpty(
-                            AsString(Get(summary, "generated_title")),
-                            AsString(Get(summary, "session_summary")));
-                        Dictionary<string, object> info =
-                            Get(summary, "info") as Dictionary<string, object>;
-                        if (info != null)
-                        {
-                            workingDirectory = AsString(Get(info, "cwd"));
-                        }
-                        if (String.IsNullOrEmpty(workingDirectory))
-                        {
-                            workingDirectory = AsString(
-                                Get(summary, "working_directory"));
-                        }
-                    }
+                    modelName = AsString(Get(summary, "current_model_id"));
                 }
-                catch
+                sessionTitle = FirstNonEmpty(
+                    AsString(Get(summary, "generated_title")),
+                    AsString(Get(summary, "session_summary")));
+                Dictionary<string, object> info =
+                    Get(summary, "info") as Dictionary<string, object>;
+                if (info != null)
                 {
-                    // Optional metadata — signals alone still yield a pill.
+                    workingDirectory = AsString(Get(info, "cwd"));
+                }
+                if (String.IsNullOrEmpty(workingDirectory))
+                {
+                    workingDirectory = AsString(
+                        Get(summary, "working_directory"));
                 }
             }
 
@@ -1345,7 +1330,7 @@ namespace CodexHalo
             {
                 string encoded = EncodeWorkspaceDirectory(cwd);
                 string candidate = Path.Combine(sessionsRoot, encoded, sessionId);
-                if (Directory.Exists(candidate))
+                if (IsSessionDirectory(candidate))
                 {
                     return candidate;
                 }
@@ -1360,7 +1345,7 @@ namespace CodexHalo
                 foreach (string workspace in Directory.GetDirectories(sessionsRoot))
                 {
                     string candidate = Path.Combine(workspace, sessionId);
-                    if (File.Exists(Path.Combine(candidate, "signals.json")))
+                    if (IsSessionDirectory(candidate))
                     {
                         return candidate;
                     }
@@ -1370,6 +1355,47 @@ namespace CodexHalo
             {
             }
             return null;
+        }
+
+        /// <summary>
+        /// Session dirs may exist with only live updates.jsonl before the first
+        /// end-of-turn signals.json is written.
+        /// </summary>
+        private static bool IsSessionDirectory(string path)
+        {
+            if (String.IsNullOrEmpty(path) || !Directory.Exists(path))
+            {
+                return false;
+            }
+            string[] markers = new string[]
+            {
+                "signals.json", "updates.jsonl", "summary.json", "chat_history.jsonl"
+            };
+            for (int i = 0; i < markers.Length; i++)
+            {
+                if (File.Exists(Path.Combine(path, markers[i])))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static Dictionary<string, object> LoadJsonObject(string path)
+        {
+            if (!File.Exists(path))
+            {
+                return null;
+            }
+            try
+            {
+                return Serializer.DeserializeObject(File.ReadAllText(path,
+                    Encoding.UTF8)) as Dictionary<string, object>;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         private static double? ContextUsedPercent(Dictionary<string, object> root)

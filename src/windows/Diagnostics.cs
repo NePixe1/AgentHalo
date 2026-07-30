@@ -1871,6 +1871,62 @@ public static class Diagnostics
                         "pill percent = liveTokens / contextWindowTokens");
                     Assert(liveSnap.ContextWindowTokens == 500000,
                         "window size still comes from signals");
+
+                    // Brand-new session: updates.jsonl streams totalTokens before
+                    // the first end-of-turn signals.json exists (macOS parity).
+                    string firstTurnId = "session-first-turn";
+                    string firstTurnCwd = Path.Combine(ctxRoot, "first-proj");
+                    string firstTurnDir = Path.Combine(ctxRoot, ".grok", "sessions",
+                        GrokSessionContextReader.EncodeWorkspaceDirectory(
+                            firstTurnCwd),
+                        firstTurnId);
+                    Directory.CreateDirectory(firstTurnDir);
+                    File.WriteAllText(Path.Combine(firstTurnDir, "updates.jsonl"),
+                        "{\"timestamp\":1,\"method\":\"session/update\",\"params\":" +
+                        "{\"_meta\":{\"totalTokens\":25000},\"update\":" +
+                        "{\"sessionUpdate\":\"agent_thought_chunk\"}}}\n" +
+                        "{\"timestamp\":2,\"method\":\"session/update\",\"params\":" +
+                        "{\"_meta\":{\"totalTokens\":50000},\"update\":" +
+                        "{\"sessionUpdate\":\"tool_call\"}}}\n",
+                        new UTF8Encoding(false));
+                    Dictionary<string, object> firstSummaryInfo =
+                        new Dictionary<string, object>();
+                    firstSummaryInfo["id"] = firstTurnId;
+                    firstSummaryInfo["cwd"] = firstTurnCwd;
+                    Dictionary<string, object> firstSummary =
+                        new Dictionary<string, object>();
+                    firstSummary["info"] = firstSummaryInfo;
+                    firstSummary["generated_title"] = "First turn pill";
+                    firstSummary["current_model_id"] = "grok-4.5";
+                    File.WriteAllText(Path.Combine(firstTurnDir, "summary.json"),
+                        new JavaScriptSerializer().Serialize(firstSummary),
+                        new UTF8Encoding(false));
+                    GrokSessionContextSnapshot firstTurnSnap =
+                        new GrokSessionContextReader(
+                            Path.Combine(ctxRoot, ".grok", "sessions"))
+                        .Read(firstTurnId, firstTurnCwd);
+                    Assert(firstTurnSnap != null &&
+                        firstTurnSnap.ContextTokensUsed == 50000,
+                        "live totalTokens alone must drive the pill");
+                    Assert(firstTurnSnap.ContextWindowTokens ==
+                        GrokSessionContextReader.DefaultContextWindowTokens,
+                        "default window when signals missing");
+                    Assert(Math.Abs(firstTurnSnap.ContextUsedPercent - 10) < 0.01,
+                        "percent = liveTokens / default window");
+                    Assert(String.Equals(firstTurnSnap.SessionTitle,
+                        "First turn pill", StringComparison.Ordinal),
+                        "summary still loads without signals");
+                    Assert(String.Equals(firstTurnSnap.ModelName, "grok-4.5",
+                        StringComparison.Ordinal),
+                        "model from summary without signals");
+
+                    GrokSessionContextSnapshot firstTurnScanned =
+                        new GrokSessionContextReader(
+                            Path.Combine(ctxRoot, ".grok", "sessions"))
+                        .Read(firstTurnId, null);
+                    Assert(firstTurnScanned != null &&
+                        firstTurnScanned.ContextTokensUsed == 50000,
+                        "scan must find sessions that only have updates.jsonl");
                 }
                 finally
                 {
