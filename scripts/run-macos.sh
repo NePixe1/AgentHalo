@@ -4,7 +4,7 @@ set -euo pipefail
 mode="${1:-run}"
 app_name="AgentHaloMac"
 bundle_name="AgentHalo.app"
-bundle_id="local.agenthalo.mac"
+bundle_id="local.agenthalo.mac.v2"
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 build_script="$root_dir/scripts/build-macos.sh"

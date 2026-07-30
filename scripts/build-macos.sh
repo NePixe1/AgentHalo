@@ -47,7 +47,7 @@ cat > "$app_dir/Contents/Info.plist" <<'PLIST'
   <key>CFBundleExecutable</key>
   <string>AgentHaloMac</string>
   <key>CFBundleIdentifier</key>
-  <string>local.agenthalo.mac</string>
+  <string>local.agenthalo.mac.v2</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
