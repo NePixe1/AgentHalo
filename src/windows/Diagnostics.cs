@@ -1390,8 +1390,9 @@ public static class Diagnostics
                 string fakeAppDataUsage = Path.Combine(layoutHome,
                     "appdata-usage-snapshots-v1.json");
                 File.WriteAllText(fakeAppDataUsage, "{\"version\":1}", Encoding.UTF8);
-                string legacyHelper = AgentHaloPaths.LegacyAgentHaloHookExe(layoutHome);
-                File.WriteAllText(legacyHelper, "legacy", Encoding.UTF8);
+                string layoutLegacyHelper =
+                    AgentHaloPaths.LegacyAgentHaloHookExe(layoutHome);
+                File.WriteAllText(layoutLegacyHelper, "legacy", Encoding.UTF8);
 
                 AgentHaloLayoutMigrator.MigrateIfNeeded(layoutHome, fakeAppDataUsage);
                 Assert(File.Exists(AgentHaloPaths.ClaudeStatusLog(layoutHome)),
@@ -1402,7 +1403,7 @@ public static class Diagnostics
                 Assert(!File.Exists(fakeAppDataUsage),
                     "migrator deletes AppData usage after move");
                 // Migrator only moves data; it must not delete staged binaries.
-                Assert(File.Exists(legacyHelper),
+                Assert(File.Exists(layoutLegacyHelper),
                     "migrator leaves AgentHaloHook.exe for configurators to scrub after rewrite");
                 Assert(File.ReadAllText(AgentHaloPaths.LayoutVersionFile(layoutHome))
                     .Trim() == "2", "layout version written");
