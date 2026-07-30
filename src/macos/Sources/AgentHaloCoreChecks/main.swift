@@ -14,6 +14,87 @@ func expect(_ condition: Bool, _ message: String) {
 }
 
 
+
+func testAgentHaloLayoutMigratorMovesFlatLayoutToV2AndKeepsLegacyBinaries() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent("agent-halo-migrate-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: home) }
+    let paths = AgentHaloPaths(homeDirectory: home)
+    try fm.createDirectory(at: paths.root, withIntermediateDirectories: true)
+
+    try "claude-old".write(to: paths.legacyClaudeStatusLog, atomically: true, encoding: .utf8)
+    try "grok-old".write(to: paths.legacyGrokStatusLog, atomically: true, encoding: .utf8)
+    try "usage-old".write(to: paths.legacyUsageSnapshots, atomically: true, encoding: .utf8)
+    try "ccline".write(to: paths.legacyStatuslineOriginalCommand, atomically: true, encoding: .utf8)
+    try #"{"legacy":true}"#.write(to: paths.legacyClaudeContextFile, atomically: true, encoding: .utf8)
+    try fm.createDirectory(at: paths.legacyClaudeContextsDirectory, withIntermediateDirectories: true)
+    try #"{"session":1}"#.write(
+        to: paths.legacyClaudeContextsDirectory.appendingPathComponent("sess-a.json"),
+        atomically: true,
+        encoding: .utf8
+    )
+    try "#!/bin/sh".write(to: paths.legacyStatusHook, atomically: true, encoding: .utf8)
+    try "#!/bin/sh".write(to: paths.legacyStatuslineProxy, atomically: true, encoding: .utf8)
+
+    AgentHaloLayoutMigrator.migrateIfNeeded(paths: paths, fileManager: fm)
+
+    expect(try String(contentsOf: paths.layoutVersionFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines), "2", "version")
+    expect(try String(contentsOf: paths.claudeStatusLog, encoding: .utf8), "claude-old", "claude log moved")
+    expect(try String(contentsOf: paths.grokStatusLog, encoding: .utf8), "grok-old", "grok log moved")
+    expect(try String(contentsOf: paths.usageSnapshots, encoding: .utf8), "usage-old", "usage moved")
+    expect(try String(contentsOf: paths.statuslineOriginalCommand, encoding: .utf8), "ccline", "original command moved")
+    expect(
+        try String(contentsOf: paths.claudeContextsDirectory.appendingPathComponent("sess-a.json"), encoding: .utf8),
+        #"{"session":1}"#,
+        "context snapshot moved"
+    )
+
+    expect(!fm.fileExists(atPath: paths.legacyClaudeStatusLog.path), "legacy claude log deleted")
+    expect(!fm.fileExists(atPath: paths.legacyGrokStatusLog.path), "legacy grok log deleted")
+    expect(!fm.fileExists(atPath: paths.legacyUsageSnapshots.path), "legacy usage deleted")
+    expect(!fm.fileExists(atPath: paths.legacyStatuslineOriginalCommand.path), "legacy original deleted")
+    expect(!fm.fileExists(atPath: paths.legacyClaudeContextFile.path), "legacy context file deleted")
+    expect(!fm.fileExists(atPath: paths.legacyClaudeContextsDirectory.path), "legacy contexts dir deleted")
+    expect(fm.fileExists(atPath: paths.legacyStatusHook.path), "legacy hook binary kept")
+    expect(fm.fileExists(atPath: paths.legacyStatuslineProxy.path), "legacy proxy binary kept")
+    expect(fm.fileExists(atPath: paths.binDirectory.path), "bin exists")
+    expect(fm.fileExists(atPath: paths.stateDirectory.path), "state exists")
+    expect(fm.fileExists(atPath: paths.logsDirectory.path), "logs exists")
+    expect(fm.fileExists(atPath: paths.cacheDirectory.path), "cache exists")
+}
+
+func testAgentHaloLayoutMigratorPrefersExistingNewPathsAndDeletesOld() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent("agent-halo-migrate-new-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: home) }
+    let paths = AgentHaloPaths(homeDirectory: home)
+    try fm.createDirectory(at: paths.logsDirectory, withIntermediateDirectories: true)
+    try "new-claude".write(to: paths.claudeStatusLog, atomically: true, encoding: .utf8)
+    try "old-claude".write(to: paths.legacyClaudeStatusLog, atomically: true, encoding: .utf8)
+
+    AgentHaloLayoutMigrator.migrateIfNeeded(paths: paths, fileManager: fm)
+
+    expect(try String(contentsOf: paths.claudeStatusLog, encoding: .utf8), "new-claude", "keep new")
+    expect(!fm.fileExists(atPath: paths.legacyClaudeStatusLog.path), "delete old when new exists")
+    expect(try String(contentsOf: paths.layoutVersionFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines), "2", "version written")
+}
+
+func testAgentHaloLayoutMigratorScrubsResidueWhenAlreadyVersion2() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent("agent-halo-migrate-scrub-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: home) }
+    let paths = AgentHaloPaths(homeDirectory: home)
+    try fm.createDirectory(at: paths.logsDirectory, withIntermediateDirectories: true)
+    try "2\n".write(to: paths.layoutVersionFile, atomically: true, encoding: .utf8)
+    try "residue".write(to: paths.legacyClaudeStatusLog, atomically: true, encoding: .utf8)
+    try "#!/bin/sh".write(to: paths.legacyStatusHook, atomically: true, encoding: .utf8)
+
+    AgentHaloLayoutMigrator.migrateIfNeeded(paths: paths, fileManager: fm)
+
+    expect(!fm.fileExists(atPath: paths.legacyClaudeStatusLog.path), "scrub residual jsonl")
+    expect(fm.fileExists(atPath: paths.legacyStatusHook.path), "scrub must not delete binary")
+}
+
 func testAgentHaloPathsLayoutV2() {
     let home = URL(fileURLWithPath: "/tmp/agent-halo-paths-home", isDirectory: true)
     let paths = AgentHaloPaths(homeDirectory: home)
@@ -2923,6 +3004,13 @@ func expectAlmost(_ actual: Double, _ expected: Double, tolerance: Double, _ mes
 }
 
 testAgentHaloPathsLayoutV2()
+do {
+    try testAgentHaloLayoutMigratorMovesFlatLayoutToV2AndKeepsLegacyBinaries()
+    try testAgentHaloLayoutMigratorPrefersExistingNewPathsAndDeletesOld()
+    try testAgentHaloLayoutMigratorScrubsResidueWhenAlreadyVersion2()
+} catch {
+    fatalError("layout migrator checks failed: \(error)")
+}
 testReducesPlanningWorkingAttentionErrorAndCompleteEvents()
 testAggregatePrioritizesActionableSessions()
 testAggregateRemovesSupersededSessionErrors()
