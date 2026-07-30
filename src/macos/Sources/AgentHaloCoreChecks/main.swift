@@ -13,6 +13,40 @@ func expect(_ condition: Bool, _ message: String) {
     }
 }
 
+
+func testAgentHaloPathsLayoutV2() {
+    let home = URL(fileURLWithPath: "/tmp/agent-halo-paths-home", isDirectory: true)
+    let paths = AgentHaloPaths(homeDirectory: home)
+    let root = home.appendingPathComponent(".agent-halo", isDirectory: true)
+
+    expect(AgentHaloPaths.layoutVersion, 2, "layout version")
+    expect(paths.root, root, "root")
+    expect(paths.binDirectory, root.appendingPathComponent("bin", isDirectory: true), "bin")
+    expect(paths.stateDirectory, root.appendingPathComponent("state", isDirectory: true), "state")
+    expect(paths.logsDirectory, root.appendingPathComponent("logs", isDirectory: true), "logs")
+    expect(paths.cacheDirectory, root.appendingPathComponent("cache", isDirectory: true), "cache")
+    expect(paths.layoutVersionFile, root.appendingPathComponent(".layout-version"), "layout version file")
+
+    expect(paths.statusHook.path, root.appendingPathComponent("bin", isDirectory: true).appendingPathComponent("status-hook").path, "status hook")
+    expect(paths.statuslineProxy.path, root.appendingPathComponent("bin", isDirectory: true).appendingPathComponent("statusline-proxy").path, "statusline proxy")
+    expect(paths.statuslineOriginalCommand.path, root.appendingPathComponent("state", isDirectory: true).appendingPathComponent("statusline-original-command").path, "statusline original")
+    expect(paths.claudeStatusLog.path, root.appendingPathComponent("logs", isDirectory: true).appendingPathComponent("claude-status.jsonl").path, "claude status log")
+    expect(paths.grokStatusLog.path, root.appendingPathComponent("logs", isDirectory: true).appendingPathComponent("grok-status.jsonl").path, "grok status log")
+    expect(paths.claudeContextsDirectory, root.appendingPathComponent("cache", isDirectory: true).appendingPathComponent("claude-contexts", isDirectory: true), "claude contexts")
+    expect(paths.usageSnapshots.path, root.appendingPathComponent("cache", isDirectory: true).appendingPathComponent("usage-snapshots-v1.json").path, "usage snapshots")
+
+    expect(paths.legacyStatusHook.lastPathComponent, "claude-code-status-hook", "legacy status hook name")
+    expect(paths.legacyStatuslineProxy.lastPathComponent, "claude-code-statusline-proxy", "legacy proxy name")
+    expect(paths.legacyStatuslineOriginalCommand.lastPathComponent, "claude-code-statusline-original-command", "legacy original command name")
+    expect(paths.legacyClaudeStatusLog.lastPathComponent, "claude-code-status.jsonl", "legacy claude log name")
+    expect(paths.legacyGrokStatusLog.lastPathComponent, "grok-build-status.jsonl", "legacy grok log name")
+    expect(paths.legacyClaudeContextsDirectory.lastPathComponent, "claude-code-contexts", "legacy contexts dir name")
+    expect(paths.legacyClaudeContextFile.lastPathComponent, "claude-code-context.json", "legacy context file name")
+    expect(paths.legacyUsageSnapshots.lastPathComponent, "usage-snapshots-v1.json", "legacy usage name")
+    expect(paths.legacyUsageSnapshots.deletingLastPathComponent(), root, "legacy usage under root")
+    expect(paths.usageSnapshots.deletingLastPathComponent().lastPathComponent, "cache", "usage under cache")
+}
+
 func testReducesPlanningWorkingAttentionErrorAndCompleteEvents() {
     var reducer = SessionReducer(filePath: "/tmp/session-019c6e27-e55b-73d1-87d8-4e01f1f75043.jsonl")
 
@@ -2888,6 +2922,7 @@ func expectAlmost(_ actual: Double, _ expected: Double, tolerance: Double, _ mes
     }
 }
 
+testAgentHaloPathsLayoutV2()
 testReducesPlanningWorkingAttentionErrorAndCompleteEvents()
 testAggregatePrioritizesActionableSessions()
 testAggregateRemovesSupersededSessionErrors()
