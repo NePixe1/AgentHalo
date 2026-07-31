@@ -1666,17 +1666,21 @@ public static class Diagnostics
                         "{\"ts\":\"2026-07-30T08:00:00.000Z\",\"type\":\"turn_started\"}\n" +
                         "{\"ts\":\"2026-07-30T08:00:01.000Z\",\"type\":\"phase_changed\",\"phase\":\"thinking\"}\n",
                         Encoding.UTF8);
-                    Assert(turnReader.Poll(seedPath) == null,
+                    GrokSessionEventsDelta seedDelta = turnReader.Poll(seedPath);
+                    Assert(seedDelta != null && seedDelta.IsEmpty,
                         "no turn_ended yet");
                     File.AppendAllText(seedPath,
                         "{\"ts\":\"2026-07-30T08:00:05.000Z\",\"type\":\"turn_ended\",\"outcome\":\"cancelled\"}\n",
                         Encoding.UTF8);
-                    GrokSessionTurnEnd ended = turnReader.Poll(seedPath);
-                    Assert(ended != null &&
-                        ended.Outcome == GrokSessionTurnEndOutcome.Cancelled,
+                    GrokSessionEventsDelta endedDelta = turnReader.Poll(seedPath);
+                    Assert(endedDelta != null &&
+                        endedDelta.TurnEnd != null &&
+                        endedDelta.TurnEnd.Outcome ==
+                            GrokSessionTurnEndOutcome.Cancelled,
                         "poll surfaces cancelled turn_ended");
-                    Assert(turnReader.Poll(seedPath) == null,
-                        "second poll with no growth is nil");
+                    GrokSessionEventsDelta secondPoll = turnReader.Poll(seedPath);
+                    Assert(secondPoll != null && secondPoll.IsEmpty,
+                        "second poll with no growth is empty");
                 }
                 finally
                 {
