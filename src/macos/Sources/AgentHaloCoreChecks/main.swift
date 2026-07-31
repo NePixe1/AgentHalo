@@ -2686,20 +2686,184 @@ func testClaudeHookReducerStopFailureMapsToError() {
 
 func testGrokHookReducerLifecycle() {
     var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
-    r.consume(jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p/AgentHalo","source":"grok-hook"}"#, now: Date(timeIntervalSince1970: 1))
+    r.consume(jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p/AgentHalo","permissionMode":"auto","source":"grok-hook"}"#, now: Date(timeIntervalSince1970: 1))
     expect(r.snapshot.state, .thinking, "prompt → thinking")
     expect(r.snapshot.agent, .grok, "agent kind")
     expect(r.snapshot.projectName, "AgentHalo", "cwd basename")
 
-    r.consume(jsonLine: #"{"timestamp":"2026-07-25T00:00:02Z","event":"PreToolUse","sessionId":"s1","cwd":"/p/AgentHalo","toolName":"run_terminal_command","source":"grok-hook"}"#, now: Date(timeIntervalSince1970: 2))
+    r.consume(jsonLine: #"{"timestamp":"2026-07-25T00:00:02Z","event":"PreToolUse","sessionId":"s1","cwd":"/p/AgentHalo","toolName":"run_terminal_command","permissionMode":"auto","source":"grok-hook"}"#, now: Date(timeIntervalSince1970: 2))
     expect(r.snapshot.state, .working, "tool → working")
     expect(r.snapshot.action, "Running command", "run_terminal_command → shell friendly action")
 
-    r.consume(jsonLine: #"{"timestamp":"2026-07-25T00:00:03Z","event":"Notification","sessionId":"s1","notificationType":"permission_prompt","source":"grok-hook"}"#, now: Date(timeIntervalSince1970: 3))
-    expect(r.snapshot.state, .attention, "permission")
+    // Auto mode: permission_prompt is suppressed (shell still has multi-second wait_ms).
+    r.consume(jsonLine: #"{"timestamp":"2026-07-25T00:00:03Z","event":"Notification","sessionId":"s1","notificationType":"permission_prompt","permissionMode":"auto","source":"grok-hook"}"#, now: Date(timeIntervalSince1970: 3))
+    expect(r.snapshot.state, .working, "permission_prompt after PreToolUse must not become attention")
+    expect(r.snapshot.action, "Running command", "tool action preserved under auto permission noise")
+    r.applyWorkingVisibility(
+        now: Date(timeIntervalSince1970: 3).addingTimeInterval(GrokHookStatusReducer.pendingPermissionAttentionDelay + 0.5)
+    )
+    expect(r.snapshot.state, .working, "auto mode never promotes permission noise to attention")
 
-    r.consume(jsonLine: #"{"timestamp":"2026-07-25T00:00:04Z","event":"Stop","sessionId":"s1","source":"grok-hook"}"#, now: Date(timeIntervalSince1970: 4))
+    r.consume(jsonLine: #"{"timestamp":"2026-07-25T00:00:05Z","event":"Stop","sessionId":"s1","source":"grok-hook"}"#, now: Date(timeIntervalSince1970: 5))
     expect(r.snapshot.state, .done, "stop → done")
+}
+
+/// Strategy A (default mode): permission_prompt arms delay, then attention.
+func testGrokHookReducerPermissionPromptWhileThinkingIsAttention() {
+    var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p","permissionMode":"default","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:02Z","event":"Notification","sessionId":"s1","notificationType":"permission_prompt","permissionMode":"default","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 2)
+    )
+    expect(r.snapshot.state, .thinking, "hook arms delay — not immediate attention")
+    r.applyWorkingVisibility(now: Date(timeIntervalSince1970: 2.1))
+    expect(r.snapshot.state, .thinking, "within delay still thinking")
+    r.applyWorkingVisibility(
+        now: Date(timeIntervalSince1970: 2).addingTimeInterval(GrokHookStatusReducer.pendingPermissionAttentionDelay + 0.05)
+    )
+    expect(r.snapshot.state, .attention, "after delay → attention (default mode)")
+    expect(r.snapshot.action, "Awaiting permission", "attention action")
+    r.applyWorkingVisibility(now: Date(timeIntervalSince1970: 10))
+    expect(r.snapshot.state, .attention, "genuine permission hold does not auto-fade")
+}
+
+/// Auto mode: multi-second shell permission wait must never flash purple.
+func testGrokHookReducerAutoModeShellPermissionNeverAttention() {
+    var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p","permissionMode":"auto","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:02Z","event":"PreToolUse","sessionId":"s1","cwd":"/p","toolName":"run_terminal_command","permissionMode":"auto","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 2)
+    )
+    // Measured: Auto shell wait_ms often 1.8–2.9s — events still fire.
+    r.applyPermissionRequested(at: Date(timeIntervalSince1970: 2.01))
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:02.020Z","event":"Notification","sessionId":"s1","notificationType":"permission_prompt","permissionMode":"auto","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 2.02)
+    )
+    r.applyWorkingVisibility(now: Date(timeIntervalSince1970: 4.5))
+    expect(r.snapshot.state, .working, "auto mode: 2.5s shell wait stays working (no purple)")
+    expect(r.snapshot.action, "Running command", "tool action preserved under auto shell wait")
+
+    r.applyPermissionResolved(decision: "allow", waitMs: 2630, at: Date(timeIntervalSince1970: 4.64))
+    r.applyWorkingVisibility(now: Date(timeIntervalSince1970: 5))
+    expect(r.snapshot.state, .working, "auto shell resolve keeps working")
+}
+
+/// Strategy C: instant auto resolve (wait_ms=0) never paints NEEDS YOU.
+func testGrokHookReducerAutoPermissionResolveDoesNotAttention() {
+    var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    r.applyPermissionRequested(at: Date(timeIntervalSince1970: 2))
+    r.applyPermissionResolved(decision: "allow", waitMs: 0, at: Date(timeIntervalSince1970: 2.01))
+    r.applyWorkingVisibility(now: Date(timeIntervalSince1970: 3))
+    expect(r.snapshot.state, .thinking, "auto resolve stays thinking, not attention")
+    expect(r.snapshot.state != .attention, "auto wait_ms=0 never NEEDS YOU")
+}
+
+/// Strategy C: pending permission without resolve becomes attention after delay.
+func testGrokHookReducerPendingPermissionBecomesAttentionAfterDelay() {
+    var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p","permissionMode":"default","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    let requestedAt = Date(timeIntervalSince1970: 2)
+    r.applyPermissionRequested(at: requestedAt)
+    r.applyWorkingVisibility(now: requestedAt.addingTimeInterval(0.1))
+    expect(r.snapshot.state, .thinking, "before delay still thinking")
+
+    r.applyWorkingVisibility(
+        now: requestedAt.addingTimeInterval(GrokHookStatusReducer.pendingPermissionAttentionDelay + 0.05)
+    )
+    expect(r.snapshot.state, .attention, "after delay → attention (human wait)")
+    expect(r.snapshot.action, "Awaiting permission", "human wait action")
+}
+
+/// Strategy C: human wait_ms then allow clears hold toward thinking.
+func testGrokHookReducerHumanPermissionResolveClearsAttention() {
+    var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p","permissionMode":"default","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    r.applyPermissionRequested(at: Date(timeIntervalSince1970: 2))
+    r.applyWorkingVisibility(now: Date(timeIntervalSince1970: 3))
+    expect(r.snapshot.state, .attention, "precondition: attention after delay")
+
+    r.applyPermissionResolved(decision: "allow", waitMs: 5000, at: Date(timeIntervalSince1970: 7))
+    expect(r.snapshot.state, .thinking, "human allow → thinking until PreToolUse")
+    expect(r.snapshot.action, "Thinking", "resume thinking after human allow")
+}
+
+/// Strategy A + C: working + permission events auto resolve stays working.
+func testGrokHookReducerAutoNoiseDuringToolExecutionStaysWorking() {
+    var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p","permissionMode":"auto","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:03Z","event":"PreToolUse","sessionId":"s1","cwd":"/p","toolName":"run_terminal_command","permissionMode":"auto","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 3)
+    )
+    r.applyPermissionRequested(at: Date(timeIntervalSince1970: 3.01))
+    r.applyPermissionResolved(decision: "allow", waitMs: 12, at: Date(timeIntervalSince1970: 3.02))
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:03.050Z","event":"Notification","sessionId":"s1","notificationType":"permission_prompt","permissionMode":"auto","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 3.05)
+    )
+    r.applyWorkingVisibility(now: Date(timeIntervalSince1970: 4))
+    expect(r.snapshot.state, .working, "auto noise during tool stays working")
+    expect(r.snapshot.action, "Running command", "tool action preserved")
+}
+
+/// Grok fires PreToolUse *before* the human permission UI. After the delay with
+/// no resolve, state must become attention (purple NEEDS YOU) even though we
+/// were already `.working`.
+func testGrokHookReducerHumanWaitAfterPreToolUseBecomesAttention() {
+    var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p","permissionMode":"default","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:02Z","event":"PreToolUse","sessionId":"s1","cwd":"/p","toolName":"run_terminal_command","permissionMode":"default","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 2)
+    )
+    expect(r.snapshot.state, .working, "precondition: PreToolUse → working")
+
+    let requestedAt = Date(timeIntervalSince1970: 2.015)
+    r.applyPermissionRequested(at: requestedAt)
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:02.020Z","event":"Notification","sessionId":"s1","notificationType":"permission_prompt","permissionMode":"default","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 2.02)
+    )
+    expect(r.snapshot.state, .working, "still working before delay (no purple flash)")
+
+    r.applyWorkingVisibility(now: requestedAt.addingTimeInterval(0.1))
+    expect(r.snapshot.state, .working, "within delay still working")
+
+    r.applyWorkingVisibility(
+        now: requestedAt.addingTimeInterval(GrokHookStatusReducer.pendingPermissionAttentionDelay + 0.05)
+    )
+    expect(r.snapshot.state, .attention, "human wait after PreToolUse → attention")
+    expect(r.snapshot.action, "Awaiting permission", "human wait action")
+    expect(r.snapshot.active, true, "human wait keeps turn active")
+
+    // Multi-second human allow should leave the hold.
+    r.applyPermissionResolved(decision: "allow", waitMs: 9678, at: Date(timeIntervalSince1970: 12))
+    expect(r.snapshot.state, .thinking, "human allow clears attention")
 }
 
 func testGrokHookReducerMapsEscCancelToInterrupted() {
@@ -2743,7 +2907,7 @@ func testGrokSessionTurnEventsReaderDetectsCancelledTurnEnded() throws {
     try Data(seed.utf8).write(to: eventsURL)
 
     let reader = GrokSessionTurnEventsReader()
-    expect(reader.poll(eventsURL: eventsURL) == nil, "no turn_ended yet")
+    expect(reader.poll(eventsURL: eventsURL).isEmpty, "no turn_ended yet")
 
     // Append without rewriting: mirrors Grok's live jsonl growth.
     let cancelLine = #"{"ts":"2026-07-30T08:00:05.000Z","type":"turn_ended","outcome":"cancelled","cancellation_category":"mid_turn_abort","cancellation_context":{"trigger":"esc"}}"# + "\n"
@@ -2754,10 +2918,41 @@ func testGrokSessionTurnEventsReaderDetectsCancelledTurnEnded() throws {
     try handle.synchronize()
 
     let ended = reader.poll(eventsURL: eventsURL)
-    expect(ended != nil, "cancelled turn_ended is not nil")
-    expect(ended?.outcome, Optional.some(GrokSessionTurnEndOutcome.cancelled), "poll surfaces cancelled turn_ended")
+    expect(ended.turnEnd != nil, "cancelled turn_ended is not nil")
+    expect(ended.turnEnd?.outcome, Optional.some(GrokSessionTurnEndOutcome.cancelled), "poll surfaces cancelled turn_ended")
 
-    expect(reader.poll(eventsURL: eventsURL) == nil, "second poll with no growth is nil")
+    expect(reader.poll(eventsURL: eventsURL).isEmpty, "second poll with no growth is empty")
+}
+
+func testGrokSessionTurnEventsReaderParsesPermissionLifecycle() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-grok-perm-events-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let eventsURL = root.appendingPathComponent("events.jsonl")
+
+    let seed = """
+    {"ts":"2026-07-30T08:00:00.000Z","type":"permission_requested","tool_name":"run_terminal_command"}
+    {"ts":"2026-07-30T08:00:00.012Z","type":"permission_resolved","tool_name":"run_terminal_command","decision":"allow","wait_ms":12}
+
+    """
+    try Data(seed.utf8).write(to: eventsURL)
+
+    let reader = GrokSessionTurnEventsReader()
+    let delta = reader.poll(eventsURL: eventsURL)
+    expect(delta.permissionUpdates.count, 2, "requested + resolved")
+    if case .requested(let tool) = delta.permissionUpdates[0].kind {
+        expect(tool, "run_terminal_command", "requested tool")
+    } else {
+        expect(false, "first update is requested")
+    }
+    if case .resolved(let tool, let decision, let waitMs) = delta.permissionUpdates[1].kind {
+        expect(tool, "run_terminal_command", "resolved tool")
+        expect(decision, "allow", "resolved decision")
+        expect(waitMs, 12, "resolved wait_ms")
+    } else {
+        expect(false, "second update is resolved")
+    }
 }
 
 func testGrokHookStatusMonitorMapsSessionEscCancelToError() throws {
@@ -2810,6 +3005,60 @@ func testGrokHookStatusMonitorMapsSessionEscCancelToError() throws {
     expect(interrupted?.state, .error, "esc cancel → error")
     expect(interrupted?.action, "Interrupted", "esc cancel action")
     expect(interrupted?.active == false, "esc cancel not active")
+}
+
+/// Monitor integration: Auto-mode permission lines in events.jsonl + post-tool
+/// permission_prompt hook must not paint NEEDS YOU while a tool is running.
+func testGrokHookStatusMonitorIgnoresAutoPermissionDuringTool() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-grok-monitor-auto-perm-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let logs = root.appendingPathComponent("logs", isDirectory: true)
+    let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+    let cwd = "/tmp/AgentHaloAutoPermTest"
+    let sessionId = "sess-auto-perm-1"
+    let encoded = GrokSessionContextReader.encodeWorkspaceDirectory(cwd)
+    let sessionDir = sessions
+        .appendingPathComponent(encoded, isDirectory: true)
+        .appendingPathComponent(sessionId, isDirectory: true)
+    try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+
+    let statusURL = logs.appendingPathComponent("grok-status.jsonl")
+    let eventsURL = sessionDir.appendingPathComponent("events.jsonl")
+
+    let hookLines = """
+    {"timestamp":"2026-07-30T08:00:01.000Z","event":"UserPromptSubmit","sessionId":"\(sessionId)","cwd":"\(cwd)","permissionMode":"auto","source":"grok-hook"}
+    {"timestamp":"2026-07-30T08:00:03.000Z","event":"PreToolUse","sessionId":"\(sessionId)","cwd":"\(cwd)","toolName":"run_terminal_command","permissionMode":"auto","source":"grok-hook"}
+    {"timestamp":"2026-07-30T08:00:03.020Z","event":"Notification","sessionId":"\(sessionId)","cwd":"\(cwd)","notificationType":"permission_prompt","permissionMode":"auto","source":"grok-hook"}
+
+    """
+    try Data(hookLines.utf8).write(to: statusURL)
+
+    // Auto shell often resolves with wait_ms in the 1.5–3s band — still not human.
+    let eventsSeed = """
+    {"ts":"2026-07-30T08:00:03.000Z","type":"permission_requested","tool_name":"run_terminal_command"}
+    {"ts":"2026-07-30T08:00:05.630Z","type":"permission_resolved","tool_name":"run_terminal_command","decision":"allow","wait_ms":2630}
+
+    """
+    try Data(eventsSeed.utf8).write(to: eventsURL)
+
+    let monitor = GrokHookStatusMonitor(statusURL: statusURL, sessionsRoot: sessions)
+    let midWait = ISO8601DateFormatter().date(from: "2026-07-30T08:00:04Z") ?? Date()
+    expect(monitor.refresh(now: midWait), true, "hooks+events load mid auto wait")
+    let mid = monitor.snapshots().first
+    expect(mid?.state, .working, "auto shell mid-wait stays working (no purple)")
+    expect(mid?.action, "Running command", "tool action kept mid-wait")
+    expect(mid?.state != .attention, "must not be NEEDS YOU mid auto wait")
+
+    // Append is not needed — seed already has resolved; re-refresh after resolve time.
+    let afterResolve = ISO8601DateFormatter().date(from: "2026-07-30T08:00:06Z") ?? Date()
+    _ = monitor.refresh(now: afterResolve)
+    let snap = monitor.snapshots().first
+    expect(snap?.state, .working, "auto permission during tool stays working")
+    expect(snap?.action, "Running command", "tool action kept")
+    expect(snap?.state != .attention, "must not be NEEDS YOU")
 }
 
 // MARK: - Durable ClaudeCodeStatusHook isolation (Grok vs Claude status files)
@@ -2930,7 +3179,7 @@ func testClaudeCodeStatusHookIsolatesGrokAndClaudeStatusFiles() throws {
             "GROK_SESSION_ID": "test-grok-session",
             "GROK_HOOK_EVENT": "pre_tool_use",
         ],
-        stdinJSON: #"{"sessionId":"test-grok-session","cwd":"/tmp/proj","toolName":"run_terminal_command","timestamp":"2026-07-25T00:00:00Z"}"#
+        stdinJSON: #"{"sessionId":"test-grok-session","cwd":"/tmp/proj","toolName":"run_terminal_command","permissionMode":"auto","timestamp":"2026-07-25T00:00:00Z"}"#
     )
 
     expect(FileManager.default.fileExists(atPath: grokStatus.path), "Grok path should write logs/grok-status.jsonl")
@@ -2938,6 +3187,7 @@ func testClaudeCodeStatusHookIsolatesGrokAndClaudeStatusFiles() throws {
     expect(grokText.contains("grok-hook"), "Grok record source should be grok-hook")
     expect(grokText.contains("test-grok-session"), "Grok record should include session id")
     expect(grokText.contains("\"PreToolUse\""), "snake_case pre_tool_use should normalize to PreToolUse")
+    expect(grokText.contains("\"permissionMode\":\"auto\""), "hook should persist permissionMode for Auto ring gating")
     if FileManager.default.fileExists(atPath: claudeStatus.path) {
         let existingClaude = try String(contentsOf: claudeStatus, encoding: .utf8)
         expect(!existingClaude.contains("test-grok-session"), "Grok session id must not appear in logs/claude-status.jsonl")
@@ -3835,7 +4085,9 @@ do {
     try testGrokSessionContextReaderLiveTokensWithoutSignals()
     try testGrokActiveSessionsReaderParsesArrayEntries()
     try testGrokSessionTurnEventsReaderDetectsCancelledTurnEnded()
+    try testGrokSessionTurnEventsReaderParsesPermissionLifecycle()
     try testGrokHookStatusMonitorMapsSessionEscCancelToError()
+    try testGrokHookStatusMonitorIgnoresAutoPermissionDuringTool()
 } catch {
     fatalError("\(error)")
 }
@@ -3893,6 +4145,13 @@ testClaudeHookReducerIdlePromptReturnsToReady()
 testClaudeHookIdlePromptDoesNotDriveThinkingAggregate()
 testClaudeHookReducerStopFailureMapsToError()
 testGrokHookReducerLifecycle()
+testGrokHookReducerPermissionPromptWhileThinkingIsAttention()
+testGrokHookReducerAutoModeShellPermissionNeverAttention()
+testGrokHookReducerAutoPermissionResolveDoesNotAttention()
+testGrokHookReducerPendingPermissionBecomesAttentionAfterDelay()
+testGrokHookReducerHumanPermissionResolveClearsAttention()
+testGrokHookReducerAutoNoiseDuringToolExecutionStaysWorking()
+testGrokHookReducerHumanWaitAfterPreToolUseBecomesAttention()
 testGrokHookReducerMapsEscCancelToInterrupted()
 do {
     try testClaudeCodeStatusHookIsolatesGrokAndClaudeStatusFiles()

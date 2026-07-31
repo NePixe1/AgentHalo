@@ -123,6 +123,13 @@ if eventName == "StopFailure" || eventName == "PostToolUseFailure" {
     errorText = ""
 }
 
+// Grok: default | auto | plan | bypassPermissions (every hook event).
+// Claude may emit acceptEdits / dontAsk / etc. — pass through as-is.
+let permissionMode = firstString(
+    payload["permission_mode"],
+    payload["permissionMode"]
+)
+
 let timestamp = firstString(
     payload["timestamp"],
     {
@@ -146,6 +153,7 @@ var record: [String: Any?] = [
     "toolName": toolName.isEmpty ? nil : toolName,
     "notificationType": notificationType.isEmpty ? nil : notificationType,
     "errorText": errorText.isEmpty ? nil : errorText,
+    "permissionMode": permissionMode.isEmpty ? nil : permissionMode,
     "source": source,
 ]
 

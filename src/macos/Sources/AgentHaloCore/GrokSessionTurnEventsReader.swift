@@ -34,7 +34,42 @@ public struct GrokSessionTurnEnd: Equatable, Sendable {
     }
 }
 
-/// Incrementally tails `events.jsonl` for `turn_ended` / `turn_started` lines.
+/// Permission lifecycle lines from Grok session `events.jsonl`.
+///
+/// Auto mode still emits `permission_requested` / `permission_resolved` with
+/// `wait_ms ≈ 0`. Real user prompts have multi-second `wait_ms`. The hook-only
+/// `Notification:permission_prompt` cannot distinguish these; these events can.
+public struct GrokPermissionUpdate: Equatable, Sendable {
+    public enum Kind: Equatable, Sendable {
+        case requested(toolName: String)
+        case resolved(toolName: String, decision: String, waitMs: Int)
+    }
+
+    public var at: Date
+    public var kind: Kind
+
+    public init(at: Date, kind: Kind) {
+        self.at = at
+        self.kind = kind
+    }
+}
+
+/// One poll of a session `events.jsonl` tail.
+public struct GrokSessionEventsDelta: Equatable, Sendable {
+    public var turnEnd: GrokSessionTurnEnd?
+    public var permissionUpdates: [GrokPermissionUpdate]
+
+    public init(turnEnd: GrokSessionTurnEnd? = nil, permissionUpdates: [GrokPermissionUpdate] = []) {
+        self.turnEnd = turnEnd
+        self.permissionUpdates = permissionUpdates
+    }
+
+    public var isEmpty: Bool {
+        turnEnd == nil && permissionUpdates.isEmpty
+    }
+}
+
+/// Incrementally tails `events.jsonl` for turn ends and permission lifecycle.
 ///
 /// Stateful per session path so the (often multi‑hundred‑KB) phase stream is not
 /// fully re-read every poll. First open seeks near EOF and only catch-up scans
@@ -60,9 +95,8 @@ public final class GrokSessionTurnEventsReader {
         self.fileManager = fileManager
     }
 
-    /// Consume newly appended `events.jsonl` bytes. Returns the latest
-    /// `turn_ended` observed in this poll (if any).
-    public func poll(eventsURL: URL) -> GrokSessionTurnEnd? {
+    /// Consume newly appended `events.jsonl` bytes.
+    public func poll(eventsURL: URL) -> GrokSessionEventsDelta {
         let key = eventsURL.path
         var state = tails[key] ?? TailState()
         defer { tails[key] = state }
@@ -73,7 +107,7 @@ public final class GrokSessionTurnEventsReader {
 
         if size == 0 || !fileManager.fileExists(atPath: eventsURL.path) {
             state = TailState()
-            return nil
+            return GrokSessionEventsDelta()
         }
 
         let mtimeChanged = mtime != nil && state.lastModified != nil && mtime != state.lastModified
@@ -94,13 +128,13 @@ public final class GrokSessionTurnEventsReader {
             state.offset = readFrom
             state.pending = ""
         } else if size <= state.offset {
-            return nil
+            return GrokSessionEventsDelta()
         } else {
             readFrom = state.offset
         }
 
         guard let handle = try? FileHandle(forReadingFrom: eventsURL) else {
-            return nil
+            return GrokSessionEventsDelta()
         }
         defer { try? handle.close() }
 
@@ -109,7 +143,7 @@ public final class GrokSessionTurnEventsReader {
             let data = try handle.readToEnd() ?? Data()
             state.offset = size
             guard let chunk = String(data: data, encoding: .utf8) else {
-                return nil
+                return GrokSessionEventsDelta()
             }
 
             let text = state.pending + chunk
@@ -128,6 +162,7 @@ public final class GrokSessionTurnEventsReader {
 
             var latest: GrokSessionTurnEnd?
             var lastStartedAt: Date?
+            var permissions: [GrokPermissionUpdate] = []
             for line in lines {
                 let trimmed = line.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
                 guard !trimmed.isEmpty,
@@ -139,24 +174,52 @@ public final class GrokSessionTurnEventsReader {
                 let at = parseDate(string(root["ts"]))
                     ?? parseDate(string(root["timestamp"]))
                     ?? Date()
-                if type == "turn_started" {
+                switch type {
+                case "turn_started":
                     lastStartedAt = at
-                    continue
+                case "turn_ended":
+                    let outcome = GrokSessionTurnEndOutcome(raw: string(root["outcome"]))
+                    let end = GrokSessionTurnEnd(endedAt: at, outcome: outcome)
+                    // Prefer a cancel/fail that is not already superseded by a newer start.
+                    if let lastStartedAt, lastStartedAt > at {
+                        continue
+                    }
+                    latest = end
+                case "permission_requested":
+                    permissions.append(
+                        GrokPermissionUpdate(
+                            at: at,
+                            kind: .requested(toolName: string(root["tool_name"]))
+                        )
+                    )
+                case "permission_resolved":
+                    let waitMs: Int
+                    if let n = root["wait_ms"] as? Int {
+                        waitMs = n
+                    } else if let n = root["wait_ms"] as? Double {
+                        waitMs = Int(n)
+                    } else if let n = root["wait_ms"] as? NSNumber {
+                        waitMs = n.intValue
+                    } else {
+                        waitMs = Int(string(root["wait_ms"])) ?? 0
+                    }
+                    permissions.append(
+                        GrokPermissionUpdate(
+                            at: at,
+                            kind: .resolved(
+                                toolName: string(root["tool_name"]),
+                                decision: string(root["decision"]),
+                                waitMs: waitMs
+                            )
+                        )
+                    )
+                default:
+                    break
                 }
-                guard type == "turn_ended" else {
-                    continue
-                }
-                let outcome = GrokSessionTurnEndOutcome(raw: string(root["outcome"]))
-                let end = GrokSessionTurnEnd(endedAt: at, outcome: outcome)
-                // Prefer a cancel/fail that is not already superseded by a newer start.
-                if let lastStartedAt, lastStartedAt > at {
-                    continue
-                }
-                latest = end
             }
-            return latest
+            return GrokSessionEventsDelta(turnEnd: latest, permissionUpdates: permissions)
         } catch {
-            return nil
+            return GrokSessionEventsDelta()
         }
     }
 

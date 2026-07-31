@@ -25,13 +25,13 @@ public final class GrokHookStatusMonitor {
 
     public func refresh(now: Date = Date()) -> Bool {
         let hooksChanged = refreshHooks(now: now)
-        let turnChanged = applySessionTurnEvents(now: now)
+        let eventsChanged = applySessionEvents(now: now)
 
         for key in reducers.keys {
             reducers[key]?.applyWorkingVisibility(now: now)
         }
         pruneStaleReducers(now: now)
-        return hooksChanged || turnChanged
+        return hooksChanged || eventsChanged
     }
 
     public func snapshots() -> [SessionSnapshot] {
@@ -105,9 +105,10 @@ public final class GrokHookStatusMonitor {
         }
     }
 
-    /// Esc cancel does not emit Stop hooks. For still-active sessions, poll
-    /// `events.jsonl` and map cancelled/failed `turn_ended` onto the fault ring.
-    private func applySessionTurnEvents(now: Date) -> Bool {
+    /// Poll session `events.jsonl` for:
+    /// - Esc cancel / failed `turn_ended` (hooks skip Stop on interrupt)
+    /// - `permission_requested` / `permission_resolved` (Strategy C: Auto vs human)
+    private func applySessionEvents(now: Date) -> Bool {
         var changed = false
         for (sessionId, reducer) in reducers {
             let snapshot = reducer.snapshot
@@ -121,27 +122,38 @@ public final class GrokHookStatusMonitor {
             guard let eventsURL = eventsURL(for: snapshot) else {
                 continue
             }
-            guard let turnEnd = turnEventsReader.poll(eventsURL: eventsURL) else {
+            let delta = turnEventsReader.poll(eventsURL: eventsURL)
+            guard !delta.isEmpty else {
                 continue
             }
-            switch turnEnd.outcome {
-            case .cancelled, .failed:
-                // A newer hook event means the session already moved on (e.g.
-                // UserPromptSubmit after a prior Esc cancel). Skip stale ends.
-                if turnEnd.endedAt.addingTimeInterval(0.25) < snapshot.lastEventAt {
-                    continue
+
+            let before = reducers[sessionId]?.snapshot
+
+            for update in delta.permissionUpdates {
+                reducers[sessionId]?.applyPermissionUpdate(update, now: now)
+            }
+
+            if let turnEnd = delta.turnEnd {
+                switch turnEnd.outcome {
+                case .cancelled, .failed:
+                    // A newer hook event means the session already moved on (e.g.
+                    // UserPromptSubmit after a prior Esc cancel). Skip stale ends.
+                    let latest = reducers[sessionId]?.snapshot ?? snapshot
+                    if turnEnd.endedAt.addingTimeInterval(0.25) < latest.lastEventAt {
+                        break
+                    }
+                    if turnEnd.outcome == .cancelled {
+                        reducers[sessionId]?.applyTurnCancelled(at: turnEnd.endedAt)
+                    } else {
+                        reducers[sessionId]?.applyTurnFailed(at: turnEnd.endedAt)
+                    }
+                case .completed, .other:
+                    break
                 }
-                let before = reducers[sessionId]?.snapshot
-                if turnEnd.outcome == .cancelled {
-                    reducers[sessionId]?.applyTurnCancelled(at: turnEnd.endedAt)
-                } else {
-                    reducers[sessionId]?.applyTurnFailed(at: turnEnd.endedAt)
-                }
-                if reducers[sessionId]?.snapshot != before {
-                    changed = true
-                }
-            case .completed, .other:
-                break
+            }
+
+            if reducers[sessionId]?.snapshot != before {
+                changed = true
             }
         }
         return changed
