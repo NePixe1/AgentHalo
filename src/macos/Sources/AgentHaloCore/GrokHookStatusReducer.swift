@@ -487,17 +487,27 @@ public struct GrokHookStatusReducer: Sendable {
     /// Grok skips `Stop` / `StopFailure` hooks on user interrupt (Esc / Ctrl+C).
     /// Session `events.jsonl` records `turn_ended` with `outcome: "cancelled"`
     /// instead — map that to the same fault ring Codex uses for interruptions.
+    ///
+    /// Steer / Sent now also emits `cancelled` (often `trigger: send_now`). Those
+    /// must not paint red — call `applySteerCancel` instead.
     public mutating func applyTurnCancelled(at eventAt: Date = Date()) {
-        applyInterruptedTurn(at: eventAt, action: "Interrupted")
+        applyInterruptedTurn(at: eventAt, action: "Interrupted", asError: true)
+    }
+
+    /// Soft end for steer / cancel-then-send: clear the in-flight turn without
+    /// the red fault ring. The subsequent `UserPromptSubmit` / new turn hooks
+    /// re-activate thinking almost immediately.
+    public mutating func applySteerCancel(at eventAt: Date = Date()) {
+        applyInterruptedTurn(at: eventAt, action: "Ready", asError: false)
     }
 
     /// Non-cancel terminal failures observed in `events.jsonl` (e.g. outcome
     /// `error` / `failed`) when hooks did not emit `StopFailure`.
     public mutating func applyTurnFailed(at eventAt: Date = Date()) {
-        applyInterruptedTurn(at: eventAt, action: "Grok stopped with an error")
+        applyInterruptedTurn(at: eventAt, action: "Grok stopped with an error", asError: true)
     }
 
-    private mutating func applyInterruptedTurn(at eventAt: Date, action: String) {
+    private mutating func applyInterruptedTurn(at eventAt: Date, action: String, asError: Bool) {
         // Only override an in-flight turn. Idle/done/error already terminal.
         guard snapshot.active
             || snapshot.state == .thinking
@@ -511,7 +521,7 @@ public struct GrokHookStatusReducer: Sendable {
         thinkingVisibleUntil = nil
         pendingWorkingAction = nil
         snapshot.active = false
-        snapshot.state = .error
+        snapshot.state = asError ? .error : .idle
         snapshot.action = action
         snapshot.lastEventAt = eventAt
         snapshot.completedAt = nil

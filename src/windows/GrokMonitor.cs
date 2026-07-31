@@ -648,10 +648,21 @@ namespace CodexHalo
         /// Grok skips Stop / StopFailure hooks on user interrupt (Esc / Ctrl+C).
         /// Session events.jsonl records turn_ended with outcome "cancelled" —
         /// map that to the same fault ring Codex uses for interruptions.
+        /// Steer / Sent now also emits cancelled (often trigger send_now); those
+        /// must not paint red — call ApplySteerCancel instead.
         /// </summary>
         public void ApplyTurnCancelled(DateTime eventUtc)
         {
-            ApplyInterruptedTurn(eventUtc, "Interrupted");
+            ApplyInterruptedTurn(eventUtc, "Interrupted", true);
+        }
+
+        /// <summary>
+        /// Soft end for steer / cancel-then-send: clear the in-flight turn without
+        /// the red fault ring. Subsequent UserPromptSubmit re-activates thinking.
+        /// </summary>
+        public void ApplySteerCancel(DateTime eventUtc)
+        {
+            ApplyInterruptedTurn(eventUtc, "Ready", false);
         }
 
         /// <summary>
@@ -660,10 +671,10 @@ namespace CodexHalo
         /// </summary>
         public void ApplyTurnFailed(DateTime eventUtc)
         {
-            ApplyInterruptedTurn(eventUtc, "Grok stopped with an error");
+            ApplyInterruptedTurn(eventUtc, "Grok stopped with an error", true);
         }
 
-        private void ApplyInterruptedTurn(DateTime eventUtc, string action)
+        private void ApplyInterruptedTurn(DateTime eventUtc, string action, bool asError)
         {
             // Only override an in-flight turn. Idle/done/error already terminal.
             if (!Snapshot.Active &&
@@ -679,7 +690,7 @@ namespace CodexHalo
             thinkingVisibleUntilUtc = DateTime.MinValue;
             pendingWorkingAction = null;
             Snapshot.Active = false;
-            Snapshot.State = HaloState.Error;
+            Snapshot.State = asError ? HaloState.Error : HaloState.Idle;
             Snapshot.Action = action;
             Snapshot.LastEventUtc = eventUtc == DateTime.MinValue
                 ? DateTime.UtcNow : eventUtc;
@@ -1210,6 +1221,7 @@ namespace CodexHalo
         /// <summary>
         /// Poll session events.jsonl for:
         /// - Esc cancel / failed turn_ended (hooks skip Stop on interrupt)
+        /// - Steer supersede (send_now / cancel_then_send / newer turn_started)
         /// - permission_requested / permission_resolved (Strategy C: Auto vs human)
         /// </summary>
         private bool ApplySessionTurnEvents(DateTime now)
@@ -1255,19 +1267,36 @@ namespace CodexHalo
                     (turnEnd.Outcome == GrokSessionTurnEndOutcome.Cancelled ||
                      turnEnd.Outcome == GrokSessionTurnEndOutcome.Failed))
                 {
-                    // Newer hook activity means the session already moved on
-                    // (e.g. UserPromptSubmit after a prior Esc cancel).
                     SessionSnapshot latest = reducer.Snapshot;
-                    if (turnEnd.EndedAtUtc.AddSeconds(0.25) >= latest.LastEventUtc)
+                    // Steer (Sent now) writes UserPromptSubmit within a few ms of
+                    // turn_ended cancelled. Any newer hook means the session already
+                    // moved on — never let a stale cancel paint red over thinking.
+                    if (turnEnd.EndedAtUtc <= latest.LastEventUtc)
+                    {
+                        // superseded
+                    }
+                    else if (delta.TurnStart != null &&
+                        delta.TurnStart.StartedAtUtc >= turnEnd.EndedAtUtc)
                     {
                         if (turnEnd.Outcome == GrokSessionTurnEndOutcome.Cancelled)
                         {
-                            reducer.ApplyTurnCancelled(turnEnd.EndedAtUtc);
+                            reducer.ApplySteerCancel(turnEnd.EndedAtUtc);
+                        }
+                    }
+                    else if (turnEnd.Outcome == GrokSessionTurnEndOutcome.Cancelled)
+                    {
+                        if (turnEnd.IsSteerLikeCancel)
+                        {
+                            reducer.ApplySteerCancel(turnEnd.EndedAtUtc);
                         }
                         else
                         {
-                            reducer.ApplyTurnFailed(turnEnd.EndedAtUtc);
+                            reducer.ApplyTurnCancelled(turnEnd.EndedAtUtc);
                         }
+                    }
+                    else
+                    {
+                        reducer.ApplyTurnFailed(turnEnd.EndedAtUtc);
                     }
                 }
 
@@ -1466,6 +1495,53 @@ namespace CodexHalo
     {
         public DateTime EndedAtUtc;
         public GrokSessionTurnEndOutcome Outcome;
+        /// <summary>cancellation_category (e.g. mid_turn_abort, permission_rejected).</summary>
+        public string CancellationCategory = String.Empty;
+        /// <summary>cancellation_context.trigger (e.g. esc, send_now).</summary>
+        public string CancellationTrigger = String.Empty;
+
+        /// <summary>
+        /// Steer / Sent now aborts only to start another turn immediately.
+        /// Those must not paint the red fault ring.
+        /// </summary>
+        public bool IsSteerLikeCancel
+        {
+            get
+            {
+                if (Outcome != GrokSessionTurnEndOutcome.Cancelled)
+                {
+                    return false;
+                }
+                string trigger = CancellationTrigger == null
+                    ? String.Empty
+                    : CancellationTrigger.Trim().ToLowerInvariant();
+                return trigger == "send_now" ||
+                    trigger == "steer" ||
+                    trigger == "redirect" ||
+                    trigger == "queued_send";
+            }
+        }
+    }
+
+    /// <summary>
+    /// A turn_started line from session events.jsonl. Steer redirects use
+    /// redirect_kind cancel_then_send / queued_after_cancel.
+    /// </summary>
+    public sealed class GrokSessionTurnStart
+    {
+        public DateTime StartedAtUtc;
+        public string RedirectKind = String.Empty;
+
+        public bool IsSteerRedirect
+        {
+            get
+            {
+                string kind = RedirectKind == null
+                    ? String.Empty
+                    : RedirectKind.Trim().ToLowerInvariant();
+                return kind == "cancel_then_send" || kind == "queued_after_cancel";
+            }
+        }
     }
 
     public enum GrokPermissionUpdateKind
@@ -1493,6 +1569,7 @@ namespace CodexHalo
     public sealed class GrokSessionEventsDelta
     {
         public GrokSessionTurnEnd TurnEnd;
+        public GrokSessionTurnStart TurnStart;
         public List<GrokPermissionUpdate> PermissionUpdates =
             new List<GrokPermissionUpdate>();
 
@@ -1501,6 +1578,7 @@ namespace CodexHalo
             get
             {
                 return TurnEnd == null &&
+                    TurnStart == null &&
                     (PermissionUpdates == null || PermissionUpdates.Count == 0);
             }
         }
@@ -1630,6 +1708,7 @@ namespace CodexHalo
                     }
 
                     GrokSessionTurnEnd latest = null;
+                    GrokSessionTurnStart latestStart = null;
                     DateTime lastStartedAt = DateTime.MinValue;
                     List<GrokPermissionUpdate> permissions =
                         new List<GrokPermissionUpdate>();
@@ -1668,6 +1747,23 @@ namespace CodexHalo
                             StringComparison.OrdinalIgnoreCase))
                         {
                             lastStartedAt = at;
+                            string redirectKind = StringValue(root, "redirect_kind");
+                            // Only surface starts with a steer redirect_kind —
+                            // ordinary starts would make IsEmpty false every turn.
+                            if (!String.IsNullOrEmpty(redirectKind))
+                            {
+                                latestStart = new GrokSessionTurnStart
+                                {
+                                    StartedAtUtc = at,
+                                    RedirectKind = redirectKind
+                                };
+                            }
+                            // Steer writes turn_ended cancelled then turn_started
+                            // in the same tail chunk — newer start supersedes end.
+                            if (latest != null && at >= latest.EndedAtUtc)
+                            {
+                                latest = null;
+                            }
                             continue;
                         }
                         if (String.Equals(type, "permission_requested",
@@ -1708,12 +1804,17 @@ namespace CodexHalo
                         latest = new GrokSessionTurnEnd
                         {
                             EndedAtUtc = at,
-                            Outcome = outcome
+                            Outcome = outcome,
+                            CancellationCategory =
+                                StringValue(root, "cancellation_category"),
+                            CancellationTrigger =
+                                NestedStringValue(root, "cancellation_context", "trigger")
                         };
                     }
                     return new GrokSessionEventsDelta
                     {
                         TurnEnd = latest,
+                        TurnStart = latestStart,
                         PermissionUpdates = permissions
                     };
                 }
@@ -1809,6 +1910,37 @@ namespace CodexHalo
                 value != null
                 ? Convert.ToString(value, CultureInfo.InvariantCulture)
                 : String.Empty;
+        }
+
+        private static string NestedStringValue(
+            Dictionary<string, object> dictionary,
+            string parentKey,
+            string childKey)
+        {
+            object parent;
+            if (dictionary == null ||
+                !dictionary.TryGetValue(parentKey, out parent) ||
+                parent == null)
+            {
+                return String.Empty;
+            }
+            Dictionary<string, object> nested =
+                parent as Dictionary<string, object>;
+            if (nested == null)
+            {
+                // JavaScriptSerializer may yield Dictionary<string, object> via
+                // nested objects; also accept IDictionary-like forms.
+                System.Collections.IDictionary idict =
+                    parent as System.Collections.IDictionary;
+                if (idict == null || !idict.Contains(childKey) ||
+                    idict[childKey] == null)
+                {
+                    return String.Empty;
+                }
+                return Convert.ToString(idict[childKey], CultureInfo.InvariantCulture)
+                    ?? String.Empty;
+            }
+            return StringValue(nested, childKey);
         }
     }
 

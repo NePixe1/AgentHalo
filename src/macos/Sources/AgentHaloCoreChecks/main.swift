@@ -3018,6 +3018,127 @@ func testGrokHookStatusMonitorMapsSessionEscCancelToError() throws {
     expect(interrupted?.active == false, "esc cancel not active")
 }
 
+func testGrokHookReducerSteerCancelDoesNotPaintError() {
+    var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:02Z","event":"PreToolUse","sessionId":"s1","cwd":"/p","toolName":"read_file","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 2)
+    )
+    expect(r.snapshot.state, .working, "precondition: working")
+
+    // Sent now / steer soft-ends without the red fault ring.
+    r.applySteerCancel(at: Date(timeIntervalSince1970: 3))
+    expect(r.snapshot.state, .idle, "steer cancel → idle not error")
+    expect(r.snapshot.action, "Ready", "steer cancel action is Ready")
+    expect(r.snapshot.active, false, "steer cancel clears active")
+}
+
+func testGrokSessionTurnEventsReaderSupersedesCancelWithSteerStart() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-grok-steer-events-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let eventsURL = root.appendingPathComponent("events.jsonl")
+
+    // Same-chunk: cancel then turn_started with cancel_then_send (real steer path).
+    let chunk = """
+    {"ts":"2026-07-30T08:00:00.000Z","type":"turn_started"}
+    {"ts":"2026-07-30T08:00:04.000Z","type":"turn_ended","outcome":"cancelled","cancellation_category":"mid_turn_abort","cancellation_context":{"trigger":"esc"}}
+    {"ts":"2026-07-30T08:00:04.010Z","type":"turn_started","redirect_kind":"cancel_then_send"}
+
+    """
+    try Data(chunk.utf8).write(to: eventsURL)
+
+    let reader = GrokSessionTurnEventsReader()
+    let delta = reader.poll(eventsURL: eventsURL)
+    expect(delta.turnEnd == nil, "steer start supersedes cancelled turn_ended in same chunk")
+    expect(delta.turnStart != nil, "turn_started is surfaced")
+    expect(delta.turnStart?.redirectKind, "cancel_then_send", "redirect_kind parsed")
+    expect(delta.turnStart?.isSteerRedirect == true, "cancel_then_send is steer redirect")
+}
+
+func testGrokSessionTurnEventsReaderParsesSendNowTrigger() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-grok-send-now-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let eventsURL = root.appendingPathComponent("events.jsonl")
+
+    let line = #"{"ts":"2026-07-30T08:00:04.000Z","type":"turn_ended","outcome":"cancelled","cancellation_category":"mid_turn_abort","cancellation_context":{"trigger":"send_now"}}"# + "\n"
+    try Data(line.utf8).write(to: eventsURL)
+
+    let reader = GrokSessionTurnEventsReader()
+    let delta = reader.poll(eventsURL: eventsURL)
+    expect(delta.turnEnd?.outcome, Optional.some(GrokSessionTurnEndOutcome.cancelled), "send_now is cancelled outcome")
+    expect(delta.turnEnd?.cancellationTrigger, "send_now", "trigger parsed")
+    expect(delta.turnEnd?.isSteerLikeCancel == true, "send_now is steer-like")
+}
+
+/// Sent now: UserPromptSubmit arrives ~4ms after turn_ended cancelled. The cancel
+/// must not overwrite thinking with the red Interrupted ring.
+func testGrokHookStatusMonitorSendNowDoesNotPaintError() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-grok-monitor-send-now-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let logs = root.appendingPathComponent("logs", isDirectory: true)
+    let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+    let cwd = "/tmp/AgentHaloSendNowTest"
+    let sessionId = "sess-send-now-1"
+    let encoded = GrokSessionContextReader.encodeWorkspaceDirectory(cwd)
+    let sessionDir = sessions
+        .appendingPathComponent(encoded, isDirectory: true)
+        .appendingPathComponent(sessionId, isDirectory: true)
+    try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+
+    let statusURL = logs.appendingPathComponent("grok-status.jsonl")
+    let eventsURL = sessionDir.appendingPathComponent("events.jsonl")
+
+    let hookLines = """
+    {"timestamp":"2026-07-30T08:00:01.000Z","event":"UserPromptSubmit","sessionId":"\(sessionId)","cwd":"\(cwd)","source":"grok-hook"}
+    {"timestamp":"2026-07-30T08:00:03.000Z","event":"PreToolUse","sessionId":"\(sessionId)","cwd":"\(cwd)","toolName":"read_file","source":"grok-hook"}
+
+    """
+    try Data(hookLines.utf8).write(to: statusURL)
+    try Data(#"{"ts":"2026-07-30T08:00:01.500Z","type":"turn_started"}"#.utf8 + Data([0x0A]))
+        .write(to: eventsURL)
+
+    let monitor = GrokHookStatusMonitor(statusURL: statusURL, sessionsRoot: sessions)
+    let now = ISO8601DateFormatter().date(from: "2026-07-30T08:00:03Z") ?? Date()
+    expect(monitor.refresh(now: now), true, "hooks load")
+    expect(monitor.snapshots().first?.state, .working, "precondition: working")
+
+    // Same refresh: new UserPromptSubmit + send_now cancel (real Sent now race).
+    let newPrompt = #"{"timestamp":"2026-07-30T08:00:04.004Z","event":"UserPromptSubmit","sessionId":"\#(sessionId)","cwd":"\#(cwd)","source":"grok-hook"}"# + "\n"
+    let handleHooks = try FileHandle(forWritingTo: statusURL)
+    defer { try? handleHooks.close() }
+    _ = try handleHooks.seekToEnd()
+    try handleHooks.write(contentsOf: Data(newPrompt.utf8))
+    try handleHooks.synchronize()
+
+    let cancel = #"{"ts":"2026-07-30T08:00:04.000Z","type":"turn_ended","outcome":"cancelled","cancellation_category":"mid_turn_abort","cancellation_context":{"trigger":"send_now"}}"# + "\n"
+    let start = #"{"ts":"2026-07-30T08:00:04.004Z","type":"turn_started","redirect_kind":"queued_after_cancel"}"# + "\n"
+    let handleEvents = try FileHandle(forWritingTo: eventsURL)
+    defer { try? handleEvents.close() }
+    _ = try handleEvents.seekToEnd()
+    try handleEvents.write(contentsOf: Data((cancel + start).utf8))
+    try handleEvents.synchronize()
+
+    let steerNow = ISO8601DateFormatter().date(from: "2026-07-30T08:00:04.010Z")
+        ?? Date(timeIntervalSince1970: 1_753_862_404.01)
+    expect(monitor.refresh(now: steerNow), true, "send_now refresh changes state")
+    let after = monitor.snapshots().first
+    expect(after?.state, .thinking, "send_now keeps thinking from UserPromptSubmit")
+    expect(after?.state != .error, "send_now must not paint red Interrupted")
+    expect(after?.active == true, "send_now new turn is active")
+    expect(after?.action, "Thinking", "send_now action is Thinking")
+}
+
 /// Monitor integration: Auto-mode permission lines in events.jsonl + post-tool
 /// permission_prompt hook must not paint NEEDS YOU while a tool is running.
 func testGrokHookStatusMonitorIgnoresAutoPermissionDuringTool() throws {
@@ -4097,7 +4218,10 @@ do {
     try testGrokActiveSessionsReaderParsesArrayEntries()
     try testGrokSessionTurnEventsReaderDetectsCancelledTurnEnded()
     try testGrokSessionTurnEventsReaderParsesPermissionLifecycle()
+    try testGrokSessionTurnEventsReaderSupersedesCancelWithSteerStart()
+    try testGrokSessionTurnEventsReaderParsesSendNowTrigger()
     try testGrokHookStatusMonitorMapsSessionEscCancelToError()
+    try testGrokHookStatusMonitorSendNowDoesNotPaintError()
     try testGrokHookStatusMonitorIgnoresAutoPermissionDuringTool()
 } catch {
     fatalError("\(error)")
@@ -4164,6 +4288,7 @@ testGrokHookReducerHumanPermissionResolveClearsAttention()
 testGrokHookReducerAutoNoiseDuringToolExecutionStaysWorking()
 testGrokHookReducerHumanWaitAfterPreToolUseBecomesAttention()
 testGrokHookReducerMapsEscCancelToInterrupted()
+testGrokHookReducerSteerCancelDoesNotPaintError()
 do {
     try testClaudeCodeStatusHookIsolatesGrokAndClaudeStatusFiles()
 } catch {

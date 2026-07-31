@@ -1631,6 +1631,27 @@ public static class Diagnostics
                 Assert(idleCancel.Snapshot.State == HaloState.Idle,
                     "cancel on idle Ready is a no-op");
 
+                // Steer soft-cancel must not paint the red fault ring.
+                GrokHookStatusReducer steerReducer =
+                    new GrokHookStatusReducer("steer-session");
+                steerReducer.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:10Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"steer-session\",\"cwd\":\"/p/AgentHalo\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(10));
+                steerReducer.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:12Z\",\"event\":\"PreToolUse\",\"sessionId\":\"steer-session\",\"cwd\":\"/p/AgentHalo\",\"toolName\":\"read_file\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(12));
+                steerReducer.ApplyWorkingVisibility(t0.AddSeconds(13));
+                Assert(steerReducer.Snapshot.State == HaloState.Working,
+                    "precondition working before steer cancel");
+                steerReducer.ApplySteerCancel(t0.AddSeconds(14));
+                Assert(steerReducer.Snapshot.State == HaloState.Idle,
+                    "steer cancel -> idle not error");
+                Assert(String.Equals(steerReducer.Snapshot.Action, "Ready",
+                    StringComparison.Ordinal),
+                    "steer cancel action is Ready");
+                Assert(!steerReducer.Snapshot.Active,
+                    "steer cancel clears active turn");
+
                 // Incremental events.jsonl tail + monitor wiring.
                 string cancelHome = Path.Combine(Path.GetTempPath(),
                     "agent-halo-grok-esc-" + Guid.NewGuid().ToString("N"));
@@ -1700,12 +1721,104 @@ public static class Diagnostics
                     GrokSessionEventsDelta secondPoll = turnReader.Poll(seedPath);
                     Assert(secondPoll != null && secondPoll.IsEmpty,
                         "second poll with no growth is empty");
+
+                    // Same-chunk cancel + cancel_then_send start supersedes fault.
+                    string steerPath = Path.Combine(cancelHome, "steer-events.jsonl");
+                    File.WriteAllText(steerPath,
+                        "{\"ts\":\"2026-07-30T08:00:00.000Z\",\"type\":\"turn_started\"}\n" +
+                        "{\"ts\":\"2026-07-30T08:00:04.000Z\",\"type\":\"turn_ended\",\"outcome\":\"cancelled\",\"cancellation_category\":\"mid_turn_abort\",\"cancellation_context\":{\"trigger\":\"esc\"}}\n" +
+                        "{\"ts\":\"2026-07-30T08:00:04.010Z\",\"type\":\"turn_started\",\"redirect_kind\":\"cancel_then_send\"}\n",
+                        Encoding.UTF8);
+                    GrokSessionTurnEventsReader steerReader =
+                        new GrokSessionTurnEventsReader();
+                    GrokSessionEventsDelta steerDelta = steerReader.Poll(steerPath);
+                    Assert(steerDelta != null && steerDelta.TurnEnd == null,
+                        "steer start supersedes cancelled turn_ended in same chunk");
+                    Assert(steerDelta != null && steerDelta.TurnStart != null &&
+                        String.Equals(steerDelta.TurnStart.RedirectKind,
+                            "cancel_then_send", StringComparison.Ordinal),
+                        "redirect_kind cancel_then_send parsed");
+                    Assert(steerDelta != null && steerDelta.TurnStart != null &&
+                        steerDelta.TurnStart.IsSteerRedirect,
+                        "cancel_then_send is steer redirect");
+
+                    // send_now trigger is steer-like.
+                    string sendNowPath = Path.Combine(cancelHome, "send-now.jsonl");
+                    File.WriteAllText(sendNowPath,
+                        "{\"ts\":\"2026-07-30T08:00:04.000Z\",\"type\":\"turn_ended\",\"outcome\":\"cancelled\",\"cancellation_category\":\"mid_turn_abort\",\"cancellation_context\":{\"trigger\":\"send_now\"}}\n",
+                        Encoding.UTF8);
+                    GrokSessionTurnEventsReader sendNowReader =
+                        new GrokSessionTurnEventsReader();
+                    GrokSessionEventsDelta sendNowDelta = sendNowReader.Poll(sendNowPath);
+                    Assert(sendNowDelta != null && sendNowDelta.TurnEnd != null &&
+                        sendNowDelta.TurnEnd.IsSteerLikeCancel,
+                        "send_now trigger is steer-like cancel");
                 }
                 finally
                 {
                     try
                     {
                         Directory.Delete(cancelHome, true);
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                // Sent now race: UserPromptSubmit ~4ms after cancel must not go red.
+                string sendNowHome = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-grok-send-now-" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    string statusPath = Path.Combine(sendNowHome, "grok-status.jsonl");
+                    string sessionsRoot = Path.Combine(sendNowHome, "sessions");
+                    string cwd = "/tmp/AgentHaloSendNowTest";
+                    string sessionId = "sess-send-now-1";
+                    string encoded =
+                        GrokSessionContextReader.EncodeWorkspaceDirectory(cwd);
+                    string sessionDir = Path.Combine(sessionsRoot, encoded, sessionId);
+                    Directory.CreateDirectory(sessionDir);
+                    File.WriteAllText(statusPath,
+                        "{\"timestamp\":\"2026-07-30T08:00:01.000Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"source\":\"grok-hook\"}\n" +
+                        "{\"timestamp\":\"2026-07-30T08:00:03.000Z\",\"event\":\"PreToolUse\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"toolName\":\"read_file\",\"source\":\"grok-hook\"}\n",
+                        Encoding.UTF8);
+                    File.WriteAllText(Path.Combine(sessionDir, "events.jsonl"),
+                        "{\"ts\":\"2026-07-30T08:00:01.500Z\",\"type\":\"turn_started\"}\n",
+                        Encoding.UTF8);
+
+                    GrokHookStatusMonitor sendNowMonitor =
+                        new GrokHookStatusMonitor(statusPath, sessionsRoot);
+                    Assert(sendNowMonitor.Refresh(), "hooks load for send_now");
+                    SessionSnapshot workingSnap =
+                        sendNowMonitor.Snapshots().FirstOrDefault();
+                    Assert(workingSnap != null &&
+                        workingSnap.State == HaloState.Working,
+                        "precondition: working before send_now");
+
+                    File.AppendAllText(statusPath,
+                        "{\"timestamp\":\"2026-07-30T08:00:04.004Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"source\":\"grok-hook\"}\n",
+                        Encoding.UTF8);
+                    File.AppendAllText(Path.Combine(sessionDir, "events.jsonl"),
+                        "{\"ts\":\"2026-07-30T08:00:04.000Z\",\"type\":\"turn_ended\",\"outcome\":\"cancelled\",\"cancellation_category\":\"mid_turn_abort\",\"cancellation_context\":{\"trigger\":\"send_now\"}}\n" +
+                        "{\"ts\":\"2026-07-30T08:00:04.004Z\",\"type\":\"turn_started\",\"redirect_kind\":\"queued_after_cancel\"}\n",
+                        Encoding.UTF8);
+                    Assert(sendNowMonitor.Refresh(), "send_now refresh changes state");
+                    SessionSnapshot afterSteer =
+                        sendNowMonitor.Snapshots().FirstOrDefault();
+                    Assert(afterSteer != null &&
+                        afterSteer.State == HaloState.Thinking,
+                        "send_now keeps thinking from UserPromptSubmit");
+                    Assert(afterSteer != null &&
+                        afterSteer.State != HaloState.Error,
+                        "send_now must not paint red Interrupted");
+                    Assert(afterSteer != null && afterSteer.Active,
+                        "send_now new turn is active");
+                }
+                finally
+                {
+                    try
+                    {
+                        Directory.Delete(sendNowHome, true);
                     }
                     catch
                     {

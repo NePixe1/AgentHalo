@@ -27,10 +27,57 @@ public enum GrokSessionTurnEndOutcome: Equatable, Sendable {
 public struct GrokSessionTurnEnd: Equatable, Sendable {
     public var endedAt: Date
     public var outcome: GrokSessionTurnEndOutcome
+    /// `cancellation_category` from events.jsonl (e.g. `mid_turn_abort`,
+    /// `permission_rejected`).
+    public var cancellationCategory: String
+    /// `cancellation_context.trigger` (e.g. `esc`, `send_now`).
+    public var cancellationTrigger: String
 
-    public init(endedAt: Date, outcome: GrokSessionTurnEndOutcome) {
+    public init(
+        endedAt: Date,
+        outcome: GrokSessionTurnEndOutcome,
+        cancellationCategory: String = "",
+        cancellationTrigger: String = ""
+    ) {
         self.endedAt = endedAt
         self.outcome = outcome
+        self.cancellationCategory = cancellationCategory
+        self.cancellationTrigger = cancellationTrigger
+    }
+
+    /// Steer / Sent now aborts the current turn only to immediately start another.
+    /// Those must not paint the red fault ring (unlike pure Esc interrupt).
+    public var isSteerLikeCancel: Bool {
+        guard outcome == .cancelled else { return false }
+        switch cancellationTrigger.lowercased() {
+        case "send_now", "steer", "redirect", "queued_send":
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+/// A `turn_started` line from session `events.jsonl`.
+///
+/// Grok marks steer redirects with `redirect_kind` (`cancel_then_send`,
+/// `queued_after_cancel`). A start after a cancel supersedes the fault ring.
+public struct GrokSessionTurnStart: Equatable, Sendable {
+    public var startedAt: Date
+    public var redirectKind: String
+
+    public init(startedAt: Date, redirectKind: String = "") {
+        self.startedAt = startedAt
+        self.redirectKind = redirectKind
+    }
+
+    public var isSteerRedirect: Bool {
+        switch redirectKind.lowercased() {
+        case "cancel_then_send", "queued_after_cancel":
+            return true
+        default:
+            return false
+        }
     }
 }
 
@@ -57,15 +104,21 @@ public struct GrokPermissionUpdate: Equatable, Sendable {
 /// One poll of a session `events.jsonl` tail.
 public struct GrokSessionEventsDelta: Equatable, Sendable {
     public var turnEnd: GrokSessionTurnEnd?
+    public var turnStart: GrokSessionTurnStart?
     public var permissionUpdates: [GrokPermissionUpdate]
 
-    public init(turnEnd: GrokSessionTurnEnd? = nil, permissionUpdates: [GrokPermissionUpdate] = []) {
+    public init(
+        turnEnd: GrokSessionTurnEnd? = nil,
+        turnStart: GrokSessionTurnStart? = nil,
+        permissionUpdates: [GrokPermissionUpdate] = []
+    ) {
         self.turnEnd = turnEnd
+        self.turnStart = turnStart
         self.permissionUpdates = permissionUpdates
     }
 
     public var isEmpty: Bool {
-        turnEnd == nil && permissionUpdates.isEmpty
+        turnEnd == nil && turnStart == nil && permissionUpdates.isEmpty
     }
 }
 
@@ -161,6 +214,7 @@ public final class GrokSessionTurnEventsReader {
             }
 
             var latest: GrokSessionTurnEnd?
+            var latestStart: GrokSessionTurnStart?
             var lastStartedAt: Date?
             var permissions: [GrokPermissionUpdate] = []
             for line in lines {
@@ -177,9 +231,34 @@ public final class GrokSessionTurnEventsReader {
                 switch type {
                 case "turn_started":
                     lastStartedAt = at
+                    let redirectKind = string(root["redirect_kind"])
+                    // Only surface starts that carry a steer redirect_kind —
+                    // ordinary starts would make isEmpty false on every turn.
+                    if !redirectKind.isEmpty {
+                        latestStart = GrokSessionTurnStart(
+                            startedAt: at,
+                            redirectKind: redirectKind
+                        )
+                    }
+                    // Steer (cancel_then_send / queued_after_cancel) writes
+                    // turn_ended cancelled then turn_started in the same tail
+                    // chunk. A newer start supersedes any prior terminal end.
+                    if let end = latest, at >= end.endedAt {
+                        latest = nil
+                    }
                 case "turn_ended":
                     let outcome = GrokSessionTurnEndOutcome(raw: string(root["outcome"]))
-                    let end = GrokSessionTurnEnd(endedAt: at, outcome: outcome)
+                    let category = string(root["cancellation_category"])
+                    var trigger = ""
+                    if let ctx = root["cancellation_context"] as? [String: Any] {
+                        trigger = string(ctx["trigger"])
+                    }
+                    let end = GrokSessionTurnEnd(
+                        endedAt: at,
+                        outcome: outcome,
+                        cancellationCategory: category,
+                        cancellationTrigger: trigger
+                    )
                     // Prefer a cancel/fail that is not already superseded by a newer start.
                     if let lastStartedAt, lastStartedAt > at {
                         continue
@@ -217,7 +296,11 @@ public final class GrokSessionTurnEventsReader {
                     break
                 }
             }
-            return GrokSessionEventsDelta(turnEnd: latest, permissionUpdates: permissions)
+            return GrokSessionEventsDelta(
+                turnEnd: latest,
+                turnStart: latestStart,
+                permissionUpdates: permissions
+            )
         } catch {
             return GrokSessionEventsDelta()
         }
