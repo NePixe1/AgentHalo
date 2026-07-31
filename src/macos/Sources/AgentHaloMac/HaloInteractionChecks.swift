@@ -75,6 +75,7 @@ func runHaloInteractionChecks() {
     testDetailsPanelUsesCompactContextPercent()
     testDetailsPanelKeepsContextPillWidthStable()
     testVisibleDetailsPanelStatusRefreshIsWiredToTick()
+    testDetailsPanelLiveContextUpdateShowsPillWhileActive()
     testUsageTerminationWaitsForCoordinatorCancellation()
     testUsageTerminationHandshakeRejectsDuplicateWork()
     testUsageMonitoringLifecycleWiring()
@@ -2013,6 +2014,49 @@ private func testVisibleDetailsPanelStatusRefreshIsWiredToTick() {
         source.contains("detailsPanel.updateStatus(aggregate: displayAggregate())"),
         "status-only refresh should preserve existing details metadata and layout"
     )
+    expect(
+        source.contains("refreshVisibleGrokContextPillIfNeeded()"),
+        "status-only path should re-read Grok disk context so the pill appears mid-turn"
+    )
+    expect(
+        source.contains("detailsPanel.updateLiveContextPercent"),
+        "Grok mid-turn context updates must not rebuild quota/session rows"
+    )
+}
+
+@MainActor
+private func testDetailsPanelLiveContextUpdateShowsPillWhileActive() {
+    let panel = DetailsPanel()
+    let executing = AggregateSnapshot(
+        state: .working,
+        label: "EXECUTING",
+        detail: "AgentHalo - Running command",
+        sessions: [
+            SessionSnapshot(
+                threadId: "grok-live-1",
+                projectName: "AgentHalo",
+                workingDirectory: "/tmp/AgentHalo",
+                state: .working,
+                action: "Running command",
+                lastEventAt: Date(),
+                completedAt: nil,
+                active: true,
+                agent: .grok
+            )
+        ],
+        focusedAgent: .grok
+    )
+    // Full render without context (new session before disk occupancy is known).
+    panel.render(
+        aggregate: executing,
+        model: usageDetailsModel(provider: "Grok", plan: "SuperGrok", context: nil)
+    )
+    expect(panel.contextPillHiddenForTesting, "no context data keeps the pill hidden")
+
+    // Mid-turn live totalTokens becomes available without a full content rebuild.
+    panel.updateLiveContextPercent(12.5, aggregate: executing)
+    expect(!panel.contextPillHiddenForTesting, "live context push should show the pill while EXECUTING")
+    expect(panel.contextValueForTesting == "13%", "live percent should render compactly")
 }
 
 private func testUsageTerminationWaitsForCoordinatorCancellation() {

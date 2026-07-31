@@ -14,7 +14,7 @@ namespace CodexHalo
     /// Writes (or updates) Grok Build hook configuration so Agent Halo receives
     /// lifecycle events. Target: %USERPROFILE%\.grok\hooks\agent-halo-status.json
     /// Command format mirrors Claude: "\"exe\" --claude-hook Event" (hook writer
-    /// routes via GROK_* env to grok-build-status.jsonl).
+    /// routes via GROK_* env to logs/grok-status.jsonl).
     /// </summary>
     public static class GrokHookConfigurator
     {
@@ -366,12 +366,37 @@ namespace CodexHalo
 
     public sealed class GrokHookStatusReducer
     {
+        /// <summary>
+        /// Fast path Auto resolutions (read/grep) complete well under this.
+        /// Shell Auto often sits in the 1.5–3 s band; those are gated by
+        /// permissionMode instead of this threshold alone.
+        /// </summary>
+        public const int AutoResolveWaitMsThreshold = 300;
+        /// <summary>
+        /// Hold before painting attention when mode is unknown/default so
+        /// same-poll auto resolve never flashes purple.
+        /// </summary>
+        public const double PendingPermissionAttentionDelaySeconds = 0.25;
+
         private readonly JavaScriptSerializer serializer;
         private DateTime workingVisibleUntilUtc;
         private DateTime thinkingVisibleUntilUtc;
         private string pendingWorkingAction;
+        /// <summary>
+        /// Genuine user-permission hold — must not auto-fade via stuck-tool net.
+        /// </summary>
         private bool permissionPrompt;
         private bool? wasActiveBeforeCompaction;
+        /// <summary>
+        /// First observation time of an unresolved permission_requested.
+        /// Delay clock uses observation time so late polls do not instantly purple.
+        /// </summary>
+        private DateTime pendingPermissionRequestedAtUtc = DateTime.MinValue;
+        /// <summary>
+        /// Last known Grok permissionMode from hooks (default / auto / plan /
+        /// bypassPermissions). Auto and bypass never need a purple NEEDS YOU ring.
+        /// </summary>
+        private string permissionMode;
 
         public SessionSnapshot Snapshot { get; private set; }
 
@@ -408,13 +433,14 @@ namespace CodexHalo
             Snapshot.LastEventUtc = eventUtc;
             Snapshot.EvidenceSource = AgentEvidenceSource.GrokHook;
             UpdateIdentity(root);
+            UpdatePermissionMode(root);
 
             switch (StringValue(root, "event"))
             {
                 case "SessionStart":
                     if (wasActiveBeforeCompaction.HasValue)
                     {
-                        permissionPrompt = false;
+                        ClearPermissionHold();
                         workingVisibleUntilUtc = DateTime.MinValue;
                         thinkingVisibleUntilUtc = DateTime.MinValue;
                         pendingWorkingAction = null;
@@ -424,7 +450,7 @@ namespace CodexHalo
                         Snapshot.CompletedUtc = DateTime.MinValue;
                         break;
                     }
-                    permissionPrompt = false;
+                    ClearPermissionHold();
                     workingVisibleUntilUtc = DateTime.MinValue;
                     thinkingVisibleUntilUtc = DateTime.MinValue;
                     pendingWorkingAction = null;
@@ -435,7 +461,7 @@ namespace CodexHalo
                     break;
                 case "UserPromptSubmit":
                     wasActiveBeforeCompaction = null;
-                    permissionPrompt = false;
+                    ClearPermissionHold();
                     workingVisibleUntilUtc = DateTime.MinValue;
                     thinkingVisibleUntilUtc = eventUtc.AddSeconds(0.7);
                     pendingWorkingAction = null;
@@ -446,7 +472,7 @@ namespace CodexHalo
                     break;
                 case "PreToolUse":
                     wasActiveBeforeCompaction = null;
-                    permissionPrompt = false;
+                    ClearPermissionHold();
                     workingVisibleUntilUtc = DateTime.MinValue;
                     string action = GeneratedHaloSpec.FriendlyAction(
                         NormalizeToolName(StringValue(root, "toolName")));
@@ -469,7 +495,7 @@ namespace CodexHalo
                 case "PostToolUse":
                 case "PostToolBatch":
                     wasActiveBeforeCompaction = null;
-                    permissionPrompt = false;
+                    ClearPermissionHold();
                     Snapshot.Active = true;
                     if (Snapshot.State == HaloState.Thinking &&
                         eventUtc < thinkingVisibleUntilUtc)
@@ -489,7 +515,7 @@ namespace CodexHalo
                     break;
                 case "PostToolUseFailure":
                     wasActiveBeforeCompaction = null;
-                    permissionPrompt = false;
+                    ClearPermissionHold();
                     Snapshot.Active = true;
                     if (Snapshot.State == HaloState.Thinking &&
                         eventUtc < thinkingVisibleUntilUtc)
@@ -508,22 +534,17 @@ namespace CodexHalo
                         .AddSeconds(0.65);
                     break;
                 case "Notification":
-                    ReduceNotification(root);
+                    ReduceNotification(root, eventUtc, nowUtc);
                     break;
                 case "PermissionRequest":
-                    wasActiveBeforeCompaction = null;
-                    permissionPrompt = true;
-                    workingVisibleUntilUtc = DateTime.MinValue;
-                    thinkingVisibleUntilUtc = DateTime.MinValue;
-                    pendingWorkingAction = null;
-                    Snapshot.Active = true;
-                    Snapshot.State = HaloState.Attention;
-                    Snapshot.Action = "Awaiting permission";
-                    Snapshot.CompletedUtc = DateTime.MinValue;
+                    // Grok does not emit this today; keep parity with Claude path
+                    // under the same Auto-safe rules as permission_prompt.
+                    ApplyPermissionPromptHook(eventUtc, nowUtc);
                     break;
                 case "PermissionDenied":
                     wasActiveBeforeCompaction = null;
-                    permissionPrompt = false;
+                    pendingPermissionRequestedAtUtc = DateTime.MinValue;
+                    permissionPrompt = true;
                     workingVisibleUntilUtc = DateTime.MinValue;
                     thinkingVisibleUntilUtc = DateTime.MinValue;
                     pendingWorkingAction = null;
@@ -534,7 +555,7 @@ namespace CodexHalo
                     break;
                 case "Stop":
                     wasActiveBeforeCompaction = null;
-                    permissionPrompt = false;
+                    ClearPermissionHold();
                     workingVisibleUntilUtc = DateTime.MinValue;
                     thinkingVisibleUntilUtc = DateTime.MinValue;
                     pendingWorkingAction = null;
@@ -545,7 +566,7 @@ namespace CodexHalo
                     break;
                 case "StopFailure":
                     wasActiveBeforeCompaction = null;
-                    permissionPrompt = false;
+                    ClearPermissionHold();
                     workingVisibleUntilUtc = DateTime.MinValue;
                     thinkingVisibleUntilUtc = DateTime.MinValue;
                     pendingWorkingAction = null;
@@ -559,7 +580,7 @@ namespace CodexHalo
                     {
                         wasActiveBeforeCompaction = Snapshot.Active;
                     }
-                    permissionPrompt = false;
+                    ClearPermissionHold();
                     workingVisibleUntilUtc = DateTime.MinValue;
                     thinkingVisibleUntilUtc = DateTime.MinValue;
                     pendingWorkingAction = null;
@@ -571,7 +592,7 @@ namespace CodexHalo
                 case "PostCompact":
                     bool? shouldResumeActiveTurn = wasActiveBeforeCompaction;
                     wasActiveBeforeCompaction = null;
-                    permissionPrompt = false;
+                    ClearPermissionHold();
                     workingVisibleUntilUtc = DateTime.MinValue;
                     thinkingVisibleUntilUtc = DateTime.MinValue;
                     pendingWorkingAction = null;
@@ -599,7 +620,7 @@ namespace CodexHalo
                     break;
                 case "SessionEnd":
                     wasActiveBeforeCompaction = null;
-                    permissionPrompt = false;
+                    ClearPermissionHold();
                     workingVisibleUntilUtc = DateTime.MinValue;
                     thinkingVisibleUntilUtc = DateTime.MinValue;
                     pendingWorkingAction = null;
@@ -643,7 +664,7 @@ namespace CodexHalo
                 return;
             }
             wasActiveBeforeCompaction = null;
-            permissionPrompt = false;
+            ClearPermissionHold();
             workingVisibleUntilUtc = DateTime.MinValue;
             thinkingVisibleUntilUtc = DateTime.MinValue;
             pendingWorkingAction = null;
@@ -657,6 +678,9 @@ namespace CodexHalo
 
         public void ApplyWorkingVisibility(DateTime nowUtc)
         {
+            // Pending human permission → attention after delay (Strategy C).
+            ApplyPermissionVisibility(nowUtc);
+
             if (!Snapshot.Active)
             {
                 return;
@@ -702,24 +726,17 @@ namespace CodexHalo
             }
         }
 
-        private void ReduceNotification(Dictionary<string, object> root)
+        private void ReduceNotification(Dictionary<string, object> root,
+            DateTime eventUtc, DateTime nowUtc)
         {
             switch (StringValue(root, "notificationType"))
             {
                 case "permission_prompt":
-                    wasActiveBeforeCompaction = null;
-                    permissionPrompt = true;
-                    workingVisibleUntilUtc = DateTime.MinValue;
-                    thinkingVisibleUntilUtc = DateTime.MinValue;
-                    pendingWorkingAction = null;
-                    Snapshot.Active = true;
-                    Snapshot.State = HaloState.Attention;
-                    Snapshot.Action = "Awaiting permission";
-                    Snapshot.CompletedUtc = DateTime.MinValue;
+                    ApplyPermissionPromptHook(eventUtc, nowUtc);
                     break;
                 case "idle_prompt":
                     wasActiveBeforeCompaction = null;
-                    permissionPrompt = false;
+                    ClearPermissionHold();
                     workingVisibleUntilUtc = DateTime.MinValue;
                     thinkingVisibleUntilUtc = DateTime.MinValue;
                     pendingWorkingAction = null;
@@ -729,6 +746,210 @@ namespace CodexHalo
                     Snapshot.CompletedUtc = DateTime.MinValue;
                     break;
             }
+        }
+
+        // Strategy A: hook permission_prompt — never paint attention immediately.
+        // Auto/bypass suppress entirely; otherwise arm Strategy C delayed pending.
+        private void ApplyPermissionPromptHook(DateTime eventUtc, DateTime observedAtUtc)
+        {
+            wasActiveBeforeCompaction = null;
+            if (SuppressesPermissionAttention)
+            {
+                pendingPermissionRequestedAtUtc = DateTime.MinValue;
+                return;
+            }
+            ArmPendingPermission(eventUtc, observedAtUtc);
+        }
+
+        /// <summary>
+        /// Strategy C: begin a permission decision without painting attention yet.
+        /// Grok emits PreToolUse before the permission UI, so state is often already
+        /// Working — still arm the timer in ask modes.
+        /// </summary>
+        public void ApplyPermissionRequested(DateTime eventUtc, DateTime observedAtUtc)
+        {
+            if (SuppressesPermissionAttention)
+            {
+                pendingPermissionRequestedAtUtc = DateTime.MinValue;
+                if (eventUtc > Snapshot.LastEventUtc)
+                {
+                    Snapshot.LastEventUtc = eventUtc;
+                }
+                return;
+            }
+            ArmPendingPermission(eventUtc, observedAtUtc);
+        }
+
+        public void ApplyPermissionResolved(string decision, int waitMs, DateTime eventUtc)
+        {
+            pendingPermissionRequestedAtUtc = DateTime.MinValue;
+            if (eventUtc > Snapshot.LastEventUtc)
+            {
+                Snapshot.LastEventUtc = eventUtc;
+            }
+
+            bool denied = IsDeniedDecision(decision);
+            bool auto = waitMs < AutoResolveWaitMsThreshold || SuppressesPermissionAttention;
+
+            if (auto && !denied)
+            {
+                ClearPermissionHold();
+                if (Snapshot.State == HaloState.Attention)
+                {
+                    Snapshot.Active = true;
+                    Snapshot.State = HaloState.Thinking;
+                    Snapshot.Action = "Thinking";
+                }
+                return;
+            }
+
+            if (denied)
+            {
+                permissionPrompt = true;
+                workingVisibleUntilUtc = DateTime.MinValue;
+                thinkingVisibleUntilUtc = DateTime.MinValue;
+                pendingWorkingAction = null;
+                Snapshot.Active = true;
+                Snapshot.State = HaloState.Attention;
+                Snapshot.Action = "Permission denied";
+                Snapshot.CompletedUtc = DateTime.MinValue;
+                return;
+            }
+
+            if (Snapshot.State == HaloState.Attention || permissionPrompt)
+            {
+                ClearPermissionHold();
+                Snapshot.Active = true;
+                if (Snapshot.State == HaloState.Attention)
+                {
+                    Snapshot.State = HaloState.Thinking;
+                    Snapshot.Action = "Thinking";
+                }
+                Snapshot.CompletedUtc = DateTime.MinValue;
+            }
+        }
+
+        public void ApplyPermissionUpdate(GrokPermissionUpdate update, DateTime nowUtc)
+        {
+            if (update == null)
+            {
+                return;
+            }
+            if (update.Kind == GrokPermissionUpdateKind.Requested)
+            {
+                ApplyPermissionRequested(update.AtUtc, nowUtc);
+            }
+            else
+            {
+                ApplyPermissionResolved(update.Decision, update.WaitMs, update.AtUtc);
+            }
+        }
+
+        /// <summary>
+        /// Promote still-pending permission_requested to NEEDS YOU after delay.
+        /// Applies even when state is Working (PreToolUse before human prompt).
+        /// Suppressed entirely while permissionMode is auto/bypass.
+        /// </summary>
+        public void ApplyPermissionVisibility(DateTime nowUtc)
+        {
+            if (pendingPermissionRequestedAtUtc == DateTime.MinValue)
+            {
+                return;
+            }
+            if (SuppressesPermissionAttention)
+            {
+                pendingPermissionRequestedAtUtc = DateTime.MinValue;
+                return;
+            }
+            if ((nowUtc - pendingPermissionRequestedAtUtc).TotalSeconds <
+                PendingPermissionAttentionDelaySeconds)
+            {
+                return;
+            }
+            pendingPermissionRequestedAtUtc = DateTime.MinValue;
+            permissionPrompt = true;
+            workingVisibleUntilUtc = DateTime.MinValue;
+            thinkingVisibleUntilUtc = DateTime.MinValue;
+            pendingWorkingAction = null;
+            Snapshot.Active = true;
+            Snapshot.State = HaloState.Attention;
+            Snapshot.Action = "Awaiting permission";
+            Snapshot.CompletedUtc = DateTime.MinValue;
+            if (nowUtc > Snapshot.LastEventUtc)
+            {
+                Snapshot.LastEventUtc = nowUtc;
+            }
+        }
+
+        private void ArmPendingPermission(DateTime eventUtc, DateTime observedAtUtc)
+        {
+            if (pendingPermissionRequestedAtUtc == DateTime.MinValue)
+            {
+                pendingPermissionRequestedAtUtc = observedAtUtc;
+            }
+            if (eventUtc > Snapshot.LastEventUtc)
+            {
+                Snapshot.LastEventUtc = eventUtc;
+            }
+            if (!Snapshot.Active &&
+                (Snapshot.State == HaloState.Idle || Snapshot.State == HaloState.Done))
+            {
+                Snapshot.Active = true;
+            }
+        }
+
+        private void ClearPermissionHold()
+        {
+            permissionPrompt = false;
+            pendingPermissionRequestedAtUtc = DateTime.MinValue;
+        }
+
+        private bool SuppressesPermissionAttention
+        {
+            get { return IsAutoLikePermissionMode(permissionMode); }
+        }
+
+        private void UpdatePermissionMode(Dictionary<string, object> root)
+        {
+            string mode = StringValue(root, "permissionMode");
+            if (!String.IsNullOrEmpty(mode))
+            {
+                permissionMode = mode;
+            }
+        }
+
+        public static bool IsAutoLikePermissionMode(string mode)
+        {
+            if (String.IsNullOrEmpty(mode))
+            {
+                return false;
+            }
+            switch (mode.Trim().ToLowerInvariant())
+            {
+                case "auto":
+                case "bypasspermissions":
+                case "bypass_permissions":
+                case "always-approve":
+                case "always_approve":
+                case "yolo":
+                case "dontask":
+                case "dont_ask":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        private static bool IsDeniedDecision(string decision)
+        {
+            if (String.IsNullOrEmpty(decision))
+            {
+                return false;
+            }
+            string lower = decision.ToLowerInvariant();
+            return lower.IndexOf("reject", StringComparison.Ordinal) >= 0 ||
+                lower.IndexOf("deny", StringComparison.Ordinal) >= 0 ||
+                String.Equals(lower, "denied", StringComparison.Ordinal);
         }
 
         private void UpdateIdentity(Dictionary<string, object> root)
@@ -810,8 +1031,7 @@ namespace CodexHalo
         private DateTime lastModifiedUtc;
 
         public GrokHookStatusMonitor()
-            : this(Path.Combine(ClaudeHookStatusWriter.AgentHaloDataDirectory(),
-                "grok-build-status.jsonl"),
+            : this(AgentHaloPaths.GrokStatusLog(),
                 GrokSessionContextReader.DefaultSessionsRoot())
         {
         }
@@ -904,8 +1124,9 @@ namespace CodexHalo
         }
 
         /// <summary>
-        /// Esc cancel does not emit Stop hooks. For still-active sessions, poll
-        /// events.jsonl and map cancelled/failed turn_ended onto the fault ring.
+        /// Poll session events.jsonl for:
+        /// - Esc cancel / failed turn_ended (hooks skip Stop on interrupt)
+        /// - permission_requested / permission_resolved (Strategy C: Auto vs human)
         /// </summary>
         private bool ApplySessionTurnEvents(DateTime now)
         {
@@ -927,33 +1148,45 @@ namespace CodexHalo
                 {
                     continue;
                 }
-                GrokSessionTurnEnd turnEnd = turnEventsReader.Poll(eventsPath);
-                if (turnEnd == null)
+                GrokSessionEventsDelta delta = turnEventsReader.Poll(eventsPath);
+                if (delta == null || delta.IsEmpty)
                 {
                     continue;
                 }
-                if (turnEnd.Outcome != GrokSessionTurnEndOutcome.Cancelled &&
-                    turnEnd.Outcome != GrokSessionTurnEndOutcome.Failed)
-                {
-                    continue;
-                }
-                // Newer hook activity means the session already moved on
-                // (e.g. UserPromptSubmit after a prior Esc cancel).
-                if (turnEnd.EndedAtUtc.AddSeconds(0.25) < snapshot.LastEventUtc)
-                {
-                    continue;
-                }
+
                 HaloState beforeState = reducer.Snapshot.State;
                 string beforeAction = reducer.Snapshot.Action;
                 bool beforeActive = reducer.Snapshot.Active;
-                if (turnEnd.Outcome == GrokSessionTurnEndOutcome.Cancelled)
+
+                if (delta.PermissionUpdates != null)
                 {
-                    reducer.ApplyTurnCancelled(turnEnd.EndedAtUtc);
+                    for (int i = 0; i < delta.PermissionUpdates.Count; i++)
+                    {
+                        reducer.ApplyPermissionUpdate(delta.PermissionUpdates[i], now);
+                    }
                 }
-                else
+
+                GrokSessionTurnEnd turnEnd = delta.TurnEnd;
+                if (turnEnd != null &&
+                    (turnEnd.Outcome == GrokSessionTurnEndOutcome.Cancelled ||
+                     turnEnd.Outcome == GrokSessionTurnEndOutcome.Failed))
                 {
-                    reducer.ApplyTurnFailed(turnEnd.EndedAtUtc);
+                    // Newer hook activity means the session already moved on
+                    // (e.g. UserPromptSubmit after a prior Esc cancel).
+                    SessionSnapshot latest = reducer.Snapshot;
+                    if (turnEnd.EndedAtUtc.AddSeconds(0.25) >= latest.LastEventUtc)
+                    {
+                        if (turnEnd.Outcome == GrokSessionTurnEndOutcome.Cancelled)
+                        {
+                            reducer.ApplyTurnCancelled(turnEnd.EndedAtUtc);
+                        }
+                        else
+                        {
+                            reducer.ApplyTurnFailed(turnEnd.EndedAtUtc);
+                        }
+                    }
                 }
+
                 if (beforeState != reducer.Snapshot.State ||
                     beforeActive != reducer.Snapshot.Active ||
                     !String.Equals(beforeAction, reducer.Snapshot.Action,
@@ -1151,8 +1384,46 @@ namespace CodexHalo
         public GrokSessionTurnEndOutcome Outcome;
     }
 
+    public enum GrokPermissionUpdateKind
+    {
+        Requested,
+        Resolved
+    }
+
     /// <summary>
-    /// Incrementally tails events.jsonl for turn_ended / turn_started lines.
+    /// Permission lifecycle lines from Grok session events.jsonl.
+    /// Auto still emits permission_requested/resolved; real waits have multi-second wait_ms.
+    /// </summary>
+    public sealed class GrokPermissionUpdate
+    {
+        public DateTime AtUtc;
+        public GrokPermissionUpdateKind Kind;
+        public string ToolName;
+        public string Decision;
+        public int WaitMs;
+    }
+
+    /// <summary>
+    /// One poll of a session events.jsonl tail.
+    /// </summary>
+    public sealed class GrokSessionEventsDelta
+    {
+        public GrokSessionTurnEnd TurnEnd;
+        public List<GrokPermissionUpdate> PermissionUpdates =
+            new List<GrokPermissionUpdate>();
+
+        public bool IsEmpty
+        {
+            get
+            {
+                return TurnEnd == null &&
+                    (PermissionUpdates == null || PermissionUpdates.Count == 0);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Incrementally tails events.jsonl for turn ends and permission lifecycle.
     /// Stateful per session path so the (often multi-hundred-KB) phase stream is
     /// not fully re-read every poll. First open seeks near EOF and only catch-up
     /// scans a short tail for an already-active turn cancelled mid-poll.
@@ -1178,7 +1449,7 @@ namespace CodexHalo
             tails.Clear();
         }
 
-        public GrokSessionTurnEnd Poll(string eventsPath)
+        public GrokSessionEventsDelta Poll(string eventsPath)
         {
             if (String.IsNullOrEmpty(eventsPath) || !File.Exists(eventsPath))
             {
@@ -1186,7 +1457,7 @@ namespace CodexHalo
                 {
                     tails.Remove(eventsPath);
                 }
-                return null;
+                return new GrokSessionEventsDelta();
             }
 
             TailState state;
@@ -1203,14 +1474,14 @@ namespace CodexHalo
             }
             catch
             {
-                return null;
+                return new GrokSessionEventsDelta();
             }
             long size = info.Length;
             DateTime mtime = info.LastWriteTimeUtc;
             if (size <= 0)
             {
                 tails[eventsPath] = new TailState();
-                return null;
+                return new GrokSessionEventsDelta();
             }
 
             bool mtimeChanged = state.LastModifiedUtc != DateTime.MinValue &&
@@ -1238,7 +1509,7 @@ namespace CodexHalo
             }
             else if (size <= state.Offset)
             {
-                return null;
+                return new GrokSessionEventsDelta();
             }
             else
             {
@@ -1276,6 +1547,8 @@ namespace CodexHalo
 
                     GrokSessionTurnEnd latest = null;
                     DateTime lastStartedAt = DateTime.MinValue;
+                    List<GrokPermissionUpdate> permissions =
+                        new List<GrokPermissionUpdate>();
                     for (int i = startIndex; i < complete; i++)
                     {
                         string line = lines[i].TrimEnd('\r').TrimStart('\ufeff');
@@ -1313,6 +1586,30 @@ namespace CodexHalo
                             lastStartedAt = at;
                             continue;
                         }
+                        if (String.Equals(type, "permission_requested",
+                            StringComparison.OrdinalIgnoreCase))
+                        {
+                            permissions.Add(new GrokPermissionUpdate
+                            {
+                                AtUtc = at,
+                                Kind = GrokPermissionUpdateKind.Requested,
+                                ToolName = StringValue(root, "tool_name")
+                            });
+                            continue;
+                        }
+                        if (String.Equals(type, "permission_resolved",
+                            StringComparison.OrdinalIgnoreCase))
+                        {
+                            permissions.Add(new GrokPermissionUpdate
+                            {
+                                AtUtc = at,
+                                Kind = GrokPermissionUpdateKind.Resolved,
+                                ToolName = StringValue(root, "tool_name"),
+                                Decision = StringValue(root, "decision"),
+                                WaitMs = IntValue(root, "wait_ms")
+                            });
+                            continue;
+                        }
                         if (!String.Equals(type, "turn_ended",
                             StringComparison.OrdinalIgnoreCase))
                         {
@@ -1330,13 +1627,56 @@ namespace CodexHalo
                             Outcome = outcome
                         };
                     }
-                    return latest;
+                    return new GrokSessionEventsDelta
+                    {
+                        TurnEnd = latest,
+                        PermissionUpdates = permissions
+                    };
                 }
             }
             catch
             {
-                return null;
+                return new GrokSessionEventsDelta();
             }
+        }
+
+        private static int IntValue(Dictionary<string, object> dictionary, string key)
+        {
+            object value;
+            if (dictionary == null || !dictionary.TryGetValue(key, out value) ||
+                value == null)
+            {
+                return 0;
+            }
+            try
+            {
+                if (value is int)
+                {
+                    return (int)value;
+                }
+                if (value is long)
+                {
+                    return (int)(long)value;
+                }
+                if (value is double)
+                {
+                    return (int)(double)value;
+                }
+                if (value is decimal)
+                {
+                    return (int)(decimal)value;
+                }
+                int parsed;
+                if (Int32.TryParse(Convert.ToString(value, CultureInfo.InvariantCulture),
+                    NumberStyles.Any, CultureInfo.InvariantCulture, out parsed))
+                {
+                    return parsed;
+                }
+            }
+            catch
+            {
+            }
+            return 0;
         }
 
         public static GrokSessionTurnEndOutcome ParseOutcome(string raw)

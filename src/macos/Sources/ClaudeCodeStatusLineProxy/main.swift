@@ -4,16 +4,25 @@ import Foundation
 
 let input = FileHandle.standardInput.readDataToEndOfFile()
 let home = FileManager.default.homeDirectoryForCurrentUser
-let agentHaloDirectory = home.appendingPathComponent(".agent-halo", isDirectory: true)
-let snapshotsDirectory = agentHaloDirectory.appendingPathComponent("claude-code-contexts", isDirectory: true)
-let originalCommandURL = agentHaloDirectory.appendingPathComponent("claude-code-statusline-original-command")
+let paths = AgentHaloPaths(homeDirectory: home)
+let snapshotsDirectory = paths.claudeContextsDirectory
+let originalCommandURL = paths.statuslineOriginalCommand
+
+guard ProcessInfo.processInfo.environment[
+    ClaudeStatusLineProxyRuntime.recursionGuardEnvironmentKey
+] != "1" else {
+    exit(0)
+}
 
 _ = try? ClaudeStatusLineProxyRuntime.capture(input: input, snapshotsDirectory: snapshotsDirectory)
 
 guard let commandData = try? Data(contentsOf: originalCommandURL),
       let command = String(data: commandData, encoding: .utf8),
       !command.isEmpty,
-      !command.contains("claude-code-statusline-proxy") else {
+      !AgentHaloBinaryStaging.commandReferencesExecutable(
+          command,
+          candidates: [paths.statuslineProxy, paths.legacyStatuslineProxy]
+      ) else {
     exit(0)
 }
 

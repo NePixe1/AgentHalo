@@ -204,8 +204,9 @@ public sealed class HaloWindow : Window
 
         private void OnLoaded(object sender, RoutedEventArgs e)
         {
-            ClaudeHookConfigurator.Configure();
-            GrokHookConfigurator.Configure();
+            // Single upgrade path: migrate data → stage stable hook binaries →
+            // rewrite Claude/Grok hooks only when unhealthy.
+            AgentHaloRuntimeBootstrap.Bootstrap();
             RestorePosition();
             RecoverHaloIfOffscreen();
             monitor.Start();

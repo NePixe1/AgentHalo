@@ -150,13 +150,16 @@ public static class ClaudeHookStatusWriter
                     ? null : notificationType;
                 record["errorText"] = String.IsNullOrEmpty(errorText) ? null : errorText;
                 record["model"] = String.IsNullOrEmpty(model) ? null : model;
+                string permissionMode = FirstString(Value(payload, "permission_mode"),
+                    Value(payload, "permissionMode"));
+                record["permissionMode"] = String.IsNullOrEmpty(permissionMode)
+                    ? null : permissionMode;
                 record["source"] = isGrok ? "grok-hook" : "claude-hook";
 
-                string root = AgentHaloDataDirectory(home);
-                Directory.CreateDirectory(root);
-                string fileName = isGrok
-                    ? "grok-build-status.jsonl" : "claude-code-status.jsonl";
-                string path = Path.Combine(root, fileName);
+                string path = isGrok
+                    ? AgentHaloPaths.GrokStatusLog(home)
+                    : AgentHaloPaths.ClaudeStatusLog(home);
+                Directory.CreateDirectory(AgentHaloPaths.LogsDirectory(home));
                 string line = Serializer.Serialize(record) + Environment.NewLine;
                 string mutexName = isGrok ? GrokMutexName : ClaudeMutexName;
 
@@ -197,17 +200,12 @@ public static class ClaudeHookStatusWriter
 
         public static string AgentHaloDataDirectory()
         {
-            return AgentHaloDataDirectory(Environment.GetFolderPath(
-                Environment.SpecialFolder.UserProfile));
+            return AgentHaloPaths.Root();
         }
 
         public static string AgentHaloDataDirectory(string home)
         {
-            if (String.IsNullOrEmpty(home))
-            {
-                home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            }
-            return Path.Combine(home, ".agent-halo");
+            return AgentHaloPaths.Root(home);
         }
 
         private static void RotateIfNeeded(string path)
@@ -1093,8 +1091,7 @@ public sealed class ClaudeHookStatusMonitor
         private DateTime lastModifiedUtc;
 
         public ClaudeHookStatusMonitor()
-            : this(Path.Combine(ClaudeHookStatusWriter.AgentHaloDataDirectory(),
-                "claude-code-status.jsonl"))
+            : this(AgentHaloPaths.ClaudeStatusLog())
         {
         }
 

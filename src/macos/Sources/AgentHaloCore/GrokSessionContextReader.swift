@@ -150,6 +150,10 @@ public struct GrokSessionContextReader: @unchecked Sendable {
     /// for the 0.3s details refresh path.
     private static let updatesTailByteLimit = 256 * 1024
 
+    /// Grok Build commonly reports a 500k window in `signals.json`. Used when a
+    /// brand-new session has live `totalTokens` but no end-of-turn signals yet.
+    public static let defaultContextWindowTokens: Int64 = 500_000
+
     public init(
         sessionsRoot: URL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".grok", isDirectory: true)
@@ -172,38 +176,35 @@ public struct GrokSessionContextReader: @unchecked Sendable {
     }
 
     public func read(sessionId: String, sessionDirectory: URL) -> GrokSessionContextSnapshot? {
-        let signalsURL = sessionDirectory.appendingPathComponent("signals.json")
-        guard fileManager.fileExists(atPath: signalsURL.path),
-              let data = try? Data(contentsOf: signalsURL),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return nil
-        }
+        // `signals.json` is end-of-turn only. New sessions and long mid-turn
+        // windows may have only streaming `updates.jsonl` totalTokens — still
+        // enough to drive the context pill.
+        let signalsRoot = loadJSONObject(named: "signals.json", in: sessionDirectory)
+        let liveTokens = latestLiveContextTokens(sessionDirectory: sessionDirectory)
 
-        guard var percent = contextUsedPercent(from: root) else {
-            return nil
-        }
-        var tokensUsed = int64(root["contextTokensUsed"])
-        let windowTokens = int64(root["contextWindowTokens"])
+        var tokensUsed = signalsRoot.flatMap { int64($0["contextTokensUsed"]) }
+        var windowTokens = signalsRoot.flatMap { int64($0["contextWindowTokens"]) }
+        var percent = signalsRoot.flatMap { contextUsedPercent(from: $0) }
+        var modelName = signalsRoot.flatMap { string($0["primaryModelId"]) }
 
-        // Prefer the live streaming estimate while a turn is in progress.
-        // `signals.json` is only rewritten at turn boundaries, so a multi-minute
-        // Grok turn would otherwise freeze the pill at the previous turn's end.
-        if let window = windowTokens, window > 0,
-           let liveTokens = latestLiveContextTokens(sessionDirectory: sessionDirectory),
-           liveTokens >= 0 {
+        if let liveTokens, liveTokens >= 0 {
             tokensUsed = liveTokens
+            let window = (windowTokens ?? 0) > 0
+                ? windowTokens!
+                : Self.defaultContextWindowTokens
+            windowTokens = window
             percent = min(100, max(0, Double(liveTokens) * 100 / Double(window)))
         }
 
-        var modelName = string(root["primaryModelId"])
+        guard let percent else {
+            return nil
+        }
+
         var sessionTitle: String?
         var workingDirectory: String?
         var projectName: String?
 
-        let summaryURL = sessionDirectory.appendingPathComponent("summary.json")
-        if fileManager.fileExists(atPath: summaryURL.path),
-           let summaryData = try? Data(contentsOf: summaryURL),
-           let summary = try? JSONSerialization.jsonObject(with: summaryData) as? [String: Any] {
+        if let summary = loadJSONObject(named: "summary.json", in: sessionDirectory) {
             if modelName == nil || modelName?.isEmpty == true {
                 modelName = string(summary["current_model_id"])
             }
@@ -248,7 +249,7 @@ public struct GrokSessionContextReader: @unchecked Sendable {
             let candidate = sessionsRoot
                 .appendingPathComponent(encoded, isDirectory: true)
                 .appendingPathComponent(sessionId, isDirectory: true)
-            if fileManager.fileExists(atPath: candidate.path) {
+            if isSessionDirectory(candidate) {
                 return candidate
             }
         }
@@ -269,11 +270,37 @@ public struct GrokSessionContextReader: @unchecked Sendable {
                 continue
             }
             let candidate = workspace.appendingPathComponent(sessionId, isDirectory: true)
-            if fileManager.fileExists(atPath: candidate.appendingPathComponent("signals.json").path) {
+            if isSessionDirectory(candidate) {
                 return candidate
             }
         }
         return nil
+    }
+
+    /// Session dirs may exist with only live `updates.jsonl` before the first
+    /// end-of-turn `signals.json` is written.
+    private func isSessionDirectory(_ url: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            return false
+        }
+        for name in ["signals.json", "updates.jsonl", "summary.json", "chat_history.jsonl"] {
+            if fileManager.fileExists(atPath: url.appendingPathComponent(name).path) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func loadJSONObject(named name: String, in directory: URL) -> [String: Any]? {
+        let url = directory.appendingPathComponent(name)
+        guard fileManager.fileExists(atPath: url.path),
+              let data = try? Data(contentsOf: url),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return root
     }
 
     private func contextUsedPercent(from root: [String: Any]) -> Double? {

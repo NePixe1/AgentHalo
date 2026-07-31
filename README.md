@@ -137,13 +137,42 @@ still produce a readable execution state.
 ## Privacy
 
 Agent Halo locally reads lifecycle events from `%USERPROFILE%\.codex\sessions`
-(or `~/.codex/sessions` on macOS). It automatically configures Claude Code lifecycle
-hooks in `~/.claude/settings.json` and Grok Build hooks under `~/.grok/hooks/`. On
-macOS it also configures a Claude Code status line proxy. Claude hook events go to
-`~/.agent-halo/claude-code-status.jsonl`; Grok hook events go to
-`~/.agent-halo/grok-build-status.jsonl`. On macOS, Claude context snapshots are written
-to `~/.agent-halo/claude-code-context.json`. It also performs read-only structured
-queries against `logs_2.sqlite` for Codex connection and service failures.
+and, on macOS, automatically configures:
+
+- Claude Code lifecycle hooks and status line proxy in `~/.claude/settings.json`
+- Grok Build lifecycle hooks in `~/.grok/hooks/agent-halo-status.json`
+
+Runtime agent data under the user home `.agent-halo` directory uses a shared layout:
+
+- `bin/` — staged hook binaries (`status-hook` / `statusline-proxy` on macOS,
+  `status-hook.exe` on Windows)
+- `state/` — small durable state such as the chained statusline command (macOS)
+- `logs/` — recent lifecycle events (`claude-status.jsonl`, `grok-status.jsonl`; rotated)
+- `cache/` — disposable cache (Claude context snapshots, usage snapshots)
+
+Grok Build also loads hooks from Claude's `settings.json` by default (Claude
+compatibility). That can make the same Agent Halo `status-hook` appear twice in a
+Grok session (`agent-halo-status` and `settings`). Behavior stays correct; the
+extra run is only redundant. To keep only the Grok-native path, set in
+`~/.grok/config.toml`:
+
+```toml
+[compat.claude]
+hooks = false
+```
+
+This disables Claude hook import only (not skills, rules, MCP, or Claude Code
+itself). Restart the Grok session for the change to take effect. Note that any
+*other* hooks you keep solely in `~/.claude/settings.json` will also stop running
+under Grok after this change.
+
+Windows keeps app settings and `halo.log` in `%LOCALAPPDATA%\CodexHalo\`; usage
+snapshots live under `.agent-halo\cache\`. At launch, Windows atomically stages a
+stable copy of the current app executable as
+`%USERPROFILE%\.agent-halo\bin\status-hook.exe`; Claude hooks invoke that copy as
+`status-hook.exe --claude-hook <event>`. It is not a separately downloaded
+component. Agent Halo also performs read-only structured queries against
+`logs_2.sqlite` for Codex connection and service failures.
 
 To refresh Codex usage independently, Agent Halo reads the existing OAuth login and
 makes HTTPS requests only to the official `auth.openai.com` and `chatgpt.com`

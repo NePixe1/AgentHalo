@@ -1022,9 +1022,9 @@ public static class Diagnostics
                 string mainExe = Path.Combine(claudeHome, "bundle",
                     "AgentHalo.exe");
                 Directory.CreateDirectory(Path.GetDirectoryName(mainExe));
+                // Real-looking PE is unnecessary; File.Exists is enough for staging.
                 File.WriteAllText(mainExe, "fake exe", Encoding.UTF8);
-                string legacyHelper = Path.Combine(claudeHome, ".agent-halo",
-                    "AgentHaloHook.exe");
+                string legacyHelper = AgentHaloPaths.LegacyAgentHaloHookExe(claudeHome);
                 Directory.CreateDirectory(Path.GetDirectoryName(legacyHelper));
                 File.WriteAllText(legacyHelper, "legacy", Encoding.UTF8);
                 string claudeSettings = Path.Combine(claudeHome, ".claude",
@@ -1036,22 +1036,38 @@ public static class Diagnostics
                     Encoding.UTF8);
                 ClaudeHookConfigurator.Configure(claudeHome, mainExe);
                 string configured = File.ReadAllText(claudeSettings, Encoding.UTF8);
-                Assert(!File.Exists(legacyHelper),
-                    "Claude hook configurator removes legacy helper");
-                Assert(configured.Contains("AgentHalo.exe") &&
+                string stagedHook = AgentHaloPaths.StatusHookExe(claudeHome);
+                Assert(File.Exists(stagedHook),
+                    "Claude hook configurator stages bin\\status-hook.exe");
+                Assert(configured.Contains("status-hook.exe") &&
                     configured.Contains("--claude-hook") &&
                     configured.Contains("PreToolUse") &&
                     configured.Contains("PostToolBatch") &&
                     configured.Contains("PermissionRequest") &&
                     configured.Contains("PermissionDenied") &&
                     configured.Contains("user-command") &&
+                    !configured.Contains("old.exe AgentHaloHook.exe") &&
                     !configured.Contains("AgentHaloHook.exe"),
-                    "Claude hook configurator merges settings");
+                    "Claude hook configurator rewrites settings onto preferred path");
                 ClaudeHookConfigurator.Configure(claudeHome, mainExe);
                 string configuredAgain = File.ReadAllText(claudeSettings, Encoding.UTF8);
                 Assert(CountOccurrences(configuredAgain, "--claude-hook") ==
                     CountOccurrences(configured, "--claude-hook"),
                     "Claude hook configurator is idempotent");
+                File.WriteAllText(
+                    claudeSettings,
+                    configuredAgain.Replace(
+                        "--claude-hook PreToolUse",
+                        "--claude-hook Stop"),
+                    Encoding.UTF8);
+                ClaudeHookConfigurator.Configure(claudeHome, mainExe);
+                string repairedEvent = File.ReadAllText(claudeSettings, Encoding.UTF8);
+                Assert(CountOccurrences(repairedEvent, "--claude-hook PreToolUse") == 1,
+                    "Claude hook configurator repairs a mismatched event argument");
+                AgentHaloRuntimeBootstrap.Bootstrap(claudeHome, mainExe);
+                Assert(File.Exists(stagedHook), "bootstrap keeps status-hook.exe");
+                Assert(!File.Exists(legacyHelper),
+                    "bootstrap scrubs unreferenced AgentHaloHook.exe after rewrite");
 
                 string liveHome = Path.Combine(Path.GetTempPath(),
                     "agent-halo-claude-live-" + Guid.NewGuid().ToString("N"));
@@ -1399,28 +1415,31 @@ public static class Diagnostics
                         StringComparison.OrdinalIgnoreCase),
                     "claudeCode focus still persists");
 
-                // Hook routing: Grok env must write grok-build-status.jsonl only
+                // Hook routing: Grok env must write logs/grok-status.jsonl only
                 // and normalize snake_case event names to PascalCase.
                 string hookIsoHome = Path.Combine(Path.GetTempPath(),
                     "agent-halo-hook-iso-" + Guid.NewGuid().ToString("N"));
-                string hookAgentHalo = Path.Combine(hookIsoHome, ".agent-halo");
-                Directory.CreateDirectory(hookAgentHalo);
+                Directory.CreateDirectory(AgentHaloPaths.LogsDirectory(hookIsoHome));
                 int grokHookCode = ClaudeHookStatusWriter.WriteForTest(
                     eventName: "pre_tool_use",
                     home: hookIsoHome,
                     grokSessionId: "test-grok-session",
                     grokHookEvent: "PreToolUse",
                     stdinJson: "{\"sessionId\":\"test-grok-session\",\"cwd\":\"/tmp/proj\"," +
-                        "\"toolName\":\"run_terminal_command\"}");
+                        "\"toolName\":\"run_terminal_command\"," +
+                        "\"permissionMode\":\"auto\"}");
                 Assert(grokHookCode == 0, "grok hook writer exit 0");
-                string grokStatusPath = Path.Combine(hookAgentHalo, "grok-build-status.jsonl");
-                string claudeStatusPath = Path.Combine(hookAgentHalo, "claude-code-status.jsonl");
-                Assert(File.Exists(grokStatusPath), "Grok path writes grok-build-status.jsonl");
+                string grokStatusPath = AgentHaloPaths.GrokStatusLog(hookIsoHome);
+                string claudeStatusPath = AgentHaloPaths.ClaudeStatusLog(hookIsoHome);
+                Assert(File.Exists(grokStatusPath), "Grok path writes logs/grok-status.jsonl");
                 string grokHookText = File.ReadAllText(grokStatusPath);
                 Assert(grokHookText.IndexOf("grok-hook", StringComparison.Ordinal) >= 0,
                     "source grok-hook");
                 Assert(grokHookText.IndexOf("\"PreToolUse\"", StringComparison.Ordinal) >= 0,
                     "snake_case event normalizes to PreToolUse");
+                Assert(grokHookText.IndexOf("\"permissionMode\":\"auto\"",
+                    StringComparison.Ordinal) >= 0,
+                    "hook should persist permissionMode for Auto ring gating");
                 Assert(!File.Exists(claudeStatusPath) ||
                     File.ReadAllText(claudeStatusPath).IndexOf("test-grok-session",
                         StringComparison.Ordinal) < 0,
@@ -1491,23 +1510,68 @@ public static class Diagnostics
                 GrokHookStatusReducer r = new GrokHookStatusReducer("s1");
                 DateTime t0 = new DateTime(2026, 7, 25, 0, 0, 0, DateTimeKind.Utc);
                 r.Consume(
-                    "{\"timestamp\":\"2026-07-25T00:00:01Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"s1\",\"cwd\":\"/p/AgentHalo\",\"source\":\"grok-hook\"}",
+                    "{\"timestamp\":\"2026-07-25T00:00:01Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"s1\",\"cwd\":\"/p/AgentHalo\",\"permissionMode\":\"auto\",\"source\":\"grok-hook\"}",
                     t0.AddSeconds(1));
                 Assert(r.Snapshot.Agent == AgentKind.Grok, "agent kind Grok");
                 Assert(r.Snapshot.State == HaloState.Thinking, "prompt -> thinking");
                 r.Consume(
-                    "{\"timestamp\":\"2026-07-25T00:00:02Z\",\"event\":\"PreToolUse\",\"sessionId\":\"s1\",\"cwd\":\"/p/AgentHalo\",\"toolName\":\"run_terminal_command\",\"source\":\"grok-hook\"}",
+                    "{\"timestamp\":\"2026-07-25T00:00:02Z\",\"event\":\"PreToolUse\",\"sessionId\":\"s1\",\"cwd\":\"/p/AgentHalo\",\"toolName\":\"run_terminal_command\",\"permissionMode\":\"auto\",\"source\":\"grok-hook\"}",
                     t0.AddSeconds(2));
                 r.ApplyWorkingVisibility(t0.AddSeconds(3));
                 Assert(r.Snapshot.State == HaloState.Working, "tool -> working");
+                // Auto mode: permission_prompt must not flash purple.
                 r.Consume(
-                    "{\"timestamp\":\"2026-07-25T00:00:04Z\",\"event\":\"Notification\",\"sessionId\":\"s1\",\"notificationType\":\"permission_prompt\",\"source\":\"grok-hook\"}",
+                    "{\"timestamp\":\"2026-07-25T00:00:04Z\",\"event\":\"Notification\",\"sessionId\":\"s1\",\"notificationType\":\"permission_prompt\",\"permissionMode\":\"auto\",\"source\":\"grok-hook\"}",
                     t0.AddSeconds(4));
-                Assert(r.Snapshot.State == HaloState.Attention, "permission -> attention");
+                Assert(r.Snapshot.State == HaloState.Working,
+                    "permission_prompt after PreToolUse must not become attention");
+                r.ApplyWorkingVisibility(t0.AddSeconds(4).AddMilliseconds(
+                    (int)(GrokHookStatusReducer.PendingPermissionAttentionDelaySeconds * 1000) + 500));
+                Assert(r.Snapshot.State == HaloState.Working,
+                    "auto mode stays working after permission delay");
                 r.Consume(
                     "{\"timestamp\":\"2026-07-25T00:00:05Z\",\"event\":\"Stop\",\"sessionId\":\"s1\",\"source\":\"grok-hook\"}",
                     t0.AddSeconds(5));
                 Assert(r.Snapshot.State == HaloState.Done, "stop -> done");
+
+                // default mode: human wait after PreToolUse becomes attention after delay.
+                GrokHookStatusReducer human = new GrokHookStatusReducer("s-human");
+                human.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:01Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"s-human\",\"cwd\":\"/p\",\"permissionMode\":\"default\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(1));
+                human.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:02Z\",\"event\":\"PreToolUse\",\"sessionId\":\"s-human\",\"cwd\":\"/p\",\"toolName\":\"run_terminal_command\",\"permissionMode\":\"default\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(2));
+                DateTime requestedAt = t0.AddSeconds(2).AddMilliseconds(20);
+                human.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:02.020Z\",\"event\":\"Notification\",\"sessionId\":\"s-human\",\"notificationType\":\"permission_prompt\",\"permissionMode\":\"default\",\"source\":\"grok-hook\"}",
+                    requestedAt);
+                Assert(human.Snapshot.State == HaloState.Working,
+                    "default mode arms pending without instant purple");
+                human.ApplyWorkingVisibility(requestedAt.AddSeconds(
+                    GrokHookStatusReducer.PendingPermissionAttentionDelaySeconds + 0.05));
+                Assert(human.Snapshot.State == HaloState.Attention,
+                    "human wait after delay -> attention");
+                Assert(String.Equals(human.Snapshot.Action, "Awaiting permission",
+                    StringComparison.Ordinal), "human wait action");
+
+                // Auto shell permission_requested stays working with multi-second wait_ms.
+                GrokHookStatusReducer autoShell = new GrokHookStatusReducer("s-auto-shell");
+                autoShell.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:01Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"s-auto-shell\",\"cwd\":\"/p\",\"permissionMode\":\"auto\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(1));
+                autoShell.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:02Z\",\"event\":\"PreToolUse\",\"sessionId\":\"s-auto-shell\",\"cwd\":\"/p\",\"toolName\":\"run_terminal_command\",\"permissionMode\":\"auto\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(2));
+                autoShell.ApplyPermissionRequested(
+                    t0.AddSeconds(2).AddMilliseconds(20),
+                    t0.AddSeconds(2).AddMilliseconds(20));
+                autoShell.ApplyWorkingVisibility(t0.AddSeconds(5));
+                Assert(autoShell.Snapshot.State == HaloState.Working,
+                    "auto mode permission_requested never becomes attention");
+                autoShell.ApplyPermissionResolved("allow", 2500, t0.AddSeconds(5));
+                Assert(autoShell.Snapshot.State == HaloState.Working,
+                    "auto resolve keeps working");
                 GrokHookStatusReducer failed =
                     new GrokHookStatusReducer("failed-session");
                 failed.Consume(
@@ -2041,6 +2105,91 @@ public static class Diagnostics
                     {
                     }
                 }
+
+                // Layout v2: paths + migrator + AppData usage relocation
+                string layoutHome = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-paths-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(layoutHome);
+                string layoutRoot = AgentHaloPaths.Root(layoutHome);
+                Assert(AgentHaloPaths.ClaudeStatusLog(layoutHome) ==
+                    Path.Combine(layoutRoot, "logs", "claude-status.jsonl"),
+                    "claude log path");
+                Assert(AgentHaloPaths.GrokStatusLog(layoutHome) ==
+                    Path.Combine(layoutRoot, "logs", "grok-status.jsonl"),
+                    "grok log path");
+                Assert(AgentHaloPaths.UsageSnapshots(layoutHome) ==
+                    Path.Combine(layoutRoot, "cache", "usage-snapshots-v1.json"),
+                    "usage cache path");
+                Assert(AgentHaloPaths.LegacyClaudeStatusLog(layoutHome) ==
+                    Path.Combine(layoutRoot, "claude-code-status.jsonl"),
+                    "legacy claude log");
+                Assert(AgentHaloPaths.LayoutVersion == 2, "layout version");
+                Assert(AgentHaloPaths.LegacyUsageSnapshotsInAppData().EndsWith(
+                    "usage-snapshots-v1.json"),
+                    "appdata legacy usage name");
+
+                Directory.CreateDirectory(layoutRoot);
+                string legacyClaude = AgentHaloPaths.LegacyClaudeStatusLog(layoutHome);
+                File.WriteAllText(legacyClaude, "claude-old", Encoding.UTF8);
+                string fakeAppDataUsage = Path.Combine(layoutHome,
+                    "appdata-usage-snapshots-v1.json");
+                File.WriteAllText(fakeAppDataUsage, "{\"version\":1}", Encoding.UTF8);
+                string layoutLegacyHelper =
+                    AgentHaloPaths.LegacyAgentHaloHookExe(layoutHome);
+                File.WriteAllText(layoutLegacyHelper, "legacy", Encoding.UTF8);
+
+                AgentHaloLayoutMigrator.MigrateIfNeeded(layoutHome, fakeAppDataUsage);
+                Assert(File.Exists(AgentHaloPaths.ClaudeStatusLog(layoutHome)),
+                    "migrator moves claude status log");
+                Assert(!File.Exists(legacyClaude), "migrator deletes legacy claude log");
+                Assert(File.Exists(AgentHaloPaths.UsageSnapshots(layoutHome)),
+                    "migrator moves AppData usage into cache");
+                Assert(!File.Exists(fakeAppDataUsage),
+                    "migrator deletes AppData usage after move");
+                // Migrator only moves data; it must not delete staged binaries.
+                Assert(File.Exists(layoutLegacyHelper),
+                    "migrator leaves AgentHaloHook.exe for configurators to scrub after rewrite");
+                Assert(File.ReadAllText(AgentHaloPaths.LayoutVersionFile(layoutHome))
+                    .Trim() == "2", "layout version written");
+                AgentHaloLayoutMigrator.MigrateIfNeeded(layoutHome, fakeAppDataUsage);
+                Assert(File.ReadAllText(AgentHaloPaths.LayoutVersionFile(layoutHome))
+                    .Trim() == "2", "migrator is idempotent");
+                Assert(AgentHaloPaths.StatusHookExe(layoutHome).EndsWith(
+                    Path.Combine("bin", "status-hook.exe")),
+                    "stable status-hook path under bin");
+                Directory.Delete(layoutHome, true);
+
+                string failedLayoutHome = Path.Combine(
+                    Path.GetTempPath(),
+                    "agent-halo-paths-failure-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(AgentHaloPaths.LogsDirectory(failedLayoutHome));
+                string failedLegacyClaude =
+                    AgentHaloPaths.LegacyClaudeStatusLog(failedLayoutHome);
+                File.WriteAllText(failedLegacyClaude, "preserve-me", Encoding.UTF8);
+                Directory.CreateDirectory(
+                    AgentHaloPaths.ClaudeStatusLog(failedLayoutHome));
+
+                AgentHaloLayoutMigrator.MigrateIfNeeded(failedLayoutHome);
+                Assert(File.Exists(failedLegacyClaude),
+                    "failed migration preserves the legacy source");
+                Assert(!File.Exists(AgentHaloPaths.LayoutVersionFile(failedLayoutHome)),
+                    "failed migration does not commit layout version");
+
+                Directory.Delete(
+                    AgentHaloPaths.ClaudeStatusLog(failedLayoutHome),
+                    true);
+                AgentHaloLayoutMigrator.MigrateIfNeeded(failedLayoutHome);
+                Assert(File.ReadAllText(
+                    AgentHaloPaths.ClaudeStatusLog(failedLayoutHome),
+                    Encoding.UTF8) == "preserve-me",
+                    "migration retry restores preserved data");
+                Assert(!File.Exists(failedLegacyClaude),
+                    "successful retry removes the legacy source");
+                Assert(File.ReadAllText(
+                    AgentHaloPaths.LayoutVersionFile(failedLayoutHome),
+                    Encoding.UTF8).Trim() == "2",
+                    "successful retry commits layout version");
+                Directory.Delete(failedLayoutHome, true);
 
                 File.Delete(temp);
                 File.WriteAllText(outputPath,

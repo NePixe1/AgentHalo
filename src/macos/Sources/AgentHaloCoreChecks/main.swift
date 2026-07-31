@@ -13,6 +13,173 @@ func expect(_ condition: Bool, _ message: String) {
     }
 }
 
+
+
+func testAgentHaloLayoutMigratorMovesFlatLayoutToV2AndKeepsLegacyBinaries() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent("agent-halo-migrate-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: home) }
+    let paths = AgentHaloPaths(homeDirectory: home)
+    try fm.createDirectory(at: paths.root, withIntermediateDirectories: true)
+
+    try "claude-old".write(to: paths.legacyClaudeStatusLog, atomically: true, encoding: .utf8)
+    try "grok-old".write(to: paths.legacyGrokStatusLog, atomically: true, encoding: .utf8)
+    try "usage-old".write(to: paths.legacyUsageSnapshots, atomically: true, encoding: .utf8)
+    try "ccline".write(to: paths.legacyStatuslineOriginalCommand, atomically: true, encoding: .utf8)
+    try #"{"legacy":true}"#.write(to: paths.legacyClaudeContextFile, atomically: true, encoding: .utf8)
+    try fm.createDirectory(at: paths.legacyClaudeContextsDirectory, withIntermediateDirectories: true)
+    try #"{"session":1}"#.write(
+        to: paths.legacyClaudeContextsDirectory.appendingPathComponent("sess-a.json"),
+        atomically: true,
+        encoding: .utf8
+    )
+    try "#!/bin/sh".write(to: paths.legacyStatusHook, atomically: true, encoding: .utf8)
+    try "#!/bin/sh".write(to: paths.legacyStatuslineProxy, atomically: true, encoding: .utf8)
+
+    AgentHaloLayoutMigrator.migrateIfNeeded(paths: paths, fileManager: fm)
+
+    expect(try String(contentsOf: paths.layoutVersionFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines), "2", "version")
+    expect(try String(contentsOf: paths.claudeStatusLog, encoding: .utf8), "claude-old", "claude log moved")
+    expect(try String(contentsOf: paths.grokStatusLog, encoding: .utf8), "grok-old", "grok log moved")
+    expect(try String(contentsOf: paths.usageSnapshots, encoding: .utf8), "usage-old", "usage moved")
+    expect(try String(contentsOf: paths.statuslineOriginalCommand, encoding: .utf8), "ccline", "original command moved")
+    expect(
+        try String(contentsOf: paths.claudeContextsDirectory.appendingPathComponent("sess-a.json"), encoding: .utf8),
+        #"{"session":1}"#,
+        "context snapshot moved"
+    )
+
+    expect(!fm.fileExists(atPath: paths.legacyClaudeStatusLog.path), "legacy claude log deleted")
+    expect(!fm.fileExists(atPath: paths.legacyGrokStatusLog.path), "legacy grok log deleted")
+    expect(!fm.fileExists(atPath: paths.legacyUsageSnapshots.path), "legacy usage deleted")
+    expect(!fm.fileExists(atPath: paths.legacyStatuslineOriginalCommand.path), "legacy original deleted")
+    expect(!fm.fileExists(atPath: paths.legacyClaudeContextFile.path), "legacy context file deleted")
+    expect(!fm.fileExists(atPath: paths.legacyClaudeContextsDirectory.path), "legacy contexts dir deleted")
+    expect(fm.fileExists(atPath: paths.legacyStatusHook.path), "legacy hook binary kept")
+    expect(fm.fileExists(atPath: paths.legacyStatuslineProxy.path), "legacy proxy binary kept")
+    expect(fm.fileExists(atPath: paths.binDirectory.path), "bin exists")
+    expect(fm.fileExists(atPath: paths.stateDirectory.path), "state exists")
+    expect(fm.fileExists(atPath: paths.logsDirectory.path), "logs exists")
+    expect(fm.fileExists(atPath: paths.cacheDirectory.path), "cache exists")
+}
+
+func testAgentHaloLayoutMigratorPrefersExistingNewPathsAndDeletesOld() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent("agent-halo-migrate-new-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: home) }
+    let paths = AgentHaloPaths(homeDirectory: home)
+    try fm.createDirectory(at: paths.logsDirectory, withIntermediateDirectories: true)
+    try "new-claude".write(to: paths.claudeStatusLog, atomically: true, encoding: .utf8)
+    try "old-claude".write(to: paths.legacyClaudeStatusLog, atomically: true, encoding: .utf8)
+
+    AgentHaloLayoutMigrator.migrateIfNeeded(paths: paths, fileManager: fm)
+
+    expect(try String(contentsOf: paths.claudeStatusLog, encoding: .utf8), "new-claude", "keep new")
+    expect(!fm.fileExists(atPath: paths.legacyClaudeStatusLog.path), "delete old when new exists")
+    expect(try String(contentsOf: paths.layoutVersionFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines), "2", "version written")
+}
+
+func testAgentHaloLayoutMigratorScrubsResidueWhenAlreadyVersion2() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent("agent-halo-migrate-scrub-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: home) }
+    let paths = AgentHaloPaths(homeDirectory: home)
+    try fm.createDirectory(at: paths.logsDirectory, withIntermediateDirectories: true)
+    try "2\n".write(to: paths.layoutVersionFile, atomically: true, encoding: .utf8)
+    try "residue".write(to: paths.legacyClaudeStatusLog, atomically: true, encoding: .utf8)
+    try "#!/bin/sh".write(to: paths.legacyStatusHook, atomically: true, encoding: .utf8)
+
+    AgentHaloLayoutMigrator.migrateIfNeeded(paths: paths, fileManager: fm)
+
+    expect(
+        try String(contentsOf: paths.claudeStatusLog, encoding: .utf8),
+        "residue",
+        "version 2 residue should still be reconciled into the live path"
+    )
+    expect(!fm.fileExists(atPath: paths.legacyClaudeStatusLog.path), "move residual jsonl")
+    expect(fm.fileExists(atPath: paths.legacyStatusHook.path), "scrub must not delete binary")
+}
+
+func testAgentHaloLayoutMigratorPreservesLegacyDataUntilDestinationIsUsable() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent(
+        "agent-halo-migrate-failure-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    defer { try? fm.removeItem(at: home) }
+    let paths = AgentHaloPaths(homeDirectory: home)
+    try fm.createDirectory(at: paths.logsDirectory, withIntermediateDirectories: true)
+    try "legacy-claude".write(
+        to: paths.legacyClaudeStatusLog,
+        atomically: true,
+        encoding: .utf8
+    )
+    try fm.createDirectory(at: paths.claudeStatusLog, withIntermediateDirectories: true)
+
+    AgentHaloLayoutMigrator.migrateIfNeeded(paths: paths, fileManager: fm)
+
+    expect(
+        fm.fileExists(atPath: paths.legacyClaudeStatusLog.path),
+        "failed migration must preserve the only legacy copy"
+    )
+    expect(
+        !fm.fileExists(atPath: paths.layoutVersionFile.path),
+        "failed migration must not commit layout version"
+    )
+
+    try fm.removeItem(at: paths.claudeStatusLog)
+    AgentHaloLayoutMigrator.migrateIfNeeded(paths: paths, fileManager: fm)
+
+    expect(
+        try String(contentsOf: paths.claudeStatusLog, encoding: .utf8),
+        "legacy-claude",
+        "retry should migrate preserved legacy data"
+    )
+    expect(
+        !fm.fileExists(atPath: paths.legacyClaudeStatusLog.path),
+        "successful retry should remove the legacy copy"
+    )
+    expect(
+        try String(contentsOf: paths.layoutVersionFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+        "2",
+        "successful retry should commit layout version"
+    )
+}
+
+func testAgentHaloPathsLayoutV2() {
+    let home = URL(fileURLWithPath: "/tmp/agent-halo-paths-home", isDirectory: true)
+    let paths = AgentHaloPaths(homeDirectory: home)
+    let root = home.appendingPathComponent(".agent-halo", isDirectory: true)
+
+    expect(AgentHaloPaths.layoutVersion, 2, "layout version")
+    expect(paths.root, root, "root")
+    expect(paths.binDirectory, root.appendingPathComponent("bin", isDirectory: true), "bin")
+    expect(paths.stateDirectory, root.appendingPathComponent("state", isDirectory: true), "state")
+    expect(paths.logsDirectory, root.appendingPathComponent("logs", isDirectory: true), "logs")
+    expect(paths.cacheDirectory, root.appendingPathComponent("cache", isDirectory: true), "cache")
+    expect(paths.layoutVersionFile, root.appendingPathComponent(".layout-version"), "layout version file")
+
+    expect(paths.statusHook.path, root.appendingPathComponent("bin", isDirectory: true).appendingPathComponent("status-hook").path, "status hook")
+    expect(paths.statuslineProxy.path, root.appendingPathComponent("bin", isDirectory: true).appendingPathComponent("statusline-proxy").path, "statusline proxy")
+    expect(paths.statuslineOriginalCommand.path, root.appendingPathComponent("state", isDirectory: true).appendingPathComponent("statusline-original-command").path, "statusline original")
+    expect(paths.claudeStatusLog.path, root.appendingPathComponent("logs", isDirectory: true).appendingPathComponent("claude-status.jsonl").path, "claude status log")
+    expect(paths.grokStatusLog.path, root.appendingPathComponent("logs", isDirectory: true).appendingPathComponent("grok-status.jsonl").path, "grok status log")
+    expect(paths.claudeContextsDirectory, root.appendingPathComponent("cache", isDirectory: true).appendingPathComponent("claude-contexts", isDirectory: true), "claude contexts")
+    expect(paths.usageSnapshots.path, root.appendingPathComponent("cache", isDirectory: true).appendingPathComponent("usage-snapshots-v1.json").path, "usage snapshots")
+
+    expect(paths.legacyStatusHook.lastPathComponent, "claude-code-status-hook", "legacy status hook name")
+    expect(paths.legacyStatuslineProxy.lastPathComponent, "claude-code-statusline-proxy", "legacy proxy name")
+    expect(paths.legacyStatuslineOriginalCommand.lastPathComponent, "claude-code-statusline-original-command", "legacy original command name")
+    expect(paths.legacyClaudeStatusLog.lastPathComponent, "claude-code-status.jsonl", "legacy claude log name")
+    expect(paths.legacyGrokStatusLog.lastPathComponent, "grok-build-status.jsonl", "legacy grok log name")
+    expect(paths.legacyClaudeContextsDirectory.lastPathComponent, "claude-code-contexts", "legacy contexts dir name")
+    expect(paths.legacyClaudeContextFile.lastPathComponent, "claude-code-context.json", "legacy context file name")
+    expect(paths.legacyUsageSnapshots.lastPathComponent, "usage-snapshots-v1.json", "legacy usage name")
+    expect(paths.legacyUsageSnapshots.deletingLastPathComponent(), root, "legacy usage under root")
+    expect(paths.usageSnapshots.deletingLastPathComponent().lastPathComponent, "cache", "usage under cache")
+}
+
 func testReducesPlanningWorkingAttentionErrorAndCompleteEvents() {
     var reducer = SessionReducer(filePath: "/tmp/session-019c6e27-e55b-73d1-87d8-4e01f1f75043.jsonl")
 
@@ -675,7 +842,7 @@ func testClaudeHookConfiguratorWritesUserSettingsNotLegacyClaudeJson() throws {
     expect(existingCommand, "/usr/local/bin/existing-hook PreToolUse", "existing user hook should not be overwritten")
     let agentHaloHooks = preToolUse?.last?["hooks"] as? [[String: Any]]
     let command = agentHaloHooks?.first?["command"] as? String
-    expect(command, "\(home.path)/.agent-halo/claude-code-status-hook PreToolUse", "Agent Halo hook should be appended to ~/.claude/settings.json")
+    expect(command, "\(home.path)/.agent-halo/bin/status-hook PreToolUse", "Agent Halo hook should be appended to ~/.claude/settings.json")
     expect(hooks?["PostToolBatch"] != nil, true, "PostToolBatch hook should be configured")
     expect(hooks?["PermissionRequest"] != nil, true, "PermissionRequest hook should be configured")
     expect(hooks?["PermissionDenied"] != nil, true, "PermissionDenied hook should be configured")
@@ -705,22 +872,25 @@ func testGrokHookConfiguratorWritesHooksJSON() throws {
     expect(FileManager.default.fileExists(atPath: hooksURL.path), "hooks json exists")
     let text = try String(contentsOf: hooksURL, encoding: .utf8)
     expect(text.contains("PreToolUse"), "pre tool registered")
-    expect(
-        text.contains("claude-code-status-hook") || text.contains("agent-halo"),
-        "command points to staged binary"
-    )
     expect(text.contains("SessionStart"), "SessionStart registered")
     expect(text.contains("SessionEnd"), "SessionEnd registered")
     expect(text.contains("PostCompact"), "PostCompact registered")
 
-    let staged = home.appendingPathComponent(".agent-halo/claude-code-status-hook")
-    expect(FileManager.default.fileExists(atPath: staged.path), "hook binary staged under .agent-halo")
+    let paths = AgentHaloPaths(homeDirectory: home)
+    expect(FileManager.default.fileExists(atPath: paths.statusHook.path), "hook binary staged under .agent-halo/bin")
 
-    // Second call must be idempotent: content and mtime stable when already configured.
+    // Parse JSON so escaped slashes (\/) do not break substring checks.
+    let hooksJSON = try JSONSerialization.jsonObject(with: Data(text.utf8)) as! [String: Any]
+    let hooksMap = hooksJSON["hooks"] as! [String: Any]
+    let pre = hooksMap["PreToolUse"] as! [[String: Any]]
+    let preHooks = pre[0]["hooks"] as! [[String: Any]]
+    let command = preHooks[0]["command"] as! String
+    expect(command, paths.statusHook.path, "hooks command is .agent-halo/bin/status-hook")
+
+    // Second call must be idempotent: content and mtime stable when already on preferred path.
     let attrsBefore = try FileManager.default.attributesOfItem(atPath: hooksURL.path)
     let mtimeBefore = attrsBefore[.modificationDate] as? Date
     let contentBefore = try Data(contentsOf: hooksURL)
-    // Brief pause so a non-idempotent rewrite would bump mtime.
     Thread.sleep(forTimeInterval: 0.05)
     GrokHookConfigurator.configure(homeDirectory: home, bundledHookBinary: bundledHook)
     let contentAfter = try Data(contentsOf: hooksURL)
@@ -728,6 +898,342 @@ func testGrokHookConfiguratorWritesHooksJSON() throws {
     let attrsAfter = try FileManager.default.attributesOfItem(atPath: hooksURL.path)
     let mtimeAfter = attrsAfter[.modificationDate] as? Date
     expect(mtimeAfter, mtimeBefore, "second configure should not bump hooks json mtime")
+}
+
+/// v1 flat layout + legacy hook commands → bootstrap leaves every advertised
+/// binary path live and rewrites configs without deleting compat mirrors.
+func testRuntimeBootstrapUpgradesLayoutV1WithoutStrandingHookPaths() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent(
+        "agent-halo-bootstrap-v1-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    defer { try? fm.removeItem(at: home) }
+
+    let paths = AgentHaloPaths(homeDirectory: home)
+    try fm.createDirectory(at: paths.root, withIntermediateDirectories: true)
+
+    // Simulate pre-layout-v2 data + root-level binaries + legacy hook configs.
+    try "grok-old\n".write(to: paths.legacyGrokStatusLog, atomically: true, encoding: .utf8)
+    try "claude-old\n".write(to: paths.legacyClaudeStatusLog, atomically: true, encoding: .utf8)
+    try Data("legacy-hook-bytes".utf8).write(to: paths.legacyStatusHook)
+    try Data("legacy-proxy-bytes".utf8).write(to: paths.legacyStatuslineProxy)
+
+    let claudeDir = home.appendingPathComponent(".claude", isDirectory: true)
+    try fm.createDirectory(at: claudeDir, withIntermediateDirectories: true)
+    let legacyHookCmd = "\(paths.legacyStatusHook.path) PreToolUse"
+    let claudeSettings: [String: Any] = [
+        "hooks": [
+            "PreToolUse": [[
+                "matcher": ".*",
+                "hooks": [["type": "command", "command": legacyHookCmd]],
+            ]],
+        ],
+        "statusLine": [
+            "type": "command",
+            "command": paths.legacyStatuslineProxy.path,
+        ],
+    ]
+    try JSONSerialization.data(withJSONObject: claudeSettings)
+        .write(to: claudeDir.appendingPathComponent("settings.json"))
+
+    let grokHooksDir = home.appendingPathComponent(".grok/hooks", isDirectory: true)
+    try fm.createDirectory(at: grokHooksDir, withIntermediateDirectories: true)
+    let grokHooks: [String: Any] = [
+        "hooks": [
+            "PreToolUse": [[
+                "matcher": ".*",
+                "hooks": [["type": "command", "command": "\(paths.legacyStatusHook.path) PreToolUse"]],
+            ]],
+            // Intentionally incomplete — bootstrap must repair missing events.
+            "SessionStart": [[
+                "hooks": [["type": "command", "command": paths.legacyStatusHook.path]],
+            ]],
+        ],
+    ]
+    try JSONSerialization.data(withJSONObject: grokHooks)
+        .write(to: grokHooksDir.appendingPathComponent("agent-halo-status.json"))
+
+    let bundledHook = home.appendingPathComponent("bundled-hook")
+    let bundledProxy = home.appendingPathComponent("bundled-proxy")
+    try Data("new-hook-v2".utf8).write(to: bundledHook)
+    try Data("new-proxy-v2".utf8).write(to: bundledProxy)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundledHook.path)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundledProxy.path)
+
+    AgentHaloRuntimeBootstrap.bootstrap(
+        homeDirectory: home,
+        bundledHookBinary: bundledHook,
+        bundledStatuslineProxy: bundledProxy,
+        fileManager: fm
+    )
+
+    // Data moved.
+    expect(try String(contentsOf: paths.grokStatusLog, encoding: .utf8), "grok-old\n", "grok log migrated")
+    expect(try String(contentsOf: paths.claudeStatusLog, encoding: .utf8), "claude-old\n", "claude log migrated")
+    expect(!fm.fileExists(atPath: paths.legacyGrokStatusLog.path), "legacy grok log scrubbed")
+
+    // Preferred binaries live; legacy names are rewritten away then scrubbed.
+    expect(fm.isExecutableFile(atPath: paths.statusHook.path), "bin/status-hook live")
+    expect(fm.isExecutableFile(atPath: paths.statuslineProxy.path), "bin/statusline-proxy live")
+    expect(try String(contentsOf: paths.statusHook, encoding: .utf8), "new-hook-v2", "hook content updated")
+    expect(!fm.fileExists(atPath: paths.legacyStatusHook.path), "legacy status-hook scrubbed after rewrite")
+    expect(!fm.fileExists(atPath: paths.legacyStatuslineProxy.path), "legacy statusline proxy scrubbed after rewrite")
+    let grokHooksJSON = try JSONSerialization.jsonObject(
+        with: Data(contentsOf: grokHooksDir.appendingPathComponent("agent-halo-status.json"))
+    ) as! [String: Any]
+    let grokPre = ((grokHooksJSON["hooks"] as! [String: Any])["PreToolUse"] as! [[String: Any]])
+    let grokCmd = ((grokPre[0]["hooks"] as! [[String: Any]])[0]["command"] as! String)
+    expect(grokCmd, paths.statusHook.path, "grok config rewritten to .agent-halo/bin/status-hook")
+
+    // Claude settings prefer bin path.
+    let claudeJSON = try JSONSerialization.jsonObject(
+        with: Data(contentsOf: claudeDir.appendingPathComponent("settings.json"))
+    ) as! [String: Any]
+    let claudeHooks = claudeJSON["hooks"] as! [String: Any]
+    let pre = claudeHooks["PreToolUse"] as! [[String: Any]]
+    let cmds = (pre.flatMap { ($0["hooks"] as? [[String: Any]]) ?? [] }).compactMap { $0["command"] as? String }
+    expect(cmds.contains { $0.contains("bin/status-hook") }, "claude hooks rewritten to bin/status-hook")
+    expect(
+        (claudeJSON["statusLine"] as? [String: Any])?["command"] as? String,
+        paths.statuslineProxy.path,
+        "statusline uses bin proxy"
+    )
+
+    // Grok hooks repaired and healthy.
+    let grokFile = grokHooksDir.appendingPathComponent("agent-halo-status.json")
+    expect(
+        GrokHookConfigurator.isHealthyConfiguration(
+            at: grokFile,
+            paths: paths,
+            homeDirectory: home,
+            fileManager: fm
+        ),
+        "grok hooks healthy after bootstrap"
+    )
+
+    // Second bootstrap is idempotent for Grok config content.
+    let before = try Data(contentsOf: grokFile)
+    AgentHaloRuntimeBootstrap.bootstrap(
+        homeDirectory: home,
+        bundledHookBinary: bundledHook,
+        bundledStatuslineProxy: bundledProxy,
+        fileManager: fm
+    )
+    let after = try Data(contentsOf: grokFile)
+    expect(after, before, "second bootstrap must not thrash healthy grok hooks")
+}
+
+/// Preferred-path Grok config must not be rewritten on routine launches.
+func testGrokHookConfiguratorLeavesPreferredPathConfigAlone() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent(
+        "agent-halo-grok-healthy-bin-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    defer { try? fm.removeItem(at: home) }
+    try fm.createDirectory(at: home, withIntermediateDirectories: true)
+
+    let paths = AgentHaloPaths(homeDirectory: home)
+    let bundled = home.appendingPathComponent("bundle-hook")
+    try Data("hook".utf8).write(to: bundled)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundled.path)
+
+    try AgentHaloBinaryStaging.stageStatusHook(
+        from: bundled,
+        homeDirectory: home,
+        fileManager: fm
+    )
+
+    let hooksDir = home.appendingPathComponent(".grok/hooks", isDirectory: true)
+    try fm.createDirectory(at: hooksDir, withIntermediateDirectories: true)
+    var hooks: [String: Any] = [:]
+    let events: [(String, String?)] = [
+        ("SessionStart", nil), ("UserPromptSubmit", nil),
+        ("PreToolUse", ".*"), ("PostToolUse", ".*"), ("PostToolUseFailure", ".*"),
+        ("Notification", nil), ("Stop", nil), ("StopFailure", nil), ("SessionEnd", nil),
+        ("PreCompact", ""), ("PostCompact", ""),
+    ]
+    for (event, matcher) in events {
+        var entry: [String: Any] = [
+            "hooks": [["type": "command", "command": paths.statusHook.path]],
+        ]
+        if let matcher { entry["matcher"] = matcher }
+        hooks[event] = [entry]
+    }
+    let hooksFile = hooksDir.appendingPathComponent("agent-halo-status.json")
+    try JSONSerialization.data(withJSONObject: ["hooks": hooks], options: [.prettyPrinted])
+        .write(to: hooksFile)
+
+    let before = try Data(contentsOf: hooksFile)
+    GrokHookConfigurator.configure(homeDirectory: home, bundledHookBinary: bundled)
+    let after = try Data(contentsOf: hooksFile)
+    expect(after, before, "preferred-path config must not be rewritten")
+}
+
+/// Legacy root path in Grok hooks must be rewritten to bin/status-hook on launch.
+func testGrokHookConfiguratorRewritesLegacyRootPath() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent(
+        "agent-halo-grok-rewrite-legacy-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    defer { try? fm.removeItem(at: home) }
+    try fm.createDirectory(at: home, withIntermediateDirectories: true)
+
+    let paths = AgentHaloPaths(homeDirectory: home)
+    try fm.createDirectory(at: paths.root, withIntermediateDirectories: true)
+    try Data("legacy-bin".utf8).write(to: paths.legacyStatusHook)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: paths.legacyStatusHook.path)
+
+    let hooksDir = home.appendingPathComponent(".grok/hooks", isDirectory: true)
+    try fm.createDirectory(at: hooksDir, withIntermediateDirectories: true)
+    var hooks: [String: Any] = [:]
+    for event in ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+                  "PostToolUseFailure", "Notification", "Stop", "StopFailure",
+                  "SessionEnd", "PreCompact", "PostCompact"] {
+        var entry: [String: Any] = [
+            "hooks": [["type": "command", "command": "\(paths.legacyStatusHook.path) \(event)"]],
+        ]
+        if event.contains("Tool") { entry["matcher"] = ".*" }
+        if event.contains("Compact") { entry["matcher"] = "" }
+        hooks[event] = [entry]
+    }
+    try JSONSerialization.data(withJSONObject: ["hooks": hooks])
+        .write(to: hooksDir.appendingPathComponent("agent-halo-status.json"))
+
+    let bundled = home.appendingPathComponent("bundle-hook")
+    try Data("new".utf8).write(to: bundled)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundled.path)
+
+    GrokHookConfigurator.configure(homeDirectory: home, bundledHookBinary: bundled)
+    AgentHaloBinaryStaging.scrubUnreferencedLegacyBinaries(homeDirectory: home, fileManager: fm)
+
+    let hooksFile = hooksDir.appendingPathComponent("agent-halo-status.json")
+    expect(
+        GrokHookConfigurator.isOnPreferredPath(
+            at: hooksFile,
+            preferredPath: paths.statusHook.path,
+            fileManager: fm
+        ),
+        "legacy root path rewritten to preferred"
+    )
+    let cmd = try {
+        let json = try JSONSerialization.jsonObject(with: Data(contentsOf: hooksFile)) as! [String: Any]
+        let pre = (json["hooks"] as! [String: Any])["PreToolUse"] as! [[String: Any]]
+        return (pre[0]["hooks"] as! [[String: Any]])[0]["command"] as! String
+    }()
+    expect(cmd, paths.statusHook.path, "command is bin/status-hook")
+    expect(!fm.fileExists(atPath: paths.legacyStatusHook.path), "unreferenced legacy binary removed")
+}
+
+/// Dead executable in hooks config must be repaired on next configure.
+func testGrokHookConfiguratorRepairsDeadExecutableCommand() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent(
+        "agent-halo-grok-dead-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    defer { try? fm.removeItem(at: home) }
+    try fm.createDirectory(at: home, withIntermediateDirectories: true)
+
+    let hooksDir = home.appendingPathComponent(".grok/hooks", isDirectory: true)
+    try fm.createDirectory(at: hooksDir, withIntermediateDirectories: true)
+    let dead = home.appendingPathComponent("missing-binary")
+    let hooks: [String: Any] = [
+        "hooks": [
+            "PreToolUse": [[
+                "matcher": ".*",
+                "hooks": [["type": "command", "command": "\(dead.path) PreToolUse"]],
+            ]],
+            "SessionStart": [[
+                "hooks": [["type": "command", "command": dead.path]],
+            ]],
+        ],
+    ]
+    try JSONSerialization.data(withJSONObject: hooks)
+        .write(to: hooksDir.appendingPathComponent("agent-halo-status.json"))
+
+    let bundled = home.appendingPathComponent("bundle-hook")
+    try Data("live".utf8).write(to: bundled)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundled.path)
+
+    GrokHookConfigurator.configure(homeDirectory: home, bundledHookBinary: bundled)
+
+    let paths = AgentHaloPaths(homeDirectory: home)
+    let hooksFile = hooksDir.appendingPathComponent("agent-halo-status.json")
+    expect(
+        GrokHookConfigurator.isHealthyConfiguration(
+            at: hooksFile,
+            paths: paths,
+            homeDirectory: home,
+            fileManager: fm
+        ),
+        "dead command repaired to healthy config"
+    )
+    let repaired = try JSONSerialization.jsonObject(with: Data(contentsOf: hooksFile)) as! [String: Any]
+    let repairedPre = ((repaired["hooks"] as! [String: Any])["PreToolUse"] as! [[String: Any]])
+    let repairedCmd = ((repairedPre[0]["hooks"] as! [[String: Any]])[0]["command"] as! String)
+    expect(repairedCmd, paths.statusHook.path, "preferred .agent-halo/bin command after repair")
+    expect(!repairedCmd.contains("missing-binary"), "dead path removed")
+}
+
+func testBinaryStagingNeverLeavesDestinationMissing() throws {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent(
+        "agent-halo-stage-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    defer { try? fm.removeItem(at: root) }
+    try fm.createDirectory(at: root, withIntermediateDirectories: true)
+
+    let dest = root.appendingPathComponent("status-hook")
+    let v1 = root.appendingPathComponent("v1")
+    let v2 = root.appendingPathComponent("v2")
+    try Data("version-1".utf8).write(to: v1)
+    try Data("version-2".utf8).write(to: v2)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: v1.path)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: v2.path)
+
+    try AgentHaloBinaryStaging.stageExecutable(from: v1, to: dest, fileManager: fm)
+    expect(try String(contentsOf: dest, encoding: .utf8), "version-1", "initial stage")
+    expect(fm.isExecutableFile(atPath: dest.path), "executable after stage")
+
+    // Replace in place — path must still exist (atomic replace).
+    try AgentHaloBinaryStaging.stageExecutable(from: v2, to: dest, fileManager: fm)
+    expect(try String(contentsOf: dest, encoding: .utf8), "version-2", "atomic upgrade")
+    expect(fm.isExecutableFile(atPath: dest.path), "still executable after replace")
+
+}
+
+func testStatuslineProxyRecursionCheckUsesExactExecutablePaths() {
+    let home = URL(
+        fileURLWithPath: "/tmp/agent-halo-statusline-command-check",
+        isDirectory: true
+    )
+    let paths = AgentHaloPaths(homeDirectory: home)
+
+    expect(
+        AgentHaloBinaryStaging.commandReferencesExecutable(
+            "\"\(paths.statuslineProxy.path)\" --ignored",
+            candidates: [paths.statuslineProxy, paths.legacyStatuslineProxy]
+        ),
+        "preferred proxy executable should be detected exactly"
+    )
+    expect(
+        AgentHaloBinaryStaging.commandReferencesExecutable(
+            paths.legacyStatuslineProxy.path,
+            candidates: [paths.statuslineProxy, paths.legacyStatuslineProxy]
+        ),
+        "legacy proxy executable should be detected exactly"
+    )
+    expect(
+        !AgentHaloBinaryStaging.commandReferencesExecutable(
+            "/usr/local/bin/my-statusline-proxy --theme statusline-proxy",
+            candidates: [paths.statuslineProxy, paths.legacyStatuslineProxy]
+        ),
+        "unrelated commands containing statusline-proxy must remain runnable"
+    )
 }
 
 func testClaudeStatusLineConfiguratorPreservesAndChainsExistingCommand() throws {
@@ -754,8 +1260,8 @@ func testClaudeStatusLineConfiguratorPreservesAndChainsExistingCommand() throws 
     let configuredData = try Data(contentsOf: settingsURL)
     let configured = try JSONSerialization.jsonObject(with: configuredData) as! [String: Any]
     let statusLine = configured["statusLine"] as! [String: Any]
-    let installedProxy = home.appendingPathComponent(".agent-halo/claude-code-statusline-proxy")
-    let storedCommand = home.appendingPathComponent(".agent-halo/claude-code-statusline-original-command")
+    let installedProxy = home.appendingPathComponent(".agent-halo/bin/statusline-proxy")
+    let storedCommand = home.appendingPathComponent(".agent-halo/state/statusline-original-command")
 
     expect(statusLine["command"] as? String, installedProxy.path, "Claude statusline should use AgentHalo proxy")
     expect(statusLine["padding"] as? Int, 0, "Claude statusline padding should be preserved")
@@ -785,6 +1291,86 @@ func testClaudeStatusLineConfiguratorPreservesAndChainsExistingCommand() throws 
     expect(repairedStatusLine["command"] as? String, installedProxy.path, "proxy should be restored")
     expect(try String(contentsOf: storedCommand, encoding: .utf8), originalCommand, "ccline should remain downstream")
     expect(repaired["theme"] as? String, "dark", "unrelated settings should survive repair")
+}
+
+
+func testClaudeHookConfiguratorRewritesLegacyPathToPreferred() throws {
+    let home = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-hook-rewrite-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: home) }
+    let fm = FileManager.default
+    let claudeDir = home.appendingPathComponent(".claude", isDirectory: true)
+    try fm.createDirectory(at: claudeDir, withIntermediateDirectories: true)
+    let paths = AgentHaloPaths(homeDirectory: home)
+    try fm.createDirectory(at: paths.root, withIntermediateDirectories: true)
+    try Data("old-binary".utf8).write(to: paths.legacyStatusHook)
+    try Data("bundled".utf8).write(to: home.appendingPathComponent("bundle-hook"))
+    let legacyCommand = "\(paths.legacyStatusHook.path) PreToolUse"
+    let settings: [String: Any] = [
+        "hooks": [
+            "PreToolUse": [[
+                "matcher": ".*",
+                "hooks": [["type": "command", "command": legacyCommand]]
+            ]]
+        ]
+    ]
+    try JSONSerialization.data(withJSONObject: settings).write(to: claudeDir.appendingPathComponent("settings.json"))
+
+    ClaudeHookConfigurator.configure(
+        homeDirectory: home,
+        bundledHookBinary: home.appendingPathComponent("bundle-hook")
+    )
+
+    let settingsJSON = try JSONSerialization.jsonObject(with: Data(contentsOf: claudeDir.appendingPathComponent("settings.json"))) as! [String: Any]
+    let hooks = settingsJSON["hooks"] as! [String: Any]
+    let pre = hooks["PreToolUse"] as! [[String: Any]]
+    let commands = (pre.flatMap { ($0["hooks"] as? [[String: Any]]) ?? [] }).compactMap { $0["command"] as? String }
+    expect(commands.contains { $0.contains("bin/status-hook") }, "settings should point at bin/status-hook")
+    expect(!commands.contains { $0.contains("claude-code-status-hook") }, "legacy command should be rewritten away")
+    expect(fm.fileExists(atPath: paths.statusHook.path), "new binary staged")
+    AgentHaloBinaryStaging.scrubUnreferencedLegacyBinaries(homeDirectory: home, fileManager: fm)
+    expect(!fm.fileExists(atPath: paths.legacyStatusHook.path), "legacy binary scrubbed after rewrite")
+}
+
+func testClaudeHookConfiguratorDoesNotDeleteLegacyBinaryWhenBundledMissing() throws {
+    let home = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-hook-no-bundle-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: home) }
+    let fm = FileManager.default
+    let paths = AgentHaloPaths(homeDirectory: home)
+    try fm.createDirectory(at: paths.root, withIntermediateDirectories: true)
+    try Data("old-binary".utf8).write(to: paths.legacyStatusHook)
+
+    ClaudeHookConfigurator.configure(homeDirectory: home, bundledHookBinary: nil)
+
+    expect(fm.fileExists(atPath: paths.legacyStatusHook.path), "missing bundle must not delete legacy binary")
+}
+
+func testClaudeStatusLineConfiguratorRewritesLegacyProxyToPreferred() throws {
+    let home = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-statusline-rewrite-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: home) }
+    let fm = FileManager.default
+    let claude = home.appendingPathComponent(".claude", isDirectory: true)
+    try fm.createDirectory(at: claude, withIntermediateDirectories: true)
+    let paths = AgentHaloPaths(homeDirectory: home)
+    try fm.createDirectory(at: paths.root, withIntermediateDirectories: true)
+    try Data("old-proxy".utf8).write(to: paths.legacyStatuslineProxy)
+    let settings: [String: Any] = [
+        "statusLine": ["type": "command", "command": paths.legacyStatuslineProxy.path]
+    ]
+    try JSONSerialization.data(withJSONObject: settings).write(to: claude.appendingPathComponent("settings.json"))
+    let bundled = home.appendingPathComponent("bundled-proxy")
+    try Data("proxy".utf8).write(to: bundled)
+
+    ClaudeStatusLineConfigurator.configure(homeDirectory: home, bundledProxyBinary: bundled)
+
+    let configured = try JSONSerialization.jsonObject(with: Data(contentsOf: claude.appendingPathComponent("settings.json"))) as! [String: Any]
+    let statusLine = configured["statusLine"] as! [String: Any]
+    expect(statusLine["command"] as? String, paths.statuslineProxy.path, "statusline uses bin/statusline-proxy")
+    expect(fm.fileExists(atPath: paths.statuslineProxy.path), "new proxy staged")
+    AgentHaloBinaryStaging.scrubUnreferencedLegacyBinaries(homeDirectory: home, fileManager: fm)
+    expect(!fm.fileExists(atPath: paths.legacyStatuslineProxy.path), "legacy proxy scrubbed after rewrite")
 }
 
 extension FileHandle {
@@ -1015,7 +1601,7 @@ func testRateLimitReaderDoesNotReturnEarlyOnContextOnlySnapshot() {
 }
 
 func testClaudeStatusLineUsageParserReadsAuthoritativeContextPercent() {
-    let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
+    let now = Date()
     let data = Data(#"{"session_id":"cc-session","model":{"id":"claude-sonnet-4","display_name":"Sonnet 4"},"context_window":{"used_percentage":52.75,"remaining_percentage":47.25,"context_window_size":200000,"total_input_tokens":38000,"total_output_tokens":1200}}"#.utf8)
 
     let snapshot = ClaudeStatusLineUsageParser.parse(data: data, updatedAt: now)
@@ -1127,6 +1713,47 @@ func testGrokSessionContextReaderPrefersLiveUpdatesTotalTokens() throws {
     expect(snapshot?.contextWindowTokens, 500_000, "window size still comes from signals")
 }
 
+func testGrokSessionContextReaderLiveTokensWithoutSignals() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-grok-context-no-signals-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
+    let cwd = "/Users/example/work/AgentHalo"
+    let sessionId = "session-first-turn"
+    let sessionDir = root
+        .appendingPathComponent(GrokSessionContextReader.encodeWorkspaceDirectory(cwd), isDirectory: true)
+        .appendingPathComponent(sessionId, isDirectory: true)
+    try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+
+    // Brand-new session: Grok streams totalTokens before writing end-of-turn signals.
+    let updates = """
+    {"timestamp":1,"method":"session/update","params":{"_meta":{"totalTokens":25000},"update":{"sessionUpdate":"agent_thought_chunk"}}}
+    {"timestamp":2,"method":"session/update","params":{"_meta":{"totalTokens":50000},"update":{"sessionUpdate":"tool_call"}}}
+    """
+    try Data(updates.utf8).write(to: sessionDir.appendingPathComponent("updates.jsonl"))
+
+    let summary = """
+    {"info":{"id":"\(sessionId)","cwd":"\(cwd)"},"generated_title":"First turn pill","current_model_id":"grok-4.5"}
+    """
+    try Data(summary.utf8).write(to: sessionDir.appendingPathComponent("summary.json"))
+
+    let snapshot = GrokSessionContextReader(sessionsRoot: root).read(sessionId: sessionId, cwd: cwd)
+    expect(snapshot?.contextTokensUsed, 50_000, "live totalTokens alone must drive the pill")
+    expect(snapshot?.contextWindowTokens, GrokSessionContextReader.defaultContextWindowTokens, "default window when signals missing")
+    expectAlmost(
+        snapshot?.contextUsedPercent ?? -1,
+        10,
+        tolerance: 0.01,
+        "percent = liveTokens / default window"
+    )
+    expect(snapshot?.sessionTitle, "First turn pill", "summary still loads without signals")
+    expect(snapshot?.modelName, "grok-4.5", "model from summary without signals")
+
+    let scanned = GrokSessionContextReader(sessionsRoot: root).read(sessionId: sessionId)
+    expect(scanned?.contextTokensUsed, 50_000, "scan must find sessions that only have updates.jsonl")
+}
+
 func testGrokActiveSessionsReaderParsesArrayEntries() throws {
     let home = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-grok-active-\(UUID().uuidString)", isDirectory: true)
@@ -1173,9 +1800,8 @@ func testClaudeContextUsageReaderKeepsLastKnownUsageForMatchingSession() throws 
         try? FileManager.default.removeItem(at: root)
     }
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    let snapshotURL = root.appendingPathComponent("claude-code-context.json")
-    let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
-    let reader = ClaudeContextUsageReader(snapshotURL: snapshotURL)
+    let now = Date()
+    let reader = ClaudeContextUsageReader(snapshotsDirectory: root)
 
     let fresh = ClaudeContextUsageSnapshot(
         sessionId: "cc-session",
@@ -1183,7 +1809,7 @@ func testClaudeContextUsageReaderKeepsLastKnownUsageForMatchingSession() throws 
         contextWindowSize: 200_000,
         updatedAt: now.addingTimeInterval(-30)
     )
-    try JSONEncoder().encode(fresh).write(to: snapshotURL)
+    try ClaudeContextUsageStorage.write(fresh, directory: root)
 
     expect(reader.read(sessionIds: ["cc-session"], now: now)?.usedPercent, 52.75, "matching fresh Claude context")
     expect(reader.read(sessionIds: ["other-session"], now: now) == nil, "mismatched Claude session should be rejected")
@@ -1195,26 +1821,25 @@ func testClaudeContextUsageReaderKeepsLastKnownUsageForMatchingSession() throws 
 }
 
 func testClaudeContextUsageReaderDoesNotShareSnapshotsAcrossFiles() throws {
-    let root = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("agent-halo-claude-context-cache-\(UUID().uuidString)", isDirectory: true)
+    let firstRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-claude-context-a-\(UUID().uuidString)", isDirectory: true)
+    let secondRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-claude-context-b-\(UUID().uuidString)", isDirectory: true)
     defer {
-        try? FileManager.default.removeItem(at: root)
+        try? FileManager.default.removeItem(at: firstRoot)
+        try? FileManager.default.removeItem(at: secondRoot)
     }
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    let firstURL = root.appendingPathComponent("first.json")
-    let secondURL = root.appendingPathComponent("second.json")
-    let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
+    try FileManager.default.createDirectory(at: firstRoot, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: secondRoot, withIntermediateDirectories: true)
+    let now = Date()
     let first = ClaudeContextUsageSnapshot(sessionId: "shared-session", usedPercent: 10, updatedAt: now)
     let second = ClaudeContextUsageSnapshot(sessionId: "shared-session", usedPercent: 90, updatedAt: now)
 
-    try JSONEncoder().encode(first).write(to: firstURL)
-    try JSONEncoder().encode(second).write(to: secondURL)
-    let sharedModificationDate = ISO8601DateFormatter().date(from: "2026-06-21T07:59:00Z")!
-    try FileManager.default.setAttributes([.modificationDate: sharedModificationDate], ofItemAtPath: firstURL.path)
-    try FileManager.default.setAttributes([.modificationDate: sharedModificationDate], ofItemAtPath: secondURL.path)
+    try ClaudeContextUsageStorage.write(first, directory: firstRoot)
+    try ClaudeContextUsageStorage.write(second, directory: secondRoot)
 
-    let firstRead = ClaudeContextUsageReader(snapshotURL: firstURL).read(sessionIds: ["shared-session"], now: now)
-    let secondRead = ClaudeContextUsageReader(snapshotURL: secondURL).read(sessionIds: ["shared-session"], now: now)
+    let firstRead = ClaudeContextUsageReader(snapshotsDirectory: firstRoot).read(sessionIds: ["shared-session"], now: now)
+    let secondRead = ClaudeContextUsageReader(snapshotsDirectory: secondRoot).read(sessionIds: ["shared-session"], now: now)
 
     expect(firstRead?.usedPercent, 10, "first Claude context reader should read its own snapshot")
     expect(secondRead?.usedPercent, 90, "second Claude context reader should not reuse another file's snapshot")
@@ -1243,7 +1868,7 @@ func testClaudeContextUsageReaderRequiresExactFreshSession() throws {
     defer { try? FileManager.default.removeItem(at: root) }
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
 
-    let now = ISO8601DateFormatter().date(from: "2026-06-23T02:00:00Z")!
+    let now = Date()
     let first = ClaudeContextUsageSnapshot(
         sessionId: "session-a",
         usedPercent: 26.5,
@@ -1256,7 +1881,7 @@ func testClaudeContextUsageReaderRequiresExactFreshSession() throws {
     try ClaudeContextUsageStorage.write(first, directory: root)
     try ClaudeContextUsageStorage.write(second, directory: root)
 
-    let reader = ClaudeContextUsageReader(snapshotsDirectory: root, legacySnapshotURL: nil)
+    let reader = ClaudeContextUsageReader(snapshotsDirectory: root)
     expect(reader.read(sessionId: "session-a", now: now)?.usedPercent, 26.5, "exact session usage")
     expect(reader.read(sessionId: "missing", now: now) == nil, "another session must not be substituted")
     expect(
@@ -1271,7 +1896,7 @@ func testClaudeContextUsageReaderRetainsExactUsageWhileSessionIsLive() throws {
     defer { try? FileManager.default.removeItem(at: root) }
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
 
-    let now = ISO8601DateFormatter().date(from: "2026-06-24T09:30:00Z")!
+    let now = Date()
     let stale = ClaudeContextUsageSnapshot(
         sessionId: "live-main",
         usedPercent: 27,
@@ -1282,7 +1907,7 @@ func testClaudeContextUsageReaderRetainsExactUsageWhileSessionIsLive() throws {
     )
     try ClaudeContextUsageStorage.write(stale, directory: root)
 
-    let reader = ClaudeContextUsageReader(snapshotsDirectory: root, legacySnapshotURL: nil)
+    let reader = ClaudeContextUsageReader(snapshotsDirectory: root)
     expect(
         reader.read(sessionId: "live-main", now: now, freshness: .whileSessionIsLive)?.modelName,
         "glm-5.2",
@@ -1298,23 +1923,120 @@ func testClaudeContextUsageReaderRetainsExactUsageWhileSessionIsLive() throws {
     )
 }
 
-func testClaudeContextUsageReaderMigratesMatchingLegacySnapshot() throws {
+
+func testClaudeContextUsageGCAgeCountProtectAndThrottle() throws {
+    ClaudeContextUsageStorage.resetPruneThrottleForTests()
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("agent-halo-context-gc2-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: root) }
+    try fm.createDirectory(at: root, withIntermediateDirectories: true)
+    let now = ISO8601DateFormatter().date(from: "2026-06-23T12:00:00Z")!
+
+    let stale = ClaudeContextUsageSnapshot(
+        sessionId: "stale",
+        usedPercent: 1,
+        updatedAt: now.addingTimeInterval(-(ClaudeContextUsageConstants.diskMaxAge + 60))
+    )
+    try JSONEncoder().encode(stale).write(
+        to: root.appendingPathComponent("stale.json"),
+        options: [.atomic]
+    )
+
+    for i in 0..<(ClaudeContextUsageConstants.maxFiles + 5) {
+        let snap = ClaudeContextUsageSnapshot(
+            sessionId: "young-\(i)",
+            usedPercent: Double(i),
+            updatedAt: now.addingTimeInterval(-30)
+        )
+        try JSONEncoder().encode(snap).write(
+            to: root.appendingPathComponent("young-\(i).json"),
+            options: [.atomic]
+        )
+    }
+    for i in 0..<10 {
+        let snap = ClaudeContextUsageSnapshot(
+            sessionId: "mid-\(i)",
+            usedPercent: Double(i),
+            updatedAt: now.addingTimeInterval(-(ClaudeContextUsageConstants.minRetainAge + 60 + TimeInterval(i)))
+        )
+        try JSONEncoder().encode(snap).write(
+            to: root.appendingPathComponent("mid-\(i).json"),
+            options: [.atomic]
+        )
+    }
+
+    let deleted = ClaudeContextUsageStorage.prune(directory: root, force: true, now: now, fileManager: fm)
+    expect(deleted > 0, "prune should delete something")
+    expect(!fm.fileExists(atPath: root.appendingPathComponent("stale.json").path), "age prune removes stale")
+    expect(
+        fm.fileExists(atPath: root.appendingPathComponent(".last-prune").path),
+        "successful prune should persist a cross-process throttle marker"
+    )
+
+    let remaining = try fm.contentsOfDirectory(atPath: root.path).filter { $0.hasSuffix(".json") }
+    let youngLeft = remaining.filter { $0.hasPrefix("young-") }.count
+    expect(youngLeft, ClaudeContextUsageConstants.maxFiles + 5, "young files protected by minRetainAge")
+    expect(remaining.count >= youngLeft, "cannot delete young to meet count")
+
+    let stale2 = ClaudeContextUsageSnapshot(
+        sessionId: "stale2",
+        usedPercent: 2,
+        updatedAt: now.addingTimeInterval(-(ClaudeContextUsageConstants.diskMaxAge + 120))
+    )
+    try JSONEncoder().encode(stale2).write(to: root.appendingPathComponent("stale2.json"), options: [.atomic])
+    let throttled = ClaudeContextUsageStorage.prune(directory: root, force: false, now: now, fileManager: fm)
+    expect(throttled, 0, "non-force prune within throttle window is no-op")
+    expect(fm.fileExists(atPath: root.appendingPathComponent("stale2.json").path), "stale2 survives throttle")
+
+    let forced = ClaudeContextUsageStorage.prune(directory: root, force: true, now: now, fileManager: fm)
+    expect(forced >= 1, "force prune bypasses throttle")
+    expect(!fm.fileExists(atPath: root.appendingPathComponent("stale2.json").path), "force prune removes stale2")
+
+    let stale3 = ClaudeContextUsageSnapshot(
+        sessionId: "stale3",
+        usedPercent: 3,
+        updatedAt: now.addingTimeInterval(-(ClaudeContextUsageConstants.diskMaxAge + 180))
+    )
+    try JSONEncoder().encode(stale3).write(
+        to: root.appendingPathComponent("stale3.json"),
+        options: [.atomic]
+    )
+    try "\(now.addingTimeInterval(3600).timeIntervalSince1970)\n".write(
+        to: root.appendingPathComponent(".last-prune"),
+        atomically: true,
+        encoding: .utf8
+    )
+    let afterClockRollback = ClaudeContextUsageStorage.prune(
+        directory: root,
+        force: false,
+        now: now,
+        fileManager: fm
+    )
+    expect(afterClockRollback >= 1, "future prune marker must not block GC after clock rollback")
+    expect(
+        !fm.fileExists(atPath: root.appendingPathComponent("stale3.json").path),
+        "clock rollback recovery should still remove stale snapshots"
+    )
+}
+
+func testClaudeContextUsageReaderDoesNotReadLegacySingleFile() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("agent-halo-legacy-usage-\(UUID().uuidString)", isDirectory: true)
+        .appendingPathComponent("agent-halo-context-no-legacy-\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: root) }
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-
     let legacyURL = root.appendingPathComponent("claude-code-context.json")
-    let now = ISO8601DateFormatter().date(from: "2026-06-23T02:00:00Z")!
-    let legacy = ClaudeContextUsageSnapshot(sessionId: "legacy-main", usedPercent: 31, updatedAt: now)
-    try JSONEncoder().encode(legacy).write(to: legacyURL)
-
-    let reader = ClaudeContextUsageReader(
-        snapshotsDirectory: root.appendingPathComponent("contexts", isDirectory: true),
-        legacySnapshotURL: legacyURL
+    let now = Date()
+    let snapshot = ClaudeContextUsageSnapshot(
+        sessionId: "sess-legacy",
+        usedPercent: 42,
+        updatedAt: now
     )
-    expect(reader.read(sessionId: "legacy-main", now: now)?.usedPercent, 31, "matching legacy fallback")
-    expect(reader.read(sessionId: "other-main", now: now) == nil, "mismatched legacy fallback")
+    try JSONEncoder().encode(snapshot).write(to: legacyURL)
+    let reader = ClaudeContextUsageReader(snapshotsDirectory: root)
+    expect(
+        reader.read(sessionId: "sess-legacy", now: now) == nil,
+        "layout v2 reader must not fall back to legacy single-file context"
+    )
 }
 
 func testClaudeStatusLineProxyRuntimeCapturesUsageAndForwardsInput() throws {
@@ -1324,7 +2046,8 @@ func testClaudeStatusLineProxyRuntimeCapturesUsageAndForwardsInput() throws {
         try? FileManager.default.removeItem(at: root)
     }
     let snapshotsDirectory = root.appendingPathComponent("claude-code-contexts", isDirectory: true)
-    let now = ISO8601DateFormatter().date(from: "2026-06-21T08:00:00Z")!
+    // Use wall-clock time so post-write contexts GC does not treat fixtures as >24h old.
+    let now = Date()
     let input = Data(#"{"session_id":"cc-session","context_window":{"used_percentage":61.5,"context_window_size":200000}}"#.utf8)
     let otherInput = Data(#"{"session_id":"other-session","context_window":{"used_percentage":18,"context_window_size":200000}}"#.utf8)
 
@@ -1339,10 +2062,19 @@ func testClaudeStatusLineProxyRuntimeCapturesUsageAndForwardsInput() throws {
         updatedAt: now
     )
     let forwarded = try ClaudeStatusLineProxyRuntime.runOriginalCommand(command: "cat", input: input)
+    let guardedEnvironment = try ClaudeStatusLineProxyRuntime.runOriginalCommand(
+        command: "printf \"$AGENT_HALO_STATUSLINE_PROXY_ACTIVE\"",
+        input: Data()
+    )
 
     expect(captured?.usedPercent, 61.5, "statusline proxy should capture Claude context")
     expect(forwarded.standardOutput, input, "statusline proxy should forward input unchanged")
     expect(forwarded.terminationStatus, 0, "statusline proxy should preserve successful command status")
+    expect(
+        guardedEnvironment.standardOutput,
+        Data("1".utf8),
+        "downstream commands should inherit the recursion guard"
+    )
     let snapshotURL = ClaudeContextUsageStorage.snapshotURL(
         directory: snapshotsDirectory,
         sessionId: "cc-session"
@@ -1954,34 +2686,393 @@ func testClaudeHookReducerStopFailureMapsToError() {
 
 func testGrokHookReducerLifecycle() {
     var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
-    r.consume(jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p/AgentHalo","source":"grok-hook"}"#, now: Date(timeIntervalSince1970: 1))
+    r.consume(jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p/AgentHalo","permissionMode":"auto","source":"grok-hook"}"#, now: Date(timeIntervalSince1970: 1))
     expect(r.snapshot.state, .thinking, "prompt → thinking")
     expect(r.snapshot.agent, .grok, "agent kind")
     expect(r.snapshot.projectName, "AgentHalo", "cwd basename")
 
-    r.consume(jsonLine: #"{"timestamp":"2026-07-25T00:00:02Z","event":"PreToolUse","sessionId":"s1","cwd":"/p/AgentHalo","toolName":"run_terminal_command","source":"grok-hook"}"#, now: Date(timeIntervalSince1970: 2))
+    r.consume(jsonLine: #"{"timestamp":"2026-07-25T00:00:02Z","event":"PreToolUse","sessionId":"s1","cwd":"/p/AgentHalo","toolName":"run_terminal_command","permissionMode":"auto","source":"grok-hook"}"#, now: Date(timeIntervalSince1970: 2))
     expect(r.snapshot.state, .working, "tool → working")
     expect(r.snapshot.action, "Running command", "run_terminal_command → shell friendly action")
 
-    r.consume(jsonLine: #"{"timestamp":"2026-07-25T00:00:03Z","event":"Notification","sessionId":"s1","notificationType":"permission_prompt","source":"grok-hook"}"#, now: Date(timeIntervalSince1970: 3))
-    expect(r.snapshot.state, .attention, "permission")
+    // Auto mode: permission_prompt is suppressed (shell still has multi-second wait_ms).
+    r.consume(jsonLine: #"{"timestamp":"2026-07-25T00:00:03Z","event":"Notification","sessionId":"s1","notificationType":"permission_prompt","permissionMode":"auto","source":"grok-hook"}"#, now: Date(timeIntervalSince1970: 3))
+    expect(r.snapshot.state, .working, "permission_prompt after PreToolUse must not become attention")
+    expect(r.snapshot.action, "Running command", "tool action preserved under auto permission noise")
+    r.applyWorkingVisibility(
+        now: Date(timeIntervalSince1970: 3).addingTimeInterval(GrokHookStatusReducer.pendingPermissionAttentionDelay + 0.5)
+    )
+    expect(r.snapshot.state, .working, "auto mode never promotes permission noise to attention")
 
-    r.consume(jsonLine: #"{"timestamp":"2026-07-25T00:00:04Z","event":"Stop","sessionId":"s1","source":"grok-hook"}"#, now: Date(timeIntervalSince1970: 4))
+    r.consume(jsonLine: #"{"timestamp":"2026-07-25T00:00:05Z","event":"Stop","sessionId":"s1","source":"grok-hook"}"#, now: Date(timeIntervalSince1970: 5))
     expect(r.snapshot.state, .done, "stop → done")
+}
+
+/// Strategy A (default mode): permission_prompt arms delay, then attention.
+func testGrokHookReducerPermissionPromptWhileThinkingIsAttention() {
+    var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p","permissionMode":"default","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:02Z","event":"Notification","sessionId":"s1","notificationType":"permission_prompt","permissionMode":"default","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 2)
+    )
+    expect(r.snapshot.state, .thinking, "hook arms delay — not immediate attention")
+    r.applyWorkingVisibility(now: Date(timeIntervalSince1970: 2.1))
+    expect(r.snapshot.state, .thinking, "within delay still thinking")
+    r.applyWorkingVisibility(
+        now: Date(timeIntervalSince1970: 2).addingTimeInterval(GrokHookStatusReducer.pendingPermissionAttentionDelay + 0.05)
+    )
+    expect(r.snapshot.state, .attention, "after delay → attention (default mode)")
+    expect(r.snapshot.action, "Awaiting permission", "attention action")
+    r.applyWorkingVisibility(now: Date(timeIntervalSince1970: 10))
+    expect(r.snapshot.state, .attention, "genuine permission hold does not auto-fade")
+}
+
+/// Auto mode: multi-second shell permission wait must never flash purple.
+func testGrokHookReducerAutoModeShellPermissionNeverAttention() {
+    var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p","permissionMode":"auto","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:02Z","event":"PreToolUse","sessionId":"s1","cwd":"/p","toolName":"run_terminal_command","permissionMode":"auto","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 2)
+    )
+    // Measured: Auto shell wait_ms often 1.8–2.9s — events still fire.
+    r.applyPermissionRequested(at: Date(timeIntervalSince1970: 2.01))
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:02.020Z","event":"Notification","sessionId":"s1","notificationType":"permission_prompt","permissionMode":"auto","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 2.02)
+    )
+    r.applyWorkingVisibility(now: Date(timeIntervalSince1970: 4.5))
+    expect(r.snapshot.state, .working, "auto mode: 2.5s shell wait stays working (no purple)")
+    expect(r.snapshot.action, "Running command", "tool action preserved under auto shell wait")
+
+    r.applyPermissionResolved(decision: "allow", waitMs: 2630, at: Date(timeIntervalSince1970: 4.64))
+    r.applyWorkingVisibility(now: Date(timeIntervalSince1970: 5))
+    expect(r.snapshot.state, .working, "auto shell resolve keeps working")
+}
+
+/// Strategy C: instant auto resolve (wait_ms=0) never paints NEEDS YOU.
+func testGrokHookReducerAutoPermissionResolveDoesNotAttention() {
+    var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    r.applyPermissionRequested(at: Date(timeIntervalSince1970: 2))
+    r.applyPermissionResolved(decision: "allow", waitMs: 0, at: Date(timeIntervalSince1970: 2.01))
+    r.applyWorkingVisibility(now: Date(timeIntervalSince1970: 3))
+    expect(r.snapshot.state, .thinking, "auto resolve stays thinking, not attention")
+    expect(r.snapshot.state != .attention, "auto wait_ms=0 never NEEDS YOU")
+}
+
+/// Strategy C: pending permission without resolve becomes attention after delay.
+func testGrokHookReducerPendingPermissionBecomesAttentionAfterDelay() {
+    var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p","permissionMode":"default","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    let requestedAt = Date(timeIntervalSince1970: 2)
+    r.applyPermissionRequested(at: requestedAt)
+    r.applyWorkingVisibility(now: requestedAt.addingTimeInterval(0.1))
+    expect(r.snapshot.state, .thinking, "before delay still thinking")
+
+    r.applyWorkingVisibility(
+        now: requestedAt.addingTimeInterval(GrokHookStatusReducer.pendingPermissionAttentionDelay + 0.05)
+    )
+    expect(r.snapshot.state, .attention, "after delay → attention (human wait)")
+    expect(r.snapshot.action, "Awaiting permission", "human wait action")
+}
+
+/// Strategy C: human wait_ms then allow clears hold toward thinking.
+func testGrokHookReducerHumanPermissionResolveClearsAttention() {
+    var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p","permissionMode":"default","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    r.applyPermissionRequested(at: Date(timeIntervalSince1970: 2))
+    r.applyWorkingVisibility(now: Date(timeIntervalSince1970: 3))
+    expect(r.snapshot.state, .attention, "precondition: attention after delay")
+
+    r.applyPermissionResolved(decision: "allow", waitMs: 5000, at: Date(timeIntervalSince1970: 7))
+    expect(r.snapshot.state, .thinking, "human allow → thinking until PreToolUse")
+    expect(r.snapshot.action, "Thinking", "resume thinking after human allow")
+}
+
+/// Strategy A + C: working + permission events auto resolve stays working.
+func testGrokHookReducerAutoNoiseDuringToolExecutionStaysWorking() {
+    var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p","permissionMode":"auto","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:03Z","event":"PreToolUse","sessionId":"s1","cwd":"/p","toolName":"run_terminal_command","permissionMode":"auto","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 3)
+    )
+    r.applyPermissionRequested(at: Date(timeIntervalSince1970: 3.01))
+    r.applyPermissionResolved(decision: "allow", waitMs: 12, at: Date(timeIntervalSince1970: 3.02))
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:03.050Z","event":"Notification","sessionId":"s1","notificationType":"permission_prompt","permissionMode":"auto","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 3.05)
+    )
+    r.applyWorkingVisibility(now: Date(timeIntervalSince1970: 4))
+    expect(r.snapshot.state, .working, "auto noise during tool stays working")
+    expect(r.snapshot.action, "Running command", "tool action preserved")
+}
+
+/// Grok fires PreToolUse *before* the human permission UI. After the delay with
+/// no resolve, state must become attention (purple NEEDS YOU) even though we
+/// were already `.working`.
+func testGrokHookReducerHumanWaitAfterPreToolUseBecomesAttention() {
+    var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p","permissionMode":"default","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:02Z","event":"PreToolUse","sessionId":"s1","cwd":"/p","toolName":"run_terminal_command","permissionMode":"default","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 2)
+    )
+    expect(r.snapshot.state, .working, "precondition: PreToolUse → working")
+
+    let requestedAt = Date(timeIntervalSince1970: 2.015)
+    r.applyPermissionRequested(at: requestedAt)
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:02.020Z","event":"Notification","sessionId":"s1","notificationType":"permission_prompt","permissionMode":"default","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 2.02)
+    )
+    expect(r.snapshot.state, .working, "still working before delay (no purple flash)")
+
+    r.applyWorkingVisibility(now: requestedAt.addingTimeInterval(0.1))
+    expect(r.snapshot.state, .working, "within delay still working")
+
+    r.applyWorkingVisibility(
+        now: requestedAt.addingTimeInterval(GrokHookStatusReducer.pendingPermissionAttentionDelay + 0.05)
+    )
+    expect(r.snapshot.state, .attention, "human wait after PreToolUse → attention")
+    expect(r.snapshot.action, "Awaiting permission", "human wait action")
+    expect(r.snapshot.active, true, "human wait keeps turn active")
+
+    // Multi-second human allow should leave the hold.
+    r.applyPermissionResolved(decision: "allow", waitMs: 9678, at: Date(timeIntervalSince1970: 12))
+    expect(r.snapshot.state, .thinking, "human allow clears attention")
+}
+
+func testGrokHookReducerMapsEscCancelToInterrupted() {
+    var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p/AgentHalo","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:02Z","event":"PreToolUse","sessionId":"s1","cwd":"/p/AgentHalo","toolName":"read_file","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 2)
+    )
+    expect(r.snapshot.state, .working, "precondition: working")
+    expect(r.snapshot.active, true, "precondition: active")
+
+    // Esc cancel does not emit Stop/StopFailure — only session events do.
+    r.applyTurnCancelled(at: Date(timeIntervalSince1970: 3))
+    expect(r.snapshot.state, .error, "esc cancel → error ring")
+    expect(r.snapshot.action, "Interrupted", "esc cancel action matches Codex interrupt")
+    expect(r.snapshot.active, false, "esc cancel clears active turn")
+    expect(r.snapshot.completedAt == nil, "interrupt is not a done completion")
+
+    // Idle Ready should not be overwritten by a late cancel.
+    var idle = GrokHookStatusReducer(threadId: "s2", now: Date(timeIntervalSince1970: 0))
+    idle.applyTurnCancelled(at: Date(timeIntervalSince1970: 1))
+    expect(idle.snapshot.state, .idle, "cancel on idle Ready is a no-op")
+}
+
+func testGrokSessionTurnEventsReaderDetectsCancelledTurnEnded() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-grok-turn-events-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let eventsURL = root.appendingPathComponent("events.jsonl")
+
+    let seed = """
+    {"ts":"2026-07-30T08:00:00.000Z","type":"turn_started"}
+    {"ts":"2026-07-30T08:00:01.000Z","type":"phase_changed","phase":"thinking"}
+
+    """
+    try Data(seed.utf8).write(to: eventsURL)
+
+    let reader = GrokSessionTurnEventsReader()
+    expect(reader.poll(eventsURL: eventsURL).isEmpty, "no turn_ended yet")
+
+    // Append without rewriting: mirrors Grok's live jsonl growth.
+    let cancelLine = #"{"ts":"2026-07-30T08:00:05.000Z","type":"turn_ended","outcome":"cancelled","cancellation_category":"mid_turn_abort","cancellation_context":{"trigger":"esc"}}"# + "\n"
+    let handle = try FileHandle(forWritingTo: eventsURL)
+    defer { try? handle.close() }
+    _ = try handle.seekToEnd()
+    try handle.write(contentsOf: Data(cancelLine.utf8))
+    try handle.synchronize()
+
+    let ended = reader.poll(eventsURL: eventsURL)
+    expect(ended.turnEnd != nil, "cancelled turn_ended is not nil")
+    expect(ended.turnEnd?.outcome, Optional.some(GrokSessionTurnEndOutcome.cancelled), "poll surfaces cancelled turn_ended")
+
+    expect(reader.poll(eventsURL: eventsURL).isEmpty, "second poll with no growth is empty")
+}
+
+func testGrokSessionTurnEventsReaderParsesPermissionLifecycle() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-grok-perm-events-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let eventsURL = root.appendingPathComponent("events.jsonl")
+
+    let seed = """
+    {"ts":"2026-07-30T08:00:00.000Z","type":"permission_requested","tool_name":"run_terminal_command"}
+    {"ts":"2026-07-30T08:00:00.012Z","type":"permission_resolved","tool_name":"run_terminal_command","decision":"allow","wait_ms":12}
+
+    """
+    try Data(seed.utf8).write(to: eventsURL)
+
+    let reader = GrokSessionTurnEventsReader()
+    let delta = reader.poll(eventsURL: eventsURL)
+    expect(delta.permissionUpdates.count, 2, "requested + resolved")
+    if case .requested(let tool) = delta.permissionUpdates[0].kind {
+        expect(tool, "run_terminal_command", "requested tool")
+    } else {
+        expect(false, "first update is requested")
+    }
+    if case .resolved(let tool, let decision, let waitMs) = delta.permissionUpdates[1].kind {
+        expect(tool, "run_terminal_command", "resolved tool")
+        expect(decision, "allow", "resolved decision")
+        expect(waitMs, 12, "resolved wait_ms")
+    } else {
+        expect(false, "second update is resolved")
+    }
+}
+
+func testGrokHookStatusMonitorMapsSessionEscCancelToError() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-grok-monitor-cancel-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let logs = root.appendingPathComponent("logs", isDirectory: true)
+    let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+    let cwd = "/tmp/AgentHaloCancelTest"
+    let sessionId = "sess-esc-1"
+    let encoded = GrokSessionContextReader.encodeWorkspaceDirectory(cwd)
+    let sessionDir = sessions
+        .appendingPathComponent(encoded, isDirectory: true)
+        .appendingPathComponent(sessionId, isDirectory: true)
+    try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+
+    let statusURL = logs.appendingPathComponent("grok-status.jsonl")
+    let eventsURL = sessionDir.appendingPathComponent("events.jsonl")
+
+    // Space PreToolUse past the 0.7s thinking hold so the ring is clearly .working.
+    let hookLines = """
+    {"timestamp":"2026-07-30T08:00:01.000Z","event":"UserPromptSubmit","sessionId":"\(sessionId)","cwd":"\(cwd)","source":"grok-hook"}
+    {"timestamp":"2026-07-30T08:00:03.000Z","event":"PreToolUse","sessionId":"\(sessionId)","cwd":"\(cwd)","toolName":"read_file","source":"grok-hook"}
+
+    """
+    try Data(hookLines.utf8).write(to: statusURL)
+    try Data(#"{"ts":"2026-07-30T08:00:01.500Z","type":"turn_started"}"#.utf8 + Data([0x0A]))
+        .write(to: eventsURL)
+
+    let monitor = GrokHookStatusMonitor(statusURL: statusURL, sessionsRoot: sessions)
+    let now = ISO8601DateFormatter().date(from: "2026-07-30T08:00:03Z") ?? Date()
+    expect(monitor.refresh(now: now), true, "hooks load")
+    let working = monitor.snapshots().first
+    expect(working?.state, .working, "precondition: working from PreToolUse")
+    expect(working?.active == true, "precondition: active")
+
+    // Esc cancel: no Stop hook, only events.jsonl turn_ended cancelled.
+    let cancel = #"{"ts":"2026-07-30T08:00:04.000Z","type":"turn_ended","outcome":"cancelled","cancellation_category":"mid_turn_abort","cancellation_context":{"trigger":"esc"}}"# + "\n"
+    let handle = try FileHandle(forWritingTo: eventsURL)
+    defer { try? handle.close() }
+    _ = try handle.seekToEnd()
+    try handle.write(contentsOf: Data(cancel.utf8))
+    try handle.synchronize()
+
+    let cancelNow = ISO8601DateFormatter().date(from: "2026-07-30T08:00:04Z") ?? Date()
+    expect(monitor.refresh(now: cancelNow), true, "cancel via events should change state")
+    let interrupted = monitor.snapshots().first
+    expect(interrupted?.state, .error, "esc cancel → error")
+    expect(interrupted?.action, "Interrupted", "esc cancel action")
+    expect(interrupted?.active == false, "esc cancel not active")
+}
+
+/// Monitor integration: Auto-mode permission lines in events.jsonl + post-tool
+/// permission_prompt hook must not paint NEEDS YOU while a tool is running.
+func testGrokHookStatusMonitorIgnoresAutoPermissionDuringTool() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-grok-monitor-auto-perm-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let logs = root.appendingPathComponent("logs", isDirectory: true)
+    let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+    let cwd = "/tmp/AgentHaloAutoPermTest"
+    let sessionId = "sess-auto-perm-1"
+    let encoded = GrokSessionContextReader.encodeWorkspaceDirectory(cwd)
+    let sessionDir = sessions
+        .appendingPathComponent(encoded, isDirectory: true)
+        .appendingPathComponent(sessionId, isDirectory: true)
+    try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+
+    let statusURL = logs.appendingPathComponent("grok-status.jsonl")
+    let eventsURL = sessionDir.appendingPathComponent("events.jsonl")
+
+    let hookLines = """
+    {"timestamp":"2026-07-30T08:00:01.000Z","event":"UserPromptSubmit","sessionId":"\(sessionId)","cwd":"\(cwd)","permissionMode":"auto","source":"grok-hook"}
+    {"timestamp":"2026-07-30T08:00:03.000Z","event":"PreToolUse","sessionId":"\(sessionId)","cwd":"\(cwd)","toolName":"run_terminal_command","permissionMode":"auto","source":"grok-hook"}
+    {"timestamp":"2026-07-30T08:00:03.020Z","event":"Notification","sessionId":"\(sessionId)","cwd":"\(cwd)","notificationType":"permission_prompt","permissionMode":"auto","source":"grok-hook"}
+
+    """
+    try Data(hookLines.utf8).write(to: statusURL)
+
+    // Auto shell often resolves with wait_ms in the 1.5–3s band — still not human.
+    let eventsSeed = """
+    {"ts":"2026-07-30T08:00:03.000Z","type":"permission_requested","tool_name":"run_terminal_command"}
+    {"ts":"2026-07-30T08:00:05.630Z","type":"permission_resolved","tool_name":"run_terminal_command","decision":"allow","wait_ms":2630}
+
+    """
+    try Data(eventsSeed.utf8).write(to: eventsURL)
+
+    let monitor = GrokHookStatusMonitor(statusURL: statusURL, sessionsRoot: sessions)
+    let midWait = ISO8601DateFormatter().date(from: "2026-07-30T08:00:04Z") ?? Date()
+    expect(monitor.refresh(now: midWait), true, "hooks+events load mid auto wait")
+    let mid = monitor.snapshots().first
+    expect(mid?.state, .working, "auto shell mid-wait stays working (no purple)")
+    expect(mid?.action, "Running command", "tool action kept mid-wait")
+    expect(mid?.state != .attention, "must not be NEEDS YOU mid auto wait")
+
+    // Append is not needed — seed already has resolved; re-refresh after resolve time.
+    let afterResolve = ISO8601DateFormatter().date(from: "2026-07-30T08:00:06Z") ?? Date()
+    _ = monitor.refresh(now: afterResolve)
+    let snap = monitor.snapshots().first
+    expect(snap?.state, .working, "auto permission during tool stays working")
+    expect(snap?.action, "Running command", "tool action kept")
+    expect(snap?.state != .attention, "must not be NEEDS YOU")
 }
 
 // MARK: - Durable ClaudeCodeStatusHook isolation (Grok vs Claude status files)
 
-/// Locate the shared status-hook binary next to this process or under the package `.build`.
+/// Locate a fresh shared status-hook binary for isolation tests.
+///
+/// Always rebuilds the package product before selecting a candidate so layout
+/// path changes (and other hook logic) cannot leave CoreChecks running a stale
+/// `.build/*/ClaudeCodeStatusHook` that still writes legacy status files.
 private func resolveClaudeCodeStatusHookBinary() throws -> URL {
     let fm = FileManager.default
     let argv0 = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
-    let sibling = argv0.deletingLastPathComponent().appendingPathComponent("ClaudeCodeStatusHook")
-    if fm.isExecutableFile(atPath: sibling.path) {
-        return sibling
-    }
 
-    // Walk up from CWD / argv0 looking for Package.swift + .build product.
+    // Walk up from CWD / argv0 looking for Package.swift, rebuild, then pick product.
     let searchRoots: [URL] = [
         URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true),
         argv0.deletingLastPathComponent(),
@@ -1991,17 +3082,6 @@ private func resolveClaudeCodeStatusHookBinary() throws -> URL {
         for _ in 0..<8 {
             let package = dir.appendingPathComponent("Package.swift")
             if fm.fileExists(atPath: package.path) {
-                let candidates = [
-                    dir.appendingPathComponent(".build/debug/ClaudeCodeStatusHook"),
-                    dir.appendingPathComponent(".build/arm64-apple-macosx/debug/ClaudeCodeStatusHook"),
-                    dir.appendingPathComponent(".build/x86_64-apple-macosx/debug/ClaudeCodeStatusHook"),
-                    dir.appendingPathComponent(".build/release/ClaudeCodeStatusHook"),
-                    dir.appendingPathComponent(".build/arm64-apple-macosx/release/ClaudeCodeStatusHook"),
-                ]
-                for candidate in candidates where fm.isExecutableFile(atPath: candidate.path) {
-                    return candidate
-                }
-                // Build once if missing (slow path; only when sibling/product absent).
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: "/usr/bin/swift")
                 process.arguments = ["build", "--product", "ClaudeCodeStatusHook"]
@@ -2011,6 +3091,16 @@ private func resolveClaudeCodeStatusHookBinary() throws -> URL {
                 try process.run()
                 process.waitUntilExit()
                 expect(process.terminationStatus, 0, "swift build ClaudeCodeStatusHook should succeed")
+
+                let candidates = [
+                    dir.appendingPathComponent(".build/debug/ClaudeCodeStatusHook"),
+                    dir.appendingPathComponent(".build/arm64-apple-macosx/debug/ClaudeCodeStatusHook"),
+                    dir.appendingPathComponent(".build/x86_64-apple-macosx/debug/ClaudeCodeStatusHook"),
+                    dir.appendingPathComponent(".build/release/ClaudeCodeStatusHook"),
+                    dir.appendingPathComponent(".build/arm64-apple-macosx/release/ClaudeCodeStatusHook"),
+                    // After rebuild, sibling of this test process is also valid.
+                    argv0.deletingLastPathComponent().appendingPathComponent("ClaudeCodeStatusHook"),
+                ]
                 for candidate in candidates where fm.isExecutableFile(atPath: candidate.path) {
                     return candidate
                 }
@@ -2067,8 +3157,8 @@ private func runClaudeCodeStatusHook(
     expect(process.terminationStatus, 0, "ClaudeCodeStatusHook should exit 0")
 }
 
-/// End-to-end: shared hook binary routes Grok env to grok-build-status.jsonl only,
-/// Claude path to claude-code-status.jsonl, and normalizes snake_case events.
+/// End-to-end: shared hook binary routes Grok env to logs/grok-status.jsonl only,
+/// Claude path to logs/claude-status.jsonl, and normalizes snake_case events.
 func testClaudeCodeStatusHookIsolatesGrokAndClaudeStatusFiles() throws {
     let home = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-hook-isolation-\(UUID().uuidString)", isDirectory: true)
@@ -2076,9 +3166,9 @@ func testClaudeCodeStatusHookIsolatesGrokAndClaudeStatusFiles() throws {
     try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
 
     let binary = try resolveClaudeCodeStatusHookBinary()
-    let agentHalo = home.appendingPathComponent(".agent-halo", isDirectory: true)
-    let grokStatus = agentHalo.appendingPathComponent("grok-build-status.jsonl")
-    let claudeStatus = agentHalo.appendingPathComponent("claude-code-status.jsonl")
+    let paths = AgentHaloPaths(homeDirectory: home)
+    let grokStatus = paths.grokStatusLog
+    let claudeStatus = paths.claudeStatusLog
 
     // Grok path: GROK_SESSION_ID set; snake_case CLI event should become PreToolUse.
     try runClaudeCodeStatusHook(
@@ -2089,17 +3179,18 @@ func testClaudeCodeStatusHookIsolatesGrokAndClaudeStatusFiles() throws {
             "GROK_SESSION_ID": "test-grok-session",
             "GROK_HOOK_EVENT": "pre_tool_use",
         ],
-        stdinJSON: #"{"sessionId":"test-grok-session","cwd":"/tmp/proj","toolName":"run_terminal_command","timestamp":"2026-07-25T00:00:00Z"}"#
+        stdinJSON: #"{"sessionId":"test-grok-session","cwd":"/tmp/proj","toolName":"run_terminal_command","permissionMode":"auto","timestamp":"2026-07-25T00:00:00Z"}"#
     )
 
-    expect(FileManager.default.fileExists(atPath: grokStatus.path), "Grok path should write grok-build-status.jsonl")
+    expect(FileManager.default.fileExists(atPath: grokStatus.path), "Grok path should write logs/grok-status.jsonl")
     let grokText = try String(contentsOf: grokStatus, encoding: .utf8)
     expect(grokText.contains("grok-hook"), "Grok record source should be grok-hook")
     expect(grokText.contains("test-grok-session"), "Grok record should include session id")
     expect(grokText.contains("\"PreToolUse\""), "snake_case pre_tool_use should normalize to PreToolUse")
+    expect(grokText.contains("\"permissionMode\":\"auto\""), "hook should persist permissionMode for Auto ring gating")
     if FileManager.default.fileExists(atPath: claudeStatus.path) {
         let existingClaude = try String(contentsOf: claudeStatus, encoding: .utf8)
-        expect(!existingClaude.contains("test-grok-session"), "Grok session id must not appear in claude-code-status.jsonl")
+        expect(!existingClaude.contains("test-grok-session"), "Grok session id must not appear in logs/claude-status.jsonl")
     }
 
     // Claude path: no GROK_* env — must write claude file only (for this session).
@@ -2111,13 +3202,13 @@ func testClaudeCodeStatusHookIsolatesGrokAndClaudeStatusFiles() throws {
         stdinJSON: #"{"session_id":"claude-1","cwd":"/tmp/c","tool_name":"Bash"}"#
     )
 
-    expect(FileManager.default.fileExists(atPath: claudeStatus.path), "Claude path should write claude-code-status.jsonl")
+    expect(FileManager.default.fileExists(atPath: claudeStatus.path), "Claude path should write logs/claude-status.jsonl")
     let claudeText = try String(contentsOf: claudeStatus, encoding: .utf8)
     expect(claudeText.contains("claude-hook"), "Claude record source should be claude-hook")
     expect(claudeText.contains("claude-1"), "Claude record should include session id")
     expect(claudeText.contains("\"PreToolUse\""), "Claude PreToolUse event should be PascalCase")
     let grokAfterClaude = try String(contentsOf: grokStatus, encoding: .utf8)
-    expect(!grokAfterClaude.contains("claude-1"), "Claude session id must not be written to grok-build-status.jsonl")
+    expect(!grokAfterClaude.contains("claude-1"), "Claude session id must not be written to logs/grok-status.jsonl")
     expect(!claudeText.contains("test-grok-session"), "Grok session must not leak into Claude status file")
 }
 
@@ -2241,7 +3332,7 @@ func testClaudeHookMonitorPrunesStaleReducers() throws {
         try? FileManager.default.removeItem(at: root)
     }
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    let statusFile = root.appendingPathComponent("claude-code-status.jsonl")
+    let statusFile = root.appendingPathComponent("claude-status.jsonl")
     let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
 
     // Write two completions from different sessions, both long ago.
@@ -2306,7 +3397,7 @@ func testClaudeHookMonitorHandlesPendingLinesAndTruncation() throws {
         try? FileManager.default.removeItem(at: root)
     }
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    let statusFile = root.appendingPathComponent("claude-code-status.jsonl")
+    let statusFile = root.appendingPathComponent("claude-status.jsonl")
     let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
 
     try Data(#"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"hook-monitor","cwd":"/Users/wjs/work/pyproj/AgentHalo","source":"claude-hook"}"#.utf8).write(to: statusFile)
@@ -2888,6 +3979,15 @@ func expectAlmost(_ actual: Double, _ expected: Double, tolerance: Double, _ mes
     }
 }
 
+testAgentHaloPathsLayoutV2()
+do {
+    try testAgentHaloLayoutMigratorMovesFlatLayoutToV2AndKeepsLegacyBinaries()
+    try testAgentHaloLayoutMigratorPrefersExistingNewPathsAndDeletesOld()
+    try testAgentHaloLayoutMigratorScrubsResidueWhenAlreadyVersion2()
+    try testAgentHaloLayoutMigratorPreservesLegacyDataUntilDestinationIsUsable()
+} catch {
+    fatalError("layout migrator checks failed: \(error)")
+}
 testReducesPlanningWorkingAttentionErrorAndCompleteEvents()
 testAggregatePrioritizesActionableSessions()
 testAggregateRemovesSupersededSessionErrors()
@@ -2928,11 +4028,20 @@ do {
 }
 do {
     try testGrokHookConfiguratorWritesHooksJSON()
+    try testRuntimeBootstrapUpgradesLayoutV1WithoutStrandingHookPaths()
+    try testGrokHookConfiguratorLeavesPreferredPathConfigAlone()
+    try testGrokHookConfiguratorRewritesLegacyRootPath()
+    try testGrokHookConfiguratorRepairsDeadExecutableCommand()
+    try testBinaryStagingNeverLeavesDestinationMissing()
+    testStatuslineProxyRecursionCheckUsesExactExecutablePaths()
 } catch {
     fatalError("\(error)")
 }
 do {
     try testClaudeStatusLineConfiguratorPreservesAndChainsExistingCommand()
+    try testClaudeHookConfiguratorRewritesLegacyPathToPreferred()
+    try testClaudeHookConfiguratorDoesNotDeleteLegacyBinaryWhenBundledMissing()
+    try testClaudeStatusLineConfiguratorRewritesLegacyProxyToPreferred()
 } catch {
     fatalError("\(error)")
 }
@@ -2973,7 +4082,12 @@ do {
     try testGrokSessionContextReaderReadsSignalsPercentAndSummary()
     try testGrokSessionContextReaderFallsBackToTokenRatio()
     try testGrokSessionContextReaderPrefersLiveUpdatesTotalTokens()
+    try testGrokSessionContextReaderLiveTokensWithoutSignals()
     try testGrokActiveSessionsReaderParsesArrayEntries()
+    try testGrokSessionTurnEventsReaderDetectsCancelledTurnEnded()
+    try testGrokSessionTurnEventsReaderParsesPermissionLifecycle()
+    try testGrokHookStatusMonitorMapsSessionEscCancelToError()
+    try testGrokHookStatusMonitorIgnoresAutoPermissionDuringTool()
 } catch {
     fatalError("\(error)")
 }
@@ -2991,7 +4105,8 @@ do {
     try testClaudeContextUsageStorageSeparatesSessionsAndRejectsUnsafeIds()
     try testClaudeContextUsageReaderRequiresExactFreshSession()
     try testClaudeContextUsageReaderRetainsExactUsageWhileSessionIsLive()
-    try testClaudeContextUsageReaderMigratesMatchingLegacySnapshot()
+    try testClaudeContextUsageGCAgeCountProtectAndThrottle()
+    try testClaudeContextUsageReaderDoesNotReadLegacySingleFile()
 } catch {
     fatalError("\(error)")
 }
@@ -3030,6 +4145,14 @@ testClaudeHookReducerIdlePromptReturnsToReady()
 testClaudeHookIdlePromptDoesNotDriveThinkingAggregate()
 testClaudeHookReducerStopFailureMapsToError()
 testGrokHookReducerLifecycle()
+testGrokHookReducerPermissionPromptWhileThinkingIsAttention()
+testGrokHookReducerAutoModeShellPermissionNeverAttention()
+testGrokHookReducerAutoPermissionResolveDoesNotAttention()
+testGrokHookReducerPendingPermissionBecomesAttentionAfterDelay()
+testGrokHookReducerHumanPermissionResolveClearsAttention()
+testGrokHookReducerAutoNoiseDuringToolExecutionStaysWorking()
+testGrokHookReducerHumanWaitAfterPreToolUseBecomesAttention()
+testGrokHookReducerMapsEscCancelToInterrupted()
 do {
     try testClaudeCodeStatusHookIsolatesGrokAndClaudeStatusFiles()
 } catch {

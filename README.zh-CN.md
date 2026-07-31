@@ -112,14 +112,39 @@ swift run AgentHaloDiagnostics --transition-strip /tmp/agent-halo-transitions
 
 ## 隐私
 
-Agent Halo 只在本机读取 `%USERPROFILE%\.codex\sessions`（macOS 为
-`~/.codex/sessions`）中的生命周期事件，并自动配置 `~/.claude/settings.json`
-中的 Claude Code 生命周期 hooks 与 `~/.grok/hooks/` 下的 Grok Build hooks。
-macOS 另会配置 Claude Code status line proxy。Claude hook 事件写入
-`~/.agent-halo/claude-code-status.jsonl`，Grok hook 事件写入
-`~/.agent-halo/grok-build-status.jsonl`；macOS 上 Claude 上下文快照写入
-`~/.agent-halo/claude-code-context.json`。它还会只读查询 `logs_2.sqlite`
-中结构化的 Codex 连接和服务故障记录。
+Agent Halo 只在本机读取 `%USERPROFILE%\.codex\sessions` 中的生命周期事件，
+并在 macOS 上自动配置：
+
+- Claude Code：`~/.claude/settings.json` 中的生命周期 hooks 与 status line proxy
+- Grok Build：`~/.grok/hooks/agent-halo-status.json` 中的生命周期 hooks
+
+用户主目录下的 `.agent-halo` 使用统一布局：
+
+- `bin/` — staged hook 二进制（macOS 为 `status-hook` /
+  `statusline-proxy`，Windows 为 `status-hook.exe`）
+- `state/` — 小型持久状态（如 macOS statusline 下游命令）
+- `logs/` — 近期生命周期事件（`claude-status.jsonl`、`grok-status.jsonl`，自动轮转）
+- `cache/` — 可安全删除的缓存（Claude context 快照、用量快照）
+
+Grok Build 默认也会加载 Claude 的 `settings.json` hooks（兼容扫描），因此同一条
+Agent Halo `status-hook` 在 Grok 会话里可能出现两次（`agent-halo-status` 与
+`settings`）。功能正常，只是重复执行。若只想保留 Grok 原生路径，可在
+`~/.grok/config.toml` 中设置：
+
+```toml
+[compat.claude]
+hooks = false
+```
+
+这只关闭 Claude hooks 导入，不影响 skills / rules / MCP，也不影响 Claude Code
+本身。修改后需重启 Grok 会话才会生效。注意：若你还有**仅**写在
+`~/.claude/settings.json` 中的其它 hooks，关闭后它们在 Grok 中也不会再运行。
+
+Windows 应用设置与 `halo.log` 仍在 `%LOCALAPPDATA%\CodexHalo\`；**用量快照**
+在 `.agent-halo\cache\`。应用启动时会把当前 `AgentHalo.exe` 原子暂存为稳定副本
+`%USERPROFILE%\.agent-halo\bin\status-hook.exe`，Claude hooks 通过
+`status-hook.exe --claude-hook <event>` 调用该副本；它不是需要单独下载的组件。
+Agent Halo 还会只读查询 `logs_2.sqlite` 中结构化的 Codex 连接和服务故障记录。
 
 为了独立刷新 Codex 额度，程序会读取现有 OAuth 登录凭据，并仅向
 `auth.openai.com` 与 `chatgpt.com` 的官方接口发起 HTTPS 请求。Grok Build
