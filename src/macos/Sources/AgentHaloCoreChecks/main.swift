@@ -2790,7 +2790,7 @@ func testGrokHookReducerPendingPermissionBecomesAttentionAfterDelay() {
     expect(r.snapshot.action, "Awaiting permission", "human wait action")
 }
 
-/// Strategy C: human wait_ms then allow clears hold toward thinking.
+/// Strategy C: human wait without prior PreToolUse falls back to thinking on allow.
 func testGrokHookReducerHumanPermissionResolveClearsAttention() {
     var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
     r.consume(
@@ -2802,8 +2802,8 @@ func testGrokHookReducerHumanPermissionResolveClearsAttention() {
     expect(r.snapshot.state, .attention, "precondition: attention after delay")
 
     r.applyPermissionResolved(decision: "allow", waitMs: 5000, at: Date(timeIntervalSince1970: 7))
-    expect(r.snapshot.state, .thinking, "human allow → thinking until PreToolUse")
-    expect(r.snapshot.action, "Thinking", "resume thinking after human allow")
+    expect(r.snapshot.state, .thinking, "human allow without PreToolUse → thinking")
+    expect(r.snapshot.action, "Thinking", "resume thinking when no tool was staged")
 }
 
 /// Strategy A + C: working + permission events auto resolve stays working.
@@ -2861,9 +2861,20 @@ func testGrokHookReducerHumanWaitAfterPreToolUseBecomesAttention() {
     expect(r.snapshot.action, "Awaiting permission", "human wait action")
     expect(r.snapshot.active, true, "human wait keeps turn active")
 
-    // Multi-second human allow should leave the hold.
+    // Multi-second human allow must restore working — Grok does not re-emit PreToolUse
+    // before PostToolUse, so tool execution UI would otherwise be lost.
     r.applyPermissionResolved(decision: "allow", waitMs: 9678, at: Date(timeIntervalSince1970: 12))
-    expect(r.snapshot.state, .thinking, "human allow clears attention")
+    expect(r.snapshot.state, .working, "human allow restores working (tool still running)")
+    expect(r.snapshot.action, "Running command", "human allow restores tool action")
+    expect(r.snapshot.active, true, "human allow keeps turn active during tool run")
+
+    // PostToolUse still advances normally after the restored working hold.
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:15Z","event":"PostToolUse","sessionId":"s1","cwd":"/p","toolName":"run_terminal_command","permissionMode":"default","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 15)
+    )
+    expect(r.snapshot.state, .working, "PostToolUse after allow → reviewing")
+    expect(r.snapshot.action, "Reviewing result", "PostToolUse action after restored working")
 }
 
 func testGrokHookReducerMapsEscCancelToInterrupted() {

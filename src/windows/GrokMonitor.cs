@@ -397,6 +397,15 @@ namespace CodexHalo
         /// bypassPermissions). Auto and bypass never need a purple NEEDS YOU ring.
         /// </summary>
         private string permissionMode;
+        /// <summary>
+        /// State/action to restore after a human permission allow. Grok's real
+        /// order is PreToolUse → permission_requested → permission_resolved →
+        /// PostToolUse; there is no second PreToolUse after approve, so we must
+        /// not drop back to Thinking while the tool is still running.
+        /// </summary>
+        private bool hasPrePermissionResume;
+        private HaloState prePermissionResumeState;
+        private string prePermissionResumeAction;
 
         public SessionSnapshot Snapshot { get; private set; }
 
@@ -545,6 +554,7 @@ namespace CodexHalo
                     wasActiveBeforeCompaction = null;
                     pendingPermissionRequestedAtUtc = DateTime.MinValue;
                     permissionPrompt = true;
+                    ClearPrePermissionResume();
                     workingVisibleUntilUtc = DateTime.MinValue;
                     thinkingVisibleUntilUtc = DateTime.MinValue;
                     pendingWorkingAction = null;
@@ -793,12 +803,16 @@ namespace CodexHalo
 
             if (auto && !denied)
             {
-                ClearPermissionHold();
+                // Drop false attention; restore working when PreToolUse already
+                // started the tool (Grok does not re-emit PreToolUse after allow).
+                permissionPrompt = false;
                 if (Snapshot.State == HaloState.Attention)
                 {
-                    Snapshot.Active = true;
-                    Snapshot.State = HaloState.Thinking;
-                    Snapshot.Action = "Thinking";
+                    RestoreAfterPermissionAllow();
+                }
+                else
+                {
+                    ClearPrePermissionResume();
                 }
                 return;
             }
@@ -806,6 +820,7 @@ namespace CodexHalo
             if (denied)
             {
                 permissionPrompt = true;
+                ClearPrePermissionResume();
                 workingVisibleUntilUtc = DateTime.MinValue;
                 thinkingVisibleUntilUtc = DateTime.MinValue;
                 pendingWorkingAction = null;
@@ -816,14 +831,19 @@ namespace CodexHalo
                 return;
             }
 
+            // Human allow: tool continues without a second PreToolUse. Restore
+            // pre-hold working state/action when we had one.
             if (Snapshot.State == HaloState.Attention || permissionPrompt)
             {
-                ClearPermissionHold();
+                permissionPrompt = false;
                 Snapshot.Active = true;
                 if (Snapshot.State == HaloState.Attention)
                 {
-                    Snapshot.State = HaloState.Thinking;
-                    Snapshot.Action = "Thinking";
+                    RestoreAfterPermissionAllow();
+                }
+                else
+                {
+                    ClearPrePermissionResume();
                 }
                 Snapshot.CompletedUtc = DateTime.MinValue;
             }
@@ -867,6 +887,9 @@ namespace CodexHalo
                 return;
             }
             pendingPermissionRequestedAtUtc = DateTime.MinValue;
+            // Capture resume target before overwriting with NEEDS YOU. Real Grok
+            // order is PreToolUse (working) → wait → allow → tool runs → PostToolUse.
+            CapturePrePermissionResume();
             permissionPrompt = true;
             workingVisibleUntilUtc = DateTime.MinValue;
             thinkingVisibleUntilUtc = DateTime.MinValue;
@@ -898,10 +921,71 @@ namespace CodexHalo
             }
         }
 
+        /// <summary>
+        /// Remember state/action so human allow can resume tool execution UI.
+        /// </summary>
+        private void CapturePrePermissionResume()
+        {
+            if (hasPrePermissionResume)
+            {
+                return;
+            }
+            if (Snapshot.State == HaloState.Working)
+            {
+                hasPrePermissionResume = true;
+                prePermissionResumeState = HaloState.Working;
+                prePermissionResumeAction = Snapshot.Action;
+                return;
+            }
+            if (!String.IsNullOrEmpty(pendingWorkingAction))
+            {
+                // PreToolUse during thinking min-hold: tool action is deferred.
+                hasPrePermissionResume = true;
+                prePermissionResumeState = HaloState.Working;
+                prePermissionResumeAction = pendingWorkingAction;
+                return;
+            }
+            if (Snapshot.State == HaloState.Thinking)
+            {
+                hasPrePermissionResume = true;
+                prePermissionResumeState = HaloState.Thinking;
+                prePermissionResumeAction = Snapshot.Action;
+                return;
+            }
+            hasPrePermissionResume = true;
+            prePermissionResumeState = HaloState.Thinking;
+            prePermissionResumeAction = "Thinking";
+        }
+
+        /// <summary>
+        /// After allow: restore working tool UI when we had one; otherwise Thinking.
+        /// </summary>
+        private void RestoreAfterPermissionAllow()
+        {
+            Snapshot.Active = true;
+            if (hasPrePermissionResume)
+            {
+                Snapshot.State = prePermissionResumeState;
+                Snapshot.Action = prePermissionResumeAction;
+                ClearPrePermissionResume();
+                return;
+            }
+            Snapshot.State = HaloState.Thinking;
+            Snapshot.Action = "Thinking";
+        }
+
+        private void ClearPrePermissionResume()
+        {
+            hasPrePermissionResume = false;
+            prePermissionResumeState = HaloState.Idle;
+            prePermissionResumeAction = null;
+        }
+
         private void ClearPermissionHold()
         {
             permissionPrompt = false;
             pendingPermissionRequestedAtUtc = DateTime.MinValue;
+            ClearPrePermissionResume();
         }
 
         private bool SuppressesPermissionAttention

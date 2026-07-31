@@ -1554,6 +1554,25 @@ public static class Diagnostics
                     "human wait after delay -> attention");
                 Assert(String.Equals(human.Snapshot.Action, "Awaiting permission",
                     StringComparison.Ordinal), "human wait action");
+                // Human allow restores working — Grok does not re-emit PreToolUse
+                // before PostToolUse, so tool execution UI must be recovered.
+                human.ApplyPermissionResolved("allow", 9678,
+                    t0.AddSeconds(12));
+                Assert(human.Snapshot.State == HaloState.Working,
+                    "human allow restores working (tool still running)");
+                Assert(String.Equals(human.Snapshot.Action, "Running command",
+                    StringComparison.Ordinal),
+                    "human allow restores tool action");
+                Assert(human.Snapshot.Active,
+                    "human allow keeps turn active during tool run");
+                human.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:15Z\",\"event\":\"PostToolUse\",\"sessionId\":\"s-human\",\"cwd\":\"/p\",\"toolName\":\"run_terminal_command\",\"permissionMode\":\"default\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(15));
+                Assert(human.Snapshot.State == HaloState.Working,
+                    "PostToolUse after allow -> reviewing");
+                Assert(String.Equals(human.Snapshot.Action, "Reviewing result",
+                    StringComparison.Ordinal),
+                    "PostToolUse action after restored working");
 
                 // Auto shell permission_requested stays working with multi-second wait_ms.
                 GrokHookStatusReducer autoShell = new GrokHookStatusReducer("s-auto-shell");
