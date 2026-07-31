@@ -16,30 +16,40 @@
 
 1. 用户可选择**启用哪些 Agent**：启用 = 左上角切换条显示 + 后台监控/采集；未启用 = 不显示、不轮询。
 2. 提供独立 **设置窗口**，从状态栏菜单与光环右键菜单的「设置…」进入。
-3. 将原先散落在菜单中的 **语言、光环大小、开机启动** 迁入设置窗口；并新增 **显示菜单栏图标** 开关。
-4. 默认行为与现网一致：全部 Agent 启用、菜单栏图标显示，升级无感。
+3. 将偏好类选项集中到设置窗口：
+   - 主页面显示（启用 Agent）
+   - 光环大小、语言（外观）
+   - 始终置顶、显示菜单栏图标、开机自动启动（通用）
+   - 重置光环位置（恢复动作按钮）
+   - 关于 / 版本号（页脚）
+4. 默认行为与现网一致：全部 Agent 启用、菜单栏图标显示、置顶默认与现网一致，升级无感。
 
 ## 非目标
 
 - Windows 设置 UI 与 `enabledAgents` / `showMenuBarIcon` 同步（后续另开）
 - 新增 Agent 类型（Gemini、OpenCode、Claude Desktop 等）
 - 用户自定义 Agent 显示顺序（拖拽排序）
-- 将「始终置顶」「暂停监控」「预览状态」迁入设置窗口（仍留菜单快捷操作）
+- 将「暂停监控」「预览状态」「退出」迁入设置（仍为菜单临时/系统操作）
+- 在设置中再放一份「监控对象 / focusedAgent」切换（详情条与菜单已覆盖）
 - 禁用 Claude 时卸载或改写 `~/.claude` hooks / statusline 配置
 - 云同步、远程配置、账号体系
-- 设置窗口内搬迁「逃离屏幕外」等恢复操作
+- 全局快捷键、通知/声音、用量刷新间隔、悬停延迟等未产品化能力
+- 高级：打开数据目录、重装 hooks、诊断导出
 
 ## 已确认的架构决策
 
 1. **平台**：仅 macOS。
 2. **语义**：勾选 Agent = **启用 + 显示**（方案 B），不是「仅控制 UI 可见性」。
-3. **持久化字段**：`enabledAgents: [AgentKind]` + `showMenuBarIcon: Bool`；语言/尺寸/开机启动沿用现有路径。
+3. **持久化新字段**：`enabledAgents: [AgentKind]` + `showMenuBarIcon: Bool`；`alwaysOnTop` / `haloSize` / `language` / 位置字段沿用现有路径；开机启动仍走 `StartupManager`。
 4. **默认**：`enabledAgents = AgentKind.allCases`；`showMenuBarIcon = true`。
 5. **至少 1 个 Agent**：不能清空；关掉当前 `focusedAgent` 时自动切到 `enabledAgents.first`。
 6. **显示顺序**：v1 写入时始终按 `AgentKind.allCases` 过滤排序，不记录用户勾选先后。
 7. **设置即时生效**，无「保存 / 取消」按钮。
 8. **菜单栏图标关闭后**：托盘消失，仍可通过**光环右键菜单**打开设置与退出。
 9. **托盘菜单与右键菜单共用**精简后的控制菜单；仅当 `showMenuBarIcon == true` 时存在 `NSStatusItem`。
+10. **始终置顶**：设置与菜单**双入口**，状态双向一致（改一处刷新另一处）。
+11. **重置位置**：设置内按钮 + 菜单项并存，均调用现有 `escapeOffscreen` 等价逻辑。
+12. **关于**：页脚只读版本字符串，不链到外部（v1 无需检查更新）。
 
 ## 背景与问题
 
@@ -57,8 +67,9 @@
 |------|------|
 | 切换条永远三个 | 单 Agent 用户噪音大 |
 | 无法关闭不需要的 Agent 监控 | 多余 IO / 轮询 |
-| 偏好设置散落在深层子菜单 | 语言、尺寸、开机启动难发现 |
+| 偏好设置散落在深层子菜单 | 语言、尺寸、开机启动、置顶难发现 |
 | 菜单栏图标无法隐藏 | 菜单栏拥挤时无退路 |
+| 无版本信息入口 | 反馈问题时不便对齐构建 |
 
 ## 数据模型与持久化
 
@@ -74,7 +85,7 @@ public var showMenuBarIcon: Bool
 | `enabledAgents` | 已启用 Agent 的有序列表（显示顺序） | `AgentKind.allCases` | 同默认 |
 | `showMenuBarIcon` | 是否显示菜单栏 `NSStatusItem` | `true` | 同默认 |
 
-现有字段不变：`focusedAgent`、`haloSize`、`language`、`alwaysOnTop`、`paused`、位置相关字段等。
+现有字段继续使用、**不改 schema 语义**：`focusedAgent`、`haloSize`、`language`、`alwaysOnTop`、`paused`、位置相关字段等。
 
 开机启动**不**写入 `settings.json`，继续由 `StartupManager` / LaunchAgent 表示真实状态（与现网一致）。
 
@@ -118,15 +129,19 @@ public var showMenuBarIcon: Bool
 │  选择要显示并启用的 Agent                   │
 │  [● Codex] [● Claude Code] [○ Grok]       │
 │                                           │
+│  外观                                      │
 │  光环大小                      112        │
 │  ━━━━━●━━━━━━━━  (72…180)                 │
-│                                           │
 │  语言                                      │
 │  ( 跟随系统  |  中文  |  English )          │
 │                                           │
 │  通用                                      │
+│  始终置顶                          [toggle]│
 │  显示菜单栏图标                    [toggle]│
 │  开机自动启动                      [toggle]│
+│  [ 重置光环位置 ]                          │
+│                                           │
+│  Agent Halo x.y.z                          │
 └───────────────────────────────────────────┘
 ```
 
@@ -135,27 +150,38 @@ public var showMenuBarIcon: Bool
 | 区块 | 行为 |
 |------|------|
 | 主页面显示 | 胶囊多选；选中 = 实心强调色 + 图标/标题；未选中 = 浅底。点击切换启用。只剩 1 个已选时不可点灭（忽略点击或视觉 dim）。即时写盘并通知 `AppDelegate`。 |
-| 光环大小 | 滑块 + 数值；范围与步进与现有菜单滑块一致（`HaloSettings.minimumHaloSize`…`maximumHaloSize`）。调用现有 `applyHaloSize` 路径（clamp、面板 resize、防抖写盘、详情面板重定位）。 |
+| 光环大小 | 滑块 + 数值；范围与现有菜单滑块一致（`HaloSettings.minimumHaloSize`…`maximumHaloSize`）。调用现有 `applyHaloSize`（clamp、面板 resize、防抖写盘、详情面板重定位）。 |
 | 语言 | 三段：跟随系统 (`nil`) / `zh` / `en`。改后 `L10n.shared.setLanguage`、写 `settings.language`、刷新菜单与设置窗文案。 |
+| 始终置顶 | Toggle ↔ `settings.alwaysOnTop` + `applyWindowLevels()` + 写盘；与菜单勾选同步。 |
 | 显示菜单栏图标 | 见下文「菜单栏图标」。 |
 | 开机自动启动 | Toggle ↔ `StartupManager.setEnabled`；打开设置时读 `StartupManager.isEnabled()` 反映真实状态。 |
+| 重置光环位置 | 按钮；调用与菜单「脱离卡死」相同的逻辑（主屏右上角 + 提交首选位置）。不关设置窗。 |
+| 关于 | 页脚只读：`Agent Halo` + 版本（优先 `Bundle.main` 的 short version / build，缺省时可用编译期常量）。不可点击或仅可选中复制。 |
 
 ### 变更传播
 
 ```text
 Settings UI 变更
-  → 更新 HaloSettings（+ 规范化）
+  → 更新 HaloSettings（+ 规范化）或调用命令回调
   → SettingsStore.save（尺寸可走既有防抖）
-  → AppDelegate.onSettingsChanged：
+  → AppDelegate 应用：
        · self.settings = normalized
        · 刷新 AgentToggleView
        · 重建控制菜单（若 status item 存在）
        · applyMenuBarIconVisibility()
+       · applyWindowLevels()（置顶变更时）
        · 若 focused 变化 → requestUsageRefresh
        · tick() 立即应用监控启停
 ```
 
-建议：`SettingsWindowController`（或等价类型）持有 `onSettingsChanged: (HaloSettings) -> Void` 与必要的命令回调（尺寸、启动项、语言），由 `AppDelegate` 注入，避免设置窗直接操作 monitor。
+建议：`SettingsWindowController`（或等价类型）持有：
+
+- `onSettingsChanged: (HaloSettings) -> Void`
+- 命令回调：`onHaloSizeChanged`、`onLanguageChanged`、`onLaunchAtLoginChanged`、`onResetPosition`、`onAlwaysOnTopChanged`、`onShowMenuBarIconChanged`  
+
+由 `AppDelegate` 注入，避免设置窗直接操作 monitor / status item。
+
+打开设置时用**当前** `settings` + `StartupManager.isEnabled()` 刷新全部控件，避免分叉。
 
 ## 菜单精简
 
@@ -167,17 +193,17 @@ Settings UI 变更
 - 光环大小滑块  
 - 语言子菜单  
 
-### 菜单保留
+### 菜单保留（快捷 / 操作）
 
-- 始终置顶  
+- **始终置顶**（与设置双入口）  
 - 暂停监控  
 - 监控对象（**仅列出 `enabledAgents`**；勾选表示当前 `focusedAgent`）  
-- 逃离屏幕外  
+- **逃离屏幕外 / 重置位置**（与设置按钮双入口）  
 - 预览状态  
 - **设置…**（新）  
 - 退出  
 
-建议顺序：置顶 → 暂停 → 监控对象 → 逃离 → 预览 → 分隔线 → 设置… → 退出。
+建议顺序：置顶 → 暂停 → 监控对象 → 重置位置 → 预览 → 分隔线 → 设置… → 退出。
 
 ## 左上角 Agent 切换条
 
@@ -231,7 +257,7 @@ Settings UI 变更
 
 关闭菜单栏图标后：
 
-- 光环右键菜单仍可用，且含「设置…」「退出」等  
+- 光环右键菜单仍可用，且含「设置…」「退出」「重置位置」等  
 - 用户可再次打开设置，打开「显示菜单栏图标」恢复托盘  
 
 实现注意：
@@ -249,14 +275,21 @@ Settings UI 变更
 | `settings.title` | 设置 | Settings |
 | `settings.home_display.title` | 主页面显示 | Home Display |
 | `settings.home_display.subtitle` | 选择要显示并启用的 Agent | Choose which agents to show and enable |
+| `settings.appearance` | 外观 | Appearance |
 | `settings.halo_size` | 光环大小 | Halo Size |
 | `settings.language` | 语言 | Language |
 | `settings.general` | 通用 | General |
+| `settings.general.always_on_top` | 始终置顶 | Always on Top |
 | `settings.general.show_menu_bar_icon` | 显示菜单栏图标 | Show Menu Bar Icon |
 | `settings.general.launch_at_startup` | 开机自动启动 | Launch at Login |
+| `settings.general.reset_position` | 重置光环位置 | Reset Halo Position |
+| `settings.about.version` | Agent Halo {0} | Agent Halo {0} |
 
-Agent 显示名继续使用 `AgentKind.menuTitle`（产品名不翻译）。  
-语言选项文案复用现有 `menu.language.*` 即可。
+说明：
+
+- Agent 显示名继续使用 `AgentKind.menuTitle`（产品名不翻译）。  
+- 语言选项文案复用现有 `menu.language.*`。  
+- 菜单「始终置顶 / 逃离屏幕外」可继续用现有 `menu.always_on_top` / `menu.escape_offscreen`；设置按钮可用更短的 `settings.general.reset_position`（语义相同、入口文案略短）。
 
 ## 测试计划
 
@@ -269,31 +302,37 @@ Agent 显示名继续使用 `AgentKind.menuTitle`（产品名不翻译）。
 - `focusedAgent ∉ enabledAgents` → 改为 `first`  
 - `setAgent(enabled: false)` 不能关掉最后一个  
 - 关掉 focused → focused 变为剩余 first  
-- round-trip 持久化：`enabledAgents` + `showMenuBarIcon` + `focusedAgent`
+- round-trip 持久化：`enabledAgents` + `showMenuBarIcon` + `focusedAgent` + 既有 `alwaysOnTop`
 
 ### App / UI（现有 testing hooks 风格）
 
 - `AgentToggleView`：1/2/3 个 enabled 时槽位与点击映射正确  
 - 设置胶囊：唯一已选项不可取消  
 - `showMenuBarIcon` false → 无 status item；true → 恢复  
+- 设置改置顶 ↔ 菜单勾选一致；`applyWindowLevels` 被调用  
+- 设置「重置位置」与菜单逃离逻辑等价  
+- 页脚版本非空  
 - 控制菜单不再包含语言 / 尺寸 / 开机启动，且含「设置…」  
 - 监控对象子菜单仅含 enabled agents  
 
 ### 手动验收
 
-1. 只勾 Codex → 切换条仅 Codex；Claude/Grok 无轮询副作用（日志/CPU 可观察）  
+1. 只勾 Codex → 切换条仅 Codex；Claude/Grok 无轮询副作用  
 2. 再勾 Claude → 两项可切换，Claude 恢复监控  
 3. 关菜单栏图标 → 托盘消失；右键可开设置并重新打开  
-4. 设置内改尺寸 / 语言 / 开机启动，效果与旧菜单一致  
-5. 升级老用户：三 Agent 全开、菜单栏图标仍在  
+4. 设置内改尺寸 / 语言 / 开机启动 / 置顶，效果与旧菜单一致  
+5. 设置与菜单均可重置位置到主屏右上角  
+6. 页脚显示正确版本  
+7. 升级老用户：三 Agent 全开、菜单栏图标仍在  
 
 ## 成功标准
 
 1. 用户可通过设置选择任意非空 Agent 子集；切换条与监控一致。  
-2. 语言、光环大小、开机启动、菜单栏图标均在设置中可改且即时生效。  
-3. 菜单精简后仍可通过托盘（若显示）与光环右键完成置顶、暂停、切换 focus、设置、退出。  
-4. 旧配置升级零回归。  
-5. 中英文文案完整。  
+2. 外观与通用偏好（尺寸、语言、置顶、菜单栏图标、开机启动）均可在设置中改且即时生效。  
+3. 重置位置在设置与菜单双入口可用。  
+4. 菜单精简后仍可通过托盘（若显示）与光环右键完成置顶、暂停、切换 focus、重置位置、设置、退出。  
+5. 旧配置升级零回归；关于信息可见。  
+6. 中英文文案完整。  
 
 ## 风险与缓解
 
@@ -301,7 +340,8 @@ Agent 显示名继续使用 `AgentKind.menuTitle`（产品名不翻译）。
 |------|------|
 | 关掉菜单栏后用户找不到设置 | 右键菜单保留「设置…」；默认 `showMenuBarIcon = true` |
 | 禁用 Claude 后 hook 仍写盘 | v1 接受；文档标明非目标；日后再做卸载策略 |
-| 设置窗与 AppDelegate 状态分叉 | 单向回调 + 唯一 `settings` 源；打开设置时用当前 settings 刷新控件 |
+| 设置窗与 AppDelegate / 菜单状态分叉 | 单向回调 + 唯一 `settings` 源；打开设置与重建菜单时刷新控件 |
+| 置顶双入口不同步 | 共用同一 `toggleAlwaysOnTop` / `applyWindowLevels` 路径 |
 | `AgentToggleView` 动态布局回归 | 保留/扩展 testing hooks，覆盖 1–3 槽 |
 
 ## 实施切片建议（供 plan 使用）
@@ -309,8 +349,8 @@ Agent 显示名继续使用 `AgentKind.menuTitle`（产品名不翻译）。
 1. **Settings schema + 规范化 + Core 测试**  
 2. **AgentToggleView 动态 enabled 列表**  
 3. **Monitor 启停联动 + focus 菜单过滤**  
-4. **Settings 窗口 UI（Agent + 尺寸 + 语言 + 通用 toggles）**  
-5. **菜单精简 + 设置入口 + 菜单栏图标显隐**  
+4. **Settings 窗口 UI**（Agent + 外观 + 通用 toggles + 重置按钮 + 关于）  
+5. **菜单精简 + 设置入口 + 菜单栏图标显隐 + 置顶/重置双入口接线**  
 6. **i18n + 手动验收清单**  
 
 切片可并行处：1∥2 起步；3 依赖 1；4–5 依赖 1 与 AppDelegate 回调约定。
