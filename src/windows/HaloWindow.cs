@@ -345,7 +345,9 @@ public sealed class HaloWindow : Window
             {
                 claudeMonitor.Refresh();
                 claudeTranscriptMonitor.Refresh();
-                aggregate = GetClaudeAggregate();
+                HashSet<string> liveClaudeSessionIds =
+                    ClaudeLiveSessionReader.LiveSessionIds();
+                aggregate = GetClaudeAggregate(liveClaudeSessionIds);
                 if (demoState.HasValue)
                 {
                     aggregate.State = demoState.Value;
@@ -357,7 +359,7 @@ public sealed class HaloWindow : Window
                 bool showClaudeStandby = !demoState.HasValue &&
                     !settings.Paused &&
                     aggregate.State == HaloState.Idle &&
-                    ClaudeLiveSessionReader.HasStandbySession();
+                    liveClaudeSessionIds.Count > 0;
                 visual.SetSteadyDone(showClaudeStandby);
                 visual.SetErrorPresentation(demoErrorPresentation ?? ErrorPresentation.Flashing);
                 visual.SetState(showClaudeStandby ? HaloState.Done : aggregate.State,
@@ -388,10 +390,12 @@ public sealed class HaloWindow : Window
             {
                 GrokUsageMonitor.Instance.RequestRefresh();
                 grokMonitor.Refresh();
-                bool grokPresent = GrokActiveSessionsReader.HasLiveSession(
-                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+                HashSet<string> liveGrokSessionIds =
+                    GrokActiveSessionsReader.LiveSessionIds(
+                        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+                bool grokPresent = liveGrokSessionIds.Count > 0;
                 lastGrokPresent = grokPresent;
-                aggregate = GetGrokAggregate(grokPresent);
+                aggregate = GetGrokAggregate(liveGrokSessionIds);
                 if (demoState.HasValue)
                 {
                     aggregate.State = demoState.Value;
@@ -882,7 +886,7 @@ public sealed class HaloWindow : Window
             RefreshState();
         }
 
-        private AggregateSnapshot GetClaudeAggregate()
+        private AggregateSnapshot GetClaudeAggregate(ISet<string> liveSessionIds)
         {
             DateTime now = DateTime.UtcNow;
             List<SessionSnapshot> merged = ClaudeStatusSourceMerger.Merge(
@@ -890,14 +894,10 @@ public sealed class HaloWindow : Window
             List<SessionSnapshot> sessions = merged
                 .Where(delegate(SessionSnapshot snapshot)
                 {
-                    if (snapshot.State == HaloState.Done)
-                    {
-                        return snapshot.CompletedUtc >= now.AddSeconds(-8);
-                    }
-                    return (snapshot.Active &&
-                            snapshot.LastEventUtc >= now.AddMinutes(-10)) ||
-                        (snapshot.State == HaloState.Error &&
-                         snapshot.LastEventUtc >= now.AddHours(-1));
+                    return IsHookActivitySessionVisible(
+                        snapshot,
+                        now,
+                        IsHookSessionLive(snapshot, liveSessionIds));
                 })
                 .OrderBy(delegate(SessionSnapshot snapshot)
                 {
@@ -936,12 +936,12 @@ public sealed class HaloWindow : Window
             return result;
         }
 
-        private AggregateSnapshot GetGrokAggregate(bool present)
+        private AggregateSnapshot GetGrokAggregate(ISet<string> liveSessionIds)
         {
             return BuildGrokAggregateForTest(
                 grokMonitor.Snapshots(),
                 settings.Paused,
-                present,
+                liveSessionIds,
                 DateTime.UtcNow);
         }
 
@@ -981,15 +981,64 @@ public sealed class HaloWindow : Window
         }
 
         /// <summary>
+        /// Visibility for Claude/Grok hook-driven sessions in the focus aggregate.
+        /// Attention (NEEDS YOU) is kept without a lastEvent age cutoff so long
+        /// human approval waits do not fall through to STANDBY.
+        /// </summary>
+        internal static bool IsHookActivitySessionVisible(
+            SessionSnapshot snapshot, DateTime now, bool sessionLive)
+        {
+            if (snapshot == null)
+            {
+                return false;
+            }
+            if (snapshot.State == HaloState.Done)
+            {
+                return snapshot.CompletedUtc >= now.AddSeconds(-8);
+            }
+            if (snapshot.State == HaloState.Attention)
+            {
+                return sessionLive && snapshot.Active;
+            }
+            if (snapshot.State == HaloState.Error)
+            {
+                return snapshot.LastEventUtc >= now.AddHours(-1);
+            }
+            return sessionLive && snapshot.Active &&
+                snapshot.LastEventUtc >= now.AddMinutes(-10);
+        }
+
+        internal static bool IsHookSessionLive(
+            SessionSnapshot snapshot, ISet<string> liveSessionIds)
+        {
+            if (snapshot == null || liveSessionIds == null ||
+                liveSessionIds.Count == 0)
+            {
+                return false;
+            }
+            if (liveSessionIds.Contains(snapshot.ThreadId))
+            {
+                return true;
+            }
+            return (snapshot.Agent == AgentKind.Grok &&
+                    String.Equals(snapshot.ThreadId, "grok",
+                        StringComparison.OrdinalIgnoreCase)) ||
+                (snapshot.Agent == AgentKind.ClaudeCode &&
+                    String.Equals(snapshot.ThreadId, "claude-code",
+                        StringComparison.OrdinalIgnoreCase));
+        }
+
+        /// <summary>
         /// Testable Grok focus aggregate: filters Agent==Grok, Done ~8s, Error ~1h.
         /// Empty sessions → Idle (standby is applied in RefreshState via HasLiveSession).
         /// </summary>
         internal static AggregateSnapshot BuildGrokAggregateForTest(
             IList<SessionSnapshot> allSessions,
             bool paused,
-            bool present,
+            ISet<string> liveSessionIds,
             DateTime now)
         {
+            bool present = liveSessionIds != null && liveSessionIds.Count > 0;
             List<SessionSnapshot> source = allSessions == null
                 ? new List<SessionSnapshot>()
                 : allSessions.Where(delegate(SessionSnapshot snapshot)
@@ -1000,14 +1049,10 @@ public sealed class HaloWindow : Window
             List<SessionSnapshot> sessions = source
                 .Where(delegate(SessionSnapshot snapshot)
                 {
-                    if (snapshot.State == HaloState.Done)
-                    {
-                        return snapshot.CompletedUtc >= now.AddSeconds(-8);
-                    }
-                    return (snapshot.Active &&
-                            snapshot.LastEventUtc >= now.AddMinutes(-10)) ||
-                        (snapshot.State == HaloState.Error &&
-                         snapshot.LastEventUtc >= now.AddHours(-1));
+                    return IsHookActivitySessionVisible(
+                        snapshot,
+                        now,
+                        IsHookSessionLive(snapshot, liveSessionIds));
                 })
                 .OrderBy(delegate(SessionSnapshot snapshot)
                 {

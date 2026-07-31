@@ -70,6 +70,9 @@ public enum SessionAggregator {
             if snapshot.agent == .codex && !codexRunning {
                 return false
             }
+            // Hide stale thinking/working after 10 minutes. Do NOT apply this to
+            // `.attention` — awaiting user approval may legitimately sit idle for
+            // a long time without new events (and must not fall back to STANDBY).
             if (snapshot.state == .thinking || snapshot.state == .working)
                 && now.timeIntervalSince(snapshot.lastEventAt) >= 600 {
                 return false

@@ -284,6 +284,16 @@ public static class Diagnostics
                     "\"status\":\"completed\",\"name\":\"apply_patch\"}}";
                 HaloState realtimeState;
                 string realtimeAction;
+                bool answerStreaming;
+                string realtimeThreadId;
+                string prefixedRealtimeAdded =
+                    "session_loop{thread_id=thread-live}:turn: " + realtimeAdded;
+                Assert(realtime.FindActive(new[] { prefixedRealtimeAdded },
+                    out realtimeState, out realtimeAction, out answerStreaming,
+                    out realtimeThreadId) &&
+                    String.Equals(realtimeThreadId, "thread-live",
+                        StringComparison.Ordinal),
+                    "live activity keeps its Codex thread id");
                 Assert(realtime.FindActive(new[] { realtimeAdded },
                     out realtimeState, out realtimeAction) &&
                     realtimeState == HaloState.Working &&
@@ -306,7 +316,6 @@ public static class Diagnostics
                 Assert(!realtime.FindActive(new[] { realtimeMessageDone, realtimeMessageAdded },
                     out realtimeState, out realtimeAction),
                     "live final answer done clears realtime working");
-                bool answerStreaming;
                 string realtimeTextDelta =
                     "SSE event: {\"type\":\"response.output_text.delta\"," +
                     "\"delta\":\"hello\"}";
@@ -1080,11 +1089,15 @@ public static class Diagnostics
                     Encoding.UTF8);
                 Assert(ClaudeLiveSessionReader.HasStandbySession(liveHome),
                     "Claude live session reader detects live CLI");
+                Assert(ClaudeLiveSessionReader.LiveSessionIds(liveHome).Contains("live"),
+                    "Claude live session reader exposes the live session id");
                 File.WriteAllText(Path.Combine(liveSessions, "live.json"),
                     "{\"status\":\"waiting\",\"pid\":999999,\"sessionId\":\"dead\"}",
                     Encoding.UTF8);
                 Assert(!ClaudeLiveSessionReader.HasStandbySession(liveHome),
                     "Claude live session reader ignores dead pid");
+                Assert(!ClaudeLiveSessionReader.LiveSessionIds(liveHome).Contains("dead"),
+                    "Claude dead session id is excluded from liveness");
                 Directory.Delete(liveHome, true);
                 Directory.Delete(claudeHome, true);
 
@@ -1253,6 +1266,38 @@ public static class Diagnostics
                 Assert(!CodexSessionMonitor.IsSessionVisible(recentActive,
                     presenceSettings, true, supersessionNow),
                     "stale active session cannot leave the halo permanently working");
+                SessionSnapshot longAttentionCodex = new SessionSnapshot
+                {
+                    ThreadId = "long-attn-codex",
+                    State = HaloState.Attention,
+                    Action = "Needs you",
+                    Active = true,
+                    LastEventUtc = supersessionNow.AddMinutes(-30)
+                };
+                Assert(CodexSessionMonitor.IsSessionVisible(longAttentionCodex,
+                    presenceSettings, true, supersessionNow),
+                    "Codex attention remains visible across long human waits");
+                Assert(!CodexSessionMonitor.IsSessionVisible(longAttentionCodex,
+                    presenceSettings, false, supersessionNow),
+                    "Codex attention still requires the process to be running");
+                Assert(!CodexSessionMonitor.IsSessionVisible(longAttentionCodex,
+                    presenceSettings, true, supersessionNow,
+                    "new-active-thread", true, null),
+                    "another realtime thread supersedes stale Codex attention");
+                Assert(CodexSessionMonitor.IsSessionVisible(longAttentionCodex,
+                    presenceSettings, true, supersessionNow,
+                    "long-attn-codex", true, null),
+                    "matching realtime thread keeps Codex attention visible");
+                Assert(!CodexSessionMonitor.IsSessionVisible(longAttentionCodex,
+                    presenceSettings, true, supersessionNow,
+                    null, false, supersessionNow.AddMinutes(-5)),
+                    "attention from before the current Codex process is hidden");
+                Assert(!CodexSessionMonitor.HasBlockingState(
+                    new[] { longAttentionCodex }, true),
+                    "fresh realtime activity can replace an old attention blocker");
+                Assert(CodexSessionMonitor.HasBlockingState(
+                    new[] { longAttentionCodex }, false),
+                    "attention remains blocking while its long wait is current");
 
                 SessionSnapshot recentDone = new SessionSnapshot
                 {
@@ -1605,6 +1650,45 @@ public static class Diagnostics
                     failed.Snapshot, t0.AddHours(1).AddSeconds(7)),
                     "Grok error snapshot expires after one hour");
 
+                // Long human permission waits must not prune into STANDBY.
+                SessionSnapshot longAttention = new SessionSnapshot
+                {
+                    ThreadId = "long-attn",
+                    State = HaloState.Attention,
+                    Action = "Awaiting permission",
+                    Active = true,
+                    LastEventUtc = t0.AddMinutes(-30)
+                };
+                Assert(!GrokHookStatusMonitor.ShouldPruneSnapshot(
+                    longAttention, t0),
+                    "Grok attention is not age-pruned after 30 minutes");
+                Assert(!ClaudeHookStatusMonitor.ShouldPruneSnapshot(
+                    longAttention, t0),
+                    "Claude attention is not age-pruned after 30 minutes");
+                Assert(HaloWindow.IsHookActivitySessionVisible(
+                    longAttention, t0, true),
+                    "Grok/Claude aggregate keeps long-held attention");
+                Assert(!HaloWindow.IsHookActivitySessionVisible(
+                    longAttention, t0, false),
+                    "ended hook session cannot keep stale attention visible");
+                SessionSnapshot staleWorkingSnap = new SessionSnapshot
+                {
+                    ThreadId = "stale-work",
+                    State = HaloState.Working,
+                    Action = "Running command",
+                    Active = true,
+                    LastEventUtc = t0.AddMinutes(-15)
+                };
+                Assert(GrokHookStatusMonitor.ShouldPruneSnapshot(
+                    staleWorkingSnap, t0),
+                    "Grok stale working is still pruned");
+                Assert(ClaudeHookStatusMonitor.ShouldPruneSnapshot(
+                    staleWorkingSnap, t0),
+                    "Claude stale working is still pruned");
+                Assert(!HaloWindow.IsHookActivitySessionVisible(
+                    staleWorkingSnap, t0, true),
+                    "stale working still hidden from aggregate after 10m");
+
                 // Esc cancel skips Stop hooks; map turn cancel onto fault ring.
                 GrokHookStatusReducer cancelReducer =
                     new GrokHookStatusReducer("esc-session");
@@ -1831,6 +1915,8 @@ public static class Diagnostics
                     "[{\"session_id\":\"abc\",\"cwd\":\"/tmp/x\"}]");
                 Assert(GrokActiveSessionsReader.HasLiveSession(home),
                     "array entry without pid counts as present");
+                Assert(GrokActiveSessionsReader.LiveSessionIds(home).Contains("abc"),
+                    "Grok active sessions reader exposes the live session id");
                 try
                 {
                     Directory.Delete(home, true);
@@ -1865,7 +1951,8 @@ public static class Diagnostics
                     }
                 };
                 AggregateSnapshot grokAgg = HaloWindow.BuildGrokAggregateForTest(
-                    mixedGrokAgg, false, true, aggNow);
+                    mixedGrokAgg, false,
+                    new HashSet<string>(new string[] { "g1" }), aggNow);
                 Assert(grokAgg.FocusedAgent == AgentKind.Grok,
                     "Grok aggregate stamps FocusedAgent.Grok");
                 Assert(grokAgg.State == HaloState.Working,
@@ -1875,19 +1962,47 @@ public static class Diagnostics
                         StringComparison.Ordinal),
                     "Grok aggregate filters out Claude sessions");
                 AggregateSnapshot idleGrokPresent = HaloWindow.BuildGrokAggregateForTest(
-                    new List<SessionSnapshot>(), false, true, aggNow);
+                    new List<SessionSnapshot>(), false,
+                    new HashSet<string>(new string[] { "g-live" }), aggNow);
                 Assert(idleGrokPresent.State == HaloState.Idle &&
                     idleGrokPresent.FocusedAgent == AgentKind.Grok,
                     "empty Grok sessions → Idle (standby applied in RefreshState)");
                 AggregateSnapshot idleGrokOffline = HaloWindow.BuildGrokAggregateForTest(
-                    new List<SessionSnapshot>(), false, false, aggNow);
+                    new List<SessionSnapshot>(), false,
+                    new HashSet<string>(), aggNow);
                 Assert(idleGrokOffline.State == HaloState.Idle,
                     "empty Grok offline → Idle");
                 AggregateSnapshot pausedGrok = HaloWindow.BuildGrokAggregateForTest(
-                    mixedGrokAgg, true, true, aggNow);
+                    mixedGrokAgg, true,
+                    new HashSet<string>(new string[] { "g1" }), aggNow);
                 Assert(pausedGrok.State == HaloState.Idle &&
                     String.Equals(pausedGrok.Label, "PAUSED", StringComparison.Ordinal),
                     "paused Grok aggregate is PAUSED");
+                List<SessionSnapshot> longAttnGrok = new List<SessionSnapshot>
+                {
+                    new SessionSnapshot
+                    {
+                        ThreadId = "g-attn",
+                        Agent = AgentKind.Grok,
+                        State = HaloState.Attention,
+                        Active = true,
+                        LastEventUtc = aggNow.AddMinutes(-25),
+                        ProjectName = "Await",
+                        Action = "Awaiting permission"
+                    }
+                };
+                AggregateSnapshot attnGrokAgg = HaloWindow.BuildGrokAggregateForTest(
+                    longAttnGrok, false,
+                    new HashSet<string>(new string[] { "g-attn" }), aggNow);
+                Assert(attnGrokAgg.State == HaloState.Attention,
+                    "long-held Grok attention remains NEEDS YOU in aggregate");
+                Assert(attnGrokAgg.Sessions != null && attnGrokAgg.Sessions.Count == 1,
+                    "long-held Grok attention session stays visible");
+                AggregateSnapshot endedAttnGrok = HaloWindow.BuildGrokAggregateForTest(
+                    longAttnGrok, false, new HashSet<string>(), aggNow);
+                Assert(endedAttnGrok.State == HaloState.Idle &&
+                    endedAttnGrok.Sessions.Count == 0,
+                    "ended Grok session drops stale attention to offline");
                 AggregateSnapshot doneGrok = new AggregateSnapshot
                 {
                     State = HaloState.Done,

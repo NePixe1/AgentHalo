@@ -1785,11 +1785,32 @@ func testGrokActiveSessionsReaderParsesArrayEntries() throws {
         "dead pid entries should not report a live session"
     )
     expect(
+        GrokActiveSessionsReader.liveSessionIds(
+            homeDirectory: home,
+            isProcessAlive: { _ in false }
+        ).isEmpty,
+        "dead pid entries should expose no live session ids"
+    )
+    expect(
         GrokActiveSessionsReader.hasLiveSession(
             homeDirectory: home,
             isProcessAlive: { $0 == 123 }
         ),
         "alive pid should report a live session"
+    )
+    expect(
+        GrokActiveSessionsReader.liveSessionIds(
+            homeDirectory: home,
+            isProcessAlive: { $0 == 123 }
+        ) == Set(["live-1"]),
+        "only the pid-backed live Grok session id should survive"
+    )
+
+    try Data(#"[{"session_id":"legacy"}]"#.utf8)
+        .write(to: grokDir.appendingPathComponent("active_sessions.json"))
+    expect(
+        GrokActiveSessionsReader.liveSessionIds(homeDirectory: home) == Set(["legacy"]),
+        "pid-less legacy entries should still expose their session id"
     )
 }
 
@@ -3491,6 +3512,142 @@ func testClaudeHookMonitorPrunesStaleReducers() throws {
     expect(after.isEmpty, true, "stale reducers pruned → empty hook snapshots")
 }
 
+/// Long human permission waits must not be age-pruned into STANDBY.
+func testHookMonitorsRetainAttentionDespiteStaleLastEvent() {
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    let old = now.addingTimeInterval(-1800) // 30 minutes ago
+    let attention = SessionSnapshot(
+        threadId: "awaiting",
+        projectName: "P",
+        workingDirectory: "/p",
+        state: .attention,
+        action: "Awaiting permission",
+        lastEventAt: old,
+        completedAt: nil,
+        active: true,
+        agent: .grok
+    )
+    let staleWorking = SessionSnapshot(
+        threadId: "stuck",
+        projectName: "P",
+        workingDirectory: "/p",
+        state: .working,
+        action: "Running command",
+        lastEventAt: old,
+        completedAt: nil,
+        active: true,
+        agent: .grok
+    )
+    expect(
+        GrokHookStatusMonitor.shouldRetainSnapshot(attention, now: now),
+        true,
+        "Grok attention survives 30m lastEvent age"
+    )
+    expect(
+        ClaudeHookStatusMonitor.shouldRetainSnapshot(attention, now: now),
+        true,
+        "Claude attention survives 30m lastEvent age"
+    )
+    expect(
+        GrokHookStatusMonitor.shouldRetainSnapshot(staleWorking, now: now),
+        false,
+        "Grok stale working is still pruned"
+    )
+    expect(
+        ClaudeHookStatusMonitor.shouldRetainSnapshot(staleWorking, now: now),
+        false,
+        "Claude stale working is still pruned"
+    )
+
+    // Aggregator visibility: attention stays; stale working is hidden.
+    let settings = HaloSettings(installedAt: now.addingTimeInterval(-3600))
+    let keepAttention = SessionAggregator.aggregate(
+        snapshots: [attention],
+        settings: settings,
+        focusedAgent: .grok,
+        now: now
+    )
+    expect(keepAttention.state, .attention, "aggregator keeps long-held attention")
+    expect(keepAttention.sessions.count, 1, "attention session remains visible")
+
+    let hideWorking = SessionAggregator.aggregate(
+        snapshots: [staleWorking],
+        settings: settings,
+        focusedAgent: .grok,
+        now: now
+    )
+    expect(hideWorking.sessions.isEmpty, true, "stale working still hidden after 10m")
+}
+
+func testClaudeHookMonitorKeepsLongHeldPermissionAttention() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-claude-attn-hold-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let statusFile = root.appendingPathComponent("claude-status.jsonl")
+    let t0 = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
+    let lines = [
+        #"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"perm-hold","cwd":"/tmp","source":"claude-hook"}"#,
+        #"{"timestamp":"2026-06-16T04:00:01Z","event":"PermissionRequest","sessionId":"perm-hold","cwd":"/tmp","source":"claude-hook"}"#,
+    ].joined(separator: "\n") + "\n"
+    try Data(lines.utf8).write(to: statusFile)
+
+    let monitor = ClaudeHookStatusMonitor(statusURL: statusFile)
+    _ = monitor.refresh(now: t0.addingTimeInterval(2))
+    expect(monitor.snapshots().first?.state, .attention, "precondition: attention")
+    // Far past the normal 10m active prune window.
+    _ = monitor.refresh(now: t0.addingTimeInterval(2000))
+    let after = monitor.snapshots()
+    expect(after.count, 1, "permission hold not pruned after ~33m")
+    expect(after.first?.state, .attention, "still NEEDS YOU after long wait")
+    expect(after.first?.action, "Awaiting permission", "action preserved")
+}
+
+func testGrokHookMonitorKeepsLongHeldPermissionAttention() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-grok-attn-hold-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let statusFile = root.appendingPathComponent("grok-status.jsonl")
+    let sessionsRoot = root.appendingPathComponent("sessions", isDirectory: true)
+    let t0 = ISO8601DateFormatter().date(from: "2026-07-30T08:00:00Z")!
+    let sessionId = "perm-hold-grok"
+    let cwd = "/tmp/AgentHaloPermHold"
+    let encoded = GrokSessionContextReader.encodeWorkspaceDirectory(cwd)
+    let sessionDir = sessionsRoot.appendingPathComponent(encoded, isDirectory: true)
+        .appendingPathComponent(sessionId, isDirectory: true)
+    try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+
+    let hooks = [
+        #"{"timestamp":"2026-07-30T08:00:00Z","event":"UserPromptSubmit","sessionId":"\#(sessionId)","cwd":"\#(cwd)","permissionMode":"default","source":"grok-hook"}"#,
+        #"{"timestamp":"2026-07-30T08:00:01Z","event":"PreToolUse","sessionId":"\#(sessionId)","cwd":"\#(cwd)","toolName":"run_terminal_command","permissionMode":"default","source":"grok-hook"}"#,
+    ].joined(separator: "\n") + "\n"
+    try Data(hooks.utf8).write(to: statusFile)
+    let events = [
+        #"{"ts":"2026-07-30T08:00:00.500Z","type":"turn_started"}"#,
+        #"{"ts":"2026-07-30T08:00:01.100Z","type":"permission_requested"}"#,
+    ].joined(separator: "\n") + "\n"
+    try Data(events.utf8).write(to: sessionDir.appendingPathComponent("events.jsonl"))
+
+    let monitor = GrokHookStatusMonitor(statusURL: statusFile, sessionsRoot: sessionsRoot)
+    // First refresh arms the pending timer from observation time; a second tick
+    // after pendingPermissionAttentionDelay paints NEEDS YOU.
+    _ = monitor.refresh(now: t0.addingTimeInterval(2))
+    _ = monitor.refresh(
+        now: t0.addingTimeInterval(2 + GrokHookStatusReducer.pendingPermissionAttentionDelay + 0.05)
+    )
+    expect(monitor.snapshots().first?.state, .attention, "precondition: attention after delay")
+    _ = monitor.refresh(now: t0.addingTimeInterval(2000))
+    let after = monitor.snapshots()
+    expect(after.count, 1, "Grok permission hold not pruned after ~33m")
+    expect(after.first?.state, .attention, "Grok still NEEDS YOU after long wait")
+    expect(after.first?.action, "Awaiting permission", "Grok action preserved")
+}
+
 func testClaudeMonitorHandlesDiscoveryPendingLinesAndTruncation() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-claude-monitor-\(UUID().uuidString)", isDirectory: true)
@@ -4300,6 +4457,13 @@ testClaudeHookReducerActiveCompactRestoresThinking()
 testClaudeHookReducerIdleCompactTimeoutReturnsToReady()
 do {
     try testClaudeHookMonitorPrunesStaleReducers()
+} catch {
+    fatalError("\(error)")
+}
+testHookMonitorsRetainAttentionDespiteStaleLastEvent()
+do {
+    try testClaudeHookMonitorKeepsLongHeldPermissionAttention()
+    try testGrokHookMonitorKeepsLongHeldPermissionAttention()
 } catch {
     fatalError("\(error)")
 }

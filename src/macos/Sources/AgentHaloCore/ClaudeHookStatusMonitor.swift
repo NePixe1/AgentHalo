@@ -108,14 +108,24 @@ public final class ClaudeHookStatusMonitor {
     }
 
     private func pruneStaleReducers(now: Date) {
-        let activeStaleThreshold = now.addingTimeInterval(-600)
-        let inactiveStaleThreshold = now.addingTimeInterval(-300)
         reducers = reducers.filter { _, reducer in
-            let t = reducer.snapshot.lastEventAt
-            if reducer.snapshot.active {
-                return t >= activeStaleThreshold
-            }
-            return t >= inactiveStaleThreshold
+            Self.shouldRetainSnapshot(reducer.snapshot, now: now)
         }
+    }
+
+    /// Whether a Claude hook snapshot should survive age-based pruning.
+    ///
+    /// `.attention` (NEEDS YOU / awaiting permission) is retained indefinitely:
+    /// humans may leave a prompt open for a long time, and no hooks fire until
+    /// they act — so `lastEventAt` alone must not demote the ring to STANDBY.
+    public static func shouldRetainSnapshot(_ snapshot: SessionSnapshot, now: Date) -> Bool {
+        if snapshot.state == .attention {
+            return true
+        }
+        let t = snapshot.lastEventAt
+        if snapshot.active {
+            return t >= now.addingTimeInterval(-600)
+        }
+        return t >= now.addingTimeInterval(-300)
     }
 }

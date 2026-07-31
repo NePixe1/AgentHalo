@@ -1436,12 +1436,22 @@ namespace CodexHalo
             return changed;
         }
 
+        /// <summary>
+        /// Age-based prune. Attention (NEEDS YOU / awaiting permission) is never
+        /// pruned by lastEvent age — humans may leave a prompt open indefinitely
+        /// with no hooks until they act.
+        /// </summary>
         internal static bool ShouldPruneSnapshot(
             SessionSnapshot snapshot, DateTime now)
         {
             if (snapshot == null)
             {
                 return true;
+            }
+            // Keep purple NEEDS YOU across long human delays (showers, etc.).
+            if (snapshot.State == HaloState.Attention)
+            {
+                return false;
             }
             if (snapshot.State == HaloState.Error)
             {
@@ -1958,35 +1968,44 @@ namespace CodexHalo
 
         public static bool HasLiveSession(string home)
         {
+            return LiveSessionIds(home).Count > 0;
+        }
+
+        public static HashSet<string> LiveSessionIds(string home)
+        {
+            HashSet<string> result = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
             try
             {
                 List<ActiveSessionRef> sessions = Read(home);
                 if (sessions.Count == 0)
                 {
-                    return false;
+                    return result;
                 }
-                List<int> withPid = sessions
+                List<ActiveSessionRef> withPid = sessions
                     .Where(delegate(ActiveSessionRef s) { return s.ProcessId > 0; })
-                    .Select(delegate(ActiveSessionRef s) { return s.ProcessId; })
                     .ToList();
                 // No pids present → any entry counts as present (older file shapes).
                 if (withPid.Count == 0)
                 {
-                    return true;
-                }
-                foreach (int pid in withPid)
-                {
-                    if (IsProcessAlive(pid))
+                    foreach (ActiveSessionRef session in sessions)
                     {
-                        return true;
+                        result.Add(session.SessionId);
+                    }
+                    return result;
+                }
+                foreach (ActiveSessionRef session in withPid)
+                {
+                    if (IsProcessAlive(session.ProcessId))
+                    {
+                        result.Add(session.SessionId);
                     }
                 }
-                return false;
             }
             catch
             {
-                return false;
             }
+            return result;
         }
 
         private static List<ActiveSessionRef> Read(string home)

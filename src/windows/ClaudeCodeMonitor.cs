@@ -1205,14 +1205,10 @@ public sealed class ClaudeHookStatusMonitor
                     changed = true;
                 }
             }
-            DateTime activeCutoff = now.AddMinutes(-10);
-            DateTime inactiveCutoff = now.AddMinutes(-5);
             List<string> stale = reducers.Where(delegate(
                 KeyValuePair<string, ClaudeHookStatusReducer> pair)
             {
-                DateTime cutoff = pair.Value.Snapshot.Active
-                    ? activeCutoff : inactiveCutoff;
-                return pair.Value.Snapshot.LastEventUtc < cutoff;
+                return ShouldPruneSnapshot(pair.Value.Snapshot, now);
             }).Select(delegate(KeyValuePair<string, ClaudeHookStatusReducer> pair)
             {
                 return pair.Key;
@@ -1223,6 +1219,27 @@ public sealed class ClaudeHookStatusMonitor
                 changed = true;
             }
             return changed;
+        }
+
+        /// <summary>
+        /// Age-based prune. Attention (NEEDS YOU / awaiting permission) is never
+        /// pruned by lastEvent age — humans may leave a prompt open indefinitely.
+        /// </summary>
+        internal static bool ShouldPruneSnapshot(
+            SessionSnapshot snapshot, DateTime now)
+        {
+            if (snapshot == null)
+            {
+                return true;
+            }
+            if (snapshot.State == HaloState.Attention)
+            {
+                return false;
+            }
+            DateTime cutoff = snapshot.Active
+                ? now.AddMinutes(-10)
+                : now.AddMinutes(-5);
+            return snapshot.LastEventUtc < cutoff;
         }
 
         private static string SessionIdFromLine(string line)
@@ -1939,29 +1956,44 @@ public static class ClaudeLiveSessionReader
 
         public static bool HasStandbySession(string home)
         {
+            return LiveSessionIds(home).Count > 0;
+        }
+
+        public static HashSet<string> LiveSessionIds()
+        {
+            return LiveSessionIds(Environment.GetFolderPath(
+                Environment.SpecialFolder.UserProfile));
+        }
+
+        public static HashSet<string> LiveSessionIds(string home)
+        {
+            HashSet<string> result = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
             try
             {
                 string sessionsDir = Path.Combine(home, ".claude", "sessions");
                 if (!Directory.Exists(sessionsDir))
                 {
-                    return false;
+                    return result;
                 }
                 foreach (string path in Directory.GetFiles(sessionsDir, "*.json"))
                 {
-                    if (IsStandbySession(path))
+                    string sessionId;
+                    if (TryReadLiveSessionId(path, out sessionId))
                     {
-                        return true;
+                        result.Add(sessionId);
                     }
                 }
             }
             catch
             {
             }
-            return false;
+            return result;
         }
 
-        private static bool IsStandbySession(string path)
+        private static bool TryReadLiveSessionId(string path, out string sessionId)
         {
+            sessionId = String.Empty;
             try
             {
                 Dictionary<string, object> json = Serializer.DeserializeObject(
@@ -1977,7 +2009,14 @@ public static class ClaudeLiveSessionReader
                 {
                     return false;
                 }
-                Process.GetProcessById(pid);
+                using (Process process = Process.GetProcessById(pid))
+                {
+                }
+                sessionId = StringValue(json, "sessionId");
+                if (String.IsNullOrEmpty(sessionId))
+                {
+                    sessionId = "claude-code";
+                }
                 return true;
             }
             catch

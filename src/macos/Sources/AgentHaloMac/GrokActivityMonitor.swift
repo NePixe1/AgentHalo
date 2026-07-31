@@ -51,6 +51,8 @@ final class GrokActivityMonitor: @unchecked Sendable {
     private var pendingDispatchWorkItem: DispatchWorkItem?
     private var lastDispatchAt = Date.distantPast
     private var cachedIsPresent = false
+    private var cachedLiveSessionIds: Set<String> = []
+    private var cachedHasUnscopedPresence = false
     private var lastPresencePollAt = Date.distantPast
 
     init(
@@ -169,15 +171,21 @@ final class GrokActivityMonitor: @unchecked Sendable {
             || hookChanged
             || now.timeIntervalSince(lastPresencePollAt) >= Self.presencePollIntervalSeconds {
             lastPresencePollAt = now
-            cachedIsPresent = Self.isPresent(
+            cachedLiveSessionIds = GrokActiveSessionsReader.liveSessionIds(
                 homeDirectory: homeDirectory,
-                fileManager: fileManager,
-                processPresenceProbe: processPresenceProbe
+                fileManager: fileManager
             )
+            cachedHasUnscopedPresence = cachedLiveSessionIds.isEmpty && processPresenceProbe()
+            cachedIsPresent = !cachedLiveSessionIds.isEmpty || cachedHasUnscopedPresence
         }
 
+        let verifiedSessions = Self.sessionsWithVerifiedLiveness(
+            sessions,
+            liveSessionIds: cachedLiveSessionIds,
+            hasUnscopedPresence: cachedHasUnscopedPresence
+        )
         let nextSnapshot = GrokActivitySnapshot(
-            sessions: sessions,
+            sessions: verifiedSessions,
             isPresent: cachedIsPresent
         )
         guard nextSnapshot != latestSnapshot else {
@@ -185,6 +193,25 @@ final class GrokActivityMonitor: @unchecked Sendable {
         }
         latestSnapshot = nextSnapshot
         scheduleDispatch(of: nextSnapshot, now: now)
+    }
+
+    static func sessionsWithVerifiedLiveness(
+        _ sessions: [SessionSnapshot],
+        liveSessionIds: Set<String>,
+        hasUnscopedPresence: Bool = false
+    ) -> [SessionSnapshot] {
+        sessions.map { snapshot in
+            guard snapshot.active, !hasUnscopedPresence else {
+                return snapshot
+            }
+            var verified = snapshot
+            let hasMatchingSession = liveSessionIds.contains(snapshot.threadId)
+                || (snapshot.threadId == "grok" && !liveSessionIds.isEmpty)
+            if !hasMatchingSession {
+                verified.active = false
+            }
+            return verified
+        }
     }
 
     private func scheduleDispatch(of snapshot: GrokActivitySnapshot, now: Date) {

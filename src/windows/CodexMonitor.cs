@@ -842,6 +842,7 @@ public sealed class CodexSessionMonitor : IDisposable
         private DateTime nextRealtimePollUtc;
         private HaloState realtimeState;
         private string realtimeAction;
+        private string realtimeThreadId;
         private bool realtimeAnswerStreaming;
         private bool hasRealtimeActivity;
         private int pollInProgress;
@@ -863,6 +864,7 @@ public sealed class CodexSessionMonitor : IDisposable
             realtimeActivity = new CodexRealtimeActivityReader();
             pendingSessionPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             realtimeAction = String.Empty;
+            realtimeThreadId = String.Empty;
             dispatcher = Dispatcher.CurrentDispatcher;
             sync = new object();
             timer = new System.Threading.Timer(OnTick, null,
@@ -915,18 +917,22 @@ public sealed class CodexSessionMonitor : IDisposable
                         nextRealtimePollUtc = DateTime.UtcNow.AddMilliseconds(300);
                         HaloState activeState;
                         string activeAction;
+                        string activeThreadId;
                         bool answerStreaming;
                         bool active = realtimeActivity.TryReadActive(out activeState,
-                            out activeAction, out answerStreaming);
+                            out activeAction, out answerStreaming, out activeThreadId);
                         if (active != hasRealtimeActivity ||
                             activeState != realtimeState ||
                             answerStreaming != realtimeAnswerStreaming ||
+                            !String.Equals(activeThreadId, realtimeThreadId,
+                                StringComparison.OrdinalIgnoreCase) ||
                             !String.Equals(activeAction, realtimeAction,
                                 StringComparison.Ordinal))
                         {
                             hasRealtimeActivity = active;
                             realtimeState = activeState;
                             realtimeAction = activeAction ?? String.Empty;
+                            realtimeThreadId = activeThreadId ?? String.Empty;
                             realtimeAnswerStreaming = answerStreaming;
                             changed = true;
                         }
@@ -1074,11 +1080,20 @@ public sealed class CodexSessionMonitor : IDisposable
 
         public AggregateSnapshot GetAggregate(HaloSettings settings)
         {
-            return GetAggregate(settings, CodexRuntimeReader.IsRunning());
+            DateTime startedAtUtc;
+            bool running = CodexRuntimeReader.TryGetRunningSinceUtc(out startedAtUtc);
+            return GetAggregate(settings, running,
+                running ? (DateTime?)startedAtUtc : null);
         }
 
         internal AggregateSnapshot GetAggregate(HaloSettings settings,
             bool codexRunning)
+        {
+            return GetAggregate(settings, codexRunning, null);
+        }
+
+        internal AggregateSnapshot GetAggregate(HaloSettings settings,
+            bool codexRunning, DateTime? codexStartedAtUtc)
         {
             lock (sync)
             {
@@ -1092,7 +1107,14 @@ public sealed class CodexSessionMonitor : IDisposable
                 List<SessionSnapshot> sessions = WithoutSupersededErrors(rawSessions)
                 .Where(delegate(SessionSnapshot snapshot)
                 {
-                    return IsSessionVisible(snapshot, settings, codexRunning, now);
+                    return IsSessionVisible(
+                        snapshot,
+                        settings,
+                        codexRunning,
+                        now,
+                        realtimeThreadId,
+                        hasRealtimeActivity,
+                        codexStartedAtUtc);
                 })
                 .OrderBy(delegate(SessionSnapshot snapshot) { return StatePriority(snapshot.State); })
                 .ThenByDescending(delegate(SessionSnapshot snapshot) { return snapshot.LastEventUtc; })
@@ -1110,14 +1132,17 @@ public sealed class CodexSessionMonitor : IDisposable
                     result.Detail = "Monitoring paused";
                     return result;
                 }
-                bool hasBlockingState = sessions.Any(delegate(SessionSnapshot snapshot)
-                {
-                    return snapshot.State == HaloState.Error ||
-                        snapshot.State == HaloState.Attention;
-                });
+                bool hasBlockingState = HasBlockingState(
+                    sessions, hasRealtimeActivity);
                 if (codexRunning && hasRealtimeActivity && !hasBlockingState)
                 {
-                    SessionSnapshot current = sessions.FirstOrDefault();
+                    SessionSnapshot current = sessions.FirstOrDefault(
+                        delegate(SessionSnapshot snapshot)
+                        {
+                            return !String.IsNullOrEmpty(realtimeThreadId) &&
+                                String.Equals(snapshot.ThreadId, realtimeThreadId,
+                                    StringComparison.OrdinalIgnoreCase);
+                        }) ?? sessions.FirstOrDefault();
                     result.State = realtimeState;
                     result.Label = StateLabel(realtimeState);
                     result.Detail = (current == null ? "Codex" : current.ProjectName) +
@@ -1182,7 +1207,10 @@ public sealed class CodexSessionMonitor : IDisposable
             TimeSpan.FromSeconds(8);
 
         internal static bool IsSessionVisible(SessionSnapshot snapshot,
-            HaloSettings settings, bool codexRunning, DateTime now)
+            HaloSettings settings, bool codexRunning, DateTime now,
+            string realtimeThreadId = null,
+            bool hasRealtimeActivity = false,
+            DateTime? codexStartedAtUtc = null)
         {
             if (snapshot.State == HaloState.Done)
             {
@@ -1196,12 +1224,40 @@ public sealed class CodexSessionMonitor : IDisposable
                     snapshot.CompletedUtc >= settings.GetInstalledUtc() &&
                     snapshot.CompletedUtc >= now - CompletedVisibleDuration;
             }
+            // Awaiting user (approval / permission / plan choice) may sit without
+            // new jsonl lines for a long time — keep NEEDS YOU while Codex runs.
+            if (snapshot.State == HaloState.Attention)
+            {
+                if (!codexRunning || !snapshot.Active)
+                {
+                    return false;
+                }
+                if (codexStartedAtUtc.HasValue &&
+                    snapshot.LastEventUtc < codexStartedAtUtc.Value)
+                {
+                    return false;
+                }
+                return !hasRealtimeActivity ||
+                    String.IsNullOrEmpty(realtimeThreadId) ||
+                    String.Equals(snapshot.ThreadId, realtimeThreadId,
+                        StringComparison.OrdinalIgnoreCase);
+            }
             if (snapshot.Active)
             {
                 return codexRunning && snapshot.LastEventUtc >= now.AddMinutes(-10);
             }
             return snapshot.State == HaloState.Error &&
                 snapshot.LastEventUtc >= now.AddHours(-12);
+        }
+
+        internal static bool HasBlockingState(
+            IEnumerable<SessionSnapshot> sessions, bool hasRealtimeActivity)
+        {
+            return sessions.Any(delegate(SessionSnapshot snapshot)
+            {
+                return snapshot.State == HaloState.Error ||
+                    (snapshot.State == HaloState.Attention && !hasRealtimeActivity);
+            });
         }
 
         private static AgentTurnPhase PhaseForState(HaloState state)
@@ -1347,17 +1403,27 @@ public sealed class CodexRealtimeActivityReader
         public bool TryReadActive(out HaloState state, out string action,
             out bool answerStreaming)
         {
+            string threadId;
+            return TryReadActive(out state, out action, out answerStreaming,
+                out threadId);
+        }
+
+        public bool TryReadActive(out HaloState state, out string action,
+            out bool answerStreaming, out string threadId)
+        {
             state = HaloState.Working;
             action = String.Empty;
             answerStreaming = false;
+            threadId = String.Empty;
             long cutoff = DateTimeOffset.UtcNow.AddMinutes(-5).ToUnixTimeSeconds();
             string query = "select feedback_log_body from logs where ts >= " +
                 cutoff.ToString(CultureInfo.InvariantCulture) +
                 " and target='codex_api::sse::responses' and " +
-                "feedback_log_body like 'SSE event: {\"type\":\"response.%' " +
+                "feedback_log_body like '%SSE event: {\"type\":\"response.%' " +
                 "order by id desc limit 96;";
             List<string> rows = CodexSQLiteLogStore.Shared.QueryText(query);
-            return FindActive(rows, out state, out action, out answerStreaming);
+            return FindActive(rows, out state, out action, out answerStreaming,
+                out threadId);
         }
 
         public bool FindActive(IEnumerable<string> newestFirst, out HaloState state,
@@ -1370,15 +1436,26 @@ public sealed class CodexRealtimeActivityReader
         public bool FindActive(IEnumerable<string> newestFirst, out HaloState state,
             out string action, out bool answerStreaming)
         {
+            string threadId;
+            return FindActive(newestFirst, out state, out action,
+                out answerStreaming, out threadId);
+        }
+
+        public bool FindActive(IEnumerable<string> newestFirst, out HaloState state,
+            out string action, out bool answerStreaming, out string threadId)
+        {
             state = HaloState.Working;
             action = String.Empty;
             answerStreaming = false;
+            threadId = String.Empty;
             bool hasArgumentActivity = false;
             bool hasAttentionArgumentActivity = false;
+            string argumentThreadId = String.Empty;
             HashSet<string> completed = new HashSet<string>(
                 StringComparer.OrdinalIgnoreCase);
             foreach (string body in newestFirst)
             {
+                string rowThreadId = ThreadIdFromBody(body);
                 string eventType;
                 string itemId;
                 string itemType;
@@ -1401,6 +1478,7 @@ public sealed class CodexRealtimeActivityReader
                         action = "Generating response";
                     }
                     answerStreaming = false;
+                    threadId = rowThreadId;
                     return true;
                 }
                 if (eventType == "response.completed" ||
@@ -1422,6 +1500,10 @@ public sealed class CodexRealtimeActivityReader
                         continue;
                     }
                     hasArgumentActivity = true;
+                    if (String.IsNullOrEmpty(argumentThreadId))
+                    {
+                        argumentThreadId = rowThreadId;
+                    }
                     if (attentionHint)
                     {
                         hasAttentionArgumentActivity = true;
@@ -1447,21 +1529,52 @@ public sealed class CodexRealtimeActivityReader
                         : GeneratedHaloSpec.FriendlyAction(
                             String.IsNullOrEmpty(name) ? itemType : name);
                 }
+                threadId = rowThreadId;
                 return true;
             }
             if (hasAttentionArgumentActivity)
             {
                 state = HaloState.Attention;
                 action = "Needs you";
+                threadId = argumentThreadId;
                 return true;
             }
             if (hasArgumentActivity)
             {
                 state = HaloState.Working;
                 action = "Preparing command";
+                threadId = argumentThreadId;
                 return true;
             }
             return false;
+        }
+
+        internal static string ThreadIdFromBody(string body)
+        {
+            if (String.IsNullOrEmpty(body))
+            {
+                return String.Empty;
+            }
+            foreach (string marker in new string[] { "thread_id=", "thread.id=" })
+            {
+                int start = body.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+                if (start < 0)
+                {
+                    continue;
+                }
+                start += marker.Length;
+                int end = start;
+                while (end < body.Length && body[end] != '}' &&
+                    !Char.IsWhiteSpace(body[end]))
+                {
+                    end++;
+                }
+                if (end > start)
+                {
+                    return body.Substring(start, end - start).Trim('"', '\'');
+                }
+            }
+            return String.Empty;
         }
 
         private bool TryParseToolEvent(string body, out string eventType,
@@ -1475,7 +1588,11 @@ public sealed class CodexRealtimeActivityReader
             attentionHint = false;
             try
             {
-                int jsonStart = body.IndexOf('{');
+                const string sseMarker = "SSE event: ";
+                int sseStart = body.IndexOf(sseMarker, StringComparison.Ordinal);
+                int jsonStart = sseStart >= 0
+                    ? body.IndexOf('{', sseStart + sseMarker.Length)
+                    : body.IndexOf('{');
                 if (jsonStart < 0)
                 {
                     return false;
@@ -1588,12 +1705,60 @@ public static class CodexRuntimeReader
         /// </summary>
         public static bool IsRunning()
         {
+            DateTime ignored;
+            return TryGetRunningSinceUtc(out ignored);
+        }
+
+        public static bool TryGetRunningSinceUtc(out DateTime startedAtUtc)
+        {
+            startedAtUtc = DateTime.MinValue;
             try
             {
                 // Exact process-name match only. Do not scan for substring "codex"
                 // — that previously matched residual background helpers forever.
-                return Process.GetProcessesByName("Codex").Length > 0 ||
-                    Process.GetProcessesByName("codex").Length > 0;
+                List<Process> discovered = Process.GetProcessesByName("Codex")
+                    .Concat(Process.GetProcessesByName("codex"))
+                    .ToList();
+                Dictionary<int, Process> uniqueProcesses =
+                    new Dictionary<int, Process>();
+                foreach (Process process in discovered)
+                {
+                    if (uniqueProcesses.ContainsKey(process.Id))
+                    {
+                        process.Dispose();
+                        continue;
+                    }
+                    uniqueProcesses.Add(process.Id, process);
+                }
+                List<Process> processes = uniqueProcesses.Values.ToList();
+                if (processes.Count == 0)
+                {
+                    return false;
+                }
+                DateTime earliest = DateTime.MaxValue;
+                foreach (Process process in processes)
+                {
+                    try
+                    {
+                        DateTime candidate = process.StartTime.ToUniversalTime();
+                        if (candidate < earliest)
+                        {
+                            earliest = candidate;
+                        }
+                    }
+                    catch
+                    {
+                    }
+                    finally
+                    {
+                        process.Dispose();
+                    }
+                }
+                if (earliest != DateTime.MaxValue)
+                {
+                    startedAtUtc = earliest;
+                }
+                return true;
             }
             catch
             {
