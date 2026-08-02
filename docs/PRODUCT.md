@@ -3,9 +3,9 @@
 ## Product promise
 
 Agent Halo is a quiet, always-visible desktop vital sign for coding agents. The
-current release monitors Codex and macOS Claude Code transcripts. It answers
-one question without making the user return to the agent window: "What needs me
-right now?"
+current release monitors Codex and Claude Code on Windows and macOS, plus Grok
+Build on macOS. It answers one question without making the user return to the
+agent window: "What needs me right now?"
 
 ## Principles
 
@@ -26,14 +26,15 @@ right now?"
 | Needs you | Explicit input/approval tool requested | violet | paired pulse |
 | Error | Turn interrupted or errored | crimson | broken ring and sharp pulse |
 
-## MVP
+## Current product surface
 
-- Windows desktop, native WPF, transparent and always on top.
+- Native Windows (WPF) and macOS (Swift) apps, transparent and always on top.
 - Smooth composition-clock animation.
-- Real-time monitoring of `%USERPROFILE%\.codex\sessions`.
-- macOS Claude Code transcript monitoring from `~/.claude/projects`.
+- Local lifecycle monitoring for Codex and Claude Code on both platforms.
+- macOS Grok Build lifecycle and weekly-usage monitoring.
 - Multiple-session aggregation with priority ordering.
-- Click-to-inspect compact session panel.
+- Focus switching between available agents without stopping background monitoring.
+- Hover-to-inspect usage, context, or session details.
 - Persistent completion acknowledgement.
 - Tray controls, pause, live/demo modes, startup toggle, and exit.
 - Position memory and edge snapping.
@@ -42,7 +43,7 @@ right now?"
 
 ## Focused Agent
 
-Agent Halo monitors Codex and Claude Code concurrently, but renders one focused agent at a time. The focused agent defaults to Codex and can be changed from the hover details segmented switch or the menu item `监控对象`.
+Agent Halo monitors Codex and Claude Code concurrently on both platforms, and Grok Build on macOS, but renders one focused agent at a time. The focused agent defaults to Codex and can be changed from the hover details segmented switch or the menu item `监控对象`.
 
 The details panel exposes two modes selected from the focused session's endpoint and credentials: official OAuth mode shows usage, while API-key mode shows session details and includes custom or third-party endpoints. Synthetic Codex failure surfacing and click-to-activate Codex remain scoped to Codex focus; Claude Code focus does not attempt to foreground a Claude Code app.
 
