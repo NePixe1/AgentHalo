@@ -172,3 +172,7 @@ Get-FileHash .\AgentHalo.exe -Algorithm SHA256
 
 Agent Halo 是独立的非官方开源项目，与 OpenAI、Quantic Dream 均无隶属或背书关系。
 项目不包含游戏素材、名称、Logo 或照搬的指示灯几何造型。
+
+## License
+
+本项目采用 [MIT License](LICENSE) 开源。

@@ -203,3 +203,7 @@ The resulting hash must exactly match the value in `SHA256.txt`.
 Agent Halo is an independent, unofficial open-source project. It is not affiliated
 with or endorsed by OpenAI or Quantic Dream. It uses no game assets, names, logos,
 or copied indicator geometry.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
