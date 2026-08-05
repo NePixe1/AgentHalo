@@ -1400,9 +1400,10 @@ private func testDetailsPanelMovesTitleGapIntoBodySpacing() {
     let sessionTopRowFrame = topRow.convert(topRow.bounds, to: contentView)
     let sessionTitleFrame = frame(of: "STANDBY")
     let sessionDetailFrame = frame(of: "Codex Standing By")
-    let sessionTitleRow = containingFrame(of: L10n.shared["metadata.session_title"])
+    // Scheme B: body is the session card (title lives inside the card).
+    let sessionBodyFrame = containingFrame(of: "Layout spacing")
     expect(sessionTopRowFrame.minY - sessionTitleFrame.maxY, 0, "session title should start immediately below the agent switcher")
-    expect(sessionDetailFrame.minY - sessionTitleRow.maxY, 11, "session body should receive the released title spacing")
+    expect(sessionDetailFrame.minY - sessionBodyFrame.maxY, 11, "session body should receive the released title spacing")
 }
 
 @MainActor
