@@ -63,11 +63,12 @@ func runHaloInteractionChecks() {
     testQuotaMeterUsesApprovedSoftFadePalette()
     testQuotaMeterRendersApprovedSoftFadeOutput()
     testDetailsPanelShowsMissingAndExpiredUsageWindows()
-    testDetailsPanelShowsThreeIndependentSessionRows()
+    testDetailsPanelShowsSessionCardForAPIKey()
     testDetailsPanelLeavesMissingSessionTitleEmpty()
     testDetailsPanelKeepsUsageAndSessionBodiesMutuallyExclusive()
     testDetailsPanelKeepsContextIndependentFromUsageFailure()
     testDetailsPanelClearsContextAndSessionRowsOffline()
+    testDetailsPanelAPIKeyOfflineAndOnlineShareHeight()
     testDetailsPanelKeepsFixedWidthForLongProviderContent()
     testDetailsPanelResizesHeightWithoutAnimation()
     testDetailsPanelMovesTitleGapIntoBodySpacing()
@@ -1139,7 +1140,7 @@ private func testDetailsPanelShowsMissingAndExpiredUsageWindows() {
 }
 
 @MainActor
-private func testDetailsPanelShowsThreeIndependentSessionRows() {
+private func testDetailsPanelShowsSessionCardForAPIKey() {
     let panel = DetailsPanel()
     panel.render(
         aggregate: detailsAggregate(),
@@ -1152,28 +1153,15 @@ private func testDetailsPanelShowsThreeIndependentSessionRows() {
         ))
     )
 
-    expect(panel.sessionTitleValueForTesting, "Redesign details", "session title row")
-    expect(panel.modelValueForTesting, "gpt-5.5", "model row")
-    expect(panel.tokenValueForTesting, "↑ 38k  ·  ↓ 1.2k", "token row")
-    expect(panel.sessionTitleToolTipForTesting, "Redesign details", "session title tooltip")
-    expect(panel.modelToolTipForTesting, "gpt-5.5", "model tooltip")
-    expect(
-        panel.sessionBodyOrderForTesting,
-        [.sessionTitle, .separator, .model, .separator, .tokens],
-        "API rows should omit the project row"
-    )
-    expect(panel.sessionBodyOrderForTesting.count, 5, "API body should contain exactly five arranged subviews")
-    expect(!panel.sessionBodyOrderForTesting.contains(.unknown), "API body should reject unknown rows or titles")
-    expect(
-        panel.sessionBodyOrderForTesting.filter { $0 == .separator }.count,
-        2,
-        "API rows should contain two separators"
-    )
-    expect(
-        panel.sessionRowHeightsForTesting,
-        [24, 24, 24],
-        "all API metadata rows should use the same 24pt height"
-    )
+    expect(!panel.apiKeyChipHiddenForTesting, "API Key body should show mode chip")
+    expect(panel.apiKeyChipTitleForTesting, L10n.shared["access.mode.api_key"], "mode chip title")
+    expect(panel.sessionBodyModeForTesting, .sessionCard, "online API body is session card")
+    expect(panel.sessionCardTitleForTesting, "Redesign details", "card title")
+    expect(panel.sessionCardModelForTesting, "gpt-5.5", "card model")
+    expect(panel.sessionCardTokensForTesting, "↑ 38k  ·  ↓ 1.2k", "card tokens")
+    expect(panel.sessionCardTitleToolTipForTesting, "Redesign details", "title tooltip")
+    expect(panel.sessionBodySlotHeightForTesting, 72, "body slot height constant")
+    expect(panel.sessionCardHeightForTesting, 72, "card matches body slot height")
 }
 
 @MainActor
@@ -1184,7 +1172,8 @@ private func testDetailsPanelLeavesMissingSessionTitleEmpty() {
         model: sessionDetailsModel(session: SessionDetailsSnapshot(projectName: "AgentHalo"))
     )
 
-    expect(panel.sessionTitleValueForTesting, "--", "missing title should not fall back to projectName")
+    expect(panel.sessionCardTitleForTesting, "--", "missing title should not fall back to projectName")
+    expect(panel.sessionBodyModeForTesting, .sessionCard, "missing title still uses session card")
 }
 
 @MainActor
@@ -1193,10 +1182,12 @@ private func testDetailsPanelKeepsUsageAndSessionBodiesMutuallyExclusive() {
     panel.render(aggregate: detailsAggregate(), model: usageDetailsModel())
     expect(!panel.usageGroupHiddenForTesting, "OAuth body should show usage")
     expect(panel.sessionGroupHiddenForTesting, "OAuth body should hide session rows")
+    expect(panel.apiKeyChipHiddenForTesting, "OAuth body should hide mode chip")
 
     panel.render(aggregate: detailsAggregate(), model: sessionDetailsModel())
     expect(panel.usageGroupHiddenForTesting, "API body should hide usage")
     expect(!panel.sessionGroupHiddenForTesting, "API body should show session rows")
+    expect(!panel.apiKeyChipHiddenForTesting, "API body should show mode chip")
 }
 
 @MainActor
@@ -1229,9 +1220,41 @@ private func testDetailsPanelClearsContextAndSessionRowsOffline() {
     )
 
     expect(panel.contextPillHiddenForTesting, "offline should clear context")
-    expect(panel.sessionTitleValueForTesting, "--", "offline should clear session title")
-    expect(panel.modelValueForTesting, "--", "offline should clear model")
-    expect(panel.tokenValueForTesting, "--", "offline should clear tokens")
+    expect(!panel.apiKeyChipHiddenForTesting, "offline API Key still shows mode chip")
+    expect(panel.sessionBodyModeForTesting, .empty, "offline shows empty body")
+    expect(
+        panel.sessionEmptyTextForTesting,
+        "○ " + L10n.shared["session.empty.api_key"],
+        "offline empty copy"
+    )
+    expect(panel.sessionBodySlotHeightForTesting, 72, "empty slot height")
+    expect(panel.emptyBodyHeightForTesting, 72, "empty rect matches card height")
+}
+
+@MainActor
+private func testDetailsPanelAPIKeyOfflineAndOnlineShareHeight() {
+    let panel = DetailsPanel()
+    let online = sessionDetailsModel(session: SessionDetailsSnapshot(
+        sessionTitle: "Redesign details",
+        modelName: "gpt-5.5",
+        inputTokens: 38_000,
+        outputTokens: 1_200
+    ))
+    panel.render(aggregate: detailsAggregate(), model: online)
+    panel.contentView?.layoutSubtreeIfNeeded()
+    let onlineHeight = panel.frameHeightForTesting
+    let onlineSlot = panel.sessionBodySlotHeightForTesting
+
+    panel.render(
+        aggregate: detailsAggregate(state: .idle, label: "OFFLINE"),
+        model: sessionDetailsModel(context: nil, session: SessionDetailsSnapshot())
+    )
+    panel.contentView?.layoutSubtreeIfNeeded()
+    expect(panel.frameHeightForTesting, onlineHeight, "API Key offline/online panel height")
+    expect(panel.frameHeightForTesting, 172, "API Key panel must keep production fitted height 172")
+    expect(onlineHeight, 172, "online API Key panel height locked to 172")
+    expect(panel.sessionBodySlotHeightForTesting, onlineSlot, "body slot height stable")
+    expect(panel.sessionBodyModeForTesting, .empty, "offline mode")
 }
 
 @MainActor

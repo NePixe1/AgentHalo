@@ -11,10 +11,8 @@ enum DetailsPanelContentRole: Equatable {
 }
 
 enum DetailsPanelSessionBodyRole: Equatable {
-    case separator
-    case sessionTitle
-    case model
-    case tokens
+    case empty
+    case sessionCard
     case unknown
 }
 
@@ -594,19 +592,50 @@ class DetailsPanel: NSPanel {
     }
 
     var sessionBodyOrderForTesting: [DetailsPanelSessionBodyRole] {
-        metadataGroup.arrangedSubviews.map { view in
-            if view === sessionTitleRow { return .sessionTitle }
-            if view === modelRow { return .model }
-            if view === tokenRow { return .tokens }
-            if view is SeparatorView { return .separator }
-            return .unknown
-        }
+        // Legacy diagnostics only. Scheme B contract uses sessionBodyModeForTesting.
+        [sessionBodyModeForTesting]
     }
 
     var sessionRowHeightsForTesting: [CGFloat] {
         contentView?.layoutSubtreeIfNeeded()
         return [sessionTitleRow, modelRow, tokenRow].map(\.frame.height)
     }
+
+    // MARK: - Scheme B session body / mode-chip test stubs
+    // Task 2: stubs compile and intentionally fail new contract asserts until Task 3 UI lands.
+
+    /// Stub: chip not implemented yet → always hidden (fails online/offline "show chip" asserts).
+    var apiKeyChipHiddenForTesting: Bool { true }
+
+    /// Stub: no chip view yet.
+    var apiKeyChipTitleForTesting: String { "" }
+
+    /// Stub: body role not wired → unknown (fails sessionCard / empty asserts).
+    var sessionBodyModeForTesting: DetailsPanelSessionBodyRole { .unknown }
+
+    /// Stub: map old three-row title until card UI exists.
+    var sessionCardTitleForTesting: String { sessionTitleRow.value }
+
+    /// Stub: map old model row.
+    var sessionCardModelForTesting: String { modelRow.value }
+
+    /// Stub: map old token row.
+    var sessionCardTokensForTesting: String { tokenRow.value }
+
+    /// Stub: map old title tooltip.
+    var sessionCardTitleToolTipForTesting: String? { sessionTitleRow.valueToolTip }
+
+    /// Stub: fixed body slot not implemented.
+    var sessionBodySlotHeightForTesting: CGFloat { 0 }
+
+    /// Stub: card view not implemented.
+    var sessionCardHeightForTesting: CGFloat { 0 }
+
+    /// Stub: empty body not implemented.
+    var sessionEmptyTextForTesting: String { "" }
+
+    /// Stub: empty rect not implemented.
+    var emptyBodyHeightForTesting: CGFloat { 0 }
 
     var primaryQuotaTitleForTesting: String {
         primaryQuota.titleForTesting
