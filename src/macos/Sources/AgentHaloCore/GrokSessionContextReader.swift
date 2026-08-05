@@ -91,15 +91,38 @@ public enum GrokActiveSessionsReader {
         fileManager: FileManager = .default,
         isProcessAlive: (Int32) -> Bool = defaultIsProcessAlive
     ) -> Bool {
+        !liveSessionIds(
+            homeDirectory: homeDirectory,
+            fileManager: fileManager,
+            isProcessAlive: isProcessAlive
+        ).isEmpty
+    }
+
+    /// Session ids that are still backed by a live Grok process.
+    ///
+    /// Older `active_sessions.json` shapes omitted `pid`; when every entry is
+    /// pid-less, keep treating the listed ids as live for compatibility. Once
+    /// any pid is available, require its process to still exist so stale file
+    /// entries cannot keep an old hook snapshot actionable.
+    public static func liveSessionIds(
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        fileManager: FileManager = .default,
+        isProcessAlive: (Int32) -> Bool = defaultIsProcessAlive
+    ) -> Set<String> {
         let sessions = read(homeDirectory: homeDirectory, fileManager: fileManager)
         guard !sessions.isEmpty else {
-            return false
+            return []
         }
-        let withPid = sessions.compactMap(\.processId)
+        let withPid = sessions.filter { $0.processId != nil }
         if withPid.isEmpty {
-            return true
+            return Set(sessions.map(\.sessionId))
         }
-        return withPid.contains { isProcessAlive($0) }
+        return Set(withPid.compactMap { session in
+            guard let processId = session.processId, isProcessAlive(processId) else {
+                return nil
+            }
+            return session.sessionId
+        })
     }
 
     public static func defaultIsProcessAlive(_ pid: Int32) -> Bool {

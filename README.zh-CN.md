@@ -39,10 +39,10 @@
 
 | 平台 | 支持的 Agent | 系统要求 |
 | --- | --- | --- |
-| Windows | Codex、Claude Code | Windows 10 或 11；.NET Framework 4.8（通常已自带） |
+| Windows | Codex、Claude Code、Grok Build | Windows 10 或 11；.NET Framework 4.8（通常已自带） |
 | macOS | Codex、Claude Code、Grok Build | macOS 13 及以上 |
 
-使用前请至少安装并登录一种受支持的 Agent。Grok Build 监听目前仅支持 macOS。
+使用前请至少安装并登录一种受支持的 Agent。
 
 ## 安装
 
@@ -65,7 +65,7 @@
 ## 快速使用
 
 - **拖动**光环调整位置，靠近屏幕边缘会轻微吸附。
-- **悬停**查看状态与额度 / 会话详情；macOS 可切换 **Codex / CC / Grok**，Windows 可切换 **Codex / CC**。
+- **悬停**查看状态与额度 / 会话详情；两个平台均可切换 **Codex / CC / Grok**。
 - **单击**光环可将 Codex 窗口切到前台（在相关场景下）。
 - **右键**打开状态预览、临时暂停、开机启动、置顶、光环大小（`75% / 100% / 125%`）、**脱离卡死**与退出。暂停会在下次启动时自动取消。
 - 显示器变化后，离屏光环会回到主屏。macOS 还会在原显示器重新连接后恢复记忆位置。

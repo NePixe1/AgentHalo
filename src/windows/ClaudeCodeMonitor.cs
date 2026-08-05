@@ -32,14 +32,70 @@ public static class ClaudeHookStatusWriter
     {
         private const long RotateTriggerBytes = 3 * 1024 * 1024;
         private const long RotateKeepBytes = 2 * 1024 * 1024;
+        private const string ClaudeMutexName =
+            "Local\\AgentHalo-ClaudeCodeStatusLog-7A0CE36F";
+        private const string GrokMutexName =
+            "Local\\AgentHalo-GrokBuildStatusLog-7A0CE36F";
         private static readonly JavaScriptSerializer Serializer =
             new JavaScriptSerializer();
 
         public static int WriteFromStandardInput(string eventName)
         {
+            string body = null;
             try
             {
-                string body = Console.In.ReadToEnd();
+                body = Console.In.ReadToEnd();
+            }
+            catch
+            {
+                body = String.Empty;
+            }
+            string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            string grokSessionId = Environment.GetEnvironmentVariable("GROK_SESSION_ID");
+            string grokHookEvent = Environment.GetEnvironmentVariable("GROK_HOOK_EVENT");
+            return WriteCore(eventName, home, grokSessionId, grokHookEvent, body);
+        }
+
+        // Injectable path for Diagnostics self-tests (no Console / Environment).
+        public static int WriteForTest(string eventName, string home,
+            string grokSessionId, string grokHookEvent, string stdinJson)
+        {
+            return WriteCore(eventName, home, grokSessionId, grokHookEvent, stdinJson);
+        }
+
+        internal static string NormalizeEventName(string eventName)
+        {
+            if (String.IsNullOrWhiteSpace(eventName))
+            {
+                return eventName;
+            }
+            if (eventName.IndexOf('_') < 0)
+            {
+                return eventName;
+            }
+            string[] parts = eventName.Split(new[] { '_' },
+                StringSplitOptions.RemoveEmptyEntries);
+            StringBuilder sb = new StringBuilder();
+            foreach (string part in parts)
+            {
+                if (part.Length == 0)
+                {
+                    continue;
+                }
+                sb.Append(Char.ToUpperInvariant(part[0]));
+                if (part.Length > 1)
+                {
+                    sb.Append(part.Substring(1).ToLowerInvariant());
+                }
+            }
+            return sb.ToString();
+        }
+
+        private static int WriteCore(string eventName, string home,
+            string grokSessionId, string grokHookEvent, string body)
+        {
+            try
+            {
                 Dictionary<string, object> payload = null;
                 if (!String.IsNullOrWhiteSpace(body))
                 {
@@ -50,20 +106,27 @@ public static class ClaudeHookStatusWriter
                     payload = new Dictionary<string, object>();
                 }
 
+                bool isGrok = !String.IsNullOrEmpty(grokSessionId) ||
+                    !String.IsNullOrEmpty(grokHookEvent);
+
                 string resolvedEvent = FirstString(eventName, Value(payload, "hook_event_name"),
-                    Value(payload, "event"), Value(payload, "eventName"));
+                    Value(payload, "event"), Value(payload, "eventName"),
+                    isGrok ? grokHookEvent : null);
                 if (String.IsNullOrWhiteSpace(resolvedEvent))
                 {
                     return 0;
                 }
+                resolvedEvent = NormalizeEventName(resolvedEvent);
 
+                string defaultSessionId = isGrok ? "grok" : "claude-code";
                 Dictionary<string, object> record = new Dictionary<string, object>();
                 record["timestamp"] = FirstString(Value(payload, "timestamp"),
                     DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
                 record["event"] = resolvedEvent;
                 record["sessionId"] = FirstString(Value(payload, "session_id"),
                     Value(payload, "sessionId"), Value(payload, "conversation_id"),
-                    "claude-code");
+                    isGrok ? grokSessionId : null,
+                    defaultSessionId);
                 record["cwd"] = FirstString(Value(payload, "cwd"),
                     Nested(payload, "workspace", "current_dir"),
                     Nested(payload, "workspace", "cwd"),
@@ -87,14 +150,20 @@ public static class ClaudeHookStatusWriter
                     ? null : notificationType;
                 record["errorText"] = String.IsNullOrEmpty(errorText) ? null : errorText;
                 record["model"] = String.IsNullOrEmpty(model) ? null : model;
-                record["source"] = "claude-hook";
+                string permissionMode = FirstString(Value(payload, "permission_mode"),
+                    Value(payload, "permissionMode"));
+                record["permissionMode"] = String.IsNullOrEmpty(permissionMode)
+                    ? null : permissionMode;
+                record["source"] = isGrok ? "grok-hook" : "claude-hook";
 
-                string path = AgentHaloPaths.ClaudeStatusLog();
-                Directory.CreateDirectory(AgentHaloPaths.LogsDirectory());
+                string path = isGrok
+                    ? AgentHaloPaths.GrokStatusLog(home)
+                    : AgentHaloPaths.ClaudeStatusLog(home);
+                Directory.CreateDirectory(AgentHaloPaths.LogsDirectory(home));
                 string line = Serializer.Serialize(record) + Environment.NewLine;
+                string mutexName = isGrok ? GrokMutexName : ClaudeMutexName;
 
-                using (Mutex mutex = new Mutex(false,
-                    "Local\\AgentHalo-ClaudeCodeStatusLog-7A0CE36F"))
+                using (Mutex mutex = new Mutex(false, mutexName))
                 {
                     bool locked = false;
                     try
@@ -124,7 +193,7 @@ public static class ClaudeHookStatusWriter
             }
             catch
             {
-                // Claude hooks must never block or break the user's Claude Code turn.
+                // Hooks must never block or break the user's agent turn.
             }
             return 0;
         }
@@ -132,6 +201,11 @@ public static class ClaudeHookStatusWriter
         public static string AgentHaloDataDirectory()
         {
             return AgentHaloPaths.Root();
+        }
+
+        public static string AgentHaloDataDirectory(string home)
+        {
+            return AgentHaloPaths.Root(home);
         }
 
         private static void RotateIfNeeded(string path)
@@ -247,13 +321,9 @@ public static class ClaudeHookConfigurator
         {
             try
             {
-                string home = Environment.GetFolderPath(
-                    Environment.SpecialFolder.UserProfile);
-                string staged = AgentHaloPaths.StatusHookExe(home);
-                string exe = File.Exists(staged)
-                    ? staged
-                    : Process.GetCurrentProcess().MainModule.FileName;
-                Configure(home, exe);
+                string exe = Process.GetCurrentProcess().MainModule.FileName;
+                Configure(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                    exe);
             }
             catch (Exception ex)
             {
@@ -261,33 +331,9 @@ public static class ClaudeHookConfigurator
             }
         }
 
-        /// <summary>
-        /// Merge Agent Halo lifecycle hooks into ~/.claude/settings.json.
-        /// <paramref name="executablePath"/> should be the stable staged
-        /// .agent-halo\bin\status-hook.exe when available. Never deletes the
-        /// legacy AgentHaloHook.exe compat path.
-        /// </summary>
         public static void Configure(string home, string executablePath)
         {
-            // Stage preferred bin\status-hook.exe before settings point at it.
-            string primary = AgentHaloPaths.StatusHookExe(home);
-            if (!String.IsNullOrEmpty(executablePath) && File.Exists(executablePath))
-            {
-                try
-                {
-                    AgentHaloBinaryStaging.StageStatusHookEverywhere(executablePath, home);
-                    if (File.Exists(primary))
-                    {
-                        executablePath = primary;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    SettingsStorage.Log(
-                        "ClaudeHookConfigurator: stage failed: " + ex.Message);
-                }
-            }
-
+            RemoveLegacyHookHelper(home);
             string claudeDir = Path.Combine(home, ".claude");
             string settingsPath = Path.Combine(claudeDir, "settings.json");
             Dictionary<string, object> config = ReadSettings(settingsPath);
@@ -297,8 +343,6 @@ public static class ClaudeHookConfigurator
                 hooks = new Dictionary<string, object>();
             }
 
-            // Preferred path only — legacy / install-dir paths are rewritten on launch.
-            string preferredCommandPrefix = Quote(executablePath) + " --claude-hook ";
             bool changed = false;
             foreach (HookSpec spec in HookSpecs)
             {
@@ -307,51 +351,30 @@ public static class ClaudeHookConfigurator
                     ? existing as object[] : null;
                 List<object> list = entries == null
                     ? new List<object>() : entries.ToList();
-                string command = preferredCommandPrefix + spec.Event;
-
-                bool alreadyOnPreferred = false;
-                for (int i = 0; i < list.Count; i++)
-                {
-                    Dictionary<string, object> entry =
-                        list[i] as Dictionary<string, object>;
-                    if (EntryIsPreferredAgentHaloHook(entry, spec, executablePath))
-                    {
-                        alreadyOnPreferred = true;
-                        break;
-                    }
-                }
-
-                if (alreadyOnPreferred)
-                {
-                    // Drop non-preferred Agent Halo siblings if any.
-                    for (int i = list.Count - 1; i >= 0; i--)
-                    {
-                        Dictionary<string, object> entry =
-                            list[i] as Dictionary<string, object>;
-                        if (EntryHasAgentHaloHook(entry) &&
-                            !EntryIsPreferredAgentHaloHook(entry, spec, executablePath))
-                        {
-                            list.RemoveAt(i);
-                            changed = true;
-                        }
-                    }
-                    hooks[spec.Event] = list.ToArray();
-                    continue;
-                }
-
-                // Remove any Agent Halo entry (legacy or wrong path), then append preferred.
+                string command = Quote(executablePath) + " --claude-hook " + spec.Event;
+                bool already = false;
                 for (int i = list.Count - 1; i >= 0; i--)
                 {
                     Dictionary<string, object> entry =
                         list[i] as Dictionary<string, object>;
                     if (EntryHasAgentHaloHook(entry))
                     {
-                        list.RemoveAt(i);
-                        changed = true;
+                        if (EntryMatches(entry, spec, command))
+                        {
+                            already = true;
+                        }
+                        else
+                        {
+                            list.RemoveAt(i);
+                            changed = true;
+                        }
                     }
                 }
-                list.Add(CreateHookEntry(spec, command));
-                changed = true;
+                if (!already)
+                {
+                    list.Add(CreateHookEntry(spec, command));
+                    changed = true;
+                }
                 hooks[spec.Event] = list.ToArray();
             }
 
@@ -361,149 +384,9 @@ public static class ClaudeHookConfigurator
             }
             config["hooks"] = hooks;
             Directory.CreateDirectory(claudeDir);
-            AtomicWriteText(settingsPath,
-                PrettyPrintJson(Serializer.Serialize(config)));
-        }
-
-        private static void AtomicWriteText(string path, string contents)
-        {
-            string parent = Path.GetDirectoryName(path);
-            if (!String.IsNullOrEmpty(parent))
-            {
-                Directory.CreateDirectory(parent);
-            }
-            string temp = path + ".tmp-" + Guid.NewGuid().ToString("N");
-            File.WriteAllText(temp, contents, new UTF8Encoding(false));
-            if (File.Exists(path))
-            {
-                try
-                {
-                    File.Replace(temp, path, null);
-                    return;
-                }
-                catch
-                {
-                    // Fall through.
-                }
-            }
-            File.Copy(temp, path, true);
-            try { File.Delete(temp); }
-            catch { }
-        }
-
-        /// <summary>
-        /// True when the entry uses the preferred executable path + --claude-hook
-        /// and the binary is live. Legacy AgentHaloHook.exe paths are not accepted.
-        /// </summary>
-        private static bool EntryIsPreferredAgentHaloHook(
-            Dictionary<string, object> entry,
-            HookSpec spec,
-            string preferredExecutable)
-        {
-            if (entry == null || String.IsNullOrEmpty(preferredExecutable))
-            {
-                return false;
-            }
-            object matcherValue;
-            bool hasMatcher = entry.TryGetValue("matcher", out matcherValue);
-            if (spec.Matcher == null)
-            {
-                if (hasMatcher)
-                {
-                    return false;
-                }
-            }
-            else if (!hasMatcher ||
-                !String.Equals(Convert.ToString(matcherValue, CultureInfo.InvariantCulture),
-                    spec.Matcher, StringComparison.Ordinal))
-            {
-                return false;
-            }
-            string preferredFull;
-            try
-            {
-                preferredFull = Path.GetFullPath(preferredExecutable);
-            }
-            catch
-            {
-                preferredFull = preferredExecutable;
-            }
-            foreach (Dictionary<string, object> hook in EntryHooks(entry))
-            {
-                string command = StringValue(hook, "command");
-                string exe = AgentHaloBinaryStaging.CommandExecutablePath(command);
-                if (String.IsNullOrEmpty(exe))
-                {
-                    continue;
-                }
-                string exeFull;
-                try
-                {
-                    exeFull = Path.GetFullPath(exe);
-                }
-                catch
-                {
-                    exeFull = exe;
-                }
-                if (!String.Equals(exeFull, preferredFull, StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-                string[] arguments = HookCommandArguments(command);
-                if (arguments.Length == 2 &&
-                    String.Equals(arguments[0], "--claude-hook",
-                        StringComparison.OrdinalIgnoreCase) &&
-                    String.Equals(arguments[1], spec.Event,
-                        StringComparison.Ordinal) &&
-                    AgentHaloBinaryStaging.CommandPointsToLiveExecutable(command))
-                {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        private static string[] HookCommandArguments(string command)
-        {
-            if (String.IsNullOrWhiteSpace(command))
-            {
-                return new string[0];
-            }
-            string trimmed = command.Trim();
-            int argumentStart;
-            if (trimmed.StartsWith("\"", StringComparison.Ordinal))
-            {
-                int closingQuote = trimmed.IndexOf('"', 1);
-                if (closingQuote < 0)
-                {
-                    return new string[0];
-                }
-                argumentStart = closingQuote + 1;
-            }
-            else
-            {
-                int firstWhitespace = trimmed.IndexOfAny(new[] { ' ', '\t' });
-                if (firstWhitespace < 0)
-                {
-                    return new string[0];
-                }
-                argumentStart = firstWhitespace;
-            }
-            return trimmed.Substring(argumentStart)
-                .Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-        }
-
-        private static bool IsAgentHaloHookCommand(string command)
-        {
-            if (String.IsNullOrEmpty(command))
-            {
-                return false;
-            }
-            return command.IndexOf("--claude-hook", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                command.IndexOf("AgentHaloHook.exe", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                command.IndexOf("status-hook", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                command.IndexOf("claude-code-status-hook",
-                    StringComparison.OrdinalIgnoreCase) >= 0;
+            File.WriteAllText(settingsPath,
+                PrettyPrintJson(Serializer.Serialize(config)),
+                new UTF8Encoding(false));
         }
 
         // Detects a settings.json that is valid JSON but written as a single
@@ -680,6 +563,21 @@ public static class ClaudeHookConfigurator
             }
         }
 
+        private static void RemoveLegacyHookHelper(string home)
+        {
+            try
+            {
+                string legacy = Path.Combine(home, ".agent-halo", "AgentHaloHook.exe");
+                if (File.Exists(legacy))
+                {
+                    File.Delete(legacy);
+                }
+            }
+            catch
+            {
+            }
+        }
+
         private static Dictionary<string, object> ReadSettings(string path)
         {
             try
@@ -722,7 +620,6 @@ public static class ClaudeHookConfigurator
                 if (command.IndexOf("--claude-hook", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     command.IndexOf("AgentHaloHook.exe",
                         StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    command.IndexOf("status-hook", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     command.IndexOf("claude-code-status-hook",
                         StringComparison.OrdinalIgnoreCase) >= 0)
                 {
@@ -1308,14 +1205,10 @@ public sealed class ClaudeHookStatusMonitor
                     changed = true;
                 }
             }
-            DateTime activeCutoff = now.AddMinutes(-10);
-            DateTime inactiveCutoff = now.AddMinutes(-5);
             List<string> stale = reducers.Where(delegate(
                 KeyValuePair<string, ClaudeHookStatusReducer> pair)
             {
-                DateTime cutoff = pair.Value.Snapshot.Active
-                    ? activeCutoff : inactiveCutoff;
-                return pair.Value.Snapshot.LastEventUtc < cutoff;
+                return ShouldPruneSnapshot(pair.Value.Snapshot, now);
             }).Select(delegate(KeyValuePair<string, ClaudeHookStatusReducer> pair)
             {
                 return pair.Key;
@@ -1326,6 +1219,27 @@ public sealed class ClaudeHookStatusMonitor
                 changed = true;
             }
             return changed;
+        }
+
+        /// <summary>
+        /// Age-based prune. Attention (NEEDS YOU / awaiting permission) is never
+        /// pruned by lastEvent age — humans may leave a prompt open indefinitely.
+        /// </summary>
+        internal static bool ShouldPruneSnapshot(
+            SessionSnapshot snapshot, DateTime now)
+        {
+            if (snapshot == null)
+            {
+                return true;
+            }
+            if (snapshot.State == HaloState.Attention)
+            {
+                return false;
+            }
+            DateTime cutoff = snapshot.Active
+                ? now.AddMinutes(-10)
+                : now.AddMinutes(-5);
+            return snapshot.LastEventUtc < cutoff;
         }
 
         private static string SessionIdFromLine(string line)
@@ -2042,29 +1956,44 @@ public static class ClaudeLiveSessionReader
 
         public static bool HasStandbySession(string home)
         {
+            return LiveSessionIds(home).Count > 0;
+        }
+
+        public static HashSet<string> LiveSessionIds()
+        {
+            return LiveSessionIds(Environment.GetFolderPath(
+                Environment.SpecialFolder.UserProfile));
+        }
+
+        public static HashSet<string> LiveSessionIds(string home)
+        {
+            HashSet<string> result = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
             try
             {
                 string sessionsDir = Path.Combine(home, ".claude", "sessions");
                 if (!Directory.Exists(sessionsDir))
                 {
-                    return false;
+                    return result;
                 }
                 foreach (string path in Directory.GetFiles(sessionsDir, "*.json"))
                 {
-                    if (IsStandbySession(path))
+                    string sessionId;
+                    if (TryReadLiveSessionId(path, out sessionId))
                     {
-                        return true;
+                        result.Add(sessionId);
                     }
                 }
             }
             catch
             {
             }
-            return false;
+            return result;
         }
 
-        private static bool IsStandbySession(string path)
+        private static bool TryReadLiveSessionId(string path, out string sessionId)
         {
+            sessionId = String.Empty;
             try
             {
                 Dictionary<string, object> json = Serializer.DeserializeObject(
@@ -2080,7 +2009,14 @@ public static class ClaudeLiveSessionReader
                 {
                     return false;
                 }
-                Process.GetProcessById(pid);
+                using (Process process = Process.GetProcessById(pid))
+                {
+                }
+                sessionId = StringValue(json, "sessionId");
+                if (String.IsNullOrEmpty(sessionId))
+                {
+                    sessionId = "claude-code";
+                }
                 return true;
             }
             catch

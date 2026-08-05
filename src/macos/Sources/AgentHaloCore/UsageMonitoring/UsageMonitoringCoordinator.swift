@@ -36,6 +36,7 @@ public actor UsageMonitoringCoordinator {
         let generation: UInt64
         let signature: AccessSignature
         let token: UUID
+        let authorization: UsageProviderFocusAuthorization
         let task: Task<UsageRefreshResult, Never>
     }
 
@@ -46,6 +47,7 @@ public actor UsageMonitoringCoordinator {
     private let providers: [UsageProviderID: any UsageProvider]
     private let cache: any UsageSnapshotCaching
     private let now: @Sendable () -> Date
+    public nonisolated let focusController: UsageProviderFocusController
 
     private var states: [UsageProviderID: UsageMonitorState] = [:]
     private var contexts: [UsageProviderID: PrepareContext] = [:]
@@ -64,6 +66,7 @@ public actor UsageMonitoringCoordinator {
     public init(
         providers: [any UsageProvider],
         cache: any UsageSnapshotCaching,
+        focusController: UsageProviderFocusController = UsageProviderFocusController(),
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         self.providers = Dictionary(
@@ -71,6 +74,7 @@ public actor UsageMonitoringCoordinator {
             uniquingKeysWith: { _, replacement in replacement }
         )
         self.cache = cache
+        self.focusController = focusController
         self.now = now
     }
 
@@ -94,6 +98,7 @@ public actor UsageMonitoringCoordinator {
     ) async -> UsageMonitorState {
         guard !isCancelling,
               prepared.cancellationGeneration == cancellationGeneration,
+              focusController.isActive(providerID),
               !Task.isCancelled
         else {
             return cancellationContext(for: providerID).state
@@ -103,7 +108,9 @@ public actor UsageMonitoringCoordinator {
         }
 
         if let record = inFlight[providerID] {
-            if record.accountKey == access.accountKey,
+            if !focusController.isCurrent(record.authorization) {
+                invalidateInFlight(providerID)
+            } else if record.accountKey == access.accountKey,
                record.generation == prepared.generation,
                record.signature == prepared.signature {
                 let result = await record.task.value
@@ -113,8 +120,9 @@ public actor UsageMonitoringCoordinator {
                     expected: record,
                     externalRecoveryRemaining: externalRecoveryRemaining
                 )
+            } else {
+                invalidateInFlight(providerID)
             }
-            invalidateInFlight(providerID)
         }
 
         if let snapshot = prepared.state.snapshot,
@@ -129,14 +137,17 @@ public actor UsageMonitoringCoordinator {
         }
         cooldownUntil.removeValue(forKey: access.accountKey)
 
-        var refreshing = prepared
-        refreshing.state.isRefreshing = true
         guard !isCancelling,
-              refreshing.cancellationGeneration == cancellationGeneration,
-              !Task.isCancelled
+              prepared.cancellationGeneration == cancellationGeneration,
+              focusController.isActive(providerID),
+              !Task.isCancelled,
+              let authorization = focusController.authorization(for: providerID)
         else {
             return cancellationContext(for: providerID).state
         }
+
+        var refreshing = prepared
+        refreshing.state.isRefreshing = true
         commit(refreshing, for: providerID)
 
         let token = UUID()
@@ -149,8 +160,19 @@ public actor UsageMonitoringCoordinator {
             generation: refreshing.generation,
             signature: refreshing.signature,
             token: token,
+            authorization: authorization,
             task: task
         )
+        guard focusController.registerCancellation(
+            token: token,
+            authorization: authorization,
+            cancel: { task.cancel() }
+        ) else {
+            var stopped = refreshing
+            stopped.state.isRefreshing = false
+            commit(stopped, for: providerID)
+            return stopped.state
+        }
         inFlight[providerID] = record
 
         let result = await task.value
@@ -181,6 +203,7 @@ public actor UsageMonitoringCoordinator {
     }
 
     public func cancelAll() async {
+        focusController.deactivateAll()
         cancellationGeneration &+= 1
         isCancelling = true
 
@@ -188,6 +211,9 @@ public actor UsageMonitoringCoordinator {
         let accessTasks = prepareTasks.values.map(\.task)
         for task in refreshTasks { task.cancel() }
         for task in accessTasks { task.cancel() }
+        for record in inFlight.values {
+            focusController.unregisterCancellation(token: record.token)
+        }
         inFlight.removeAll()
         for providerID in Array(states.keys) {
             states[providerID]?.isRefreshing = false
@@ -220,6 +246,7 @@ public actor UsageMonitoringCoordinator {
         let files = FilesystemUsageFiles()
         let keychain = UsageMonitoringDependencyFactory.keychain(for: mode).keychain
         let http = URLSessionUsageHTTPClient(fixedHost: "official usage endpoints")
+        let focusController = UsageProviderFocusController()
 
         let codexAuthStore = CodexAuthStore(
             environment: environment,
@@ -233,11 +260,13 @@ public actor UsageMonitoringCoordinator {
         )
         let codexProvider = CodexUsageProvider(
             authStore: codexAuthStore,
-            usageClient: CodexUsageClient(http: http)
+            usageClient: CodexUsageClient(http: http),
+            focusController: focusController
         )
         let claudeProvider = ClaudeUsageProvider(
             authStore: claudeAuthStore,
-            usageClient: ClaudeUsageClient(http: http)
+            usageClient: ClaudeUsageClient(http: http),
+            focusController: focusController
         )
         let grokAuthStore = GrokAuthStore(
             homeDirectory: homeDirectory,
@@ -246,18 +275,23 @@ public actor UsageMonitoringCoordinator {
         )
         let grokProvider = GrokUsageProvider(
             authStore: grokAuthStore,
-            usageClient: GrokUsageClient(http: http)
+            usageClient: GrokUsageClient(http: http),
+            focusController: focusController
         )
         let cacheURL = AgentHaloPaths(homeDirectory: homeDirectory).usageSnapshots
         let cache = UsageSnapshotCache(cacheURL: cacheURL, files: files)
         return UsageMonitoringCoordinator(
             providers: [codexProvider, claudeProvider, grokProvider],
-            cache: cache
+            cache: cache,
+            focusController: focusController
         )
     }
 
     private func prepareContext(_ providerID: UsageProviderID) async -> PrepareContext {
-        guard !isCancelling else { return cancellationContext(for: providerID) }
+        guard !isCancelling, focusController.isActive(providerID)
+        else {
+            return cancellationContext(for: providerID)
+        }
         let lifecycleGeneration = cancellationGeneration
         let sequence = nextPrepareSequence(for: providerID)
         guard let provider = providers[providerID] else {
@@ -303,6 +337,7 @@ public actor UsageMonitoringCoordinator {
 
         guard !isCancelling,
               cancellationGeneration == lifecycleGeneration,
+              focusController.isActive(providerID),
               !Task.isCancelled
         else {
             return cancellationContext(for: providerID)
@@ -325,6 +360,7 @@ public actor UsageMonitoringCoordinator {
 
         guard !isCancelling,
               cancellationGeneration == lifecycleGeneration,
+              focusController.isActive(providerID),
               !Task.isCancelled,
               prepareSequences[providerID] == sequence,
               let current = contexts[providerID],
@@ -455,12 +491,14 @@ public actor UsageMonitoringCoordinator {
         guard isCurrent(expected, providerID: providerID),
               let context = contexts[providerID]
         else {
-            return state(for: providerID)
+            return discardOwnedRefresh(providerID: providerID, expected: expected)
         }
 
         switch result.outcome {
+        case .cancelled:
+            return discardOwnedRefresh(providerID: providerID, expected: expected)
         case .externalAccessChanged:
-            inFlight.removeValue(forKey: providerID)
+            removeInFlight(providerID)
             var stopped = context
             stopped.state.isRefreshing = false
             commit(stopped, for: providerID)
@@ -520,14 +558,14 @@ public actor UsageMonitoringCoordinator {
             try? await cache.migrate(from: oldKey, to: snapshot.accountKey)
         }
         guard isCurrent(expected, providerID: providerID) else {
-            return state(for: providerID)
+            return discardOwnedRefresh(providerID: providerID, expected: expected)
         }
         try? await cache.store(snapshot)
         guard isCurrent(expected, providerID: providerID) else {
-            return state(for: providerID)
+            return discardOwnedRefresh(providerID: providerID, expected: expected)
         }
 
-        inFlight.removeValue(forKey: providerID)
+        removeInFlight(providerID)
         cooldownUntil.removeValue(forKey: expected.accountKey)
         cooldownUntil.removeValue(forKey: snapshot.accountKey)
         currentRunSnapshotKeys.insert(snapshot.accountKey)
@@ -560,9 +598,9 @@ public actor UsageMonitoringCoordinator {
         expected: InFlightRecord
     ) -> UsageMonitorState {
         guard isCurrent(expected, providerID: providerID) else {
-            return state(for: providerID)
+            return discardOwnedRefresh(providerID: providerID, expected: expected)
         }
-        inFlight.removeValue(forKey: providerID)
+        removeInFlight(providerID)
         if case .rateLimited(let retryAt) = failure {
             cooldownUntil[expected.accountKey] = retryAt
                 ?? now().addingTimeInterval(Self.defaultCooldown)
@@ -602,7 +640,8 @@ public actor UsageMonitoringCoordinator {
               let context = contexts[providerID],
               context.generation == expected.generation,
               context.signature == expected.signature,
-              context.signature.accountKey == expected.accountKey
+              context.signature.accountKey == expected.accountKey,
+              focusController.isCurrent(expected.authorization)
         else {
             return false
         }
@@ -610,9 +649,34 @@ public actor UsageMonitoringCoordinator {
     }
 
     private func invalidateInFlight(_ providerID: UsageProviderID) {
-        inFlight.removeValue(forKey: providerID)?.task.cancel()
+        removeInFlight(providerID, cancel: true)
         states[providerID]?.isRefreshing = false
         contexts[providerID]?.state.isRefreshing = false
+    }
+
+    /// Drop an owned in-flight refresh without applying its outcome.
+    /// Only removes `inFlight` when the token still matches `expected`, so a
+    /// newer generation started after focus switch is never cleared.
+    private func discardOwnedRefresh(
+        providerID: UsageProviderID,
+        expected: InFlightRecord
+    ) -> UsageMonitorState {
+        if let record = inFlight[providerID], record.token == expected.token {
+            removeInFlight(providerID)
+            states[providerID]?.isRefreshing = false
+            contexts[providerID]?.state.isRefreshing = false
+        }
+        return state(for: providerID)
+    }
+
+    private func removeInFlight(_ providerID: UsageProviderID, cancel: Bool = false) {
+        guard let record = inFlight.removeValue(forKey: providerID) else {
+            return
+        }
+        focusController.unregisterCancellation(token: record.token)
+        if cancel {
+            record.task.cancel()
+        }
     }
 
     private func commit(_ context: PrepareContext, for providerID: UsageProviderID) {

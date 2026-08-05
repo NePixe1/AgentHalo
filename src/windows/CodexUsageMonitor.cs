@@ -67,6 +67,7 @@ public sealed class CodexUsageMonitor : IDisposable
         private DateTime cooldownUntilUtc;
         private bool refreshInFlight;
         private bool localRefreshInFlight;
+        private bool active;
         private bool disposed;
         private CodexUsageDataStatus status = CodexUsageDataStatus.NoData;
 
@@ -82,9 +83,47 @@ public sealed class CodexUsageMonitor : IDisposable
             serializer.MaxJsonLength = Int32.MaxValue;
             LoadMatchingCache();
             refreshTimer = new Timer(delegate { RequestRefresh(); }, null,
-                TimeSpan.Zero, RefreshInterval);
+                Timeout.Infinite, Timeout.Infinite);
             localSnapshotTimer = new Timer(delegate { RequestLocalRefresh(); }, null,
                 TimeSpan.Zero, TimeSpan.FromSeconds(3));
+        }
+
+        internal bool IsActiveForTest
+        {
+            get
+            {
+                lock (gate)
+                {
+                    return active;
+                }
+            }
+        }
+
+        internal void SetActive(bool value)
+        {
+            bool requestNow = false;
+            lock (gate)
+            {
+                if (disposed || active == value)
+                {
+                    return;
+                }
+                active = value;
+                if (active)
+                {
+                    int interval = (int)RefreshInterval.TotalMilliseconds;
+                    refreshTimer.Change(interval, interval);
+                    requestNow = true;
+                }
+                else
+                {
+                    refreshTimer.Change(Timeout.Infinite, Timeout.Infinite);
+                }
+            }
+            if (requestNow)
+            {
+                RequestRefresh();
+            }
         }
 
         public CodexUsageDataStatus Status
@@ -138,10 +177,13 @@ public sealed class CodexUsageMonitor : IDisposable
 
         public void RequestRefresh()
         {
+            UsageFocusLease lease = null;
             lock (gate)
             {
                 DateTime now = DateTime.UtcNow;
-                if (disposed || refreshInFlight || now < cooldownUntilUtc)
+                if (disposed || !active || refreshInFlight ||
+                    now < cooldownUntilUtc ||
+                    !UsageFocusGate.TryAcquire(AgentKind.Codex, out lease))
                 {
                     return;
                 }
@@ -153,7 +195,7 @@ public sealed class CodexUsageMonitor : IDisposable
                 lastAttemptUtc = now;
                 refreshInFlight = true;
             }
-            ThreadPool.QueueUserWorkItem(delegate { RefreshWorker(); });
+            ThreadPool.QueueUserWorkItem(delegate { RefreshWorker(lease); });
         }
 
         internal void RequestRefreshForTest()
@@ -174,6 +216,7 @@ public sealed class CodexUsageMonitor : IDisposable
                 {
                     return;
                 }
+                active = false;
                 disposed = true;
             }
             refreshTimer.Dispose();
@@ -220,12 +263,14 @@ public sealed class CodexUsageMonitor : IDisposable
             });
         }
 
-        private void RefreshWorker()
+        private void RefreshWorker(UsageFocusLease lease)
         {
             bool notify = false;
             bool retryForChangedCredentials = false;
+            bool cancelledByFocus = false;
             try
             {
+                UsageFocusGate.ThrowIfInactive(lease);
                 CodexOAuthAccess access = CodexAuthStore.Resolve();
                 if (access == null)
                 {
@@ -240,22 +285,23 @@ public sealed class CodexUsageMonitor : IDisposable
                 }
 
                 LoadCacheForAccess(access);
+                UsageFocusGate.ThrowIfInactive(lease);
                 if (CodexAuthStore.NeedsRefresh(access, DateTime.UtcNow))
                 {
                     string previousAccountKey = access.AccountKey;
-                    access = RefreshAccess(access);
+                    access = RefreshAccess(access, lease);
                     CodexUsageSnapshotCache.Migrate(previousAccountKey,
                         access.AccountKey);
                 }
 
-                CodexUsageHttpResponse response = FetchUsage(access);
+                CodexUsageHttpResponse response = FetchUsage(access, lease);
                 if (response.StatusCode == 401)
                 {
                     string previousAccountKey = access.AccountKey;
-                    access = RefreshAccess(access);
+                    access = RefreshAccess(access, lease);
                     CodexUsageSnapshotCache.Migrate(previousAccountKey,
                         access.AccountKey);
-                    response = FetchUsage(access);
+                    response = FetchUsage(access, lease);
                 }
                 if (response.StatusCode == 401)
                 {
@@ -293,6 +339,7 @@ public sealed class CodexUsageMonitor : IDisposable
                 {
                     throw new InvalidDataException("invalid usage response");
                 }
+                UsageFocusGate.ThrowIfInactive(lease);
                 DateTime refreshedAt = DateTime.UtcNow;
                 CodexUsageSnapshotCache.Store(access.AccountKey, mapped, refreshedAt);
                 lock (gate)
@@ -305,38 +352,54 @@ public sealed class CodexUsageMonitor : IDisposable
                 }
                 notify = true;
             }
+            catch (OperationCanceledException)
+            {
+                cancelledByFocus = true;
+            }
             catch (Exception ex)
             {
-                lock (gate)
+                if (!UsageFocusGate.IsCurrent(lease))
                 {
-                    if (String.Equals(ex.Message, "sign-in-required",
-                        StringComparison.Ordinal))
-                    {
-                        status = CodexUsageDataStatus.SignInAgain;
-                    }
-                    else
-                    {
-                        MarkStaleLocked();
-                    }
+                    cancelledByFocus = true;
                 }
-                SettingsStorage.Log("Codex usage refresh failed: " + SafeError(ex));
-                notify = true;
+                else
+                {
+                    lock (gate)
+                    {
+                        if (String.Equals(ex.Message, "sign-in-required",
+                            StringComparison.Ordinal))
+                        {
+                            status = CodexUsageDataStatus.SignInAgain;
+                        }
+                        else
+                        {
+                            MarkStaleLocked();
+                        }
+                    }
+                    SettingsStorage.Log("Codex usage refresh failed: " + SafeError(ex));
+                    notify = true;
+                }
             }
             finally
             {
+                bool restartAfterFocusCancellation;
                 lock (gate)
                 {
                     refreshInFlight = false;
-                    if (retryForChangedCredentials)
+                    if (retryForChangedCredentials || cancelledByFocus)
                     {
                         lastAttemptUtc = DateTime.MinValue;
                     }
+                    restartAfterFocusCancellation =
+                        cancelledByFocus && active;
                 }
-                if (notify)
+                if (notify && UsageFocusGate.IsCurrent(lease))
                 {
                     RaiseUpdated();
                 }
-                if (retryForChangedCredentials)
+                if (restartAfterFocusCancellation ||
+                    (retryForChangedCredentials &&
+                     UsageFocusGate.IsCurrent(lease)))
                 {
                     RequestRefresh();
                 }
@@ -392,8 +455,10 @@ public sealed class CodexUsageMonitor : IDisposable
                 ? CodexUsageDataStatus.NoData : CodexUsageDataStatus.Stale;
         }
 
-        private CodexOAuthAccess RefreshAccess(CodexOAuthAccess expected)
+        private CodexOAuthAccess RefreshAccess(
+            CodexOAuthAccess expected, UsageFocusLease lease)
         {
+            UsageFocusGate.ThrowIfInactive(lease);
             if (String.IsNullOrWhiteSpace(expected.RefreshToken))
             {
                 throw new InvalidOperationException("sign-in-required");
@@ -401,9 +466,11 @@ public sealed class CodexUsageMonitor : IDisposable
             string form = "grant_type=refresh_token&client_id=" +
                 Uri.EscapeDataString(OAuthClientId) + "&refresh_token=" +
                 Uri.EscapeDataString(expected.RefreshToken);
-            CodexUsageHttpResponse response = SendRequest("POST", "auth.openai.com",
+            CodexUsageHttpResponse response = SendRequest(lease,
+                "POST", "auth.openai.com",
                 "/oauth/token", null, "application/x-www-form-urlencoded",
                 Encoding.UTF8.GetBytes(form), 15);
+            UsageFocusGate.ThrowIfInactive(lease);
             if (response.StatusCode == 400 || response.StatusCode == 401)
             {
                 throw new InvalidOperationException("sign-in-required");
@@ -421,9 +488,14 @@ public sealed class CodexUsageMonitor : IDisposable
             }
             string refreshToken = StringValue(root, "refresh_token");
             string idToken = StringValue(root, "id_token");
-            CodexOAuthAccess persisted = CodexAuthStore.PersistRotation(expected,
-                accessToken, String.IsNullOrEmpty(refreshToken)
-                    ? expected.RefreshToken : refreshToken, idToken, DateTime.UtcNow);
+            CodexOAuthAccess persisted = UsageFocusGate.RunCredentialWrite(
+                lease, delegate
+                {
+                    return CodexAuthStore.PersistRotation(expected,
+                        accessToken, String.IsNullOrEmpty(refreshToken)
+                            ? expected.RefreshToken : refreshToken,
+                        idToken, DateTime.UtcNow);
+                });
             if (persisted != null)
             {
                 return persisted;
@@ -432,8 +504,10 @@ public sealed class CodexUsageMonitor : IDisposable
                 String.IsNullOrEmpty(refreshToken) ? expected.RefreshToken : refreshToken);
         }
 
-        private static CodexUsageHttpResponse FetchUsage(CodexOAuthAccess access)
+        private static CodexUsageHttpResponse FetchUsage(
+            CodexOAuthAccess access, UsageFocusLease lease)
         {
+            UsageFocusGate.ThrowIfInactive(lease);
             Dictionary<string, string> headers = new Dictionary<string, string>();
             headers["Authorization"] = "Bearer " + access.AccessToken;
             headers["Accept"] = "application/json";
@@ -441,14 +515,17 @@ public sealed class CodexUsageMonitor : IDisposable
             {
                 headers["ChatGPT-Account-Id"] = access.AccountId;
             }
-            return SendRequest("GET", "chatgpt.com", "/backend-api/wham/usage",
+            return SendRequest(lease, "GET", "chatgpt.com",
+                "/backend-api/wham/usage",
                 headers, null, null, 10);
         }
 
-        private static CodexUsageHttpResponse SendRequest(string method, string host,
+        private static CodexUsageHttpResponse SendRequest(
+            UsageFocusLease lease, string method, string host,
             string path, Dictionary<string, string> headers, string contentType,
             byte[] body, int timeoutSeconds)
         {
+            UsageFocusGate.ThrowIfInactive(lease);
             ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;
             HttpWebRequest request = (HttpWebRequest)WebRequest.Create(
                 "https://" + host + path);
@@ -480,33 +557,55 @@ public sealed class CodexUsageMonitor : IDisposable
                     }
                 }
             }
-            if (body != null)
+            if (!UsageFocusGate.RegisterRequest(lease, request))
             {
-                request.ContentLength = body.Length;
-                using (Stream stream = request.GetRequestStream())
-                {
-                    stream.Write(body, 0, body.Length);
-                }
+                throw new OperationCanceledException(
+                    "usage provider is no longer focused");
             }
-
             try
             {
-                using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+                if (body != null)
                 {
-                    return ReadResponse(response);
+                    request.ContentLength = body.Length;
+                    try
+                    {
+                        using (Stream stream = request.GetRequestStream())
+                        {
+                            stream.Write(body, 0, body.Length);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        UsageFocusGate.ThrowIfInactive(lease, ex);
+                        throw;
+                    }
+                }
+
+                try
+                {
+                    using (HttpWebResponse response =
+                        (HttpWebResponse)request.GetResponse())
+                    {
+                        return ReadResponse(response);
+                    }
+                }
+                catch (WebException ex)
+                {
+                    HttpWebResponse response = ex.Response as HttpWebResponse;
+                    if (response == null)
+                    {
+                        UsageFocusGate.ThrowIfInactive(lease, ex);
+                        throw;
+                    }
+                    using (response)
+                    {
+                        return ReadResponse(response);
+                    }
                 }
             }
-            catch (WebException ex)
+            finally
             {
-                HttpWebResponse response = ex.Response as HttpWebResponse;
-                if (response == null)
-                {
-                    throw;
-                }
-                using (response)
-                {
-                    return ReadResponse(response);
-                }
+                UsageFocusGate.UnregisterRequest(request);
             }
         }
 

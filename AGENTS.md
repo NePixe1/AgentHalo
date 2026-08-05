@@ -15,7 +15,7 @@ Keep end-user behavior in the README, but move commands, internal paths, generat
 
 ## Product intent
 
-Agent Halo is a local, always-on-top desktop status ring for coding agents. Windows supports Codex and Claude Code; macOS also supports Grok Build. Ambient first: readable in peripheral vision; honest lifecycle inference; privacy-first (no session upload). Product framing: [docs/PRODUCT.md](docs/PRODUCT.md).
+Agent Halo is a local, always-on-top desktop status ring for coding agents. Windows and macOS support Codex, Claude Code, and Grok Build. Ambient first: readable in peripheral vision; honest lifecycle inference; privacy-first (no session upload). Product framing: [docs/PRODUCT.md](docs/PRODUCT.md).
 
 ## Architecture
 
@@ -159,7 +159,7 @@ Related scripts: `scripts/build-macos.sh`, `scripts/create-dmg.sh`. Packaged app
 ## UI / product constraints worth preserving
 
 - Hover details: focus switch + usage vs session detail modes by credential type.
-- Context pill: Codex quota-based context; Claude via status line proxy; macOS Grok prefers live `totalTokens` from session `updates.jsonl` (fallback end-of-turn `signals.json`).
+- Context pill: Codex quota-based context; Claude via status line proxy; Grok prefers live `totalTokens` from session `updates.jsonl` (fallback end-of-turn `signals.json`).
 - Click halo: bring Codex window forward when relevant (Claude focus does not invent a Claude desktop app activate path).
 - Halo size submenu: `75% / 100% / 125%`, persisted.
 - No pets, chat body content, cost meter, or cloud backend for lifecycle.

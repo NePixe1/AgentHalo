@@ -32,9 +32,12 @@ public static class Diagnostics
     {
         public static int WriteCodexUsageSnapshot(string outputPath)
         {
+            CodexUsageMonitor monitor = null;
             try
             {
-                CodexUsageMonitor monitor = CodexUsageMonitor.Instance;
+                UsageFocusGate.Activate(AgentKind.Codex);
+                monitor = CodexUsageMonitor.Instance;
+                monitor.SetActive(true);
                 monitor.RequestRefreshForTest();
                 DateTime deadline = DateTime.UtcNow.AddSeconds(20);
                 while (monitor.IsRefreshing && DateTime.UtcNow < deadline)
@@ -72,6 +75,14 @@ public static class Diagnostics
                 File.WriteAllText(outputPath, "{\"status\":\"Error\",\"detail\":\"" +
                     EscapeJson(ex.GetType().Name) + "\"}", new UTF8Encoding(false));
                 return 1;
+            }
+            finally
+            {
+                UsageFocusGate.DeactivateAll();
+                if (monitor != null)
+                {
+                    monitor.SetActive(false);
+                }
             }
         }
 
@@ -273,6 +284,16 @@ public static class Diagnostics
                     "\"status\":\"completed\",\"name\":\"apply_patch\"}}";
                 HaloState realtimeState;
                 string realtimeAction;
+                bool answerStreaming;
+                string realtimeThreadId;
+                string prefixedRealtimeAdded =
+                    "session_loop{thread_id=thread-live}:turn: " + realtimeAdded;
+                Assert(realtime.FindActive(new[] { prefixedRealtimeAdded },
+                    out realtimeState, out realtimeAction, out answerStreaming,
+                    out realtimeThreadId) &&
+                    String.Equals(realtimeThreadId, "thread-live",
+                        StringComparison.Ordinal),
+                    "live activity keeps its Codex thread id");
                 Assert(realtime.FindActive(new[] { realtimeAdded },
                     out realtimeState, out realtimeAction) &&
                     realtimeState == HaloState.Working &&
@@ -295,7 +316,6 @@ public static class Diagnostics
                 Assert(!realtime.FindActive(new[] { realtimeMessageDone, realtimeMessageAdded },
                     out realtimeState, out realtimeAction),
                     "live final answer done clears realtime working");
-                bool answerStreaming;
                 string realtimeTextDelta =
                     "SSE event: {\"type\":\"response.output_text.delta\"," +
                     "\"delta\":\"hello\"}";
@@ -1069,11 +1089,15 @@ public static class Diagnostics
                     Encoding.UTF8);
                 Assert(ClaudeLiveSessionReader.HasStandbySession(liveHome),
                     "Claude live session reader detects live CLI");
+                Assert(ClaudeLiveSessionReader.LiveSessionIds(liveHome).Contains("live"),
+                    "Claude live session reader exposes the live session id");
                 File.WriteAllText(Path.Combine(liveSessions, "live.json"),
                     "{\"status\":\"waiting\",\"pid\":999999,\"sessionId\":\"dead\"}",
                     Encoding.UTF8);
                 Assert(!ClaudeLiveSessionReader.HasStandbySession(liveHome),
                     "Claude live session reader ignores dead pid");
+                Assert(!ClaudeLiveSessionReader.LiveSessionIds(liveHome).Contains("dead"),
+                    "Claude dead session id is excluded from liveness");
                 Directory.Delete(liveHome, true);
                 Directory.Delete(claudeHome, true);
 
@@ -1242,6 +1266,38 @@ public static class Diagnostics
                 Assert(!CodexSessionMonitor.IsSessionVisible(recentActive,
                     presenceSettings, true, supersessionNow),
                     "stale active session cannot leave the halo permanently working");
+                SessionSnapshot longAttentionCodex = new SessionSnapshot
+                {
+                    ThreadId = "long-attn-codex",
+                    State = HaloState.Attention,
+                    Action = "Needs you",
+                    Active = true,
+                    LastEventUtc = supersessionNow.AddMinutes(-30)
+                };
+                Assert(CodexSessionMonitor.IsSessionVisible(longAttentionCodex,
+                    presenceSettings, true, supersessionNow),
+                    "Codex attention remains visible across long human waits");
+                Assert(!CodexSessionMonitor.IsSessionVisible(longAttentionCodex,
+                    presenceSettings, false, supersessionNow),
+                    "Codex attention still requires the process to be running");
+                Assert(!CodexSessionMonitor.IsSessionVisible(longAttentionCodex,
+                    presenceSettings, true, supersessionNow,
+                    "new-active-thread", true, null),
+                    "another realtime thread supersedes stale Codex attention");
+                Assert(CodexSessionMonitor.IsSessionVisible(longAttentionCodex,
+                    presenceSettings, true, supersessionNow,
+                    "long-attn-codex", true, null),
+                    "matching realtime thread keeps Codex attention visible");
+                Assert(!CodexSessionMonitor.IsSessionVisible(longAttentionCodex,
+                    presenceSettings, true, supersessionNow,
+                    null, false, supersessionNow.AddMinutes(-5)),
+                    "attention from before the current Codex process is hidden");
+                Assert(!CodexSessionMonitor.HasBlockingState(
+                    new[] { longAttentionCodex }, true),
+                    "fresh realtime activity can replace an old attention blocker");
+                Assert(CodexSessionMonitor.HasBlockingState(
+                    new[] { longAttentionCodex }, false),
+                    "attention remains blocking while its long wait is current");
 
                 SessionSnapshot recentDone = new SessionSnapshot
                 {
@@ -1361,6 +1417,945 @@ public static class Diagnostics
                     Math.Abs(standbyIgnoresLive.DisplayPercent.Value - 55.0) < 0.001,
                     "STANDBY soft-hold uses remembered percent only");
 
+                // Focused agent grok persistence
+                HaloSettings grokSettings = new HaloSettings();
+                grokSettings.SetFocusedAgent(AgentKind.Grok);
+                Assert(grokSettings.GetFocusedAgent() == AgentKind.Grok,
+                    "settings should accept grok focus");
+                Assert(String.Equals(grokSettings.FocusedAgent, "grok",
+                    StringComparison.OrdinalIgnoreCase), "serialized focusedAgent is grok");
+
+                JavaScriptSerializer settingsSerializer = new JavaScriptSerializer();
+                HaloSettings grokDeserialized = settingsSerializer.Deserialize<HaloSettings>(
+                    "{\"FocusedAgent\":\"grok\"}");
+                Assert(grokDeserialized != null &&
+                    grokDeserialized.GetFocusedAgent() == AgentKind.Grok,
+                    "deserialized focusedAgent grok maps to AgentKind.Grok");
+
+                HaloSettings invalidFocus = settingsSerializer.Deserialize<HaloSettings>(
+                    "{\"FocusedAgent\":\"nope\"}");
+                Assert(invalidFocus != null &&
+                    invalidFocus.GetFocusedAgent() == AgentKind.Codex,
+                    "invalid focusedAgent falls back to Codex");
+                // Load() repair accepts only codex/claudeCode/grok; "nope" would reset string.
+                Assert(!String.Equals(invalidFocus.FocusedAgent, "grok",
+                    StringComparison.OrdinalIgnoreCase) &&
+                    !String.Equals(invalidFocus.FocusedAgent, "claudeCode",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    !String.Equals(invalidFocus.FocusedAgent, "codex",
+                        StringComparison.OrdinalIgnoreCase),
+                    "invalid focusedAgent is not a known agent string before Load repair");
+
+                // Existing agents still round-trip after Grok support.
+                HaloSettings codexSettings = new HaloSettings();
+                codexSettings.SetFocusedAgent(AgentKind.Codex);
+                Assert(codexSettings.GetFocusedAgent() == AgentKind.Codex &&
+                    String.Equals(codexSettings.FocusedAgent, "codex",
+                        StringComparison.OrdinalIgnoreCase),
+                    "codex focus still persists");
+                HaloSettings claudeFocusSettings = new HaloSettings();
+                claudeFocusSettings.SetFocusedAgent(AgentKind.ClaudeCode);
+                Assert(claudeFocusSettings.GetFocusedAgent() == AgentKind.ClaudeCode &&
+                    String.Equals(claudeFocusSettings.FocusedAgent, "claudeCode",
+                        StringComparison.OrdinalIgnoreCase),
+                    "claudeCode focus still persists");
+
+                // Hook routing: Grok env must write logs/grok-status.jsonl only
+                // and normalize snake_case event names to PascalCase.
+                string hookIsoHome = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-hook-iso-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(AgentHaloPaths.LogsDirectory(hookIsoHome));
+                int grokHookCode = ClaudeHookStatusWriter.WriteForTest(
+                    eventName: "pre_tool_use",
+                    home: hookIsoHome,
+                    grokSessionId: "test-grok-session",
+                    grokHookEvent: "PreToolUse",
+                    stdinJson: "{\"sessionId\":\"test-grok-session\",\"cwd\":\"/tmp/proj\"," +
+                        "\"toolName\":\"run_terminal_command\"," +
+                        "\"permissionMode\":\"auto\"}");
+                Assert(grokHookCode == 0, "grok hook writer exit 0");
+                string grokStatusPath = AgentHaloPaths.GrokStatusLog(hookIsoHome);
+                string claudeStatusPath = AgentHaloPaths.ClaudeStatusLog(hookIsoHome);
+                Assert(File.Exists(grokStatusPath), "Grok path writes logs/grok-status.jsonl");
+                string grokHookText = File.ReadAllText(grokStatusPath);
+                Assert(grokHookText.IndexOf("grok-hook", StringComparison.Ordinal) >= 0,
+                    "source grok-hook");
+                Assert(grokHookText.IndexOf("\"PreToolUse\"", StringComparison.Ordinal) >= 0,
+                    "snake_case event normalizes to PreToolUse");
+                Assert(grokHookText.IndexOf("\"permissionMode\":\"auto\"",
+                    StringComparison.Ordinal) >= 0,
+                    "hook should persist permissionMode for Auto ring gating");
+                Assert(!File.Exists(claudeStatusPath) ||
+                    File.ReadAllText(claudeStatusPath).IndexOf("test-grok-session",
+                        StringComparison.Ordinal) < 0,
+                    "Grok session must not appear in claude jsonl");
+
+                // Claude path without GROK env must not touch grok jsonl.
+                ClaudeHookStatusWriter.WriteForTest("PreToolUse", hookIsoHome, null, null,
+                    "{\"sessionId\":\"claude-1\",\"cwd\":\"/tmp/c\",\"toolName\":\"Bash\"}");
+                string claudeHookText = File.ReadAllText(claudeStatusPath);
+                Assert(claudeHookText.IndexOf("claude-hook", StringComparison.Ordinal) >= 0,
+                    "claude source");
+                Assert(File.ReadAllText(grokStatusPath).IndexOf("claude-1",
+                    StringComparison.Ordinal) < 0,
+                    "Claude session must not appear in grok jsonl");
+                Assert(String.Equals(
+                    ClaudeHookStatusWriter.NormalizeEventName("pre_tool_use"),
+                    "PreToolUse", StringComparison.Ordinal),
+                    "NormalizeEventName pre_tool_use");
+                Assert(String.Equals(
+                    ClaudeHookStatusWriter.NormalizeEventName("PreToolUse"),
+                    "PreToolUse", StringComparison.Ordinal),
+                    "NormalizeEventName keeps PascalCase");
+                try
+                {
+                    Directory.Delete(hookIsoHome, true);
+                }
+                catch
+                {
+                }
+
+                // Grok hook configurator + reducer + active sessions (Task 3)
+                string home = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-grok-cfg-" + Guid.NewGuid().ToString("N"));
+                string fakeExe = Path.Combine(home, "AgentHalo.exe");
+                Directory.CreateDirectory(home);
+                File.WriteAllText(fakeExe, "x");
+                GrokHookConfigurator.Configure(home, fakeExe);
+                string hooksPath = Path.Combine(home, ".grok", "hooks",
+                    "agent-halo-status.json");
+                Assert(File.Exists(hooksPath), "writes agent-halo-status.json");
+                string hooksJson = File.ReadAllText(hooksPath);
+                Assert(hooksJson.IndexOf("--claude-hook", StringComparison.Ordinal) >= 0,
+                    "command uses --claude-hook");
+                Assert(hooksJson.IndexOf("UserPromptSubmit", StringComparison.Ordinal) >= 0,
+                    "registers UserPromptSubmit");
+                // Idempotent: second call does not throw; content still valid
+                GrokHookConfigurator.Configure(home, fakeExe);
+                Assert(File.Exists(hooksPath) &&
+                    File.ReadAllText(hooksPath).IndexOf("--claude-hook",
+                        StringComparison.Ordinal) >= 0,
+                    "Grok hook configurator is idempotent");
+                Assert(GrokHookConfigurator.IsConfiguredForTest(
+                    hooksPath, fakeExe), "current Grok hook executable is configured");
+                string movedExe = Path.Combine(home, "moved", "AgentHalo.exe");
+                Directory.CreateDirectory(Path.GetDirectoryName(movedExe));
+                File.WriteAllText(movedExe, "x");
+                Assert(!GrokHookConfigurator.IsConfiguredForTest(
+                    hooksPath, movedExe),
+                    "stale Grok hook executable path is not accepted");
+                GrokHookConfigurator.Configure(home, movedExe);
+                Assert(GrokHookConfigurator.IsConfiguredForTest(
+                    hooksPath, movedExe),
+                    "Grok hook executable path is rewritten after move");
+                Assert(!GrokHookConfigurator.IsConfiguredForTest(
+                    hooksPath, fakeExe),
+                    "old Grok hook executable path is removed after rewrite");
+
+                GrokHookStatusReducer r = new GrokHookStatusReducer("s1");
+                DateTime t0 = new DateTime(2026, 7, 25, 0, 0, 0, DateTimeKind.Utc);
+                r.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:01Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"s1\",\"cwd\":\"/p/AgentHalo\",\"permissionMode\":\"auto\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(1));
+                Assert(r.Snapshot.Agent == AgentKind.Grok, "agent kind Grok");
+                Assert(r.Snapshot.State == HaloState.Thinking, "prompt -> thinking");
+                r.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:02Z\",\"event\":\"PreToolUse\",\"sessionId\":\"s1\",\"cwd\":\"/p/AgentHalo\",\"toolName\":\"run_terminal_command\",\"permissionMode\":\"auto\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(2));
+                r.ApplyWorkingVisibility(t0.AddSeconds(3));
+                Assert(r.Snapshot.State == HaloState.Working, "tool -> working");
+                // Auto mode: permission_prompt must not flash purple.
+                r.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:04Z\",\"event\":\"Notification\",\"sessionId\":\"s1\",\"notificationType\":\"permission_prompt\",\"permissionMode\":\"auto\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(4));
+                Assert(r.Snapshot.State == HaloState.Working,
+                    "permission_prompt after PreToolUse must not become attention");
+                r.ApplyWorkingVisibility(t0.AddSeconds(4).AddMilliseconds(
+                    (int)(GrokHookStatusReducer.PendingPermissionAttentionDelaySeconds * 1000) + 500));
+                Assert(r.Snapshot.State == HaloState.Working,
+                    "auto mode stays working after permission delay");
+                r.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:05Z\",\"event\":\"Stop\",\"sessionId\":\"s1\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(5));
+                Assert(r.Snapshot.State == HaloState.Done, "stop -> done");
+
+                // default mode: human wait after PreToolUse becomes attention after delay.
+                GrokHookStatusReducer human = new GrokHookStatusReducer("s-human");
+                human.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:01Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"s-human\",\"cwd\":\"/p\",\"permissionMode\":\"default\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(1));
+                human.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:02Z\",\"event\":\"PreToolUse\",\"sessionId\":\"s-human\",\"cwd\":\"/p\",\"toolName\":\"run_terminal_command\",\"permissionMode\":\"default\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(2));
+                DateTime requestedAt = t0.AddSeconds(2).AddMilliseconds(20);
+                human.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:02.020Z\",\"event\":\"Notification\",\"sessionId\":\"s-human\",\"notificationType\":\"permission_prompt\",\"permissionMode\":\"default\",\"source\":\"grok-hook\"}",
+                    requestedAt);
+                Assert(human.Snapshot.State == HaloState.Working,
+                    "default mode arms pending without instant purple");
+                human.ApplyWorkingVisibility(requestedAt.AddSeconds(
+                    GrokHookStatusReducer.PendingPermissionAttentionDelaySeconds + 0.05));
+                Assert(human.Snapshot.State == HaloState.Attention,
+                    "human wait after delay -> attention");
+                Assert(String.Equals(human.Snapshot.Action, "Awaiting permission",
+                    StringComparison.Ordinal), "human wait action");
+                // Human allow restores working — Grok does not re-emit PreToolUse
+                // before PostToolUse, so tool execution UI must be recovered.
+                human.ApplyPermissionResolved("allow", 9678,
+                    t0.AddSeconds(12));
+                Assert(human.Snapshot.State == HaloState.Working,
+                    "human allow restores working (tool still running)");
+                Assert(String.Equals(human.Snapshot.Action, "Running command",
+                    StringComparison.Ordinal),
+                    "human allow restores tool action");
+                Assert(human.Snapshot.Active,
+                    "human allow keeps turn active during tool run");
+                human.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:15Z\",\"event\":\"PostToolUse\",\"sessionId\":\"s-human\",\"cwd\":\"/p\",\"toolName\":\"run_terminal_command\",\"permissionMode\":\"default\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(15));
+                Assert(human.Snapshot.State == HaloState.Working,
+                    "PostToolUse after allow -> reviewing");
+                Assert(String.Equals(human.Snapshot.Action, "Reviewing result",
+                    StringComparison.Ordinal),
+                    "PostToolUse action after restored working");
+
+                // Auto shell permission_requested stays working with multi-second wait_ms.
+                GrokHookStatusReducer autoShell = new GrokHookStatusReducer("s-auto-shell");
+                autoShell.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:01Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"s-auto-shell\",\"cwd\":\"/p\",\"permissionMode\":\"auto\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(1));
+                autoShell.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:02Z\",\"event\":\"PreToolUse\",\"sessionId\":\"s-auto-shell\",\"cwd\":\"/p\",\"toolName\":\"run_terminal_command\",\"permissionMode\":\"auto\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(2));
+                autoShell.ApplyPermissionRequested(
+                    t0.AddSeconds(2).AddMilliseconds(20),
+                    t0.AddSeconds(2).AddMilliseconds(20));
+                autoShell.ApplyWorkingVisibility(t0.AddSeconds(5));
+                Assert(autoShell.Snapshot.State == HaloState.Working,
+                    "auto mode permission_requested never becomes attention");
+                autoShell.ApplyPermissionResolved("allow", 2500, t0.AddSeconds(5));
+                Assert(autoShell.Snapshot.State == HaloState.Working,
+                    "auto resolve keeps working");
+                GrokHookStatusReducer failed =
+                    new GrokHookStatusReducer("failed-session");
+                failed.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:06Z\",\"event\":\"StopFailure\",\"sessionId\":\"failed-session\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(6));
+                Assert(failed.Snapshot.State == HaloState.Error,
+                    "stop failure -> error");
+                Assert(!GrokHookStatusMonitor.ShouldPruneSnapshot(
+                    failed.Snapshot, t0.AddMinutes(30)),
+                    "Grok error snapshot is retained for 30 minutes");
+                Assert(GrokHookStatusMonitor.ShouldPruneSnapshot(
+                    failed.Snapshot, t0.AddHours(1).AddSeconds(7)),
+                    "Grok error snapshot expires after one hour");
+
+                // Long human permission waits must not prune into STANDBY.
+                SessionSnapshot longAttention = new SessionSnapshot
+                {
+                    ThreadId = "long-attn",
+                    State = HaloState.Attention,
+                    Action = "Awaiting permission",
+                    Active = true,
+                    LastEventUtc = t0.AddMinutes(-30)
+                };
+                Assert(!GrokHookStatusMonitor.ShouldPruneSnapshot(
+                    longAttention, t0),
+                    "Grok attention is not age-pruned after 30 minutes");
+                Assert(!ClaudeHookStatusMonitor.ShouldPruneSnapshot(
+                    longAttention, t0),
+                    "Claude attention is not age-pruned after 30 minutes");
+                Assert(HaloWindow.IsHookActivitySessionVisible(
+                    longAttention, t0, true),
+                    "Grok/Claude aggregate keeps long-held attention");
+                Assert(!HaloWindow.IsHookActivitySessionVisible(
+                    longAttention, t0, false),
+                    "ended hook session cannot keep stale attention visible");
+                SessionSnapshot staleWorkingSnap = new SessionSnapshot
+                {
+                    ThreadId = "stale-work",
+                    State = HaloState.Working,
+                    Action = "Running command",
+                    Active = true,
+                    LastEventUtc = t0.AddMinutes(-15)
+                };
+                Assert(GrokHookStatusMonitor.ShouldPruneSnapshot(
+                    staleWorkingSnap, t0),
+                    "Grok stale working is still pruned");
+                Assert(ClaudeHookStatusMonitor.ShouldPruneSnapshot(
+                    staleWorkingSnap, t0),
+                    "Claude stale working is still pruned");
+                Assert(!HaloWindow.IsHookActivitySessionVisible(
+                    staleWorkingSnap, t0, true),
+                    "stale working still hidden from aggregate after 10m");
+
+                // Esc cancel skips Stop hooks; map turn cancel onto fault ring.
+                GrokHookStatusReducer cancelReducer =
+                    new GrokHookStatusReducer("esc-session");
+                cancelReducer.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:10Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"esc-session\",\"cwd\":\"/p/AgentHalo\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(10));
+                cancelReducer.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:12Z\",\"event\":\"PreToolUse\",\"sessionId\":\"esc-session\",\"cwd\":\"/p/AgentHalo\",\"toolName\":\"read_file\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(12));
+                cancelReducer.ApplyWorkingVisibility(t0.AddSeconds(13));
+                Assert(cancelReducer.Snapshot.State == HaloState.Working,
+                    "precondition working before esc cancel");
+                cancelReducer.ApplyTurnCancelled(t0.AddSeconds(14));
+                Assert(cancelReducer.Snapshot.State == HaloState.Error,
+                    "esc cancel -> error ring");
+                Assert(String.Equals(cancelReducer.Snapshot.Action, "Interrupted",
+                    StringComparison.Ordinal),
+                    "esc cancel action is Interrupted");
+                Assert(!cancelReducer.Snapshot.Active,
+                    "esc cancel clears active turn");
+                GrokHookStatusReducer idleCancel =
+                    new GrokHookStatusReducer("idle-esc");
+                idleCancel.ApplyTurnCancelled(t0.AddSeconds(15));
+                Assert(idleCancel.Snapshot.State == HaloState.Idle,
+                    "cancel on idle Ready is a no-op");
+
+                // Steer soft-cancel must not paint the red fault ring.
+                GrokHookStatusReducer steerReducer =
+                    new GrokHookStatusReducer("steer-session");
+                steerReducer.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:10Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"steer-session\",\"cwd\":\"/p/AgentHalo\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(10));
+                steerReducer.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:12Z\",\"event\":\"PreToolUse\",\"sessionId\":\"steer-session\",\"cwd\":\"/p/AgentHalo\",\"toolName\":\"read_file\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(12));
+                steerReducer.ApplyWorkingVisibility(t0.AddSeconds(13));
+                Assert(steerReducer.Snapshot.State == HaloState.Working,
+                    "precondition working before steer cancel");
+                steerReducer.ApplySteerCancel(t0.AddSeconds(14));
+                Assert(steerReducer.Snapshot.State == HaloState.Idle,
+                    "steer cancel -> idle not error");
+                Assert(String.Equals(steerReducer.Snapshot.Action, "Ready",
+                    StringComparison.Ordinal),
+                    "steer cancel action is Ready");
+                Assert(!steerReducer.Snapshot.Active,
+                    "steer cancel clears active turn");
+
+                // Incremental events.jsonl tail + monitor wiring.
+                string cancelHome = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-grok-esc-" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    string statusPath = Path.Combine(cancelHome, "grok-status.jsonl");
+                    string sessionsRoot = Path.Combine(cancelHome, "sessions");
+                    string cwd = "/tmp/AgentHaloCancelTest";
+                    string sessionId = "sess-esc-1";
+                    string encoded =
+                        GrokSessionContextReader.EncodeWorkspaceDirectory(cwd);
+                    string sessionDir = Path.Combine(sessionsRoot, encoded, sessionId);
+                    Directory.CreateDirectory(sessionDir);
+                    File.WriteAllText(statusPath,
+                        "{\"timestamp\":\"2026-07-30T08:00:01.000Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"source\":\"grok-hook\"}\n" +
+                        "{\"timestamp\":\"2026-07-30T08:00:03.000Z\",\"event\":\"PreToolUse\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"toolName\":\"read_file\",\"source\":\"grok-hook\"}\n",
+                        Encoding.UTF8);
+                    File.WriteAllText(Path.Combine(sessionDir, "events.jsonl"),
+                        "{\"ts\":\"2026-07-30T08:00:01.500Z\",\"type\":\"turn_started\"}\n",
+                        Encoding.UTF8);
+
+                    GrokHookStatusMonitor cancelMonitor =
+                        new GrokHookStatusMonitor(statusPath, sessionsRoot);
+                    Assert(cancelMonitor.Refresh(), "hooks load for esc monitor");
+                    SessionSnapshot workingSnap =
+                        cancelMonitor.Snapshots().FirstOrDefault();
+                    Assert(workingSnap != null &&
+                        workingSnap.State == HaloState.Working,
+                        "precondition: working from PreToolUse");
+
+                    File.AppendAllText(Path.Combine(sessionDir, "events.jsonl"),
+                        "{\"ts\":\"2026-07-30T08:00:04.000Z\",\"type\":\"turn_ended\",\"outcome\":\"cancelled\",\"cancellation_category\":\"mid_turn_abort\",\"cancellation_context\":{\"trigger\":\"esc\"}}\n",
+                        Encoding.UTF8);
+                    Assert(cancelMonitor.Refresh(),
+                        "cancel via events should change state");
+                    SessionSnapshot interruptedSnap =
+                        cancelMonitor.Snapshots().FirstOrDefault();
+                    Assert(interruptedSnap != null &&
+                        interruptedSnap.State == HaloState.Error,
+                        "esc cancel via events.jsonl -> error");
+                    Assert(interruptedSnap != null &&
+                        String.Equals(interruptedSnap.Action, "Interrupted",
+                            StringComparison.Ordinal),
+                        "esc cancel action Interrupted");
+                    Assert(interruptedSnap != null && !interruptedSnap.Active,
+                        "esc cancel not active");
+
+                    GrokSessionTurnEventsReader turnReader =
+                        new GrokSessionTurnEventsReader();
+                    string seedPath = Path.Combine(cancelHome, "seed-events.jsonl");
+                    File.WriteAllText(seedPath,
+                        "{\"ts\":\"2026-07-30T08:00:00.000Z\",\"type\":\"turn_started\"}\n" +
+                        "{\"ts\":\"2026-07-30T08:00:01.000Z\",\"type\":\"phase_changed\",\"phase\":\"thinking\"}\n",
+                        Encoding.UTF8);
+                    GrokSessionEventsDelta seedDelta = turnReader.Poll(seedPath);
+                    Assert(seedDelta != null && seedDelta.IsEmpty,
+                        "no turn_ended yet");
+                    File.AppendAllText(seedPath,
+                        "{\"ts\":\"2026-07-30T08:00:05.000Z\",\"type\":\"turn_ended\",\"outcome\":\"cancelled\"}\n",
+                        Encoding.UTF8);
+                    GrokSessionEventsDelta endedDelta = turnReader.Poll(seedPath);
+                    Assert(endedDelta != null &&
+                        endedDelta.TurnEnd != null &&
+                        endedDelta.TurnEnd.Outcome ==
+                            GrokSessionTurnEndOutcome.Cancelled,
+                        "poll surfaces cancelled turn_ended");
+                    GrokSessionEventsDelta secondPoll = turnReader.Poll(seedPath);
+                    Assert(secondPoll != null && secondPoll.IsEmpty,
+                        "second poll with no growth is empty");
+
+                    // Same-chunk cancel + cancel_then_send start supersedes fault.
+                    string steerPath = Path.Combine(cancelHome, "steer-events.jsonl");
+                    File.WriteAllText(steerPath,
+                        "{\"ts\":\"2026-07-30T08:00:00.000Z\",\"type\":\"turn_started\"}\n" +
+                        "{\"ts\":\"2026-07-30T08:00:04.000Z\",\"type\":\"turn_ended\",\"outcome\":\"cancelled\",\"cancellation_category\":\"mid_turn_abort\",\"cancellation_context\":{\"trigger\":\"esc\"}}\n" +
+                        "{\"ts\":\"2026-07-30T08:00:04.010Z\",\"type\":\"turn_started\",\"redirect_kind\":\"cancel_then_send\"}\n",
+                        Encoding.UTF8);
+                    GrokSessionTurnEventsReader steerReader =
+                        new GrokSessionTurnEventsReader();
+                    GrokSessionEventsDelta steerDelta = steerReader.Poll(steerPath);
+                    Assert(steerDelta != null && steerDelta.TurnEnd == null,
+                        "steer start supersedes cancelled turn_ended in same chunk");
+                    Assert(steerDelta != null && steerDelta.TurnStart != null &&
+                        String.Equals(steerDelta.TurnStart.RedirectKind,
+                            "cancel_then_send", StringComparison.Ordinal),
+                        "redirect_kind cancel_then_send parsed");
+                    Assert(steerDelta != null && steerDelta.TurnStart != null &&
+                        steerDelta.TurnStart.IsSteerRedirect,
+                        "cancel_then_send is steer redirect");
+
+                    // send_now trigger is steer-like.
+                    string sendNowPath = Path.Combine(cancelHome, "send-now.jsonl");
+                    File.WriteAllText(sendNowPath,
+                        "{\"ts\":\"2026-07-30T08:00:04.000Z\",\"type\":\"turn_ended\",\"outcome\":\"cancelled\",\"cancellation_category\":\"mid_turn_abort\",\"cancellation_context\":{\"trigger\":\"send_now\"}}\n",
+                        Encoding.UTF8);
+                    GrokSessionTurnEventsReader sendNowReader =
+                        new GrokSessionTurnEventsReader();
+                    GrokSessionEventsDelta sendNowDelta = sendNowReader.Poll(sendNowPath);
+                    Assert(sendNowDelta != null && sendNowDelta.TurnEnd != null &&
+                        sendNowDelta.TurnEnd.IsSteerLikeCancel,
+                        "send_now trigger is steer-like cancel");
+                }
+                finally
+                {
+                    try
+                    {
+                        Directory.Delete(cancelHome, true);
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                // Sent now race: UserPromptSubmit ~4ms after cancel must not go red.
+                string sendNowHome = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-grok-send-now-" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    string statusPath = Path.Combine(sendNowHome, "grok-status.jsonl");
+                    string sessionsRoot = Path.Combine(sendNowHome, "sessions");
+                    string cwd = "/tmp/AgentHaloSendNowTest";
+                    string sessionId = "sess-send-now-1";
+                    string encoded =
+                        GrokSessionContextReader.EncodeWorkspaceDirectory(cwd);
+                    string sessionDir = Path.Combine(sessionsRoot, encoded, sessionId);
+                    Directory.CreateDirectory(sessionDir);
+                    File.WriteAllText(statusPath,
+                        "{\"timestamp\":\"2026-07-30T08:00:01.000Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"source\":\"grok-hook\"}\n" +
+                        "{\"timestamp\":\"2026-07-30T08:00:03.000Z\",\"event\":\"PreToolUse\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"toolName\":\"read_file\",\"source\":\"grok-hook\"}\n",
+                        Encoding.UTF8);
+                    File.WriteAllText(Path.Combine(sessionDir, "events.jsonl"),
+                        "{\"ts\":\"2026-07-30T08:00:01.500Z\",\"type\":\"turn_started\"}\n",
+                        Encoding.UTF8);
+
+                    GrokHookStatusMonitor sendNowMonitor =
+                        new GrokHookStatusMonitor(statusPath, sessionsRoot);
+                    Assert(sendNowMonitor.Refresh(), "hooks load for send_now");
+                    SessionSnapshot workingSnap =
+                        sendNowMonitor.Snapshots().FirstOrDefault();
+                    Assert(workingSnap != null &&
+                        workingSnap.State == HaloState.Working,
+                        "precondition: working before send_now");
+
+                    File.AppendAllText(statusPath,
+                        "{\"timestamp\":\"2026-07-30T08:00:04.004Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"source\":\"grok-hook\"}\n",
+                        Encoding.UTF8);
+                    File.AppendAllText(Path.Combine(sessionDir, "events.jsonl"),
+                        "{\"ts\":\"2026-07-30T08:00:04.000Z\",\"type\":\"turn_ended\",\"outcome\":\"cancelled\",\"cancellation_category\":\"mid_turn_abort\",\"cancellation_context\":{\"trigger\":\"send_now\"}}\n" +
+                        "{\"ts\":\"2026-07-30T08:00:04.004Z\",\"type\":\"turn_started\",\"redirect_kind\":\"queued_after_cancel\"}\n",
+                        Encoding.UTF8);
+                    Assert(sendNowMonitor.Refresh(), "send_now refresh changes state");
+                    SessionSnapshot afterSteer =
+                        sendNowMonitor.Snapshots().FirstOrDefault();
+                    Assert(afterSteer != null &&
+                        afterSteer.State == HaloState.Thinking,
+                        "send_now keeps thinking from UserPromptSubmit");
+                    Assert(afterSteer != null &&
+                        afterSteer.State != HaloState.Error,
+                        "send_now must not paint red Interrupted");
+                    Assert(afterSteer != null && afterSteer.Active,
+                        "send_now new turn is active");
+                }
+                finally
+                {
+                    try
+                    {
+                        Directory.Delete(sendNowHome, true);
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                string grokDir = Path.Combine(home, ".grok");
+                Directory.CreateDirectory(grokDir);
+                File.WriteAllText(Path.Combine(grokDir, "active_sessions.json"),
+                    "[{\"session_id\":\"abc\",\"cwd\":\"/tmp/x\"}]");
+                Assert(GrokActiveSessionsReader.HasLiveSession(home),
+                    "array entry without pid counts as present");
+                Assert(GrokActiveSessionsReader.LiveSessionIds(home).Contains("abc"),
+                    "Grok active sessions reader exposes the live session id");
+                try
+                {
+                    Directory.Delete(home, true);
+                }
+                catch
+                {
+                }
+
+                // HaloWindow Grok focus aggregate filters mixed Claude+Grok sessions
+                DateTime aggNow = DateTime.UtcNow;
+                List<SessionSnapshot> mixedGrokAgg = new List<SessionSnapshot>
+                {
+                    new SessionSnapshot
+                    {
+                        ThreadId = "c1",
+                        Agent = AgentKind.ClaudeCode,
+                        State = HaloState.Working,
+                        Active = true,
+                        LastEventUtc = aggNow,
+                        ProjectName = "C",
+                        Action = "Edit"
+                    },
+                    new SessionSnapshot
+                    {
+                        ThreadId = "g1",
+                        Agent = AgentKind.Grok,
+                        State = HaloState.Working,
+                        Active = true,
+                        LastEventUtc = aggNow,
+                        ProjectName = "GrokProject",
+                        Action = "Running command"
+                    }
+                };
+                AggregateSnapshot grokAgg = HaloWindow.BuildGrokAggregateForTest(
+                    mixedGrokAgg, false,
+                    new HashSet<string>(new string[] { "g1" }), aggNow);
+                Assert(grokAgg.FocusedAgent == AgentKind.Grok,
+                    "Grok aggregate stamps FocusedAgent.Grok");
+                Assert(grokAgg.State == HaloState.Working,
+                    "Grok aggregate uses Grok session state");
+                Assert(grokAgg.Sessions != null && grokAgg.Sessions.Count == 1 &&
+                    String.Equals(grokAgg.Sessions[0].ThreadId, "g1",
+                        StringComparison.Ordinal),
+                    "Grok aggregate filters out Claude sessions");
+                AggregateSnapshot idleGrokPresent = HaloWindow.BuildGrokAggregateForTest(
+                    new List<SessionSnapshot>(), false,
+                    new HashSet<string>(new string[] { "g-live" }), aggNow);
+                Assert(idleGrokPresent.State == HaloState.Idle &&
+                    idleGrokPresent.FocusedAgent == AgentKind.Grok,
+                    "empty Grok sessions → Idle (standby applied in RefreshState)");
+                AggregateSnapshot idleGrokOffline = HaloWindow.BuildGrokAggregateForTest(
+                    new List<SessionSnapshot>(), false,
+                    new HashSet<string>(), aggNow);
+                Assert(idleGrokOffline.State == HaloState.Idle,
+                    "empty Grok offline → Idle");
+                AggregateSnapshot pausedGrok = HaloWindow.BuildGrokAggregateForTest(
+                    mixedGrokAgg, true,
+                    new HashSet<string>(new string[] { "g1" }), aggNow);
+                Assert(pausedGrok.State == HaloState.Idle &&
+                    String.Equals(pausedGrok.Label, "PAUSED", StringComparison.Ordinal),
+                    "paused Grok aggregate is PAUSED");
+                List<SessionSnapshot> longAttnGrok = new List<SessionSnapshot>
+                {
+                    new SessionSnapshot
+                    {
+                        ThreadId = "g-attn",
+                        Agent = AgentKind.Grok,
+                        State = HaloState.Attention,
+                        Active = true,
+                        LastEventUtc = aggNow.AddMinutes(-25),
+                        ProjectName = "Await",
+                        Action = "Awaiting permission"
+                    }
+                };
+                AggregateSnapshot attnGrokAgg = HaloWindow.BuildGrokAggregateForTest(
+                    longAttnGrok, false,
+                    new HashSet<string>(new string[] { "g-attn" }), aggNow);
+                Assert(attnGrokAgg.State == HaloState.Attention,
+                    "long-held Grok attention remains NEEDS YOU in aggregate");
+                Assert(attnGrokAgg.Sessions != null && attnGrokAgg.Sessions.Count == 1,
+                    "long-held Grok attention session stays visible");
+                AggregateSnapshot endedAttnGrok = HaloWindow.BuildGrokAggregateForTest(
+                    longAttnGrok, false, new HashSet<string>(), aggNow);
+                Assert(endedAttnGrok.State == HaloState.Idle &&
+                    endedAttnGrok.Sessions.Count == 0,
+                    "ended Grok session drops stale attention to offline");
+                AggregateSnapshot doneGrok = new AggregateSnapshot
+                {
+                    State = HaloState.Done,
+                    FocusedAgent = AgentKind.Grok
+                };
+                Assert(HaloWindow.ShouldRefreshGrokStateForTick(
+                    false, false, doneGrok),
+                    "Grok done state keeps refreshing until it settles");
+                Assert(HaloWindow.ShouldRefreshGrokStateForTick(
+                    false, true, idleGrokPresent),
+                    "Grok presence changes refresh standby/offline state");
+                Assert(!HaloWindow.ShouldRefreshGrokStateForTick(
+                    false, false, idleGrokPresent),
+                    "stable idle Grok state does not refresh unnecessarily");
+                Assert(HaloWindow.ShouldPollGrokUsageForAgent(AgentKind.Grok) &&
+                    !HaloWindow.ShouldPollGrokUsageForAgent(AgentKind.Codex) &&
+                    !HaloWindow.ShouldPollGrokUsageForAgent(AgentKind.ClaudeCode),
+                    "Grok usage polling is focused-agent gated");
+                Assert(HaloWindow.ShouldPollCodexUsageForAgent(AgentKind.Codex) &&
+                    !HaloWindow.ShouldPollCodexUsageForAgent(AgentKind.Grok) &&
+                    !HaloWindow.ShouldPollCodexUsageForAgent(AgentKind.ClaudeCode),
+                    "Codex usage polling is focused-agent gated");
+                Assert(!GrokUsageMonitor.Instance.IsActiveForTest,
+                    "Grok usage polling starts inactive");
+                Assert(!CodexUsageMonitor.Instance.IsActiveForTest,
+                    "Codex OAuth usage polling starts inactive");
+
+                UsageFocusGate.Activate(AgentKind.Codex);
+                UsageFocusLease focusedCodexLease;
+                Assert(UsageFocusGate.TryAcquire(
+                    AgentKind.Codex, out focusedCodexLease),
+                    "focused Codex acquires OAuth authorization");
+                UsageFocusLease inactiveGrokLease;
+                Assert(!UsageFocusGate.TryAcquire(
+                    AgentKind.Grok, out inactiveGrokLease),
+                    "unfocused Grok cannot acquire OAuth authorization");
+                UsageFocusGate.Activate(AgentKind.Grok);
+                Assert(!UsageFocusGate.IsCurrent(focusedCodexLease),
+                    "focus switch invalidates in-flight Codex authorization");
+                bool staleCredentialWriteRejected = false;
+                try
+                {
+                    UsageFocusGate.RunCredentialWrite(
+                        focusedCodexLease, delegate { return true; });
+                }
+                catch (OperationCanceledException)
+                {
+                    staleCredentialWriteRejected = true;
+                }
+                Assert(staleCredentialWriteRejected,
+                    "stale provider cannot write OAuth credentials");
+                UsageFocusGate.Activate(AgentKind.Codex);
+                Assert(!UsageFocusGate.IsCurrent(focusedCodexLease),
+                    "switching back does not revive an old authorization");
+                bool abortMappedToCancel = false;
+                try
+                {
+                    UsageFocusGate.ThrowIfInactive(
+                        focusedCodexLease,
+                        new System.Net.WebException("aborted"));
+                }
+                catch (OperationCanceledException)
+                {
+                    abortMappedToCancel = true;
+                }
+                Assert(abortMappedToCancel,
+                    "inactive lease maps transport abort to focus cancel");
+                UsageFocusLease liveCodexLease;
+                Assert(UsageFocusGate.TryAcquire(
+                    AgentKind.Codex, out liveCodexLease),
+                    "focused Codex reacquires after switch-back");
+                bool liveLeaseKeepsTransportError = false;
+                try
+                {
+                    UsageFocusGate.ThrowIfInactive(
+                        liveCodexLease,
+                        new System.Net.WebException("network"));
+                    liveLeaseKeepsTransportError = true;
+                }
+                catch (OperationCanceledException)
+                {
+                    liveLeaseKeepsTransportError = false;
+                }
+                Assert(liveLeaseKeepsTransportError,
+                    "active lease does not rewrite transport errors as cancel");
+                UsageFocusGate.DeactivateAll();
+
+                // DetailsWindow offline copy for focused Grok (three-way switch).
+                AggregateSnapshot offlineGrok = new AggregateSnapshot
+                {
+                    State = HaloState.Idle,
+                    Label = "OFFLINE",
+                    FocusedAgent = AgentKind.Grok,
+                    Sessions = new List<SessionSnapshot>()
+                };
+                string offlineGrokDetail = DetailsWindow.FriendlyStatusDetailForTest(
+                    offlineGrok, offlineGrok.Sessions);
+                Assert(offlineGrokDetail.IndexOf("Grok",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    offlineGrokDetail == L10n.Instance["status.offline_grok"],
+                    "offline grok detail");
+                AggregateSnapshot offlineCodex = new AggregateSnapshot
+                {
+                    State = HaloState.Idle,
+                    Label = "OFFLINE",
+                    FocusedAgent = AgentKind.Codex,
+                    Sessions = new List<SessionSnapshot>()
+                };
+                Assert(DetailsWindow.FriendlyStatusDetailForTest(
+                        offlineCodex, offlineCodex.Sessions) ==
+                    L10n.Instance["status.offline_codex"],
+                    "offline codex detail still maps to offline_codex");
+                AggregateSnapshot offlineClaude = new AggregateSnapshot
+                {
+                    State = HaloState.Idle,
+                    Label = "OFFLINE",
+                    FocusedAgent = AgentKind.ClaudeCode,
+                    Sessions = new List<SessionSnapshot>()
+                };
+                Assert(DetailsWindow.FriendlyStatusDetailForTest(
+                        offlineClaude, offlineClaude.Sessions) ==
+                    L10n.Instance["status.offline_claude"],
+                    "offline claude detail still maps to offline_claude");
+
+                // Grok usage mapper + multi-entry auth persist (Task 6)
+                string weeklyBody =
+                    "{\"config\":{\"creditUsagePercent\":42.5,\"currentPeriod\":{\"type\":\"USAGE_PERIOD_TYPE_WEEKLY\",\"start\":\"2026-07-20T00:00:00Z\",\"end\":\"2026-07-27T00:00:00Z\"}}}";
+                UsageMetrics mapped;
+                Assert(GrokUsageResponseMapper.TryMap(weeklyBody, out mapped), "map weekly");
+                Assert(mapped.HasWeekly && !mapped.HasFiveHour && !mapped.HasMonthly,
+                    "only weekly");
+                Assert(Math.Abs(mapped.WeeklyUsedPercent - 42.5) < 0.01, "percent");
+                Assert(mapped.WeeklyResetUtc.Year == 2026, "reset");
+
+                string zeroBody =
+                    "{\"config\":{\"currentPeriod\":{\"type\":\"USAGE_PERIOD_TYPE_WEEKLY\",\"start\":\"2026-07-20T00:00:00Z\",\"end\":\"2026-07-27T00:00:00Z\"}}}";
+                Assert(GrokUsageResponseMapper.TryMap(zeroBody, out mapped) &&
+                    mapped.WeeklyUsedPercent == 0, "absent percent is 0");
+
+                string monthlyBody =
+                    "{\"config\":{\"creditUsagePercent\":10,\"currentPeriod\":{\"type\":\"USAGE_PERIOD_TYPE_MONTHLY\",\"start\":\"2026-07-01T00:00:00Z\",\"end\":\"2026-08-01T00:00:00Z\"}}}";
+                Assert(GrokUsageResponseMapper.TryMap(monthlyBody, out mapped) &&
+                    !mapped.HasWeekly, "non-weekly does not fake weekly");
+
+                string grokAuthHome = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-grok-auth-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(Path.Combine(grokAuthHome, ".grok"));
+                string authPath = Path.Combine(grokAuthHome, ".grok", "auth.json");
+                File.WriteAllText(authPath,
+                    "{\n  \"iss::client-a\": {\"key\":\"tok-a\",\"refresh_token\":\"ra\",\"expires_at\":\"2099-01-01T00:00:00Z\",\"user_id\":\"u1\"},\n  \"iss::client-b\": {\"key\":\"tok-b\",\"refresh_token\":\"rb\",\"expires_at\":\"2099-01-01T00:00:00Z\",\"user_id\":\"u2\"}\n}\n",
+                    new UTF8Encoding(false));
+                Assert(GrokAuthStore.PersistForTest(grokAuthHome, "tok-a",
+                    "tok-a2", "ra2", DateTime.UtcNow.AddHours(1)),
+                    "persist tok-a rotation");
+                string after = File.ReadAllText(authPath);
+                Assert(after.IndexOf("tok-a2", StringComparison.Ordinal) >= 0,
+                    "updated access");
+                Assert(after.IndexOf("tok-b", StringComparison.Ordinal) >= 0,
+                    "other entry preserved");
+                File.WriteAllText(authPath, "NOT-JSON", new UTF8Encoding(false));
+                bool threw = false;
+                bool persistedCorrupt = false;
+                try
+                {
+                    persistedCorrupt = GrokAuthStore.PersistForTest(grokAuthHome,
+                        "tok-a2", "tok-a3", "ra3", DateTime.UtcNow.AddHours(1));
+                }
+                catch
+                {
+                    threw = true;
+                }
+                Assert(threw || !persistedCorrupt, "corrupt auth not overwritten");
+                Assert(File.ReadAllText(authPath).IndexOf("NOT-JSON",
+                    StringComparison.Ordinal) >= 0,
+                    "corrupt auth.json left intact");
+                try
+                {
+                    Directory.Delete(grokAuthHome, true);
+                }
+                catch
+                {
+                }
+
+                // Grok session context reader (Task 7) — signals / token ratio / live updates
+                Assert(String.Equals(
+                    GrokSessionContextReader.EncodeWorkspaceDirectory(
+                        "/Users/example/work/AgentHalo"),
+                    "%2FUsers%2Fexample%2Fwork%2FAgentHalo",
+                    StringComparison.Ordinal),
+                    "workspace dirs must match Grok percent-encoding");
+
+                string ctxRoot = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-grok-ctx-" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    string cwd = Path.Combine(ctxRoot, "proj");
+                    string sessionId = "sess-1";
+                    string enc = GrokSessionContextReader.EncodeWorkspaceDirectory(cwd);
+                    string sessionDir = Path.Combine(ctxRoot, ".grok", "sessions",
+                        enc, sessionId);
+                    Directory.CreateDirectory(sessionDir);
+                    File.WriteAllText(Path.Combine(sessionDir, "signals.json"),
+                        "{\"contextWindowUsage\":26,\"contextTokensUsed\":130000," +
+                        "\"contextWindowTokens\":500000,\"primaryModelId\":\"grok-4.5\"}",
+                        new UTF8Encoding(false));
+                    Dictionary<string, object> summaryInfo =
+                        new Dictionary<string, object>();
+                    summaryInfo["id"] = sessionId;
+                    summaryInfo["cwd"] = cwd;
+                    Dictionary<string, object> summaryRoot =
+                        new Dictionary<string, object>();
+                    summaryRoot["info"] = summaryInfo;
+                    summaryRoot["generated_title"] = "Wire Grok context pill";
+                    summaryRoot["session_summary"] = "fallback title";
+                    summaryRoot["current_model_id"] = "grok-4.5";
+                    File.WriteAllText(Path.Combine(sessionDir, "summary.json"),
+                        new JavaScriptSerializer().Serialize(summaryRoot),
+                        new UTF8Encoding(false));
+                    GrokSessionContextSnapshot snap =
+                        new GrokSessionContextReader(
+                            Path.Combine(ctxRoot, ".grok", "sessions"))
+                        .Read(sessionId, cwd);
+                    Assert(snap != null && Math.Abs(snap.ContextUsedPercent - 26) < 0.1,
+                        "signals percent");
+                    Assert(snap.ContextTokensUsed == 130000, "token counters preserved");
+                    Assert(snap.ContextWindowTokens == 500000, "window size preserved");
+                    Assert(String.Equals(snap.ModelName, "grok-4.5",
+                        StringComparison.Ordinal), "model");
+                    Assert(String.Equals(snap.SessionTitle, "Wire Grok context pill",
+                        StringComparison.Ordinal), "title from summary");
+                    Assert(String.Equals(snap.ProjectName, "proj",
+                        StringComparison.Ordinal), "project from cwd leaf");
+
+                    GrokSessionContextSnapshot scanned =
+                        new GrokSessionContextReader(
+                            Path.Combine(ctxRoot, ".grok", "sessions"))
+                        .Read(sessionId, null);
+                    Assert(scanned != null &&
+                        Math.Abs(scanned.ContextUsedPercent - 26) < 0.1,
+                        "scan fallback finds the session without cwd");
+
+                    // Token-ratio fallback (no contextWindowUsage field)
+                    string ratioSessionId = "session-ratio";
+                    string ratioDir = Path.Combine(ctxRoot, ".grok", "sessions",
+                        "%2Ftmp", ratioSessionId);
+                    Directory.CreateDirectory(ratioDir);
+                    File.WriteAllText(Path.Combine(ratioDir, "signals.json"),
+                        "{\"contextTokensUsed\":50,\"contextWindowTokens\":200}",
+                        new UTF8Encoding(false));
+                    GrokSessionContextSnapshot ratioSnap =
+                        new GrokSessionContextReader(
+                            Path.Combine(ctxRoot, ".grok", "sessions"))
+                        .Read(ratioSessionId, null);
+                    Assert(ratioSnap != null &&
+                        Math.Abs(ratioSnap.ContextUsedPercent - 25) < 0.01,
+                        "token ratio fallback");
+
+                    // Live updates.jsonl totalTokens preferred over frozen signals
+                    string liveSessionId = "session-live";
+                    string liveDir = Path.Combine(ctxRoot, ".grok", "sessions",
+                        "%2Ftmp", liveSessionId);
+                    Directory.CreateDirectory(liveDir);
+                    File.WriteAllText(Path.Combine(liveDir, "signals.json"),
+                        "{\"contextWindowUsage\":26,\"contextTokensUsed\":130000," +
+                        "\"contextWindowTokens\":500000,\"primaryModelId\":\"grok-4.5\"}",
+                        new UTF8Encoding(false));
+                    File.WriteAllText(Path.Combine(liveDir, "updates.jsonl"),
+                        "{\"timestamp\":1,\"method\":\"session/update\",\"params\":" +
+                        "{\"_meta\":{\"totalTokens\":40000},\"update\":" +
+                        "{\"sessionUpdate\":\"agent_thought_chunk\"}}}\n" +
+                        "{\"timestamp\":2,\"method\":\"session/update\",\"params\":" +
+                        "{\"_meta\":{\"totalTokens\":65000},\"update\":" +
+                        "{\"sessionUpdate\":\"tool_call\"}}}\n" +
+                        "{\"timestamp\":3,\"method\":\"session/update\",\"params\":" +
+                        "{\"update\":{\"sessionUpdate\":\"tool_call_update\"}}}\n",
+                        new UTF8Encoding(false));
+                    GrokSessionContextSnapshot liveSnap =
+                        new GrokSessionContextReader(
+                            Path.Combine(ctxRoot, ".grok", "sessions"))
+                        .Read(liveSessionId, null);
+                    Assert(liveSnap != null && liveSnap.ContextTokensUsed == 65000,
+                        "live totalTokens must override stale signals counters");
+                    Assert(Math.Abs(liveSnap.ContextUsedPercent - 13) < 0.01,
+                        "pill percent = liveTokens / contextWindowTokens");
+                    Assert(liveSnap.ContextWindowTokens == 500000,
+                        "window size still comes from signals");
+
+                    // Brand-new session: updates.jsonl streams totalTokens before
+                    // the first end-of-turn signals.json exists (macOS parity).
+                    string firstTurnId = "session-first-turn";
+                    string firstTurnCwd = Path.Combine(ctxRoot, "first-proj");
+                    string firstTurnDir = Path.Combine(ctxRoot, ".grok", "sessions",
+                        GrokSessionContextReader.EncodeWorkspaceDirectory(
+                            firstTurnCwd),
+                        firstTurnId);
+                    Directory.CreateDirectory(firstTurnDir);
+                    File.WriteAllText(Path.Combine(firstTurnDir, "updates.jsonl"),
+                        "{\"timestamp\":1,\"method\":\"session/update\",\"params\":" +
+                        "{\"_meta\":{\"totalTokens\":25000},\"update\":" +
+                        "{\"sessionUpdate\":\"agent_thought_chunk\"}}}\n" +
+                        "{\"timestamp\":2,\"method\":\"session/update\",\"params\":" +
+                        "{\"_meta\":{\"totalTokens\":50000},\"update\":" +
+                        "{\"sessionUpdate\":\"tool_call\"}}}\n",
+                        new UTF8Encoding(false));
+                    Dictionary<string, object> firstSummaryInfo =
+                        new Dictionary<string, object>();
+                    firstSummaryInfo["id"] = firstTurnId;
+                    firstSummaryInfo["cwd"] = firstTurnCwd;
+                    Dictionary<string, object> firstSummary =
+                        new Dictionary<string, object>();
+                    firstSummary["info"] = firstSummaryInfo;
+                    firstSummary["generated_title"] = "First turn pill";
+                    firstSummary["current_model_id"] = "grok-4.5";
+                    File.WriteAllText(Path.Combine(firstTurnDir, "summary.json"),
+                        new JavaScriptSerializer().Serialize(firstSummary),
+                        new UTF8Encoding(false));
+                    GrokSessionContextSnapshot firstTurnSnap =
+                        new GrokSessionContextReader(
+                            Path.Combine(ctxRoot, ".grok", "sessions"))
+                        .Read(firstTurnId, firstTurnCwd);
+                    Assert(firstTurnSnap != null &&
+                        firstTurnSnap.ContextTokensUsed == 50000,
+                        "live totalTokens alone must drive the pill");
+                    Assert(firstTurnSnap.ContextWindowTokens ==
+                        GrokSessionContextReader.DefaultContextWindowTokens,
+                        "default window when signals missing");
+                    Assert(Math.Abs(firstTurnSnap.ContextUsedPercent - 10) < 0.01,
+                        "percent = liveTokens / default window");
+                    Assert(String.Equals(firstTurnSnap.SessionTitle,
+                        "First turn pill", StringComparison.Ordinal),
+                        "summary still loads without signals");
+                    Assert(String.Equals(firstTurnSnap.ModelName, "grok-4.5",
+                        StringComparison.Ordinal),
+                        "model from summary without signals");
+
+                    GrokSessionContextSnapshot firstTurnScanned =
+                        new GrokSessionContextReader(
+                            Path.Combine(ctxRoot, ".grok", "sessions"))
+                        .Read(firstTurnId, null);
+                    Assert(firstTurnScanned != null &&
+                        firstTurnScanned.ContextTokensUsed == 50000,
+                        "scan must find sessions that only have updates.jsonl");
+                }
+                finally
+                {
+                    try
+                    {
+                        Directory.Delete(ctxRoot, true);
+                    }
+                    catch
+                    {
+                    }
+                }
 
                 // Layout v2: paths + migrator + AppData usage relocation
                 string layoutHome = Path.Combine(Path.GetTempPath(),

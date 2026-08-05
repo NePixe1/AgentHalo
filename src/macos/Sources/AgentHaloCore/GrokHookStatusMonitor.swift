@@ -107,6 +107,7 @@ public final class GrokHookStatusMonitor {
 
     /// Poll session `events.jsonl` for:
     /// - Esc cancel / failed `turn_ended` (hooks skip Stop on interrupt)
+    /// - Steer supersede (`send_now` / `cancel_then_send` / newer turn_started)
     /// - `permission_requested` / `permission_resolved` (Strategy C: Auto vs human)
     private func applySessionEvents(now: Date) -> Bool {
         var changed = false
@@ -136,14 +137,31 @@ public final class GrokHookStatusMonitor {
             if let turnEnd = delta.turnEnd {
                 switch turnEnd.outcome {
                 case .cancelled, .failed:
-                    // A newer hook event means the session already moved on (e.g.
-                    // UserPromptSubmit after a prior Esc cancel). Skip stale ends.
                     let latest = reducers[sessionId]?.snapshot ?? snapshot
-                    if turnEnd.endedAt.addingTimeInterval(0.25) < latest.lastEventAt {
+                    // Steer (Sent now) writes UserPromptSubmit within a few ms of
+                    // turn_ended cancelled. Any newer hook means the session already
+                    // moved on — never let a stale cancel paint red over thinking.
+                    // (Previously used a 0.25s slack which still allowed the ~4ms
+                    // send_now race to overwrite UserPromptSubmit.)
+                    if turnEnd.endedAt <= latest.lastEventAt {
+                        break
+                    }
+                    // Same-chunk turn_started after cancel (reader usually drops the
+                    // end; keep this as a safety net for redirect steers).
+                    if let start = delta.turnStart, start.startedAt >= turnEnd.endedAt {
+                        if turnEnd.outcome == .cancelled {
+                            // Soft end only if still in-flight; start itself does not
+                            // activate the ring — hooks will.
+                            reducers[sessionId]?.applySteerCancel(at: turnEnd.endedAt)
+                        }
                         break
                     }
                     if turnEnd.outcome == .cancelled {
-                        reducers[sessionId]?.applyTurnCancelled(at: turnEnd.endedAt)
+                        if turnEnd.isSteerLikeCancel {
+                            reducers[sessionId]?.applySteerCancel(at: turnEnd.endedAt)
+                        } else {
+                            reducers[sessionId]?.applyTurnCancelled(at: turnEnd.endedAt)
+                        }
                     } else {
                         reducers[sessionId]?.applyTurnFailed(at: turnEnd.endedAt)
                     }
@@ -223,14 +241,24 @@ public final class GrokHookStatusMonitor {
     }
 
     private func pruneStaleReducers(now: Date) {
-        let activeStaleThreshold = now.addingTimeInterval(-600)
-        let inactiveStaleThreshold = now.addingTimeInterval(-300)
         reducers = reducers.filter { _, reducer in
-            let t = reducer.snapshot.lastEventAt
-            if reducer.snapshot.active {
-                return t >= activeStaleThreshold
-            }
-            return t >= inactiveStaleThreshold
+            Self.shouldRetainSnapshot(reducer.snapshot, now: now)
         }
+    }
+
+    /// Whether a Grok hook snapshot should survive age-based pruning.
+    ///
+    /// `.attention` (NEEDS YOU / awaiting permission) is retained indefinitely:
+    /// humans may leave a prompt open for a long time, and no hooks fire until
+    /// they act — so `lastEventAt` alone must not demote the ring to STANDBY.
+    public static func shouldRetainSnapshot(_ snapshot: SessionSnapshot, now: Date) -> Bool {
+        if snapshot.state == .attention {
+            return true
+        }
+        let t = snapshot.lastEventAt
+        if snapshot.active {
+            return t >= now.addingTimeInterval(-600)
+        }
+        return t >= now.addingTimeInterval(-300)
     }
 }

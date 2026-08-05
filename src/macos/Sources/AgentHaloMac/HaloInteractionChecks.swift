@@ -90,6 +90,7 @@ func runHaloInteractionChecks() {
     testClaudePollingIsThrottledWhenCodexFocused()
     testGrokPollingIsThrottledWhenNotFocused()
     testGrokPresencePrefersActiveSessionsFile()
+    testGrokActivityDropsEndedAttention()
     testGrokLiveStandbyUsesStableGreenAggregate()
     testClaudeLiveSessionsRefreshIsThrottled()
     testHaloUsesShapeLayersNotCpuRasterization()
@@ -2624,6 +2625,41 @@ private func testGrokPresencePrefersActiveSessionsFile() {
     expect(
         GrokActivityMonitor.isPresent(homeDirectory: root, processPresenceProbe: { false }),
         "legacy active_sessions entries without pid still report presence"
+    )
+}
+
+private func testGrokActivityDropsEndedAttention() {
+    let now = Date()
+    let attention = SessionSnapshot(
+        threadId: "waiting-grok",
+        projectName: "AgentHalo",
+        workingDirectory: "/tmp/AgentHalo",
+        state: .attention,
+        action: "Awaiting permission",
+        lastEventAt: now.addingTimeInterval(-1800),
+        completedAt: nil,
+        active: true,
+        agent: .grok
+    )
+    let live = GrokActivityMonitor.sessionsWithVerifiedLiveness(
+        [attention],
+        liveSessionIds: Set(["waiting-grok"])
+    )
+    expect(live.first?.active == true, "live Grok attention should survive long waits")
+
+    let ended = GrokActivityMonitor.sessionsWithVerifiedLiveness(
+        [attention],
+        liveSessionIds: []
+    )
+    expect(ended.first?.active == false, "ended Grok attention must not remain actionable")
+
+    let otherSession = GrokActivityMonitor.sessionsWithVerifiedLiveness(
+        [attention],
+        liveSessionIds: Set(["new-working-session"])
+    )
+    expect(
+        otherSession.first?.active == false,
+        "another live Grok session must not keep an old attention snapshot active"
     )
 }
 

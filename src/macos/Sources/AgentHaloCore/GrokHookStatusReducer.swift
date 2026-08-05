@@ -21,6 +21,11 @@ public struct GrokHookStatusReducer: Sendable {
     /// `bypassPermissions`). Auto and bypass never need a purple NEEDS YOU ring —
     /// shell tools still emit permission_* with multi-second `wait_ms` under Auto.
     private var permissionMode: String?
+    /// State/action to restore after a human permission allow. Grok's real order is
+    /// PreToolUse → permission_requested → permission_resolved → PostToolUse; there
+    /// is no second PreToolUse after approve, so we must not drop back to Thinking
+    /// while the tool is still running.
+    private var prePermissionResume: (state: HaloState, action: String)?
 
     /// Fast path resolutions (read/grep Auto, rule allow) complete well under this.
     /// Shell Auto often sits in the 1.5–3 s band; those are gated by `permissionMode`
@@ -167,6 +172,7 @@ public struct GrokHookStatusReducer: Sendable {
             wasActiveBeforeCompaction = nil
             pendingPermissionRequestedAt = nil
             isPermissionPrompt = true
+            prePermissionResume = nil
             workingVisibleUntil = nil
             thinkingVisibleUntil = nil
             pendingWorkingAction = nil
@@ -318,12 +324,13 @@ public struct GrokHookStatusReducer: Sendable {
 
         if auto && !denied {
             // Instant auto-approve (or Auto/bypass mode): drop any false attention.
-            // Prefer keeping `.working` when PreToolUse already started the tool.
+            // Prefer keeping / restoring `.working` when PreToolUse already started
+            // the tool (Grok does not re-emit PreToolUse after allow).
             isPermissionPrompt = false
             if snapshot.state == .attention {
-                snapshot.active = true
-                snapshot.state = .thinking
-                snapshot.action = "Thinking"
+                restoreAfterPermissionAllow()
+            } else {
+                prePermissionResume = nil
             }
             return
         }
@@ -332,6 +339,7 @@ public struct GrokHookStatusReducer: Sendable {
             // In Auto/bypass the user is not holding a prompt; still surface deny
             // so a blocked tool is visible, then leave attention until next event.
             isPermissionPrompt = true
+            prePermissionResume = nil
             workingVisibleUntil = nil
             thinkingVisibleUntil = nil
             pendingWorkingAction = nil
@@ -342,16 +350,16 @@ public struct GrokHookStatusReducer: Sendable {
             return
         }
 
-        // Human wait finished with allow — tool execution follows. Clear the
-        // purple hold; PreToolUse often already painted working for Grok, so
-        // only leave attention when we were holding for the user.
+        // Human wait finished with allow — tool execution continues without a
+        // second PreToolUse. Restore the pre-hold working state/action when we
+        // had one (typical: PreToolUse → wait → allow → PostToolUse).
         if snapshot.state == .attention || isPermissionPrompt {
             isPermissionPrompt = false
             snapshot.active = true
-            // PreToolUse may already have set working; if still attention, resume.
             if snapshot.state == .attention {
-                snapshot.state = .thinking
-                snapshot.action = "Thinking"
+                restoreAfterPermissionAllow()
+            } else {
+                prePermissionResume = nil
             }
             snapshot.completedAt = nil
         }
@@ -371,6 +379,9 @@ public struct GrokHookStatusReducer: Sendable {
             return
         }
         pendingPermissionRequestedAt = nil
+        // Capture resume target before overwriting with NEEDS YOU. Real Grok
+        // order is PreToolUse (working) → wait → allow → tool runs → PostToolUse.
+        capturePrePermissionResume()
         isPermissionPrompt = true
         workingVisibleUntil = nil
         thinkingVisibleUntil = nil
@@ -399,9 +410,42 @@ public struct GrokHookStatusReducer: Sendable {
         }
     }
 
+    /// Remember state/action so human allow can resume tool execution UI.
+    private mutating func capturePrePermissionResume() {
+        guard prePermissionResume == nil else { return }
+        if snapshot.state == .working {
+            prePermissionResume = (state: .working, action: snapshot.action)
+            return
+        }
+        if let pendingWorkingAction, !pendingWorkingAction.isEmpty {
+            // PreToolUse during thinking min-hold: tool action is deferred.
+            prePermissionResume = (state: .working, action: pendingWorkingAction)
+            return
+        }
+        if snapshot.state == .thinking {
+            prePermissionResume = (state: .thinking, action: snapshot.action)
+            return
+        }
+        prePermissionResume = (state: .thinking, action: "Thinking")
+    }
+
+    /// After allow: restore working tool UI when we had one; otherwise Thinking.
+    private mutating func restoreAfterPermissionAllow() {
+        snapshot.active = true
+        if let resume = prePermissionResume {
+            snapshot.state = resume.state
+            snapshot.action = resume.action
+            prePermissionResume = nil
+            return
+        }
+        snapshot.state = .thinking
+        snapshot.action = "Thinking"
+    }
+
     private mutating func clearPermissionHold() {
         isPermissionPrompt = false
         pendingPermissionRequestedAt = nil
+        prePermissionResume = nil
     }
 
     /// Auto / always-approve modes must not drive the purple ring. Grok still
@@ -443,17 +487,27 @@ public struct GrokHookStatusReducer: Sendable {
     /// Grok skips `Stop` / `StopFailure` hooks on user interrupt (Esc / Ctrl+C).
     /// Session `events.jsonl` records `turn_ended` with `outcome: "cancelled"`
     /// instead — map that to the same fault ring Codex uses for interruptions.
+    ///
+    /// Steer / Sent now also emits `cancelled` (often `trigger: send_now`). Those
+    /// must not paint red — call `applySteerCancel` instead.
     public mutating func applyTurnCancelled(at eventAt: Date = Date()) {
-        applyInterruptedTurn(at: eventAt, action: "Interrupted")
+        applyInterruptedTurn(at: eventAt, action: "Interrupted", asError: true)
+    }
+
+    /// Soft end for steer / cancel-then-send: clear the in-flight turn without
+    /// the red fault ring. The subsequent `UserPromptSubmit` / new turn hooks
+    /// re-activate thinking almost immediately.
+    public mutating func applySteerCancel(at eventAt: Date = Date()) {
+        applyInterruptedTurn(at: eventAt, action: "Ready", asError: false)
     }
 
     /// Non-cancel terminal failures observed in `events.jsonl` (e.g. outcome
     /// `error` / `failed`) when hooks did not emit `StopFailure`.
     public mutating func applyTurnFailed(at eventAt: Date = Date()) {
-        applyInterruptedTurn(at: eventAt, action: "Grok stopped with an error")
+        applyInterruptedTurn(at: eventAt, action: "Grok stopped with an error", asError: true)
     }
 
-    private mutating func applyInterruptedTurn(at eventAt: Date, action: String) {
+    private mutating func applyInterruptedTurn(at eventAt: Date, action: String, asError: Bool) {
         // Only override an in-flight turn. Idle/done/error already terminal.
         guard snapshot.active
             || snapshot.state == .thinking
@@ -467,7 +521,7 @@ public struct GrokHookStatusReducer: Sendable {
         thinkingVisibleUntil = nil
         pendingWorkingAction = nil
         snapshot.active = false
-        snapshot.state = .error
+        snapshot.state = asError ? .error : .idle
         snapshot.action = action
         snapshot.lastEventAt = eventAt
         snapshot.completedAt = nil

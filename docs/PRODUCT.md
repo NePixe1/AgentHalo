@@ -3,9 +3,9 @@
 ## Product promise
 
 Agent Halo is a quiet, always-visible desktop vital sign for coding agents. The
-current release monitors Codex and Claude Code on Windows and macOS, plus Grok
-Build on macOS. It answers one question without making the user return to the
-agent window: "What needs me right now?"
+current release monitors Codex, Claude Code, and Grok Build on Windows and
+macOS. It answers one question without making the user return to the agent
+window: "What needs me right now?"
 
 ## Principles
 
@@ -30,8 +30,7 @@ agent window: "What needs me right now?"
 
 - Native Windows (WPF) and macOS (Swift) apps, transparent and always on top.
 - Smooth composition-clock animation.
-- Local lifecycle monitoring for Codex and Claude Code on both platforms.
-- macOS Grok Build lifecycle and weekly-usage monitoring.
+- Local lifecycle monitoring for Codex, Claude Code, and Grok Build on both platforms.
 - Multiple-session aggregation with priority ordering.
 - Focus switching between available agents without stopping background monitoring.
 - Hover-to-inspect usage, context, or session details.
@@ -43,7 +42,7 @@ agent window: "What needs me right now?"
 
 ## Focused Agent
 
-Agent Halo monitors Codex and Claude Code concurrently on both platforms, and Grok Build on macOS, but renders one focused agent at a time. The focused agent defaults to Codex and can be changed from the hover details segmented switch or the menu item `监控对象`.
+Agent Halo monitors Codex, Claude Code, and Grok Build concurrently on both platforms, but renders one focused agent at a time. The focused agent defaults to Codex and can be changed from the hover details segmented switch or the menu item `监控对象`.
 
 The details panel exposes two modes selected from the focused session's endpoint and credentials: official OAuth mode shows usage, while API-key mode shows session details and includes custom or third-party endpoints. Synthetic Codex failure surfacing and click-to-activate Codex remain scoped to Codex focus; Claude Code focus does not attempt to foreground a Claude Code app.
 

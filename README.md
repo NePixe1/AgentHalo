@@ -39,10 +39,10 @@
 
 | Platform | Supported agents | Requirement |
 | --- | --- | --- |
-| Windows | Codex, Claude Code | Windows 10 or 11; .NET Framework 4.8 (usually preinstalled) |
+| Windows | Codex, Claude Code, Grok Build | Windows 10 or 11; .NET Framework 4.8 (usually preinstalled) |
 | macOS | Codex, Claude Code, Grok Build | macOS 13 or later |
 
-Install and sign in to at least one supported agent before using Agent Halo. Grok Build monitoring is currently macOS-only.
+Install and sign in to at least one supported agent before using Agent Halo.
 
 ## Install
 
@@ -65,7 +65,7 @@ Official accounts do not need an OpenAI API key. When available, usage refresh r
 ## Quick usage
 
 - **Drag** the halo to move it; it snaps lightly to screen edges.
-- **Hover** for status and usage / session details; switch **Codex / CC / Grok** on macOS or **Codex / CC** on Windows.
+- **Hover** for status and usage / session details; switch **Codex / CC / Grok** on either platform.
 - **Click** the halo to bring the Codex window forward when relevant.
 - **Right-click** for state previews, temporary pause, startup, always-on-top behavior, halo size (`75% / 100% / 125%`), **Reset Position**, and quit. Pause clears on the next launch.
 - After a display change, an off-screen halo recovers to the primary display. On macOS, it can also return to its remembered display when that display reconnects.

@@ -152,10 +152,12 @@ public sealed class DetailsWindow : Window
         private readonly ContextBatteryMeter contextMeter;
         private readonly Border codexSwitch;
         private readonly Border claudeSwitch;
+        private readonly Border grokSwitch;
         private readonly Border switchThumb;
         private readonly TranslateTransform switchThumbTransform;
         private readonly System.Windows.Shapes.Path codexSwitchIcon;
         private readonly Canvas claudeSwitchIcon;
+        private readonly System.Windows.Shapes.Path grokSwitchIcon;
         private readonly StackPanel quotaGroup;
         private readonly StackPanel claudeGroup;
         private readonly Grid dataLayer;
@@ -235,8 +237,8 @@ public sealed class DetailsWindow : Window
             top.ColumnDefinitions.Add(new ColumnDefinition());
             top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             Grid switcher = CreateAgentSwitch(out codexSwitch, out claudeSwitch,
-                out switchThumb, out switchThumbTransform,
-                out codexSwitchIcon, out claudeSwitchIcon);
+                out grokSwitch, out switchThumb, out switchThumbTransform,
+                out codexSwitchIcon, out claudeSwitchIcon, out grokSwitchIcon);
             switcher.HorizontalAlignment = HorizontalAlignment.Left;
             switcher.VerticalAlignment = VerticalAlignment.Center;
             top.Children.Add(switcher);
@@ -298,6 +300,7 @@ public sealed class DetailsWindow : Window
             {
                 quotaTimer.Stop();
                 CodexUsageMonitor.Instance.Updated -= OnCodexUsageUpdated;
+                GrokUsageMonitor.Instance.Updated -= OnGrokUsageUpdated;
             };
             quotaTimer = new DispatcherTimer();
             quotaTimer.Interval = TimeSpan.FromSeconds(3);
@@ -310,6 +313,7 @@ public sealed class DetailsWindow : Window
             };
             quotaTimer.Start();
             CodexUsageMonitor.Instance.Updated += OnCodexUsageUpdated;
+            GrokUsageMonitor.Instance.Updated += OnGrokUsageUpdated;
 
             L10n.Instance.LanguageChanged += (s, ev) =>
             {
@@ -347,8 +351,15 @@ public sealed class DetailsWindow : Window
                 {
                     return L10n.Instance["status.paused"];
                 }
-                return aggregate.FocusedAgent == AgentKind.ClaudeCode
-                    ? L10n.Instance["status.offline_claude"] : L10n.Instance["status.offline_codex"];
+                if (aggregate.FocusedAgent == AgentKind.ClaudeCode)
+                {
+                    return L10n.Instance["status.offline_claude"];
+                }
+                if (aggregate.FocusedAgent == AgentKind.Grok)
+                {
+                    return L10n.Instance["status.offline_grok"];
+                }
+                return L10n.Instance["status.offline_codex"];
             }
             if (String.Equals(aggregate.Label, "STANDBY",
                 StringComparison.OrdinalIgnoreCase) &&
@@ -409,6 +420,16 @@ public sealed class DetailsWindow : Window
             }
         }
 
+        /// <summary>
+        /// Test hook for offline / idle status detail copy (Grok parity).
+        /// </summary>
+        internal static string FriendlyStatusDetailForTest(
+            AggregateSnapshot aggregate, List<SessionSnapshot> sessions)
+        {
+            return FriendlyStatusDetail(aggregate,
+                sessions ?? new List<SessionSnapshot>());
+        }
+
         private void RefreshSupplementalData()
         {
             if (IsOfflineAggregate(currentAggregate))
@@ -419,6 +440,10 @@ public sealed class DetailsWindow : Window
             if (currentAgent == AgentKind.ClaudeCode)
             {
                 RefreshClaudeDetails();
+            }
+            else if (currentAgent == AgentKind.Grok)
+            {
+                RefreshGrokDetails();
             }
             else
             {
@@ -463,6 +488,10 @@ public sealed class DetailsWindow : Window
                 claudeProjectValue.Text = "--";
                 claudeModelValue.Text = "--";
                 claudeTokenValue.Text = "--";
+            }
+            else if (currentAgent == AgentKind.Grok)
+            {
+                RefreshGrokDetails();
             }
             else
             {
@@ -515,6 +544,80 @@ public sealed class DetailsWindow : Window
                 return;
             }
             RefreshQuota();
+        }
+
+        /// <summary>
+        /// Weekly OAuth credits from <see cref="GrokUsageMonitor"/> only (no 5h row).
+        /// Context pill is disk-backed (signals.json / live updates.jsonl) and only
+        /// surfaces while a real Grok session (not the "grok" placeholder) is
+        /// displayed. STANDBY soft-holds via <see cref="ApplyContextSource"/>;
+        /// OFFLINE clears immediately in <see cref="ApplyOfflinePlaceholders"/>.
+        /// </summary>
+        private void RefreshGrokDetails()
+        {
+            quotaGroup.Visibility = Visibility.Visible;
+            claudeGroup.Visibility = Visibility.Hidden;
+            fiveHourRow.Visibility = Visibility.Collapsed;
+            weekRow.Visibility = Visibility.Visible;
+            weekRow.Margin = new Thickness(0);
+            weekLabel.Text = L10n.Instance["quota.weekly"];
+            quotaGroup.VerticalAlignment = VerticalAlignment.Center;
+
+            UsageMetrics metrics;
+            if (!GrokUsageMonitor.Instance.TryRead(out metrics) || metrics == null)
+            {
+                metrics = new UsageMetrics { ContextInputTokens = -1 };
+            }
+
+            ApplyQuota(metrics.HasWeekly, metrics.WeeklyUsedPercent,
+                metrics.WeeklyResetUtc, weekValue, weekReset, weekBar);
+
+            if (GrokUsageMonitor.Instance.Status == GrokUsageDataStatus.SignInAgain)
+            {
+                // Same warning slot pattern as Codex L10n keys (provider-specific copy).
+                weekValue.Text = L10n.Instance["usage.warning.sign_in_grok"];
+                weekReset.Text = String.Empty;
+                weekReset.Visibility = Visibility.Collapsed;
+                weekBar.Value = 0;
+            }
+
+            SessionSnapshot primary = FindDisplayedGrokSession(currentSessions);
+            GrokSessionContextSnapshot context = null;
+            if (primary != null)
+            {
+                string cwd = String.IsNullOrEmpty(primary.WorkingDirectory)
+                    ? null : primary.WorkingDirectory;
+                context = new GrokSessionContextReader().Read(primary.ThreadId, cwd);
+            }
+            if (context != null)
+            {
+                SetContextPercent(true, context.ContextUsedPercent);
+            }
+            else
+            {
+                SetContextPercent(false, 0);
+            }
+        }
+
+        /// <summary>
+        /// Real Grok thread currently shown in the details aggregate — not the
+        /// "grok" placeholder used when session id is unknown.
+        /// </summary>
+        private static SessionSnapshot FindDisplayedGrokSession(
+            List<SessionSnapshot> sessions)
+        {
+            if (sessions == null)
+            {
+                return null;
+            }
+            return sessions.FirstOrDefault(delegate(SessionSnapshot session)
+            {
+                return session != null
+                    && session.Agent == AgentKind.Grok
+                    && !String.IsNullOrEmpty(session.ThreadId)
+                    && !String.Equals(session.ThreadId, "grok",
+                        StringComparison.Ordinal);
+            });
         }
 
         private CodexCustomApiMetrics ReadCodexCustomMetrics()
@@ -659,6 +762,21 @@ public sealed class DetailsWindow : Window
             }));
         }
 
+        private void OnGrokUsageUpdated()
+        {
+            if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+            {
+                return;
+            }
+            Dispatcher.BeginInvoke(new Action(delegate
+            {
+                if (IsVisible && currentAgent == AgentKind.Grok)
+                {
+                    RefreshGrokDetails();
+                }
+            }));
+        }
+
         private void SetContextPercent(bool available, double value)
         {
             ApplyContextSource(available ? (double?)value : null);
@@ -798,15 +916,28 @@ public sealed class DetailsWindow : Window
 
         private void UpdateAgentSwitch()
         {
-            bool codex = currentAgent == AgentKind.Codex;
-            StyleCodexSwitch(codexSwitch, codexSwitchIcon, codex);
-            StyleClaudeSwitch(claudeSwitch, claudeSwitchIcon, !codex);
-            MoveSwitchThumb(codex);
+            StyleCodexSwitch(codexSwitch, codexSwitchIcon,
+                currentAgent == AgentKind.Codex);
+            StyleClaudeSwitch(claudeSwitch, claudeSwitchIcon,
+                currentAgent == AgentKind.ClaudeCode);
+            StyleGrokSwitch(grokSwitch, grokSwitchIcon,
+                currentAgent == AgentKind.Grok);
+            MoveSwitchThumb(currentAgent);
         }
 
-        private void MoveSwitchThumb(bool codexSelected)
+        private void MoveSwitchThumb(AgentKind agent)
         {
-            double target = codexSelected ? 0 : 48;
+            // Three equal columns (~48.67 each) on a 146-wide track; thumb is 44
+            // with 3px inset. Index 0/1/2 → 0 / 48 / 96.
+            double target = 0;
+            if (agent == AgentKind.ClaudeCode)
+            {
+                target = 48;
+            }
+            else if (agent == AgentKind.Grok)
+            {
+                target = 96;
+            }
             if (!IsVisible)
             {
                 switchThumbTransform.X = target;
@@ -849,6 +980,13 @@ public sealed class DetailsWindow : Window
                     ? MediaColor.FromRgb(17, 17, 17)
                     : body);
             }
+        }
+
+        private static void StyleGrokSwitch(Border border,
+            System.Windows.Shapes.Path icon, bool selected)
+        {
+            border.Opacity = selected ? 1.0 : 0.58;
+            icon.Fill = new SolidColorBrush(MediaColor.FromRgb(17, 17, 17));
         }
 
         private void ApplyQuotaMetrics(UsageMetrics metrics)
@@ -980,15 +1118,21 @@ public sealed class DetailsWindow : Window
         private const string ClaudeCodeIconPath =
             "M6.9 2.7h10.2c.9 0 1.6.7 1.6 1.6v3.4h2.4c.8 0 1.4.6 1.4 1.4v3.9c0 .8-.6 1.4-1.4 1.4h-2.4v6.9h-3.2v-6.9h-2.1v6.9h-2.8v-6.9H8.5v6.9H5.3v-6.9H2.9c-.8 0-1.4-.6-1.4-1.4V9.1c0-.8.6-1.4 1.4-1.4h2.4V4.3c0-.9.7-1.6 1.6-1.6z";
 
+        // From src/shared/assets/agent-switch/grok.svg (fill #111111).
+        private const string GrokIconPath =
+            "M9.27 15.29l7.978-5.897c.391-.29.95-.177 1.137.272.98 2.369.542 5.215-1.41 7.169-1.951 1.954-4.667 2.382-7.149 1.406l-2.711 1.257c3.889 2.661 8.611 2.003 11.562-.953 2.341-2.344 3.066-5.539 2.388-8.42l.006.007c-.983-4.232.242-5.924 2.75-9.383.06-.082.12-.164.179-.248l-3.301 3.305v-.01L9.267 15.292M7.623 16.723c-2.792-2.67-2.31-6.801.071-9.184 1.761-1.763 4.647-2.483 7.166-1.425l2.705-1.25a7.808 7.808 0 00-1.829-1A8.975 8.975 0 005.984 5.83c-2.533 2.536-3.33 6.436-1.962 9.764 1.022 2.487-.653 4.246-2.34 6.022-.599.63-1.199 1.259-1.682 1.925l7.62-6.815";
+
         private Grid CreateAgentSwitch(out Border codexBorder,
-            out Border claudeBorder, out Border thumb,
+            out Border claudeBorder, out Border grokBorder, out Border thumb,
             out TranslateTransform thumbTransform,
             out System.Windows.Shapes.Path codexIcon,
-            out Canvas claudeIcon)
+            out Canvas claudeIcon,
+            out System.Windows.Shapes.Path grokIcon)
         {
             Grid shell = new Grid();
-            shell.Width = 98;
+            shell.Width = 146;
             shell.Height = 32;
+            shell.ColumnDefinitions.Add(new ColumnDefinition());
             shell.ColumnDefinitions.Add(new ColumnDefinition());
             shell.ColumnDefinitions.Add(new ColumnDefinition());
             Border background = new Border
@@ -998,7 +1142,7 @@ public sealed class DetailsWindow : Window
                 BorderBrush = new SolidColorBrush(MediaColor.FromRgb(221, 233, 238)),
                 BorderThickness = new Thickness(1)
             };
-            Grid.SetColumnSpan(background, 2);
+            Grid.SetColumnSpan(background, 3);
             shell.Children.Add(background);
 
             thumbTransform = new TranslateTransform();
@@ -1022,13 +1166,14 @@ public sealed class DetailsWindow : Window
                     Color = MediaColor.FromRgb(66, 178, 205)
                 }
             };
-            Grid.SetColumnSpan(thumb, 2);
+            Grid.SetColumnSpan(thumb, 3);
             shell.Children.Add(thumb);
 
             Grid hitLayer = new Grid();
             hitLayer.ColumnDefinitions.Add(new ColumnDefinition());
             hitLayer.ColumnDefinitions.Add(new ColumnDefinition());
-            Grid.SetColumnSpan(hitLayer, 2);
+            hitLayer.ColumnDefinitions.Add(new ColumnDefinition());
+            Grid.SetColumnSpan(hitLayer, 3);
 
             Viewbox codexIconBox = CreateSwitchIcon(OpenAiBlossomIconPath, 18,
                 out codexIcon);
@@ -1054,6 +1199,20 @@ public sealed class DetailsWindow : Window
             claudeBorder.MouseLeftButtonUp += delegate { SelectAgent(AgentKind.ClaudeCode); };
             Grid.SetColumn(claudeBorder, 1);
             hitLayer.Children.Add(claudeBorder);
+
+            Viewbox grokIconBox = CreateSwitchIcon(GrokIconPath, 18, out grokIcon);
+            // grok.svg uses fill-rule="evenodd"; WPF Geometry.Parse defaults to Nonzero.
+            SetGeometryFillRule(grokIcon.Data, FillRule.EvenOdd);
+            grokBorder = new Border
+            {
+                Background = System.Windows.Media.Brushes.Transparent,
+                Child = grokIconBox,
+                Cursor = System.Windows.Input.Cursors.Hand,
+                Padding = new Thickness(0)
+            };
+            grokBorder.MouseLeftButtonUp += delegate { SelectAgent(AgentKind.Grok); };
+            Grid.SetColumn(grokBorder, 2);
+            hitLayer.Children.Add(grokBorder);
             shell.Children.Add(hitLayer);
             return shell;
         }
@@ -1086,6 +1245,25 @@ public sealed class DetailsWindow : Window
                 Child = canvas
             };
             return viewbox;
+        }
+
+        private static void SetGeometryFillRule(Geometry geometry, FillRule fillRule)
+        {
+            if (geometry == null)
+            {
+                return;
+            }
+            PathGeometry pathGeometry = geometry as PathGeometry;
+            if (pathGeometry != null)
+            {
+                pathGeometry.FillRule = fillRule;
+                return;
+            }
+            StreamGeometry streamGeometry = geometry as StreamGeometry;
+            if (streamGeometry != null)
+            {
+                streamGeometry.FillRule = fillRule;
+            }
         }
 
         private static Viewbox CreateClaudeCodeSwitchIcon(double displaySize,

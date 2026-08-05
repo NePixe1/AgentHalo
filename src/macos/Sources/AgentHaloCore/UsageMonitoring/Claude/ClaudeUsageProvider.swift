@@ -4,6 +4,7 @@ private enum ClaudeGenerationChecked<Value: Sendable>: Sendable {
     case value(Value)
     case externalAccessChanged
     case failure(UsageProviderFailure)
+    case cancelled
 }
 
 public struct ClaudeUsageProvider: UsageProvider, Sendable {
@@ -11,15 +12,19 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
 
     private let authStore: ClaudeAuthStore
     private let usageClient: ClaudeUsageClient
+    private let focusController: UsageProviderFocusController
     private let now: @Sendable () -> Date
 
     public init(
         authStore: ClaudeAuthStore = ClaudeAuthStore(),
         usageClient: ClaudeUsageClient = ClaudeUsageClient(),
+        focusController: UsageProviderFocusController =
+            UsageProviderFocusController(),
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         self.authStore = authStore
         self.usageClient = usageClient
+        self.focusController = focusController
         self.now = now
     }
 
@@ -31,11 +36,21 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
         guard case .oauth(let initialAccess) = access else {
             return failure(.signInAgain)
         }
-        return await refresh(initialAccess: initialAccess)
+        guard let authorization = focusController.authorization(for: providerID) else {
+            return cancelled()
+        }
+        return await refresh(
+            initialAccess: initialAccess,
+            authorization: authorization
+        )
     }
 
-    private func refresh(initialAccess: OAuthAccess) async -> UsageRefreshResult {
+    private func refresh(
+        initialAccess: OAuthAccess,
+        authorization: UsageProviderFocusAuthorization
+    ) async -> UsageRefreshResult {
         do {
+            try authorization.check()
             var current = initialAccess
             var migrateCacheFrom: AccountCacheKey?
             let exactAccess = authStore.reloadResolved(source: initialAccess.source)
@@ -53,8 +68,14 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
                 let requestCandidate = current
                 let checked = await generationChecked(
                     candidate: requestCandidate,
+                    authorization: authorization,
                     successCandidate: { $0.access },
-                    operation: { try await rotate(requestCandidate) }
+                    operation: {
+                        try await rotate(
+                            requestCandidate,
+                            authorization: authorization
+                        )
+                    }
                 )
                 let rotated: (access: OAuthAccess, migrateCacheFrom: AccountCacheKey?)
                 switch checked {
@@ -64,6 +85,8 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
                     return externalAccessChanged()
                 case .failure(let failure):
                     return self.failure(failure)
+                case .cancelled:
+                    return cancelled()
                 }
                 current = rotated.access
                 migrateCacheFrom = rotated.migrateCacheFrom
@@ -72,6 +95,7 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
             let firstUsageCandidate = current
             let firstUsage = await generationChecked(
                 candidate: firstUsageCandidate,
+                authorization: authorization,
                 successCandidate: { _ in firstUsageCandidate },
                 operation: {
                     try await usageClient.fetchUsage(accessToken: firstUsageCandidate.accessToken)
@@ -85,13 +109,21 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
                 return externalAccessChanged()
             case .failure(let failure):
                 return self.failure(failure)
+            case .cancelled:
+                return cancelled()
             }
             if response.statusCode == 401 {
                 let requestCandidate = current
                 let checkedRotation = await generationChecked(
                     candidate: requestCandidate,
+                    authorization: authorization,
                     successCandidate: { $0.access },
-                    operation: { try await rotate(requestCandidate) }
+                    operation: {
+                        try await rotate(
+                            requestCandidate,
+                            authorization: authorization
+                        )
+                    }
                 )
                 let rotated: (access: OAuthAccess, migrateCacheFrom: AccountCacheKey?)
                 switch checkedRotation {
@@ -101,12 +133,15 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
                     return externalAccessChanged()
                 case .failure(let failure):
                     return self.failure(failure)
+                case .cancelled:
+                    return cancelled()
                 }
                 current = rotated.access
                 migrateCacheFrom = migrateCacheFrom ?? rotated.migrateCacheFrom
                 let secondUsageCandidate = current
                 let secondUsage = await generationChecked(
                     candidate: secondUsageCandidate,
+                    authorization: authorization,
                     successCandidate: { _ in secondUsageCandidate },
                     operation: {
                         try await usageClient.fetchUsage(accessToken: secondUsageCandidate.accessToken)
@@ -119,6 +154,8 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
                     return externalAccessChanged()
                 case .failure(let failure):
                     return self.failure(failure)
+                case .cancelled:
+                    return cancelled()
                 }
                 if response.statusCode == 401 { return failure(.signInAgain) }
             }
@@ -137,28 +174,42 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
             )
         } catch let failure as UsageProviderFailure {
             return self.failure(failure)
+        } catch is CancellationError {
+            return cancelled()
+        } catch is UsageProviderFocusError {
+            return cancelled()
         } catch {
             return failure(.network)
         }
     }
 
     private func rotate(
-        _ expected: OAuthAccess
+        _ expected: OAuthAccess,
+        authorization: UsageProviderFocusAuthorization
     ) async throws -> (access: OAuthAccess, migrateCacheFrom: AccountCacheKey?) {
+        try authorization.check()
         guard let refreshToken = expected.refreshToken, !refreshToken.isEmpty else {
             throw UsageProviderFailure.signInAgain
         }
         let response = try await usageClient.refreshToken(refreshToken)
+        try authorization.check()
         let rotation = try Self.rotation(from: response, now: now())
         var requestAccess = Self.rotatedAccess(rotation, replacing: expected)
         requestAccess.accountKey = expected.accountKey
         var persistedAccess: OAuthAccess?
 
         do {
-            if let persisted = try authStore.persist(rotation: rotation, replacing: expected) {
+            let persisted = try authorization.performCredentialWrite {
+                try authStore.persist(rotation: rotation, replacing: expected)
+            }
+            if let persisted {
                 requestAccess = persisted
                 persistedAccess = persisted
             }
+        } catch let error as UsageProviderFocusError {
+            throw error
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             NSLog("[ClaudeUsage] rotated credential writeback failed; continuing in memory")
         }
@@ -171,15 +222,22 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
 
     private func generationChecked<Value: Sendable>(
         candidate: OAuthAccess,
+        authorization: UsageProviderFocusAuthorization,
         successCandidate: @Sendable (Value) -> OAuthAccess,
         operation: @Sendable () async throws -> Value
     ) async -> ClaudeGenerationChecked<Value> {
         do {
+            try authorization.check()
             let value = try await operation()
+            try authorization.check()
             if sourceHasChanged(since: successCandidate(value)) {
                 return .externalAccessChanged
             }
             return .value(value)
+        } catch is CancellationError {
+            return .cancelled
+        } catch is UsageProviderFocusError {
+            return .cancelled
         } catch let failure as UsageProviderFailure {
             if sourceHasChanged(since: candidate) {
                 return .externalAccessChanged
@@ -202,6 +260,10 @@ public struct ClaudeUsageProvider: UsageProvider, Sendable {
 
     private func failure(_ failure: UsageProviderFailure) -> UsageRefreshResult {
         UsageRefreshResult(providerID: providerID, snapshot: nil, failure: failure)
+    }
+
+    private func cancelled() -> UsageRefreshResult {
+        UsageRefreshResult(providerID: providerID, outcome: .cancelled)
     }
 
     private func externalAccessChanged() -> UsageRefreshResult {

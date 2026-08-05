@@ -6,7 +6,7 @@ namespace CodexHalo
 {
     /// <summary>
     /// Single launch-time upgrade entry point (Windows).
-    /// Order: migrate data → stage stable hook binaries → rewrite Claude hooks
+    /// Order: migrate data → stage stable hook binaries → rewrite Claude/Grok hooks
     /// only when unhealthy. Mirrors macOS AgentHaloRuntimeBootstrap.
     /// </summary>
     internal static class AgentHaloRuntimeBootstrap
@@ -56,6 +56,7 @@ namespace CodexHalo
             if (!String.IsNullOrEmpty(hookExe))
             {
                 ClaudeHookConfigurator.Configure(home, hookExe);
+                GrokHookConfigurator.Configure(home, hookExe);
             }
 
             // Settings now point at bin\status-hook.exe — drop unreferenced

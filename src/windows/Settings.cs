@@ -54,14 +54,31 @@ public sealed class HaloSettings
 
         public AgentKind GetFocusedAgent()
         {
-            return String.Equals(FocusedAgent, "claudeCode",
-                StringComparison.OrdinalIgnoreCase)
-                ? AgentKind.ClaudeCode : AgentKind.Codex;
+            if (String.Equals(FocusedAgent, "claudeCode", StringComparison.OrdinalIgnoreCase))
+            {
+                return AgentKind.ClaudeCode;
+            }
+            if (String.Equals(FocusedAgent, "grok", StringComparison.OrdinalIgnoreCase))
+            {
+                return AgentKind.Grok;
+            }
+            return AgentKind.Codex;
         }
 
         public void SetFocusedAgent(AgentKind agent)
         {
-            FocusedAgent = agent == AgentKind.ClaudeCode ? "claudeCode" : "codex";
+            if (agent == AgentKind.ClaudeCode)
+            {
+                FocusedAgent = "claudeCode";
+            }
+            else if (agent == AgentKind.Grok)
+            {
+                FocusedAgent = "grok";
+            }
+            else
+            {
+                FocusedAgent = "codex";
+            }
         }
 
         public DateTime GetInstalledUtc()
@@ -160,6 +177,8 @@ public static class SettingsStorage
                         if (!String.Equals(result.FocusedAgent, "codex",
                                 StringComparison.OrdinalIgnoreCase) &&
                             !String.Equals(result.FocusedAgent, "claudeCode",
+                                StringComparison.OrdinalIgnoreCase) &&
+                            !String.Equals(result.FocusedAgent, "grok",
                                 StringComparison.OrdinalIgnoreCase))
                         {
                             result.FocusedAgent = "codex";

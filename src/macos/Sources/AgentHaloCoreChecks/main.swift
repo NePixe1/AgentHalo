@@ -1785,11 +1785,32 @@ func testGrokActiveSessionsReaderParsesArrayEntries() throws {
         "dead pid entries should not report a live session"
     )
     expect(
+        GrokActiveSessionsReader.liveSessionIds(
+            homeDirectory: home,
+            isProcessAlive: { _ in false }
+        ).isEmpty,
+        "dead pid entries should expose no live session ids"
+    )
+    expect(
         GrokActiveSessionsReader.hasLiveSession(
             homeDirectory: home,
             isProcessAlive: { $0 == 123 }
         ),
         "alive pid should report a live session"
+    )
+    expect(
+        GrokActiveSessionsReader.liveSessionIds(
+            homeDirectory: home,
+            isProcessAlive: { $0 == 123 }
+        ) == Set(["live-1"]),
+        "only the pid-backed live Grok session id should survive"
+    )
+
+    try Data(#"[{"session_id":"legacy"}]"#.utf8)
+        .write(to: grokDir.appendingPathComponent("active_sessions.json"))
+    expect(
+        GrokActiveSessionsReader.liveSessionIds(homeDirectory: home) == Set(["legacy"]),
+        "pid-less legacy entries should still expose their session id"
     )
 }
 
@@ -2790,7 +2811,7 @@ func testGrokHookReducerPendingPermissionBecomesAttentionAfterDelay() {
     expect(r.snapshot.action, "Awaiting permission", "human wait action")
 }
 
-/// Strategy C: human wait_ms then allow clears hold toward thinking.
+/// Strategy C: human wait without prior PreToolUse falls back to thinking on allow.
 func testGrokHookReducerHumanPermissionResolveClearsAttention() {
     var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
     r.consume(
@@ -2802,8 +2823,8 @@ func testGrokHookReducerHumanPermissionResolveClearsAttention() {
     expect(r.snapshot.state, .attention, "precondition: attention after delay")
 
     r.applyPermissionResolved(decision: "allow", waitMs: 5000, at: Date(timeIntervalSince1970: 7))
-    expect(r.snapshot.state, .thinking, "human allow → thinking until PreToolUse")
-    expect(r.snapshot.action, "Thinking", "resume thinking after human allow")
+    expect(r.snapshot.state, .thinking, "human allow without PreToolUse → thinking")
+    expect(r.snapshot.action, "Thinking", "resume thinking when no tool was staged")
 }
 
 /// Strategy A + C: working + permission events auto resolve stays working.
@@ -2861,9 +2882,20 @@ func testGrokHookReducerHumanWaitAfterPreToolUseBecomesAttention() {
     expect(r.snapshot.action, "Awaiting permission", "human wait action")
     expect(r.snapshot.active, true, "human wait keeps turn active")
 
-    // Multi-second human allow should leave the hold.
+    // Multi-second human allow must restore working — Grok does not re-emit PreToolUse
+    // before PostToolUse, so tool execution UI would otherwise be lost.
     r.applyPermissionResolved(decision: "allow", waitMs: 9678, at: Date(timeIntervalSince1970: 12))
-    expect(r.snapshot.state, .thinking, "human allow clears attention")
+    expect(r.snapshot.state, .working, "human allow restores working (tool still running)")
+    expect(r.snapshot.action, "Running command", "human allow restores tool action")
+    expect(r.snapshot.active, true, "human allow keeps turn active during tool run")
+
+    // PostToolUse still advances normally after the restored working hold.
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:15Z","event":"PostToolUse","sessionId":"s1","cwd":"/p","toolName":"run_terminal_command","permissionMode":"default","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 15)
+    )
+    expect(r.snapshot.state, .working, "PostToolUse after allow → reviewing")
+    expect(r.snapshot.action, "Reviewing result", "PostToolUse action after restored working")
 }
 
 func testGrokHookReducerMapsEscCancelToInterrupted() {
@@ -3005,6 +3037,127 @@ func testGrokHookStatusMonitorMapsSessionEscCancelToError() throws {
     expect(interrupted?.state, .error, "esc cancel → error")
     expect(interrupted?.action, "Interrupted", "esc cancel action")
     expect(interrupted?.active == false, "esc cancel not active")
+}
+
+func testGrokHookReducerSteerCancelDoesNotPaintError() {
+    var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:02Z","event":"PreToolUse","sessionId":"s1","cwd":"/p","toolName":"read_file","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 2)
+    )
+    expect(r.snapshot.state, .working, "precondition: working")
+
+    // Sent now / steer soft-ends without the red fault ring.
+    r.applySteerCancel(at: Date(timeIntervalSince1970: 3))
+    expect(r.snapshot.state, .idle, "steer cancel → idle not error")
+    expect(r.snapshot.action, "Ready", "steer cancel action is Ready")
+    expect(r.snapshot.active, false, "steer cancel clears active")
+}
+
+func testGrokSessionTurnEventsReaderSupersedesCancelWithSteerStart() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-grok-steer-events-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let eventsURL = root.appendingPathComponent("events.jsonl")
+
+    // Same-chunk: cancel then turn_started with cancel_then_send (real steer path).
+    let chunk = """
+    {"ts":"2026-07-30T08:00:00.000Z","type":"turn_started"}
+    {"ts":"2026-07-30T08:00:04.000Z","type":"turn_ended","outcome":"cancelled","cancellation_category":"mid_turn_abort","cancellation_context":{"trigger":"esc"}}
+    {"ts":"2026-07-30T08:00:04.010Z","type":"turn_started","redirect_kind":"cancel_then_send"}
+
+    """
+    try Data(chunk.utf8).write(to: eventsURL)
+
+    let reader = GrokSessionTurnEventsReader()
+    let delta = reader.poll(eventsURL: eventsURL)
+    expect(delta.turnEnd == nil, "steer start supersedes cancelled turn_ended in same chunk")
+    expect(delta.turnStart != nil, "turn_started is surfaced")
+    expect(delta.turnStart?.redirectKind, "cancel_then_send", "redirect_kind parsed")
+    expect(delta.turnStart?.isSteerRedirect == true, "cancel_then_send is steer redirect")
+}
+
+func testGrokSessionTurnEventsReaderParsesSendNowTrigger() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-grok-send-now-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let eventsURL = root.appendingPathComponent("events.jsonl")
+
+    let line = #"{"ts":"2026-07-30T08:00:04.000Z","type":"turn_ended","outcome":"cancelled","cancellation_category":"mid_turn_abort","cancellation_context":{"trigger":"send_now"}}"# + "\n"
+    try Data(line.utf8).write(to: eventsURL)
+
+    let reader = GrokSessionTurnEventsReader()
+    let delta = reader.poll(eventsURL: eventsURL)
+    expect(delta.turnEnd?.outcome, Optional.some(GrokSessionTurnEndOutcome.cancelled), "send_now is cancelled outcome")
+    expect(delta.turnEnd?.cancellationTrigger, "send_now", "trigger parsed")
+    expect(delta.turnEnd?.isSteerLikeCancel == true, "send_now is steer-like")
+}
+
+/// Sent now: UserPromptSubmit arrives ~4ms after turn_ended cancelled. The cancel
+/// must not overwrite thinking with the red Interrupted ring.
+func testGrokHookStatusMonitorSendNowDoesNotPaintError() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-grok-monitor-send-now-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let logs = root.appendingPathComponent("logs", isDirectory: true)
+    let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+    let cwd = "/tmp/AgentHaloSendNowTest"
+    let sessionId = "sess-send-now-1"
+    let encoded = GrokSessionContextReader.encodeWorkspaceDirectory(cwd)
+    let sessionDir = sessions
+        .appendingPathComponent(encoded, isDirectory: true)
+        .appendingPathComponent(sessionId, isDirectory: true)
+    try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+
+    let statusURL = logs.appendingPathComponent("grok-status.jsonl")
+    let eventsURL = sessionDir.appendingPathComponent("events.jsonl")
+
+    let hookLines = """
+    {"timestamp":"2026-07-30T08:00:01.000Z","event":"UserPromptSubmit","sessionId":"\(sessionId)","cwd":"\(cwd)","source":"grok-hook"}
+    {"timestamp":"2026-07-30T08:00:03.000Z","event":"PreToolUse","sessionId":"\(sessionId)","cwd":"\(cwd)","toolName":"read_file","source":"grok-hook"}
+
+    """
+    try Data(hookLines.utf8).write(to: statusURL)
+    try Data(#"{"ts":"2026-07-30T08:00:01.500Z","type":"turn_started"}"#.utf8 + Data([0x0A]))
+        .write(to: eventsURL)
+
+    let monitor = GrokHookStatusMonitor(statusURL: statusURL, sessionsRoot: sessions)
+    let now = ISO8601DateFormatter().date(from: "2026-07-30T08:00:03Z") ?? Date()
+    expect(monitor.refresh(now: now), true, "hooks load")
+    expect(monitor.snapshots().first?.state, .working, "precondition: working")
+
+    // Same refresh: new UserPromptSubmit + send_now cancel (real Sent now race).
+    let newPrompt = #"{"timestamp":"2026-07-30T08:00:04.004Z","event":"UserPromptSubmit","sessionId":"\#(sessionId)","cwd":"\#(cwd)","source":"grok-hook"}"# + "\n"
+    let handleHooks = try FileHandle(forWritingTo: statusURL)
+    defer { try? handleHooks.close() }
+    _ = try handleHooks.seekToEnd()
+    try handleHooks.write(contentsOf: Data(newPrompt.utf8))
+    try handleHooks.synchronize()
+
+    let cancel = #"{"ts":"2026-07-30T08:00:04.000Z","type":"turn_ended","outcome":"cancelled","cancellation_category":"mid_turn_abort","cancellation_context":{"trigger":"send_now"}}"# + "\n"
+    let start = #"{"ts":"2026-07-30T08:00:04.004Z","type":"turn_started","redirect_kind":"queued_after_cancel"}"# + "\n"
+    let handleEvents = try FileHandle(forWritingTo: eventsURL)
+    defer { try? handleEvents.close() }
+    _ = try handleEvents.seekToEnd()
+    try handleEvents.write(contentsOf: Data((cancel + start).utf8))
+    try handleEvents.synchronize()
+
+    let steerNow = ISO8601DateFormatter().date(from: "2026-07-30T08:00:04.010Z")
+        ?? Date(timeIntervalSince1970: 1_753_862_404.01)
+    expect(monitor.refresh(now: steerNow), true, "send_now refresh changes state")
+    let after = monitor.snapshots().first
+    expect(after?.state, .thinking, "send_now keeps thinking from UserPromptSubmit")
+    expect(after?.state != .error, "send_now must not paint red Interrupted")
+    expect(after?.active == true, "send_now new turn is active")
+    expect(after?.action, "Thinking", "send_now action is Thinking")
 }
 
 /// Monitor integration: Auto-mode permission lines in events.jsonl + post-tool
@@ -3357,6 +3510,142 @@ func testClaudeHookMonitorPrunesStaleReducers() throws {
     _ = monitor.refresh(now: now.addingTimeInterval(700))
     let after = monitor.snapshots()
     expect(after.isEmpty, true, "stale reducers pruned → empty hook snapshots")
+}
+
+/// Long human permission waits must not be age-pruned into STANDBY.
+func testHookMonitorsRetainAttentionDespiteStaleLastEvent() {
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    let old = now.addingTimeInterval(-1800) // 30 minutes ago
+    let attention = SessionSnapshot(
+        threadId: "awaiting",
+        projectName: "P",
+        workingDirectory: "/p",
+        state: .attention,
+        action: "Awaiting permission",
+        lastEventAt: old,
+        completedAt: nil,
+        active: true,
+        agent: .grok
+    )
+    let staleWorking = SessionSnapshot(
+        threadId: "stuck",
+        projectName: "P",
+        workingDirectory: "/p",
+        state: .working,
+        action: "Running command",
+        lastEventAt: old,
+        completedAt: nil,
+        active: true,
+        agent: .grok
+    )
+    expect(
+        GrokHookStatusMonitor.shouldRetainSnapshot(attention, now: now),
+        true,
+        "Grok attention survives 30m lastEvent age"
+    )
+    expect(
+        ClaudeHookStatusMonitor.shouldRetainSnapshot(attention, now: now),
+        true,
+        "Claude attention survives 30m lastEvent age"
+    )
+    expect(
+        GrokHookStatusMonitor.shouldRetainSnapshot(staleWorking, now: now),
+        false,
+        "Grok stale working is still pruned"
+    )
+    expect(
+        ClaudeHookStatusMonitor.shouldRetainSnapshot(staleWorking, now: now),
+        false,
+        "Claude stale working is still pruned"
+    )
+
+    // Aggregator visibility: attention stays; stale working is hidden.
+    let settings = HaloSettings(installedAt: now.addingTimeInterval(-3600))
+    let keepAttention = SessionAggregator.aggregate(
+        snapshots: [attention],
+        settings: settings,
+        focusedAgent: .grok,
+        now: now
+    )
+    expect(keepAttention.state, .attention, "aggregator keeps long-held attention")
+    expect(keepAttention.sessions.count, 1, "attention session remains visible")
+
+    let hideWorking = SessionAggregator.aggregate(
+        snapshots: [staleWorking],
+        settings: settings,
+        focusedAgent: .grok,
+        now: now
+    )
+    expect(hideWorking.sessions.isEmpty, true, "stale working still hidden after 10m")
+}
+
+func testClaudeHookMonitorKeepsLongHeldPermissionAttention() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-claude-attn-hold-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let statusFile = root.appendingPathComponent("claude-status.jsonl")
+    let t0 = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
+    let lines = [
+        #"{"timestamp":"2026-06-16T04:00:00Z","event":"UserPromptSubmit","sessionId":"perm-hold","cwd":"/tmp","source":"claude-hook"}"#,
+        #"{"timestamp":"2026-06-16T04:00:01Z","event":"PermissionRequest","sessionId":"perm-hold","cwd":"/tmp","source":"claude-hook"}"#,
+    ].joined(separator: "\n") + "\n"
+    try Data(lines.utf8).write(to: statusFile)
+
+    let monitor = ClaudeHookStatusMonitor(statusURL: statusFile)
+    _ = monitor.refresh(now: t0.addingTimeInterval(2))
+    expect(monitor.snapshots().first?.state, .attention, "precondition: attention")
+    // Far past the normal 10m active prune window.
+    _ = monitor.refresh(now: t0.addingTimeInterval(2000))
+    let after = monitor.snapshots()
+    expect(after.count, 1, "permission hold not pruned after ~33m")
+    expect(after.first?.state, .attention, "still NEEDS YOU after long wait")
+    expect(after.first?.action, "Awaiting permission", "action preserved")
+}
+
+func testGrokHookMonitorKeepsLongHeldPermissionAttention() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-grok-attn-hold-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let statusFile = root.appendingPathComponent("grok-status.jsonl")
+    let sessionsRoot = root.appendingPathComponent("sessions", isDirectory: true)
+    let t0 = ISO8601DateFormatter().date(from: "2026-07-30T08:00:00Z")!
+    let sessionId = "perm-hold-grok"
+    let cwd = "/tmp/AgentHaloPermHold"
+    let encoded = GrokSessionContextReader.encodeWorkspaceDirectory(cwd)
+    let sessionDir = sessionsRoot.appendingPathComponent(encoded, isDirectory: true)
+        .appendingPathComponent(sessionId, isDirectory: true)
+    try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+
+    let hooks = [
+        #"{"timestamp":"2026-07-30T08:00:00Z","event":"UserPromptSubmit","sessionId":"\#(sessionId)","cwd":"\#(cwd)","permissionMode":"default","source":"grok-hook"}"#,
+        #"{"timestamp":"2026-07-30T08:00:01Z","event":"PreToolUse","sessionId":"\#(sessionId)","cwd":"\#(cwd)","toolName":"run_terminal_command","permissionMode":"default","source":"grok-hook"}"#,
+    ].joined(separator: "\n") + "\n"
+    try Data(hooks.utf8).write(to: statusFile)
+    let events = [
+        #"{"ts":"2026-07-30T08:00:00.500Z","type":"turn_started"}"#,
+        #"{"ts":"2026-07-30T08:00:01.100Z","type":"permission_requested"}"#,
+    ].joined(separator: "\n") + "\n"
+    try Data(events.utf8).write(to: sessionDir.appendingPathComponent("events.jsonl"))
+
+    let monitor = GrokHookStatusMonitor(statusURL: statusFile, sessionsRoot: sessionsRoot)
+    // First refresh arms the pending timer from observation time; a second tick
+    // after pendingPermissionAttentionDelay paints NEEDS YOU.
+    _ = monitor.refresh(now: t0.addingTimeInterval(2))
+    _ = monitor.refresh(
+        now: t0.addingTimeInterval(2 + GrokHookStatusReducer.pendingPermissionAttentionDelay + 0.05)
+    )
+    expect(monitor.snapshots().first?.state, .attention, "precondition: attention after delay")
+    _ = monitor.refresh(now: t0.addingTimeInterval(2000))
+    let after = monitor.snapshots()
+    expect(after.count, 1, "Grok permission hold not pruned after ~33m")
+    expect(after.first?.state, .attention, "Grok still NEEDS YOU after long wait")
+    expect(after.first?.action, "Awaiting permission", "Grok action preserved")
 }
 
 func testClaudeMonitorHandlesDiscoveryPendingLinesAndTruncation() throws {
@@ -4086,7 +4375,10 @@ do {
     try testGrokActiveSessionsReaderParsesArrayEntries()
     try testGrokSessionTurnEventsReaderDetectsCancelledTurnEnded()
     try testGrokSessionTurnEventsReaderParsesPermissionLifecycle()
+    try testGrokSessionTurnEventsReaderSupersedesCancelWithSteerStart()
+    try testGrokSessionTurnEventsReaderParsesSendNowTrigger()
     try testGrokHookStatusMonitorMapsSessionEscCancelToError()
+    try testGrokHookStatusMonitorSendNowDoesNotPaintError()
     try testGrokHookStatusMonitorIgnoresAutoPermissionDuringTool()
 } catch {
     fatalError("\(error)")
@@ -4153,6 +4445,7 @@ testGrokHookReducerHumanPermissionResolveClearsAttention()
 testGrokHookReducerAutoNoiseDuringToolExecutionStaysWorking()
 testGrokHookReducerHumanWaitAfterPreToolUseBecomesAttention()
 testGrokHookReducerMapsEscCancelToInterrupted()
+testGrokHookReducerSteerCancelDoesNotPaintError()
 do {
     try testClaudeCodeStatusHookIsolatesGrokAndClaudeStatusFiles()
 } catch {
@@ -4164,6 +4457,13 @@ testClaudeHookReducerActiveCompactRestoresThinking()
 testClaudeHookReducerIdleCompactTimeoutReturnsToReady()
 do {
     try testClaudeHookMonitorPrunesStaleReducers()
+} catch {
+    fatalError("\(error)")
+}
+testHookMonitorsRetainAttentionDespiteStaleLastEvent()
+do {
+    try testClaudeHookMonitorKeepsLongHeldPermissionAttention()
+    try testGrokHookMonitorKeepsLongHeldPermissionAttention()
 } catch {
     fatalError("\(error)")
 }
