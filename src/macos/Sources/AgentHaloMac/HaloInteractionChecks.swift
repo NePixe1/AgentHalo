@@ -1183,6 +1183,7 @@ private func testDetailsPanelKeepsUsageAndSessionBodiesMutuallyExclusive() {
     expect(!panel.usageGroupHiddenForTesting, "OAuth body should show usage")
     expect(panel.sessionGroupHiddenForTesting, "OAuth body should hide session rows")
     expect(panel.apiKeyChipHiddenForTesting, "OAuth body should hide mode chip")
+    expect(panel.sessionBodyModeForTesting, .unknown, "usage path must not leak session body mode")
 
     panel.render(aggregate: detailsAggregate(), model: sessionDetailsModel())
     expect(panel.usageGroupHiddenForTesting, "API body should hide usage")
@@ -1205,18 +1206,23 @@ private func testDetailsPanelKeepsContextIndependentFromUsageFailure() {
 @MainActor
 private func testDetailsPanelClearsContextAndSessionRowsOffline() {
     let panel = DetailsPanel()
+    let staleSession = SessionDetailsSnapshot(
+        projectName: "AgentHalo",
+        sessionTitle: "Stale title",
+        modelName: "gpt-5.5",
+        inputTokens: 100,
+        outputTokens: 20
+    )
+    // Seed online values first so offline must actively clear hidden card fields.
+    panel.render(
+        aggregate: detailsAggregate(),
+        model: sessionDetailsModel(context: 58, session: staleSession)
+    )
+    expect(panel.sessionCardTitleForTesting, "Stale title", "online seeds card title")
+
     panel.render(
         aggregate: detailsAggregate(state: .idle, label: "OFFLINE"),
-        model: sessionDetailsModel(
-            context: 58,
-            session: SessionDetailsSnapshot(
-                projectName: "AgentHalo",
-                sessionTitle: "Stale title",
-                modelName: "gpt-5.5",
-                inputTokens: 100,
-                outputTokens: 20
-            )
-        )
+        model: sessionDetailsModel(context: 58, session: staleSession)
     )
 
     expect(panel.contextPillHiddenForTesting, "offline should clear context")
@@ -1227,6 +1233,10 @@ private func testDetailsPanelClearsContextAndSessionRowsOffline() {
         "○ " + L10n.shared["session.empty.api_key"],
         "offline empty copy"
     )
+    expect(panel.sessionCardTitleForTesting, "--", "offline must clear card title")
+    expect(panel.sessionCardModelForTesting, "--", "offline must clear card model")
+    expect(panel.sessionCardTokensForTesting, "↑ --  ·  ↓ --", "offline must clear card tokens")
+    expect(panel.sessionCardTitleToolTipForTesting == nil, "offline must clear title tooltip")
     expect(panel.sessionBodySlotHeightForTesting, 72, "empty slot height")
     expect(panel.emptyBodyHeightForTesting, 72, "empty rect matches card height")
 }

@@ -1002,6 +1002,12 @@ public sealed class DetailsWindow : Window
                 emptyBody.Visibility = Visibility.Visible;
                 sessionCard.Visibility = Visibility.Collapsed;
                 emptyBodyText.Text = "○ " + L10n.Instance["session.empty.api_key"];
+                // Clear hidden card fields so a11y / subsequent reads do not
+                // leak the previous session title, model, or tokens.
+                sessionCardTitle.Text = "--";
+                sessionCardTitle.ToolTip = null;
+                sessionCardModel.Text = "--";
+                sessionCardTokens.Text = "↑ --  ·  ↓ --";
                 return;
             }
             emptyBody.Visibility = Visibility.Collapsed;

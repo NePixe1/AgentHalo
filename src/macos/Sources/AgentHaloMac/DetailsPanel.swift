@@ -204,6 +204,7 @@ class DetailsPanel: NSPanel {
             stack.setCustomSpacing(16, after: detailField)
             stack.edgeInsets.bottom = 4
             setAPIKeyChipVisible(false)
+            sessionBodyMode = .unknown
             renderUsage(usage)
             quotaGroup.isHidden = false
         case .session(let session):
@@ -316,6 +317,11 @@ class DetailsPanel: NSPanel {
             sessionCard.isHidden = true
             emptyBody.setText("○ " + L10n.shared["session.empty.api_key"])
             sessionBodyMode = .empty
+            // Clear hidden card fields so a11y / subsequent reads do not leak
+            // the previous session title, model, or tokens.
+            sessionCard.setTitle("--", toolTip: nil)
+            sessionCard.setModel("--")
+            sessionCard.setTokens(Self.formatTokenAttributedString(input: nil, output: nil))
             return
         }
 
