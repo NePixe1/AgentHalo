@@ -1,7 +1,8 @@
 # AGENTS.md
 
-Contributor and coding-agent notes for Agent Halo.  
-End-user install and usage live in [README.md](README.md) / [README.zh-CN.md](README.zh-CN.md).
+## UI design principle
+
+The entire UI must stay **minimal and refined** : ambient-first, low visual noise, restrained typography and chrome, no decorative clutter. Prefer calm density over busy panels; do not invent extra rows, badges, or copy that break the premium quiet aesthetic. Details panels, menus, and hover surfaces should match the halo itself—readable at a glance, never loud.
 
 ## Documentation boundaries
 
