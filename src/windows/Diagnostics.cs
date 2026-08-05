@@ -608,6 +608,11 @@ public static class Diagnostics
                     "English quota remaining copy");
                 Assert(L10n.Instance.Format("quota.resets", "Aug 2") == "Resets Aug 2",
                     "English quota reset copy");
+                Assert(L10n.Instance["access.mode.api_key"] == "API Key"
+                    || !string.IsNullOrEmpty(L10n.Instance["access.mode.api_key"]),
+                    "access.mode.api_key locale");
+                Assert(!string.IsNullOrEmpty(L10n.Instance["session.empty.api_key"]),
+                    "session.empty.api_key locale");
                 Assert(HaloWindow.IsLanguageMenuItemChecked(null, null),
                     "auto language item is checked when preference follows system");
                 Assert(!HaloWindow.IsLanguageMenuItemChecked("en", null),
