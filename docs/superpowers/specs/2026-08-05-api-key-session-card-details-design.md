@@ -3,7 +3,7 @@
 ## 文档状态
 
 - 日期：2026-08-05
-- 状态：已实现（macOS + Windows 方案 B；Windows 含 locale self-check 断言）
+- 状态：已实现，待发布验证（macOS + Windows 方案 B；Windows 含 locale self-check 断言）
 - 实现范围：AgentHalo **macOS + Windows** 详情面板（API Key / 非 OAuth 路径）
 - 视觉预览：[`docs/API_KEY_PANEL_MOCKUPS.html`](../../API_KEY_PANEL_MOCKUPS.html)（方案 B）
 - 实施计划：[API Key 会话摘要卡 Implementation Plan](../plans/2026-08-05-api-key-session-card-details-implementation.md)
