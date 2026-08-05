@@ -16,160 +16,110 @@
     </a>
   </p>
   <p>
-    <img src="https://img.shields.io/badge/版本-1.0.0-14B8A6?style=for-the-badge" alt="Version"/>
-    <img src="https://img.shields.io/badge/隐私优先-0F172A?style=for-the-badge" alt="Privacy First"/>
-    <img src="https://img.shields.io/badge/Swift-FA7343?style=for-the-badge&logo=swift&logoColor=white" alt="Swift"/>
-    <img src="https://img.shields.io/badge/Xcode-007ACC?style=for-the-badge&logo=xcode&logoColor=white" alt="Xcode"/>
-    <img src="https://img.shields.io/badge/C%23-512BD4?style=for-the-badge&logo=csharp&logoColor=white" alt="C#"/>
-    <img src="https://img.shields.io/badge/.NET-512BD4?style=for-the-badge&logo=dotnet&logoColor=white" alt=".NET"/>
-    <img src="https://img.shields.io/badge/macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="macOS"/>
-    <img src="https://img.shields.io/badge/Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Windows"/>
-    <img src="https://img.shields.io/badge/Git-E44C30?style=for-the-badge&logo=git&logoColor=white" alt="Git"/>
+    <img src="https://img.shields.io/badge/macOS-13%2B-000000?style=for-the-badge&logo=apple&logoColor=white" alt="macOS 13+"/>
+    <img src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 10 / 11"/>
+    <img src="https://img.shields.io/badge/local--first-0F172A?style=for-the-badge" alt="本地优先"/>
+    <img src="https://img.shields.io/badge/license-MIT-14B8A6?style=for-the-badge" alt="MIT 许可证"/>
   </p>
-  <p>Agent 的本地常驻状态光环。在桌面上原生呈现各种 Agent 的执行与规划状态。</p>
+  <p>无需切换窗口，随时知道编码 Agent 正在思考、执行、完成、受阻，还是等待你。</p>
   <p><a href="README.md">English</a> | 简体中文</p>
 </div>
 
-
 ---
 
-跨平台行为以
-[`src/shared/spec/agent-halo.v2.json`](src/shared/spec/agent-halo.v2.json)
-为唯一参数来源，并生成 C# 与 Swift 常量；Windows 和 macOS 继续使用各自的原生渲染。
-详见 [共享契约说明](src/shared/README.md) 与
-[跨平台架构说明](docs/CROSS_PLATFORM_SHARED_CONTRACT.md)。
+## 功能亮点
 
-## 系统要求
+- **一眼看懂状态。** 一枚常驻光环区分规划思考、工具执行、任务完成、等待输入与阻断故障。任务完成后会持续呼吸，直到你确认它。
+- **多个 Agent，一个焦点。** Agent Halo 并行监听已支持的 Agent，光环与详情面板只跟随当前选中的对象；切换焦点不会停止其它监听。
+- **需要时再看详情。** 悬停可查看官方额度、上下文或会话信息。自定义 Codex / API Key 会话显示项目、模型与本轮输入/输出 Token，但不暴露 API Key、Base URL 或中转工具名称，也不伪造官方额度。
+- **真正的原生桌面体验。** Windows 与 macOS 应用无需浏览器或云端面板；支持置顶、拖动吸附、缩放、暂停、开机启动以及显示器变化后的位置恢复。
+- **从设计上保持本地。** 生命周期与会话内容留在本机。官方额度刷新复用已有登录；Agent Halo 不需要、也不会读取 OpenAI API Key。
 
-- Windows 10 或 Windows 11
-- 至少安装并使用以下之一：Codex 桌面端、Claude Code、或 Grok Build CLI
-- .NET Framework 4.8（目前的 Windows 10/11 通常已自带）
+## 平台支持
 
-## macOS 开发版
+| 平台 | 支持的 Agent | 系统要求 |
+| --- | --- | --- |
+| Windows | Codex、Claude Code、Grok Build | Windows 10 或 11；.NET Framework 4.8（通常已自带） |
+| macOS | Codex、Claude Code、Grok Build | macOS 13 及以上 |
 
-运行并验证：
+使用前请至少安装并登录一种受支持的 Agent。
 
-```bash
-bash ./scripts/run-macos.sh --verify
-```
+## 安装
 
-应用是菜单栏辅助应用，不显示 Dock 图标。可以从菜单栏 Agent Halo 图标退出，也可以执行：
+从 [GitHub 最新版本](https://github.com/NePixe1/AgentHalo/releases/latest) 下载。
 
-```bash
-pkill -x AgentHaloMac
-```
+### Windows
 
-诊断命令：
-
-```bash
-cd src/macos
-swift run AgentHaloDiagnostics --self-test /tmp/agent-halo-self-test.txt
-swift run AgentHaloDiagnostics --render-states /tmp/agent-halo-states
-swift run AgentHaloDiagnostics --transition-strip /tmp/agent-halo-transitions
-```
-
-## 安装与运行
-
-1. 从 GitHub Releases 下载最新的 `AgentHalo-Windows-v*.zip`。
-2. 解压整个 ZIP 压缩包，不要直接在压缩包内运行。
+1. 下载 `AgentHalo-Windows-v*.zip`。
+2. 解压整个压缩包（不要在压缩包内直接运行）。
 3. 双击 `AgentHalo.exe`，光环会出现在主显示器右上方附近。
 
-程序没有安装器，也不需要 OpenAI API Key。为独立刷新额度，Agent Halo
-会复用 Codex 已有的 OAuth 登录凭据；OAuth Token 轮换时会原子更新 Codex
-原有的 `auth.json`。
+### macOS
 
-## 操作
+1. 下载 `AgentHalo-macOS-*.dmg`。
+2. 打开 DMG，将 Agent Halo 拖入「应用程序」。
+3. 从「应用程序」启动。Agent Halo 为菜单栏应用，不显示 Dock 图标。
 
-- 拖动光环：调整位置，靠近屏幕边缘时会自动吸附。
-- 鼠标悬停：查看当前状态；官方 Codex OAuth 显示 5 小时额度和周额度。
-- 使用 CCSwitch、自定义模型提供商或 API Key 时，Codex 面板会自动改为显示项目、模型和本轮输入/输出 Token，不展示 API Key、Base URL 或中转工具名称。
-- 悬停详情面板提供 `Codex / CC / Grok` 三段切换（Windows 与 macOS）。Agent Halo 会同时监听可用工具，但光环颜色、状态文案和额度行只跟随当前选中的监控对象。Grok Build 焦点显示 OAuth 周额度与最小生命周期光环（thinking / working / done / needs you / error；presence 为 STANDBY 与 OFFLINE）。无 Pay-as-you-go UI。
-- 上下文 pill 显示当前监控对象的上下文占用：Codex 显示配额上下文占用，Claude Code 显示上下文窗口使用率（macOS 经 status line proxy），Grok Build 优先使用会话 `updates.jsonl` 中的 live `totalTokens`（回退到回合结束的 `signals.json`）。
-- Codex 官方额度行只在 OAuth 模式显示；自定义 API 模式和 `CC` 视图使用相同高度的信息行，不混入虚假的官方额度。Grok 焦点在有 OAuth 凭据时显示单条 Weekly 行。
-- 任务完成后绿色会缓慢呼吸；再次打开 Codex 后自动确认并变为不发光的稳定绿色。
-- 右键单击：打开状态预览、暂停监听、开机启动和退出菜单。
-- 右键”光环大小”：选择 `75% / 100% / 125%`，重启后保持设置。
-- macOS 会记住光环所属显示器及相对位置；该显示器断开时临时移到主屏右上角，重新连接后恢复原位置。临时回退期间如果手动拖动光环，新位置会成为首选位置，不再返回原显示器。
-- Windows 保持原有离屏恢复行为：启动或显示器变化后，如果光环完全离开所有屏幕，会自动移回主屏右上角。
-- 两个平台都可从右键菜单选择“脱离卡死”，明确重置到主屏右上角。
-- 单击光环：将 Codex 窗口切到前台。
+官方账号不需要 OpenAI API Key。可用时，额度刷新会复用你已有的提供商登录。
 
-## 状态含义
+## 快速使用
 
-- 黄色长亮短暗：Agent 正在思考或规划。
-- 蓝色长亮短暗：Agent 正在执行命令、搜索、编辑文件或调用工具。
-- 绿色双闪：Agent 已完成；高亮两次后持续缓慢呼吸，直到被确认。
-- 珊瑚橙双脉冲：Agent 正在等待 Yes、授权、确认或输入。
-- 红色：仅表示阻止任务继续的故障；未查看时爆闪，打开 Codex 后常亮，离开后变为暗红。
-- 稳定绿色：被监听的 Agent 已运行且当前没有活动任务。
-- 暗白色：当前没有可见的 Agent 活动。
+- **拖动**光环调整位置，靠近屏幕边缘会轻微吸附。
+- **悬停**查看状态与额度 / 会话详情；两个平台均可切换 **Codex / CC / Grok**。
+- **单击**光环可将 Codex 窗口切到前台（在相关场景下）。
+- **右键**打开状态预览、临时暂停、开机启动、置顶、光环大小（`75% / 100% / 125%`）、**脱离卡死**与退出。暂停会在下次启动时自动取消。
+- 显示器变化后，离屏光环会回到主屏。macOS 还会在原显示器重新连接后恢复记忆位置。
 
-详细动效规则按平台拆分：
+## 状态颜色
 
-- [Windows 视觉行为说明](docs/WINDOWS_VISUAL_BEHAVIOR.md)
-- [macOS 视觉行为说明](docs/MACOS_VISUAL_BEHAVIOR.md)
-- 共享状态机契约见 [CROSS_PLATFORM_SHARED_CONTRACT.md](docs/CROSS_PLATFORM_SHARED_CONTRACT.md)。
+| 颜色 | 含义 |
+| --- | --- |
+| 黄色（呼吸） | 思考 / 规划 |
+| 蓝色（呼吸） | 正在执行命令、搜索、编辑或调用工具 |
+| 绿色双闪 → 缓慢呼吸 | 任务已完成，正在等待你确认 |
+| 紫色双脉冲 | 等待授权、确认或输入 |
+| 红色 | 故障或中断导致任务无法继续 |
+| 稳定绿色 | 当前聚焦的 Agent 正在运行，但没有活动任务 |
+| 暗白色 | 暂无可见的被监听活动 |
 
 ## 隐私
 
-Agent Halo 只在本机读取 `%USERPROFILE%\.codex\sessions` 中的生命周期事件，
-并在 macOS 上自动配置：
+- 生命周期与会话内容**仅留在本机**，不会上传对话或会话正文。
+- Agent Halo **不会**读取或保存 OpenAI API Key，也不在界面显示 Key 或私有端点信息。
+- 可选的额度查询使用你已有的登录凭据，并只访问官方接口。
+- 刷新 Codex 额度时，OAuth Token 不会存入 Agent Halo 缓存；额度快照只包含账户哈希、百分比和重置时间。
 
-- Claude Code：`~/.claude/settings.json` 中的生命周期 hooks 与 status line proxy
-- Grok Build：`~/.grok/hooks/agent-halo-status.json` 中的生命周期 hooks
+路径、hooks 与缓存布局等实现细节见 [AGENTS.md](AGENTS.md)。
 
-用户主目录下的 `.agent-halo` 使用统一布局：
+## 常见问题
 
-- `bin/` — staged hook 二进制（macOS 为 `status-hook` /
-  `statusline-proxy`，Windows 为 `status-hook.exe`）
-- `state/` — 小型持久状态（如 macOS statusline 下游命令）
-- `logs/` — 近期生命周期事件（`claude-status.jsonl`、`grok-status.jsonl`，自动轮转）
-- `cache/` — 可安全删除的缓存（Claude context 快照、用量快照）
+### Windows SmartScreen 提示
 
-Grok Build 默认也会加载 Claude 的 `settings.json` hooks（兼容扫描），因此同一条
-Agent Halo `status-hook` 在 Grok 会话里可能出现两次（`agent-halo-status` 与
-`settings`）。功能正常，只是重复执行。若只想保留 Grok 原生路径，可在
-`~/.grok/config.toml` 中设置：
+个人 Windows 构建未使用商业代码签名，SmartScreen 可能提示警告。请只运行可信来源的压缩包，并核对 `SHA256.txt`：
+
+```powershell
+Get-FileHash .\AgentHalo.exe -Algorithm SHA256
+```
+
+输出的哈希必须与 `SHA256.txt` 中的值完全一致。
+
+### macOS 上 Grok Build hook 重复
+
+Grok Build 默认也可能加载 Claude Code 的 `~/.claude/settings.json` hooks（兼容模式）。因此同一条 Agent Halo 状态 hook 在 Grok 会话里可能出现两次（`agent-halo-status` 与 `settings`）。功能正常，只是重复执行。
+
+若只想保留 Grok 原生路径，可在 `~/.grok/config.toml` 中设置：
 
 ```toml
 [compat.claude]
 hooks = false
 ```
 
-这只关闭 Claude hooks 导入，不影响 skills / rules / MCP，也不影响 Claude Code
-本身。修改后需重启 Grok 会话才会生效。注意：若你还有**仅**写在
-`~/.claude/settings.json` 中的其它 hooks，关闭后它们在 Grok 中也不会再运行。
+这只关闭 Claude hooks 导入，不影响 skills / rules / MCP，也不影响 Claude Code 本身。修改后需重启 Grok 会话才会生效。若你还有**仅**写在 `~/.claude/settings.json` 中的其它 hooks，关闭后它们在 Grok 中也不会再运行。
 
-Windows 应用设置与 `halo.log` 仍在 `%LOCALAPPDATA%\CodexHalo\`；**用量快照**
-在 `.agent-halo\cache\`。应用启动时会把当前 `AgentHalo.exe` 原子暂存为稳定副本
-`%USERPROFILE%\.agent-halo\bin\status-hook.exe`，Claude hooks 通过
-`status-hook.exe --claude-hook <event>` 调用该副本；它不是需要单独下载的组件。
-Agent Halo 还会只读查询 `logs_2.sqlite` 中结构化的 Codex 连接和服务故障记录。
+## 开发与贡献
 
-为了独立刷新 Codex 额度，程序会读取现有 OAuth 登录凭据，并仅向
-`auth.openai.com` 与 `chatgpt.com` 的官方接口发起 HTTPS 请求。Grok Build
-周额度（OAuth）读取 `~/.grok/auth.json`，并仅请求 `auth.x.ai` 与
-`cli-chat-proxy.grok.com`。OAuth Token 不会写入 Agent Halo 缓存；Token 轮换时
-只会原子写回原有凭据文件。Agent Halo 的额度缓存仅保存账户哈希、使用百分比和
-重置时间，不上传会话内容，也不读取或保存各厂商 API Key。
+README 有意只保留安装与使用信息。架构、源码构建、诊断、共享契约修改与贡献者检查见 **[AGENTS.md](AGENTS.md)**。
 
-## Windows 安全提示
+## 许可证
 
-这是一个未购买商业代码签名证书的自制程序，因此 Windows SmartScreen 可能提示
-“Windows 已保护你的电脑”。请只在确认压缩包来自可信发送者、并核对
-`SHA256.txt` 后运行。确认无误时，可选择“更多信息”查看程序名称。
-
-可以在解压后的文件夹中打开 PowerShell，并执行：
-
-```powershell
-Get-FileHash .\AgentHalo.exe -Algorithm SHA256
-```
-
-输出的哈希值应与 `SHA256.txt` 中的值完全一致。
-
----
-
-## 项目声明
-
-Agent Halo 是独立的非官方开源项目，与 OpenAI、Quantic Dream 均无隶属或背书关系。
-项目不包含游戏素材、名称、Logo 或照搬的指示灯几何造型。
+本项目采用 [MIT License](LICENSE) 开源。

@@ -162,7 +162,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var codexIsForeground = false
     private var codexWasForeground = false
     private var lastStatusMenuSignature: StatusMenuSignature?
-    private var lastStatusIconState: HaloState?
     private var cachedStartupEnabled = false
     private var cachedStartupExpiresAt = Date.distantPast
     private let startupCheckInterval: TimeInterval = 2
@@ -416,7 +415,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func createStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = StatusIcon.image(color: NSColor.systemTeal)
+        statusItem.button?.image = StatusIcon.image()
         statusItem.button?.toolTip = "Agent Halo"
     }
 
@@ -561,20 +560,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateStatusMenu() {
         rebuildStatusMenuIfNeeded()
-        updateStatusIcon()
-    }
-
-    private func updateStatusIcon() {
-        guard let statusItem else {
-            return
-        }
-        if lastStatusIconState == aggregate.state {
-            return
-        }
-        lastStatusIconState = aggregate.state
-        let rgb = HaloVisualModel.stateColor(aggregate.state)
-        let color = NSColor(calibratedRed: rgb.red / 255, green: rgb.green / 255, blue: rgb.blue / 255, alpha: 1)
-        statusItem.button?.image = StatusIcon.image(color: color)
     }
 
     private func rebuildStatusMenuIfNeeded() {
