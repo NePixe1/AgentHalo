@@ -657,8 +657,8 @@ namespace CodexHalo
             }
             DateTime result;
             if (DateTime.TryParse(normalized, CultureInfo.InvariantCulture,
-                DateTimeStyles.RoundtripKind | DateTimeStyles.AssumeUniversal |
-                DateTimeStyles.AdjustToUniversal, out result))
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                out result))
             {
                 return result.ToUniversalTime();
             }
