@@ -473,11 +473,19 @@ public sealed class DetailsWindow : Window
             contextHoldExpiresUtc = null;
             CodexCustomApiMetrics codexMetrics = currentAgent == AgentKind.Codex
                 ? ReadCodexCustomMetrics() : null;
-            if (currentAgent == AgentKind.ClaudeCode ||
-                (codexMetrics != null && codexMetrics.IsCustomApi))
+            if (currentAgent == AgentKind.ClaudeCode)
             {
                 // Scheme B: offline empty rectangle — never three rows of "--".
-                ShowAPIKeySessionBody(true, null, null, null);
+                bool showAPIKeyChip = previewClaudeMetrics != null
+                    ? ShouldShowClaudeAPIKeyChip(previewClaudeMetrics)
+                    : ClaudeCodeMetricsReader.IsCustomApi(
+                        Environment.GetFolderPath(
+                            Environment.SpecialFolder.UserProfile));
+                ShowSessionBody(showAPIKeyChip, true, null, null, null);
+            }
+            else if (codexMetrics != null && codexMetrics.IsCustomApi)
+            {
+                ShowSessionBody(true, true, null, null, null);
             }
             else if (currentAgent == AgentKind.Grok)
             {
@@ -506,7 +514,8 @@ public sealed class DetailsWindow : Window
             string model = metrics.HasModel ? metrics.Model : null;
             string tokens = FormatTokenPair(metrics.HasTokenUsage,
                 metrics.InputTokens, metrics.OutputTokens);
-            ShowAPIKeySessionBody(false, title, model, tokens);
+            ShowSessionBody(ShouldShowClaudeAPIKeyChip(metrics),
+                false, title, model, tokens);
             SetContextPercent(metrics.HasContext, metrics.ContextUsedPercent);
         }
 
@@ -617,7 +626,7 @@ public sealed class DetailsWindow : Window
             string model = metrics.HasModel ? metrics.Model : null;
             string tokens = FormatTokenPair(metrics.HasTokenUsage,
                 metrics.InputTokens, metrics.OutputTokens);
-            ShowAPIKeySessionBody(false, title, model, tokens);
+            ShowSessionBody(true, false, title, model, tokens);
             SetContextPercent(metrics.HasContext, metrics.ContextUsedPercent);
         }
 
@@ -987,14 +996,18 @@ public sealed class DetailsWindow : Window
         }
 
         /// <summary>
-        /// Scheme B session body: API Key chip + fixed-height empty XOR session card.
+        /// Scheme B session body: optional API Key chip + fixed-height empty XOR card.
         /// </summary>
-        private void ShowAPIKeySessionBody(bool offline, string title, string model,
-            string tokens)
+        private void ShowSessionBody(bool showAPIKeyChip, bool offline,
+            string title, string model, string tokens)
         {
             quotaGroup.Visibility = Visibility.Hidden;
-            apiKeyChip.Visibility = Visibility.Visible;
-            apiKeyChipText.Text = L10n.Instance["access.mode.api_key"];
+            apiKeyChip.Visibility = showAPIKeyChip
+                ? Visibility.Visible : Visibility.Collapsed;
+            if (showAPIKeyChip)
+            {
+                apiKeyChipText.Text = L10n.Instance["access.mode.api_key"];
+            }
             sessionBodySlot.Visibility = Visibility.Visible;
 
             if (offline)
@@ -1017,6 +1030,11 @@ public sealed class DetailsWindow : Window
             sessionCardModel.Text = String.IsNullOrEmpty(model) ? "--" : model;
             sessionCardTokens.Text = String.IsNullOrEmpty(tokens)
                 ? "↑ --  ·  ↓ --" : tokens;
+        }
+
+        internal static bool ShouldShowClaudeAPIKeyChip(ClaudeCodeMetrics metrics)
+        {
+            return metrics != null && metrics.IsCustomApi;
         }
 
         private void HideAPIKeySessionChrome()

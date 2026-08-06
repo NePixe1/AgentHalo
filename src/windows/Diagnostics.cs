@@ -612,6 +612,12 @@ public static class Diagnostics
                     "access.mode.api_key locale");
                 Assert(L10n.Instance["session.empty.api_key"] == "No session",
                     "session.empty.api_key locale");
+                Assert(!DetailsWindow.ShouldShowClaudeAPIKeyChip(
+                    new ClaudeCodeMetrics { IsCustomApi = false }),
+                    "official Claude does not show API key chip");
+                Assert(DetailsWindow.ShouldShowClaudeAPIKeyChip(
+                    new ClaudeCodeMetrics { IsCustomApi = true }),
+                    "custom Claude shows API key chip");
                 Assert(HaloWindow.IsLanguageMenuItemChecked(null, null),
                     "auto language item is checked when preference follows system");
                 Assert(!HaloWindow.IsLanguageMenuItemChecked("en", null),

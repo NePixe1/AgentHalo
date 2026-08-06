@@ -487,7 +487,8 @@ private TextBlock sessionCardModel;
 private TextBlock sessionCardTokens;
 ```
 
-将原 `claudeGroup` 内三行 Project/Model/Token（及 Codex custom 复用的行）**替换或隐藏**，改为上述 body slot。  
+将原 `claudeGroup` 内三行 Project/Model/Token（及 Codex custom 复用的行）**替换或隐藏**，改为上述 body slot。
+
 注意：Windows 历史代码里 Claude/Codex-custom 共用 `claudeGroup` 行——统一改为 session card，**不再单独展示 Project 行**（与 macOS 已去掉 Project 行一致；卡片标题用 session title）。
 
 - [ ] **Step 2: 布局**
@@ -506,12 +507,13 @@ sessionBodySlot.Height = 72; // 与 macOS H_body 同语义；总窗高不得明�
 - [ ] **Step 3: 渲染分支**
 
 ```csharp
-private void ShowAPIKeySessionBody(bool offline, string title, string model, string tokens)
+private void ShowSessionBody(bool showAPIKeyChip, bool offline,
+    string title, string model, string tokens)
 {
     quotaGroup.Visibility = Visibility.Hidden;
     // hide old row group if still present
-    apiKeyChip.Visibility = Visibility.Visible;
-    apiKeyChipText.Text = L10n.Instance["access.mode.api_key"];
+    apiKeyChip.Visibility = showAPIKeyChip
+        ? Visibility.Visible : Visibility.Collapsed;
     sessionBodySlot.Visibility = Visibility.Visible;
 
     if (offline)
@@ -532,8 +534,8 @@ private void ShowAPIKeySessionBody(bool offline, string title, string model, str
 
 接线：
 
-- `ApplyOfflinePlaceholders`：Claude / Codex-custom / 任何 API-key session 路径 → `ShowAPIKeySessionBody(offline: true, ...)`，**禁止**再写三行 `"--"`。
-- `RefreshClaudeDetails` / `ApplyCodexCustomMetrics`：非 offline → `ShowAPIKeySessionBody(false, title, model, tokens)`。
+- `ApplyOfflinePlaceholders`：Claude 根据 `ClaudeCodeMetrics.IsCustomApi` 决定 chip；Codex-custom / 任何 API-key session 路径传 `showAPIKeyChip: true`；**禁止**再写三行 `"--"`。
+- `RefreshClaudeDetails`：根据 `ClaudeCodeMetrics.IsCustomApi` 决定 chip；`ApplyCodexCustomMetrics` 传 `showAPIKeyChip: true`。
 - OAuth `RefreshQuota` / Grok OAuth：`apiKeyChip.Visibility = Collapsed`，`sessionBodySlot` 隐藏，quota 显示（保持现状）。
 
 Grok 若为 API Key 且无 usage：按 spec 走 session body；若当前 Windows 仅 OAuth weekly，保持既有 Grok OAuth 分支，**不要**给 Grok OAuth 加 chip。
@@ -698,7 +700,7 @@ Plan 已保存到 `docs/superpowers/plans/2026-08-05-api-key-session-card-detail
 
 两种执行方式：
 
-1. **Subagent-Driven（推荐）** — 每任务新开 subagent，任务间审查  
-2. **Inline Execution** — 本会话按 executing-plans 连续做，设检查点  
+1. **Subagent-Driven（推荐）** — 每任务新开 subagent，任务间审查
+2. **Inline Execution** — 本会话按 executing-plans 连续做，设检查点
 
 需要我按哪种方式开始实现？
