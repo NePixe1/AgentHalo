@@ -325,7 +325,10 @@ class DetailsPanel: NSPanel {
     }
 
     private func renderSession(_ session: SessionDetailsSnapshot, isOffline: Bool) {
-        if isOffline {
+        // Soft empty rectangle for both OFFLINE and online-with-no-fields so we
+        // never show a card full of "--" (STANDBY often has empty snapshots).
+        // Same copy for offline and blank/standby: "○ No session".
+        if isOffline || !Self.hasSessionCardContent(session) {
             emptyBody.isHidden = false
             sessionCard.isHidden = true
             emptyBody.setText("○ " + L10n.shared["session.empty.api_key"])
@@ -351,6 +354,18 @@ class DetailsPanel: NSPanel {
         } else {
             sessionCard.setTokens(Self.formatTokenAttributedString(input: nil, output: nil))
         }
+    }
+
+    /// Card is only worth showing when at least one field the card paints has data.
+    /// `projectName` alone does not count — the card never surfaces it.
+    static func hasSessionCardContent(_ session: SessionDetailsSnapshot) -> Bool {
+        if let title = session.sessionTitle, !title.isEmpty {
+            return true
+        }
+        if let model = session.modelName, !model.isEmpty {
+            return true
+        }
+        return session.inputTokens != nil || session.outputTokens != nil
     }
 
     private func setAPIKeyChipVisible(_ visible: Bool) {

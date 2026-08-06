@@ -1010,7 +1010,10 @@ public sealed class DetailsWindow : Window
             }
             sessionBodySlot.Visibility = Visibility.Visible;
 
-            if (offline)
+            // Soft empty for OFFLINE and online-with-no-fields — never a card of
+            // "--". Same copy for offline and blank/standby: "○ No session".
+            bool blank = !HasSessionCardContent(title, model, tokens);
+            if (offline || blank)
             {
                 emptyBody.Visibility = Visibility.Visible;
                 sessionCard.Visibility = Visibility.Collapsed;
@@ -1030,6 +1033,24 @@ public sealed class DetailsWindow : Window
             sessionCardModel.Text = String.IsNullOrEmpty(model) ? "--" : model;
             sessionCardTokens.Text = String.IsNullOrEmpty(tokens)
                 ? "↑ --  ·  ↓ --" : tokens;
+        }
+
+        /// <summary>
+        /// Card is only worth showing when at least one painted field has data.
+        /// </summary>
+        internal static bool HasSessionCardContent(
+            string title, string model, string tokens)
+        {
+            if (!String.IsNullOrEmpty(title) || !String.IsNullOrEmpty(model))
+            {
+                return true;
+            }
+            if (String.IsNullOrEmpty(tokens))
+            {
+                return false;
+            }
+            // FormatTokenPair uses this placeholder when usage is missing.
+            return !String.Equals(tokens, "↑ --  ·  ↓ --", StringComparison.Ordinal);
         }
 
         internal static bool ShouldShowClaudeAPIKeyChip(ClaudeCodeMetrics metrics)

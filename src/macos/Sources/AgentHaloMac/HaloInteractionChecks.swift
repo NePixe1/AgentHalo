@@ -65,6 +65,8 @@ func runHaloInteractionChecks() {
     testDetailsPanelShowsMissingAndExpiredUsageWindows()
     testDetailsPanelShowsSessionCardForAPIKey()
     testDetailsPanelLeavesMissingSessionTitleEmpty()
+    testDetailsPanelBlankStandbyUsesSoftEmptyNotDashCard()
+    testDetailsPanelPartialSessionStillUsesCard()
     testDetailsPanelKeepsUsageAndSessionBodiesMutuallyExclusive()
     testDetailsPanelKeepsContextIndependentFromUsageFailure()
     testDetailsPanelClearsContextAndSessionRowsOffline()
@@ -1167,13 +1169,50 @@ private func testDetailsPanelShowsSessionCardForAPIKey() {
 @MainActor
 private func testDetailsPanelLeavesMissingSessionTitleEmpty() {
     let panel = DetailsPanel()
+    // projectName alone is not painted on the card — treat as blank soft empty.
     panel.render(
         aggregate: detailsAggregate(),
         model: sessionDetailsModel(session: SessionDetailsSnapshot(projectName: "AgentHalo"))
     )
 
-    expect(panel.sessionCardTitleForTesting, "--", "missing title should not fall back to projectName")
-    expect(panel.sessionBodyModeForTesting, .sessionCard, "missing title still uses session card")
+    expect(panel.sessionBodyModeForTesting, .empty, "project-only snapshot uses soft empty")
+    expect(
+        panel.sessionEmptyTextForTesting,
+        "○ " + L10n.shared["session.empty.api_key"],
+        "blank online uses No session"
+    )
+    expect(panel.sessionCardTitleForTesting, "--", "hidden card must not fall back to projectName")
+}
+
+@MainActor
+private func testDetailsPanelBlankStandbyUsesSoftEmptyNotDashCard() {
+    let panel = DetailsPanel()
+    panel.render(
+        aggregate: detailsAggregate(state: .done, label: "STANDBY"),
+        model: sessionDetailsModel(session: SessionDetailsSnapshot())
+    )
+
+    expect(panel.sessionBodyModeForTesting, .empty, "STANDBY blank shows soft empty")
+    expect(
+        panel.sessionEmptyTextForTesting,
+        "○ " + L10n.shared["session.empty.api_key"],
+        "STANDBY blank shows No session"
+    )
+    expect(!panel.apiKeyChipHiddenForTesting, "STANDBY API Key still shows mode chip")
+    expect(panel.sessionBodySlotHeightForTesting, 72, "blank empty keeps body slot height")
+}
+
+@MainActor
+private func testDetailsPanelPartialSessionStillUsesCard() {
+    let panel = DetailsPanel()
+    panel.render(
+        aggregate: detailsAggregate(state: .done, label: "STANDBY"),
+        model: sessionDetailsModel(session: SessionDetailsSnapshot(modelName: "claude-opus"))
+    )
+
+    expect(panel.sessionBodyModeForTesting, .sessionCard, "any card field keeps session card")
+    expect(panel.sessionCardModelForTesting, "claude-opus", "partial model on card")
+    expect(panel.sessionCardTitleForTesting, "--", "missing title still placeholders inside card")
 }
 
 @MainActor
@@ -1231,7 +1270,7 @@ private func testDetailsPanelClearsContextAndSessionRowsOffline() {
     expect(
         panel.sessionEmptyTextForTesting,
         "○ " + L10n.shared["session.empty.api_key"],
-        "offline empty copy"
+        "offline empty matches STANDBY: No session"
     )
     expect(panel.sessionCardTitleForTesting, "--", "offline must clear card title")
     expect(panel.sessionCardModelForTesting, "--", "offline must clear card model")

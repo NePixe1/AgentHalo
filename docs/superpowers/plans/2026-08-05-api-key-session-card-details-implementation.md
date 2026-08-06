@@ -27,7 +27,7 @@
 - **不**新增网络请求、端点 host、会话时长、费用（方案 C 不做）。
 - **不**改状态大标题文案为方案 E 软化文案；继续 `aggregate.label` + 现有 detail 本地化。
 - Offline 判定：`state == idle && label == "OFFLINE"`（与现网一致）。
-- empty 文案 **仅 Offline**；STANDBY / 字段全空仍显示 session card + 占位，不回退 empty。
+- Offline soft empty 与 STANDBY / 字段全空 **同一文案**：`session.empty.api_key`（无会话 / No session），UI 前缀 `○ `。
 - 标题 **单行省略** + tooltip 全文；body 内 empty 与 card **同高常量**。
 - i18n 以 `src/shared/locales/{en,zh}.json` 为源，**同步** macOS Core locales 与 Windows locales（`scripts/check_shared.py` 会比对）。
 - 双端信息架构一致；允许控件实现差异。
@@ -92,7 +92,7 @@ access.mode.api_key:
   en: "API Key"
 
 session.empty.api_key:
-  zh: "暂无会话"
+  zh: "无会话"
   en: "No session"
 ```
 
@@ -143,7 +143,7 @@ enum DetailsPanelSessionBodyRole {
 
 ```json
   "access.mode.api_key": "API Key",
-  "session.empty.api_key": "暂无会话",
+  "session.empty.api_key": "无会话",
 ```
 
 - [ ] **Step 2: 原样同步到 macOS Core 与 Windows locales**
@@ -689,7 +689,7 @@ EOF
 1. **Windows `claudeGroup` 复用 Codex custom**：改 body 时两处 Refresh 都要切到 card，避免漏网三行表。
 2. **硬编码面板高度 172**：现网契约，**不得**随新布局改大；失败时压布局而非改期望。不要删掉 top-edge 与 usage==session 同高断言。
 3. **context pill + chip 抢宽度**：顶栏 278 宽；chip 文案短（API Key），优先保证 toggle 108 + pill 42 + chip ≈ 可容纳。
-4. **STANDBY**：不要误用 empty；仅 OFFLINE empty。
+4. **STANDBY 字段全空**：soft empty + blank 文案；Offline 用 empty 文案；禁止全 `--` 卡。
 5. **Grok**：OAuth weekly 保持 quota；勿错误显示 API Key chip。
 
 ---

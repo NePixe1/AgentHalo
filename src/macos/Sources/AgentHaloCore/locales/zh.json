@@ -52,7 +52,7 @@
   "metadata.tokens": "输入输出",
   "metadata.separator": "  ·  ",
   "access.mode.api_key": "API Key",
-  "session.empty.api_key": "暂无会话",
+  "session.empty.api_key": "无会话",
 
   "usage.warning.sign_in_codex": "请重新登录 Codex 以刷新使用情况。",
   "usage.warning.sign_in_claude": "请重新登录 Claude Code 以刷新使用情况。",

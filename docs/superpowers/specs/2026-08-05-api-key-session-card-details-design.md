@@ -61,7 +61,7 @@ Offline（`state == idle` 且 `label == OFFLINE`）时三行强制填 `--`，造
 | 5 | 面板与 body 内矩形 **固定同高**：以「有 session card 的 working 态」为基准，offline empty 对齐该高度。 |
 | 6 | 标题单行省略；完整标题仍可通过 tooltip（或等效悬停）展示。 |
 | 7 | 字段缺失时：标题 / 模型显示占位（`--` 或本地化 empty）；tokens 无数据时显示 `--`，不隐藏整张卡（只要非 offline）。 |
-| 8 | STANDBY / 在线但无有效 session 字段：仍走 session body；有任意可展示字段则填卡，全空时卡内可全为占位，但 **不回退成 offline empty**（empty 文案仅 Offline）。 |
+| 8 | STANDBY / 在线但无有效 session 字段：仍走 session body 槽位；有任意可展示字段则填卡；**字段全空 soft empty 用 `session.empty.api_key`（无会话 / No session）**；Offline 同矩形、**同一文案**（`○ 无会话` / `○ No session`），禁止全 `--` 卡。 |
 | 9 | 双端（macOS + Windows）同一规格；允许平台控件差异，禁止信息架构差异。 |
 | 10 | 视觉以 mock 为准；实现数值可像素对齐平台习惯，但结构与层次不得偏离。 |
 | 11 | **面板外框尺寸锁定现网**：宽度与拟合高度不得因方案 B 变大或变小；OAuth ↔ session 切换后高度关系保持现有契约（macOS 均为 **172**）。 |
@@ -149,7 +149,7 @@ quota rows（5h / weekly 等，按 provider）
 | 尺寸 | 与 session card **同宽同高** |
 | 样式 | 虚线边框 + 浅底（可略淡于 session card） |
 | 文案 | 单行居中；前缀可用轻量圆点 `○`（可选，双端一致即可） |
-| 文案内容 | 见 i18n：表达「暂无会话」，不展示 `--` 三行表 |
+| 文案内容 | Offline 与 STANDBY 全空一致：`○ ` + `session.empty.api_key`（无会话 / No session）；不展示 `--` 三行表 |
 
 ### 状态大标题 / 副文案
 
@@ -160,9 +160,9 @@ quota rows（5h / weekly 等，按 provider）
 
 | 条件 | mode chip | context pill | body |
 |------|-----------|--------------|------|
-| API Key + OFFLINE | 显示 | 隐藏 | empty 矩形 |
+| API Key + OFFLINE | 显示 | 隐藏 | soft empty（虚线框 + `○ 无会话` / `○ No session`） |
 | API Key + STANDBY / 活跃态 + 有 session 字段 | 显示 | 按现有规则 | session card |
-| API Key + 活跃/STANDBY + 字段全空 | 显示 | 按现有规则 | session card（占位 `--`） |
+| API Key + 活跃/STANDBY + 字段全空 | 显示 | 按现有规则 | soft empty（`session.empty.api_key` = 无会话 / No session） |
 | OAuth（任意状态） | 隐藏 | 按现有规则 | usage / quota（不变） |
 
 **Offline 判定**（与现网一致）：
@@ -232,12 +232,12 @@ VStack
 | Key | zh | en |
 |-----|----|----|
 | `access.mode.api_key` | API Key | API Key |
-| `session.empty.api_key` | 暂无会话 | No session |
+| `session.empty.api_key` | 无会话 | No session |
 
 说明：
 
 - mode chip 使用 `access.mode.api_key`。
-- empty 矩形使用 `session.empty.api_key`；前导 `○` 可作为装饰字符写在 UI 层或拼进字符串，双端一致即可。
+- STANDBY / 字段全空：`session.empty.api_key`（前导 `○` 由 UI 层拼接）；Offline empty **不写文案**。
 - 现有 `metadata.*`、`status.*`、`context.*` 保持；三行表文案在 API Key 路径不再作为主 UI 展示（实现可删除 session 三行视图或仅保留测试/调试路径，以最小 diff 为准）。
 
 ## 平台落点
