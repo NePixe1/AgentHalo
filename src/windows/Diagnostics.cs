@@ -1440,10 +1440,12 @@ public static class Diagnostics
                 Assert(invalidFocus != null &&
                     invalidFocus.GetFocusedAgent() == AgentKind.Codex,
                     "invalid focusedAgent falls back to Codex");
-                // Load() repair accepts only codex/claudeCode/grok; "nope" would reset string.
+                // Load() repair accepts only known agent values; "nope" resets.
                 Assert(!String.Equals(invalidFocus.FocusedAgent, "grok",
                     StringComparison.OrdinalIgnoreCase) &&
                     !String.Equals(invalidFocus.FocusedAgent, "claudeCode",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    !String.Equals(invalidFocus.FocusedAgent, "pi",
                         StringComparison.OrdinalIgnoreCase) &&
                     !String.Equals(invalidFocus.FocusedAgent, "codex",
                         StringComparison.OrdinalIgnoreCase),
@@ -1462,6 +1464,73 @@ public static class Diagnostics
                     String.Equals(claudeFocusSettings.FocusedAgent, "claudeCode",
                         StringComparison.OrdinalIgnoreCase),
                     "claudeCode focus still persists");
+
+                HaloSettings piFocusSettings = new HaloSettings();
+                piFocusSettings.SetFocusedAgent(AgentKind.Pi);
+                Assert(piFocusSettings.GetFocusedAgent() == AgentKind.Pi &&
+                    String.Equals(piFocusSettings.FocusedAgent, "pi",
+                        StringComparison.OrdinalIgnoreCase),
+                    "pi focus persists");
+
+                string piExtensionSource = PiExtensionConfigurator.ReadEmbeddedSource();
+                Assert(!String.IsNullOrWhiteSpace(piExtensionSource) &&
+                    piExtensionSource.Contains("agent_settled") &&
+                    piExtensionSource.Contains("tool_execution_start"),
+                    "Pi status extension is embedded with authoritative events");
+                Assert(!piExtensionSource.Contains("prompt:") &&
+                    !piExtensionSource.Contains("toolArgs") &&
+                    !piExtensionSource.Contains("baseUrl"),
+                    "Pi extension excludes prompts, tool arguments and provider URLs");
+
+                string oldPiRoot = Environment.GetEnvironmentVariable(
+                    "PI_CODING_AGENT_DIR");
+                string piAgentRoot = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-pi-extension-" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    Environment.SetEnvironmentVariable("PI_CODING_AGENT_DIR", piAgentRoot);
+                    string installedPiExtension = PiExtensionConfigurator.Configure();
+                    Assert(File.Exists(installedPiExtension) &&
+                        String.Equals(File.ReadAllText(installedPiExtension, Encoding.UTF8),
+                            piExtensionSource, StringComparison.Ordinal),
+                        "Pi extension installs atomically from the embedded source");
+                }
+                finally
+                {
+                    Environment.SetEnvironmentVariable("PI_CODING_AGENT_DIR", oldPiRoot);
+                }
+
+                string piStatusHome = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-pi-status-" + Guid.NewGuid().ToString("N"));
+                string piStatusPath = AgentHaloPaths.PiStatusLog(piStatusHome);
+                Directory.CreateDirectory(Path.GetDirectoryName(piStatusPath));
+                string piNow = DateTime.UtcNow.ToString("o");
+                int currentPid = Process.GetCurrentProcess().Id;
+                File.WriteAllText(piStatusPath,
+                    "{\"version\":1,\"timestamp\":\"" + piNow +
+                    "\",\"source\":\"pi-extension\",\"event\":\"tool_execution_start\"," +
+                    "\"state\":\"working\",\"pid\":" +
+                    currentPid.ToString(CultureInfo.InvariantCulture) +
+                    ",\"sessionId\":\"pi-self-test\",\"cwd\":\"C:\\\\work\\\\demo\"," +
+                    "\"provider\":\"test-provider\",\"model\":\"test-model\"," +
+                    "\"contextTokens\":24000,\"contextWindow\":120000," +
+                    "\"inputTokens\":1200,\"outputTokens\":80," +
+                    "\"toolName\":\"read\"}\n", Encoding.UTF8);
+                PiStatusMonitor piStatusMonitor = new PiStatusMonitor(piStatusPath);
+                Assert(piStatusMonitor.Refresh(), "Pi status log refreshes");
+                List<SessionSnapshot> piSnapshots = piStatusMonitor.Snapshots();
+                Assert(piSnapshots.Count == 1 &&
+                    piSnapshots[0].Agent == AgentKind.Pi &&
+                    piSnapshots[0].State == HaloState.Working &&
+                    piSnapshots[0].ModelName == "test-model" &&
+                    piSnapshots[0].ContextInputTokens == 24000 &&
+                    piStatusMonitor.LiveSessionIds().Contains("pi-self-test"),
+                    "Pi status maps working/model/context and validates live pid");
+                AggregateSnapshot piAggregate = HaloWindow.BuildPiAggregateForTest(
+                    piSnapshots, false, piStatusMonitor.LiveSessionIds(), DateTime.UtcNow);
+                Assert(piAggregate.State == HaloState.Working &&
+                    piAggregate.FocusedAgent == AgentKind.Pi,
+                    "Pi aggregate exposes active working state");
 
                 // Hook routing: Grok env must write logs/grok-status.jsonl only
                 // and normalize snake_case event names to PascalCase.
@@ -2961,6 +3030,66 @@ public static class Diagnostics
                 claudeEncoder.Save(stream);
             }
             claudePanel.Close();
+
+            List<SessionSnapshot> piSessions = new List<SessionSnapshot>();
+            piSessions.Add(new SessionSnapshot
+            {
+                ThreadId = "preview-pi",
+                ProjectName = "AgentHalo",
+                WorkingDirectory = @"C:\work\AgentHalo",
+                State = HaloState.Thinking,
+                Action = "Thinking",
+                Active = true,
+                LastEventUtc = now,
+                Agent = AgentKind.Pi,
+                ModelProvider = "openai",
+                ModelName = "gpt-5.4",
+                TurnInputTokens = 24500,
+                TurnOutputTokens = 920,
+                ContextInputTokens = 64000,
+                ContextWindowTokens = 200000
+            });
+            AggregateSnapshot piAggregate = new AggregateSnapshot
+            {
+                State = HaloState.Thinking,
+                Label = "THINKING",
+                Detail = "AgentHalo · Thinking",
+                Sessions = piSessions,
+                FocusedAgent = AgentKind.Pi
+            };
+            DetailsWindow piPanel = new DetailsWindow();
+            piPanel.UpdateContent(piAggregate, piSessions);
+            FrameworkElement piContent = piPanel.Content as FrameworkElement;
+            piPanel.Content = null;
+            Grid piStage = new Grid();
+            piStage.Width = 380;
+            piStage.Background = new SolidColorBrush(MediaColor.FromRgb(7, 10, 15));
+            piContent.Width = 324;
+            piContent.Margin = new Thickness(28);
+            piStage.Children.Add(piContent);
+            piStage.Measure(new System.Windows.Size(380, 1000));
+            double piHeight = Math.Ceiling(piStage.DesiredSize.Height);
+            if (Math.Abs(height - piHeight) > 0.001)
+            {
+                throw new InvalidOperationException(
+                    "Panel preview height mismatch: Codex=" +
+                    height.ToString(CultureInfo.InvariantCulture) + ", Pi=" +
+                    piHeight.ToString(CultureInfo.InvariantCulture));
+            }
+            piStage.Height = piHeight;
+            piStage.Arrange(new Rect(0, 0, 380, piHeight));
+            piStage.UpdateLayout();
+            RenderTargetBitmap piBitmap = new RenderTargetBitmap(760,
+                (int)(piHeight * 2), 192, 192, PixelFormats.Pbgra32);
+            piBitmap.Render(piStage);
+            PngBitmapEncoder piEncoder = new PngBitmapEncoder();
+            piEncoder.Frames.Add(BitmapFrame.Create(piBitmap));
+            using (FileStream stream = File.Create(Path.Combine(outputDirectory,
+                "panel-pi.png")))
+            {
+                piEncoder.Save(stream);
+            }
+            piPanel.Close();
         }
 
         private static void RenderMenuPreview(string outputDirectory)

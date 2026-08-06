@@ -62,6 +62,10 @@ public sealed class HaloSettings
             {
                 return AgentKind.Grok;
             }
+            if (String.Equals(FocusedAgent, "pi", StringComparison.OrdinalIgnoreCase))
+            {
+                return AgentKind.Pi;
+            }
             return AgentKind.Codex;
         }
 
@@ -74,6 +78,10 @@ public sealed class HaloSettings
             else if (agent == AgentKind.Grok)
             {
                 FocusedAgent = "grok";
+            }
+            else if (agent == AgentKind.Pi)
+            {
+                FocusedAgent = "pi";
             }
             else
             {
@@ -179,6 +187,8 @@ public static class SettingsStorage
                             !String.Equals(result.FocusedAgent, "claudeCode",
                                 StringComparison.OrdinalIgnoreCase) &&
                             !String.Equals(result.FocusedAgent, "grok",
+                                StringComparison.OrdinalIgnoreCase) &&
+                            !String.Equals(result.FocusedAgent, "pi",
                                 StringComparison.OrdinalIgnoreCase))
                         {
                             result.FocusedAgent = "codex";
