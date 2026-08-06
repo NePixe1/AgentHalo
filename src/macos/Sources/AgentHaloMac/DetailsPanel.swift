@@ -39,7 +39,8 @@ class DetailsPanel: NSPanel {
     private let apiKeyChip = ModeChipView(title: L10n.shared["access.mode.api_key"])
     private let quotaGroup = NSStackView()
     /// Hosts the fixed-height session body slot (empty | session card).
-    private let metadataGroup = NSStackView()
+    /// Plain `NSView` (not `NSStackView`) so width is explicit and not ambiguous.
+    private let metadataGroup = NSView()
     private let bodySlot = NSView()
     private let emptyBody = EmptySessionBodyView()
     private let sessionCard = SessionCardView()
@@ -114,20 +115,24 @@ class DetailsPanel: NSPanel {
         quotaGroup.addArrangedSubview(secondaryQuota)
         stack.addArrangedSubview(quotaGroup)
 
-        metadataGroup.orientation = .vertical
-        metadataGroup.spacing = 0
-        metadataGroup.alignment = .width
+        // Plain container: explicit full-width pin avoids NSStackView width
+        // ambiguity that shrank empty/card to label-hugging size (right-biased).
         metadataGroup.translatesAutoresizingMaskIntoConstraints = false
         // Bottom inset keeps session body contribution aligned with the 70pt
         // usage group so fitted panel height stays 172 (11 + 72 + 3 == 16 + 70).
-        metadataGroup.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 3, right: 0)
+        let sessionBodyBottomEqualizer: CGFloat = 3
 
         bodySlot.translatesAutoresizingMaskIntoConstraints = false
         emptyBody.translatesAutoresizingMaskIntoConstraints = false
         sessionCard.translatesAutoresizingMaskIntoConstraints = false
+        // Expand horizontally; never hug label intrinsic width.
+        for view in [bodySlot, emptyBody, sessionCard] as [NSView] {
+            view.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        }
         bodySlot.addSubview(emptyBody)
         bodySlot.addSubview(sessionCard)
-        metadataGroup.addArrangedSubview(bodySlot)
+        metadataGroup.addSubview(bodySlot)
         metadataGroup.isHidden = true
         stack.addArrangedSubview(metadataGroup)
 
@@ -163,6 +168,14 @@ class DetailsPanel: NSPanel {
             secondaryQuota.trailingAnchor.constraint(equalTo: quotaGroup.trailingAnchor),
             metadataGroup.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 17),
             metadataGroup.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
+            // Full-bleed body slot inside metadata container (+ bottom equalizer).
+            bodySlot.leadingAnchor.constraint(equalTo: metadataGroup.leadingAnchor),
+            bodySlot.trailingAnchor.constraint(equalTo: metadataGroup.trailingAnchor),
+            bodySlot.topAnchor.constraint(equalTo: metadataGroup.topAnchor),
+            bodySlot.bottomAnchor.constraint(
+                equalTo: metadataGroup.bottomAnchor,
+                constant: -sessionBodyBottomEqualizer
+            ),
             bodySlot.heightAnchor.constraint(equalToConstant: Self.sessionBodyHeight),
             emptyBody.leadingAnchor.constraint(equalTo: bodySlot.leadingAnchor),
             emptyBody.trailingAnchor.constraint(equalTo: bodySlot.trailingAnchor),
@@ -781,7 +794,9 @@ class DetailsPanel: NSPanel {
     }
 
     var metadataTopInsetForTesting: CGFloat {
-        metadataGroup.edgeInsets.top
+        // Session body container is a plain NSView; top inset is always 0
+        // (bottom equalizer is applied via bodySlot bottom constraint).
+        0
     }
 
     var backingScaleForTesting: CGFloat {
@@ -860,16 +875,24 @@ private final class EmptySessionBodyView: NSView {
         set { label.stringValue = newValue }
     }
 
+    /// Prefer expanding to fill body slot; do not hug label width.
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
+    }
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
         layer?.cornerRadius = 12
+        layer?.masksToBounds = true
         layer?.backgroundColor = NSColor(calibratedWhite: 1, alpha: 0.45).cgColor
 
         dashLayer.fillColor = nil
         dashLayer.strokeColor = NSColor(calibratedRed: 130 / 255, green: 150 / 255, blue: 165 / 255, alpha: 0.28).cgColor
         dashLayer.lineWidth = 1
         dashLayer.lineDashPattern = [4, 3]
+        dashLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
         layer?.addSublayer(dashLayer)
 
         label.font = .systemFont(ofSize: 12, weight: .regular)
@@ -877,6 +900,8 @@ private final class EmptySessionBodyView: NSView {
         label.alignment = .center
         label.lineBreakMode = .byTruncatingTail
         label.maximumNumberOfLines = 1
+        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         label.translatesAutoresizingMaskIntoConstraints = false
         addSubview(label)
 
@@ -895,10 +920,16 @@ private final class EmptySessionBodyView: NSView {
 
     func setText(_ text: String) {
         label.stringValue = text
+        needsLayout = true
     }
 
     override func layout() {
         super.layout()
+        // Keep dash stroke in view coordinates (frame = bounds origin 0).
+        dashLayer.frame = bounds
+        dashLayer.contentsScale = window?.backingScaleFactor
+            ?? NSScreen.main?.backingScaleFactor
+            ?? 2
         let path = CGPath(
             roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
             cornerWidth: 12,
@@ -906,7 +937,6 @@ private final class EmptySessionBodyView: NSView {
             transform: nil
         )
         dashLayer.path = path
-        dashLayer.frame = bounds
     }
 }
 
@@ -923,13 +953,20 @@ private final class SessionCardView: NSView {
     var tokensText: String { tokenLabel.stringValue }
     var titleToolTipText: String? { titleLabel.toolTip }
 
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
+    }
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.cornerRadius = 12
+        layer?.masksToBounds = true
         layer?.backgroundColor = NSColor(calibratedWhite: 1, alpha: 0.62).cgColor
         layer?.borderWidth = 1
         layer?.borderColor = NSColor(calibratedRed: 140 / 255, green: 160 / 255, blue: 175 / 255, alpha: 0.18).cgColor
+        setContentHuggingPriority(.defaultLow, for: .horizontal)
+        setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         titleLabel.textColor = NSColor(calibratedRed: 30 / 255, green: 44 / 255, blue: 54 / 255, alpha: 1)
