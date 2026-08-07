@@ -1280,7 +1280,7 @@ public sealed class DetailsWindow : Window
                 Width = 44,
                 Height = 26,
                 CornerRadius = new CornerRadius(13),
-                Margin = new Thickness(3),
+                Margin = new Thickness(1, 3, 0, 3),
                 HorizontalAlignment = HorizontalAlignment.Left,
                 VerticalAlignment = VerticalAlignment.Center,
                 Background = new SolidColorBrush(MediaColor.FromRgb(225, 249, 255)),
@@ -1347,6 +1347,8 @@ public sealed class DetailsWindow : Window
 
             Viewbox piIconBox = CreateSwitchIcon(PiIconPath, 13.5, out piIcon);
             SetGeometryFillRule(piIcon.Data, FillRule.EvenOdd);
+            // The official mark is geometrically centered but carries more ink on the left.
+            piIconBox.RenderTransform = new TranslateTransform(0.9, 0);
             piBorder = new Border
             {
                 Background = System.Windows.Media.Brushes.Transparent,
