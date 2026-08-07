@@ -1472,6 +1472,42 @@ public static class Diagnostics
                         StringComparison.OrdinalIgnoreCase),
                     "pi focus persists");
 
+                HaloSettings legacyAgents = settingsSerializer.Deserialize<HaloSettings>(
+                    "{\"FocusedAgent\":\"grok\"}");
+                legacyAgents.NormalizeEnabledAgents();
+                Assert(legacyAgents.GetEnabledAgents().Count == 4 &&
+                    legacyAgents.GetFocusedAgent() == AgentKind.Grok,
+                    "legacy settings enable every supported agent");
+
+                HaloSettings filteredAgents = settingsSerializer.Deserialize<HaloSettings>(
+                    "{\"FocusedAgent\":\"claudeCode\",\"EnabledAgents\":[\"codex\",\"pi\"]}");
+                Assert(filteredAgents.NormalizeEnabledAgents() &&
+                    filteredAgents.GetEnabledAgents().SequenceEqual(new[]
+                    {
+                        AgentKind.Codex, AgentKind.Pi
+                    }) && filteredAgents.GetFocusedAgent() == AgentKind.Codex,
+                    "disabled focused agent falls back to first enabled agent");
+                Assert(filteredAgents.SetAgentEnabled(AgentKind.Codex, false) &&
+                    filteredAgents.GetFocusedAgent() == AgentKind.Pi &&
+                    filteredAgents.GetEnabledAgents().SequenceEqual(new[]
+                    {
+                        AgentKind.Pi
+                    }), "disabling focused agent selects the remaining agent");
+                Assert(!filteredAgents.SetAgentEnabled(AgentKind.Pi, false) &&
+                    filteredAgents.IsAgentEnabled(AgentKind.Pi),
+                    "settings keep at least one monitored agent");
+
+                HaloSettings monitorSettings = new HaloSettings();
+                Assert(HaloWindow.ShouldRunCodexMonitor(monitorSettings),
+                    "Codex monitor runs while Codex is focused");
+                monitorSettings.SetFocusedAgent(AgentKind.Pi);
+                Assert(!HaloWindow.ShouldRunCodexMonitor(monitorSettings),
+                    "Codex monitor stops while another agent is focused");
+                monitorSettings.SetFocusedAgent(AgentKind.Codex);
+                monitorSettings.Paused = true;
+                Assert(!HaloWindow.ShouldRunCodexMonitor(monitorSettings),
+                    "Codex monitor stops while monitoring is paused");
+
                 string piExtensionSource = PiExtensionConfigurator.ReadEmbeddedSource();
                 Assert(!String.IsNullOrWhiteSpace(piExtensionSource) &&
                     piExtensionSource.Contains("agent_settled") &&
@@ -3058,6 +3094,7 @@ public static class Diagnostics
                 FocusedAgent = AgentKind.Pi
             };
             DetailsWindow piPanel = new DetailsWindow();
+            piPanel.SetEnabledAgents(new[] { AgentKind.Codex, AgentKind.Pi });
             piPanel.UpdateContent(piAggregate, piSessions);
             FrameworkElement piContent = piPanel.Content as FrameworkElement;
             piPanel.Content = null;

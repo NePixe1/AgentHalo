@@ -160,6 +160,9 @@ public sealed class DetailsWindow : Window
         private readonly Canvas claudeSwitchIcon;
         private readonly System.Windows.Shapes.Path grokSwitchIcon;
         private readonly System.Windows.Shapes.Path piSwitchIcon;
+        private Grid agentSwitcher;
+        private Grid agentSwitchHitLayer;
+        private readonly List<AgentKind> enabledAgents;
         private readonly StackPanel quotaGroup;
         private readonly StackPanel claudeGroup;
         private readonly Grid dataLayer;
@@ -214,6 +217,7 @@ public sealed class DetailsWindow : Window
             UseLayoutRounding = true;
             SnapsToDevicePixels = true;
             SourceInitialized += OnSourceInitialized;
+            enabledAgents = HaloSettings.SupportedAgents().ToList();
 
             shell = new Border();
             shell.CornerRadius = new CornerRadius(16);
@@ -954,10 +958,61 @@ public sealed class DetailsWindow : Window
 
         private void SelectAgent(AgentKind agent)
         {
+            if (!enabledAgents.Contains(agent))
+            {
+                return;
+            }
             if (AgentSelected != null)
             {
                 AgentSelected(agent);
             }
+        }
+
+        public void SetEnabledAgents(IEnumerable<AgentKind> agents)
+        {
+            enabledAgents.Clear();
+            if (agents != null)
+            {
+                foreach (AgentKind candidate in HaloSettings.SupportedAgents())
+                {
+                    if (agents.Contains(candidate))
+                    {
+                        enabledAgents.Add(candidate);
+                    }
+                }
+            }
+            if (enabledAgents.Count == 0)
+            {
+                enabledAgents.Add(AgentKind.Codex);
+            }
+            ApplyAgentSwitchLayout();
+            UpdateAgentSwitch();
+        }
+
+        private void ApplyAgentSwitchLayout()
+        {
+            if (agentSwitcher == null || agentSwitchHitLayer == null)
+            {
+                return;
+            }
+            Border[] borders = { codexSwitch, claudeSwitch, grokSwitch, piSwitch };
+            AgentKind[] agents = HaloSettings.SupportedAgents();
+            for (int i = 0; i < borders.Length; i++)
+            {
+                borders[i].Visibility = Visibility.Collapsed;
+                agentSwitcher.ColumnDefinitions[i].Width = new GridLength(0);
+                agentSwitchHitLayer.ColumnDefinitions[i].Width = new GridLength(0);
+            }
+            for (int i = 0; i < enabledAgents.Count; i++)
+            {
+                int sourceIndex = Array.IndexOf(agents, enabledAgents[i]);
+                Border border = borders[sourceIndex];
+                border.Visibility = Visibility.Visible;
+                Grid.SetColumn(border, i);
+                agentSwitcher.ColumnDefinitions[i].Width = new GridLength(46);
+                agentSwitchHitLayer.ColumnDefinitions[i].Width = new GridLength(46);
+            }
+            agentSwitcher.Width = 46 * enabledAgents.Count;
         }
 
         private void UpdateAgentSwitch()
@@ -975,20 +1030,8 @@ public sealed class DetailsWindow : Window
 
         private void MoveSwitchThumb(AgentKind agent)
         {
-            // Four equal 46px columns on a 184px track.
-            double target = 0;
-            if (agent == AgentKind.ClaudeCode)
-            {
-                target = 46;
-            }
-            else if (agent == AgentKind.Grok)
-            {
-                target = 92;
-            }
-            else if (agent == AgentKind.Pi)
-            {
-                target = 138;
-            }
+            int index = enabledAgents.IndexOf(agent);
+            double target = Math.Max(0, index) * 46;
             if (!IsVisible)
             {
                 switchThumbTransform.X = target;
@@ -1197,6 +1240,7 @@ public sealed class DetailsWindow : Window
             out System.Windows.Shapes.Path piIcon)
         {
             Grid shell = new Grid();
+            agentSwitcher = shell;
             shell.Width = 184;
             shell.Height = 32;
             shell.ColumnDefinitions.Add(new ColumnDefinition());
@@ -1238,6 +1282,7 @@ public sealed class DetailsWindow : Window
             shell.Children.Add(thumb);
 
             Grid hitLayer = new Grid();
+            agentSwitchHitLayer = hitLayer;
             hitLayer.ColumnDefinitions.Add(new ColumnDefinition());
             hitLayer.ColumnDefinitions.Add(new ColumnDefinition());
             hitLayer.ColumnDefinitions.Add(new ColumnDefinition());

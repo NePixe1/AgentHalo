@@ -63,6 +63,10 @@ public sealed class HaloWindow : Window
         private Forms.ToolStripMenuItem claudeAgentItem;
         private Forms.ToolStripMenuItem grokAgentItem;
         private Forms.ToolStripMenuItem piAgentItem;
+        private Forms.ToolStripMenuItem enabledCodexAgentItem;
+        private Forms.ToolStripMenuItem enabledClaudeAgentItem;
+        private Forms.ToolStripMenuItem enabledGrokAgentItem;
+        private Forms.ToolStripMenuItem enabledPiAgentItem;
 
         public HaloWindow(HaloSettings appSettings)
         {
@@ -95,6 +99,7 @@ public sealed class HaloWindow : Window
             hitSurface.Children.Add(visual);
             Content = hitSurface;
             details = new DetailsWindow();
+            details.SetEnabledAgents(settings.GetEnabledAgents());
             details.AgentSelected += delegate(AgentKind agent)
             {
                 Dispatcher.BeginInvoke(new Action(delegate { SetFocusedAgent(agent); }));
@@ -213,7 +218,7 @@ public sealed class HaloWindow : Window
             AgentHaloRuntimeBootstrap.Bootstrap();
             RestorePosition();
             RecoverHaloIfOffscreen();
-            monitor.Start();
+            UpdateFocusedAgentMonitoring();
             ConfigureFocusedUsageProvider(settings.GetFocusedAgent());
             RefreshState();
             codexWasForeground = IsCodexForeground();
@@ -235,6 +240,10 @@ public sealed class HaloWindow : Window
 
         private void OnForegroundTick(object sender, EventArgs e)
         {
+            if (settings.Paused)
+            {
+                return;
+            }
             AgentKind focusedAgent = settings.GetFocusedAgent();
             if (focusedAgent == AgentKind.ClaudeCode)
             {
@@ -1282,10 +1291,35 @@ public sealed class HaloWindow : Window
                 Dispatcher.BeginInvoke(new Action(delegate
                 {
                     settings.Paused = pause.Checked;
+                    UpdateFocusedAgentMonitoring();
+                    if (settings.Paused)
+                    {
+                        SuspendFocusedUsageProviders();
+                    }
+                    else
+                    {
+                        ConfigureFocusedUsageProvider(settings.GetFocusedAgent());
+                    }
                     RefreshState();
                 }));
             };
             menu.Items.Add(pause);
+
+            Forms.ToolStripMenuItem enabledAgentMenu =
+                new Forms.ToolStripMenuItem(L10n.Instance["menu.enabled_agents"]);
+            enabledCodexAgentItem = CreateEnabledAgentItem(
+                AgentKind.Codex, "Codex");
+            enabledClaudeAgentItem = CreateEnabledAgentItem(
+                AgentKind.ClaudeCode, "Claude Code");
+            enabledGrokAgentItem = CreateEnabledAgentItem(
+                AgentKind.Grok, "Grok");
+            enabledPiAgentItem = CreateEnabledAgentItem(
+                AgentKind.Pi, "Pi");
+            enabledAgentMenu.DropDownItems.Add(enabledCodexAgentItem);
+            enabledAgentMenu.DropDownItems.Add(enabledClaudeAgentItem);
+            enabledAgentMenu.DropDownItems.Add(enabledGrokAgentItem);
+            enabledAgentMenu.DropDownItems.Add(enabledPiAgentItem);
+            menu.Items.Add(enabledAgentMenu);
 
             Forms.ToolStripMenuItem agentMenu =
                 new Forms.ToolStripMenuItem(L10n.Instance["menu.focus_target"]);
@@ -1394,12 +1428,17 @@ public sealed class HaloWindow : Window
 
         private void SetFocusedAgent(AgentKind agent)
         {
+            if (!settings.IsAgentEnabled(agent))
+            {
+                return;
+            }
             if (settings.GetFocusedAgent() != agent)
             {
                 SuspendFocusedUsageProviders();
                 settings.SetFocusedAgent(agent);
                 SettingsStorage.Save(settings);
             }
+            UpdateFocusedAgentMonitoring();
             ConfigureFocusedUsageProvider(agent);
             RefreshState();
             if (details.IsVisible)
@@ -1422,6 +1461,76 @@ public sealed class HaloWindow : Window
             claudeAgentItem.Checked = focused == AgentKind.ClaudeCode;
             grokAgentItem.Checked = focused == AgentKind.Grok;
             piAgentItem.Checked = focused == AgentKind.Pi;
+            codexAgentItem.Visible = settings.IsAgentEnabled(AgentKind.Codex);
+            claudeAgentItem.Visible = settings.IsAgentEnabled(AgentKind.ClaudeCode);
+            grokAgentItem.Visible = settings.IsAgentEnabled(AgentKind.Grok);
+            piAgentItem.Visible = settings.IsAgentEnabled(AgentKind.Pi);
+
+            if (enabledCodexAgentItem != null)
+            {
+                enabledCodexAgentItem.Checked =
+                    settings.IsAgentEnabled(AgentKind.Codex);
+                enabledClaudeAgentItem.Checked =
+                    settings.IsAgentEnabled(AgentKind.ClaudeCode);
+                enabledGrokAgentItem.Checked =
+                    settings.IsAgentEnabled(AgentKind.Grok);
+                enabledPiAgentItem.Checked =
+                    settings.IsAgentEnabled(AgentKind.Pi);
+            }
+        }
+
+        private Forms.ToolStripMenuItem CreateEnabledAgentItem(
+            AgentKind agent, string title)
+        {
+            Forms.ToolStripMenuItem item = new Forms.ToolStripMenuItem(title);
+            item.CheckOnClick = true;
+            item.Checked = settings.IsAgentEnabled(agent);
+            item.Click += delegate
+            {
+                bool enabled = item.Checked;
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    if (!settings.SetAgentEnabled(agent, enabled))
+                    {
+                        item.Checked = true;
+                        return;
+                    }
+                    SuspendFocusedUsageProviders();
+                    details.SetEnabledAgents(settings.GetEnabledAgents());
+                    UpdateFocusedAgentMonitoring();
+                    ConfigureFocusedUsageProvider(settings.GetFocusedAgent());
+                    SettingsStorage.Save(settings);
+                    UpdateAgentMenuChecks();
+                    RefreshState();
+                    if (details.IsVisible)
+                    {
+                        AggregateSnapshot detailsAggregate = displayAggregate ?? aggregate;
+                        details.UpdateContent(detailsAggregate,
+                            DetailsSessions(detailsAggregate));
+                        PositionDetails();
+                    }
+                }));
+            };
+            return item;
+        }
+
+        private void UpdateFocusedAgentMonitoring()
+        {
+            if (ShouldRunCodexMonitor(settings))
+            {
+                monitor.Start();
+            }
+            else
+            {
+                monitor.Stop();
+            }
+        }
+
+        internal static bool ShouldRunCodexMonitor(HaloSettings candidate)
+        {
+            return candidate != null && !candidate.Paused &&
+                candidate.GetFocusedAgent() == AgentKind.Codex &&
+                candidate.IsAgentEnabled(AgentKind.Codex);
         }
 
         private void AddPreviewItem(Forms.ToolStripMenuItem parent, string title,
