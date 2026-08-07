@@ -334,7 +334,10 @@ namespace CodexHalo
                     Path = file,
                     CreatedUtc = info.CreationTimeUtc,
                     LastWriteUtc = info.LastWriteTimeUtc,
-                    Length = info.Length
+                    Length = info.Length,
+                    // -1 means "unknown" so a models.json window alone cannot
+                    // produce a fake 0% context pill.
+                    ContextTokens = -1
                 };
                 string changedProvider = null;
                 string changedModel = null;
@@ -405,8 +408,11 @@ namespace CodexHalo
                     evidence.Provider = changedProvider;
                     evidence.Model = changedModel;
                 }
-                evidence.ContextWindowTokens = ReadContextWindow(root,
-                    evidence.Provider, evidence.Model);
+                if (evidence.ContextTokens >= 0)
+                {
+                    evidence.ContextWindowTokens = ReadContextWindow(root,
+                        evidence.Provider, evidence.Model);
+                }
                 return evidence;
             }
             catch
@@ -701,6 +707,21 @@ namespace CodexHalo
                     return false;
                 }
                 Dictionary<string, PiStatusRecord> next = ReadLatest(path);
+                // Log rotation renames the file and starts a fresh one that only
+                // contains the next event from one session. Keep last-known
+                // records for other still-live PIDs so multi-session rings do
+                // not flash offline mid-turn.
+                foreach (KeyValuePair<string, PiStatusRecord> pair in records)
+                {
+                    if (next.ContainsKey(pair.Key))
+                    {
+                        continue;
+                    }
+                    if (IsLive(pair.Value))
+                    {
+                        next[pair.Key] = pair.Value;
+                    }
+                }
                 string before = Fingerprint(records.Values);
                 string after = Fingerprint(next.Values);
                 records.Clear();
@@ -801,8 +822,10 @@ namespace CodexHalo
                     InputTokens = GetLong(data, "inputTokens"),
                     OutputTokens = GetLong(data, "outputTokens"),
                     CacheReadTokens = GetLong(data, "cacheRead"),
-                    ContextTokens = GetLong(data, "contextTokens"),
-                    ContextWindowTokens = GetLong(data, "contextWindow")
+                    // Null/missing context fields map to -1 (unknown), not 0.
+                    // A window-only payload must not look like "0% used".
+                    ContextTokens = GetOptionalLong(data, "contextTokens"),
+                    ContextWindowTokens = GetOptionalLong(data, "contextWindow")
                 };
             }
             catch
@@ -931,6 +954,23 @@ namespace CodexHalo
                 Int64.TryParse(Convert.ToString(value, CultureInfo.InvariantCulture),
                     NumberStyles.Any, CultureInfo.InvariantCulture, out result)
                 ? result : 0;
+        }
+
+        /// <summary>
+        /// Like <see cref="GetLong"/> but returns -1 when the key is missing or
+        /// null, so callers can distinguish "unknown" from a real zero.
+        /// </summary>
+        private static long GetOptionalLong(Dictionary<string, object> data, string key)
+        {
+            object value;
+            long result;
+            if (!data.TryGetValue(key, out value) || value == null)
+            {
+                return -1;
+            }
+            return Int64.TryParse(Convert.ToString(value, CultureInfo.InvariantCulture),
+                NumberStyles.Any, CultureInfo.InvariantCulture, out result)
+                ? result : -1;
         }
 
         private static string Fingerprint(IEnumerable<PiStatusRecord> values)

@@ -28,6 +28,12 @@ export default function registerAgentHaloPiStatus(pi: any) {
     state = nextState;
     try {
       const context = ctx.getContextUsage?.() ?? null;
+      // Only publish context fields as a complete set. A lone model.contextWindow
+      // without tokens makes readers show a false 0% pill.
+      const hasContextUsage = context != null
+        && typeof context.tokens === "number"
+        && typeof context.contextWindow === "number"
+        && context.contextWindow > 0;
       const assistant = latestAssistant(ctx);
       const usage = assistant?.usage ?? {};
       const model = ctx.model ?? {};
@@ -42,9 +48,9 @@ export default function registerAgentHaloPiStatus(pi: any) {
         cwd: ctx.cwd ?? process.cwd(),
         provider: model.provider ?? assistant?.provider ?? null,
         model: model.id ?? assistant?.model ?? null,
-        contextTokens: context?.tokens ?? null,
-        contextWindow: context?.contextWindow ?? model.contextWindow ?? null,
-        contextPercent: context?.percent ?? null,
+        contextTokens: hasContextUsage ? context.tokens : null,
+        contextWindow: hasContextUsage ? context.contextWindow : null,
+        contextPercent: hasContextUsage ? (context.percent ?? null) : null,
         inputTokens: usage.input ?? null,
         outputTokens: usage.output ?? null,
         cacheRead: usage.cacheRead ?? null,

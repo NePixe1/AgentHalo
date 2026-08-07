@@ -1557,6 +1557,9 @@ public static class Diagnostics
                     piExtensionSource.Contains("agent_settled") &&
                     piExtensionSource.Contains("tool_execution_start"),
                     "Pi status extension is embedded with authoritative events");
+                Assert(piExtensionSource.Contains("hasContextUsage") &&
+                    !piExtensionSource.Contains("model.contextWindow"),
+                    "Pi extension only writes context tokens and window as a pair");
                 Assert(!piExtensionSource.Contains("prompt:") &&
                     !piExtensionSource.Contains("toolArgs") &&
                     !piExtensionSource.Contains("baseUrl"),
@@ -1611,6 +1614,92 @@ public static class Diagnostics
                 Assert(piAggregate.State == HaloState.Working &&
                     piAggregate.FocusedAgent == AgentKind.Pi,
                     "Pi aggregate exposes active working state");
+
+                // Null context fields must stay "unknown" (-1), not a fake 0%.
+                PiStatusRecord piNullContext = PiStatusMonitor.Parse(
+                    "{\"version\":1,\"timestamp\":\"" + piNow +
+                    "\",\"source\":\"pi-extension\",\"event\":\"turn_start\"," +
+                    "\"state\":\"thinking\",\"pid\":" +
+                    currentPid.ToString(CultureInfo.InvariantCulture) +
+                    ",\"sessionId\":\"pi-null-context\",\"cwd\":\"C:\\\\work\\\\demo\"," +
+                    "\"model\":\"test-model\",\"contextTokens\":null," +
+                    "\"contextWindow\":null}");
+                Assert(piNullContext != null &&
+                    piNullContext.ContextTokens == -1 &&
+                    piNullContext.ContextWindowTokens == -1,
+                    "Pi status treats missing context tokens/window as unknown");
+                // Window-only (legacy) payloads also map null tokens to -1 so
+                // DetailsWindow hasContext stays false.
+                PiStatusRecord piWindowOnly = PiStatusMonitor.Parse(
+                    "{\"version\":1,\"timestamp\":\"" + piNow +
+                    "\",\"source\":\"pi-extension\",\"event\":\"turn_start\"," +
+                    "\"state\":\"thinking\",\"pid\":" +
+                    currentPid.ToString(CultureInfo.InvariantCulture) +
+                    ",\"sessionId\":\"pi-window-only\",\"cwd\":\"C:\\\\work\\\\demo\"," +
+                    "\"model\":\"test-model\",\"contextTokens\":null," +
+                    "\"contextWindow\":200000}");
+                Assert(piWindowOnly != null &&
+                    piWindowOnly.ContextTokens == -1 &&
+                    piWindowOnly.ContextWindowTokens == 200000 &&
+                    !(piWindowOnly.ContextTokens >= 0 &&
+                        piWindowOnly.ContextWindowTokens > 0),
+                    "Pi status rejects window-only context as available");
+                PiStatusRecord piZeroContext = PiStatusMonitor.Parse(
+                    "{\"version\":1,\"timestamp\":\"" + piNow +
+                    "\",\"source\":\"pi-extension\",\"event\":\"agent_settled\"," +
+                    "\"state\":\"done\",\"pid\":" +
+                    currentPid.ToString(CultureInfo.InvariantCulture) +
+                    ",\"sessionId\":\"pi-zero-context\",\"cwd\":\"C:\\\\work\\\\demo\"," +
+                    "\"model\":\"test-model\",\"contextTokens\":0," +
+                    "\"contextWindow\":200000}");
+                Assert(piZeroContext != null &&
+                    piZeroContext.ContextTokens == 0 &&
+                    piZeroContext.ContextWindowTokens == 200000,
+                    "Pi status preserves real zero context usage");
+
+                // After log rotation the new file may only contain one session's
+                // next line; other still-live sessions must be retained.
+                string piRotateHome = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-pi-rotate-" + Guid.NewGuid().ToString("N"));
+                string piRotatePath = AgentHaloPaths.PiStatusLog(piRotateHome);
+                Directory.CreateDirectory(Path.GetDirectoryName(piRotatePath));
+                string pidText = currentPid.ToString(CultureInfo.InvariantCulture);
+                File.WriteAllText(piRotatePath,
+                    "{\"version\":1,\"timestamp\":\"" + piNow +
+                    "\",\"source\":\"pi-extension\",\"event\":\"thinking_start\"," +
+                    "\"state\":\"thinking\",\"pid\":" + pidText +
+                    ",\"sessionId\":\"pi-rotate-a\",\"cwd\":\"C:\\\\a\"," +
+                    "\"model\":\"m\"}\n" +
+                    "{\"version\":1,\"timestamp\":\"" + piNow +
+                    "\",\"source\":\"pi-extension\",\"event\":\"thinking_start\"," +
+                    "\"state\":\"thinking\",\"pid\":" + pidText +
+                    ",\"sessionId\":\"pi-rotate-b\",\"cwd\":\"C:\\\\b\"," +
+                    "\"model\":\"m\"}\n", Encoding.UTF8);
+                PiStatusMonitor piRotateMonitor = new PiStatusMonitor(piRotatePath);
+                Assert(piRotateMonitor.Refresh(), "Pi rotate baseline refresh");
+                Assert(piRotateMonitor.Snapshots().Count == 2,
+                    "Pi rotate baseline has both sessions");
+                // Simulate rotation: truncate/replace with only session A's next event.
+                File.WriteAllText(piRotatePath,
+                    "{\"version\":1,\"timestamp\":\"" +
+                    DateTime.UtcNow.ToString("o") +
+                    "\",\"source\":\"pi-extension\",\"event\":\"text_start\"," +
+                    "\"state\":\"working\",\"pid\":" + pidText +
+                    ",\"sessionId\":\"pi-rotate-a\",\"cwd\":\"C:\\\\a\"," +
+                    "\"model\":\"m\"}\n", Encoding.UTF8);
+                Assert(piRotateMonitor.Refresh(), "Pi rotate post-rotation refresh");
+                List<SessionSnapshot> rotated = piRotateMonitor.Snapshots();
+                Assert(rotated.Count == 2 &&
+                    rotated.Any(delegate(SessionSnapshot s)
+                    {
+                        return s.ThreadId == "pi-rotate-a" && s.State == HaloState.Working;
+                    }) &&
+                    rotated.Any(delegate(SessionSnapshot s)
+                    {
+                        return s.ThreadId == "pi-rotate-b" && s.State == HaloState.Thinking;
+                    }),
+                    "Pi status retains live sessions across log rotation");
+                try { Directory.Delete(piRotateHome, true); } catch { }
 
                 DateTime piRuntimeNow = DateTime.UtcNow;
                 PiSessionEvidence piRuntimeEvidence = new PiSessionEvidence
