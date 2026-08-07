@@ -10,6 +10,16 @@ const maxLogBytes = 2 * 1024 * 1024;
 export default function registerAgentHaloPiStatus(pi: any) {
   let state = "idle";
 
+  const terminalFailure = (assistant: any): JsonRecord | null => {
+    const stopReason = assistant?.stopReason;
+    if (stopReason !== "error" && stopReason !== "aborted") return null;
+    return {
+      stopReason,
+      errorMessage: assistant?.errorMessage
+        ?? (stopReason === "aborted" ? "Interrupted" : null),
+    };
+  };
+
   const latestAssistant = (ctx: any): any => {
     try {
       const branch = ctx.sessionManager?.getBranch?.() ?? [];
@@ -72,8 +82,9 @@ export default function registerAgentHaloPiStatus(pi: any) {
   pi.on("session_shutdown", (event: any, ctx: any) =>
     writeStatus("session_shutdown", "offline", ctx,
       { reason: event?.reason ?? null }));
-  pi.on("input", (_event: any, ctx: any) =>
-    writeStatus("input", "thinking", ctx));
+  // `input` fires for queued prompts and before Pi finishes model/provider
+  // preflight. Wait for the authoritative agent lifecycle so rejected or
+  // queued input cannot publish false thinking activity.
   pi.on("before_agent_start", (_event: any, ctx: any) =>
     writeStatus("before_agent_start", "thinking", ctx));
   pi.on("agent_start", (_event: any, ctx: any) =>
@@ -102,10 +113,9 @@ export default function registerAgentHaloPiStatus(pi: any) {
   pi.on("message_end", (event: any, ctx: any) => {
     const message = event?.message;
     if (message?.role !== "assistant") return;
-    if (message.stopReason === "error") {
-      writeStatus("message_end", "error", ctx, {
-        stopReason: message.stopReason,
-      });
+    const failure = terminalFailure(message);
+    if (failure != null) {
+      writeStatus("message_end", "error", ctx, failure);
     }
   });
 
@@ -113,10 +123,9 @@ export default function registerAgentHaloPiStatus(pi: any) {
   // agent_settled is Pi's authoritative terminal point for the whole turn.
   pi.on("agent_settled", (_event: any, ctx: any) => {
     const assistant = latestAssistant(ctx);
-    if (assistant?.stopReason === "error") {
-      writeStatus("agent_settled", "error", ctx, {
-        stopReason: assistant.stopReason,
-      });
+    const failure = terminalFailure(assistant);
+    if (failure != null) {
+      writeStatus("agent_settled", "error", ctx, failure);
       return;
     }
     writeStatus("agent_settled", "done", ctx,

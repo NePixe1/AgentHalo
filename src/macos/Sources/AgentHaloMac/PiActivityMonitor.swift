@@ -7,7 +7,7 @@ struct PiActivitySnapshot: Equatable, Sendable {
     var sessions: [SessionSnapshot]
     /// Session ids whose extension record still has a live PID.
     var liveSessionIds: Set<String>
-    /// True when at least one Pi session PID is live (drives STANDBY vs OFFLINE).
+    /// True when an extension PID or runtime fallback confirms Pi is live.
     var isPresent: Bool
 
     static let empty = PiActivitySnapshot(
@@ -16,10 +16,14 @@ struct PiActivitySnapshot: Equatable, Sendable {
         isPresent: false
     )
 
-    /// Newest non-offline session for details panel on STANDBY.
+    /// Newest live hook session or runtime idle fallback for STANDBY details.
     var preferredStandbySession: SessionSnapshot? {
         sessions
-            .filter { $0.agent == .pi && !$0.threadId.isEmpty }
+            .filter {
+                $0.agent == .pi
+                    && !$0.threadId.isEmpty
+                    && ($0.state == .idle || liveSessionIds.contains($0.threadId))
+            }
             .max(by: { $0.lastEventAt < $1.lastEventAt })
     }
 }
@@ -39,6 +43,7 @@ final class PiActivityMonitor: @unchecked Sendable {
 
     private let queue = DispatchQueue(label: "com.agenthalo.pi-activity", qos: .utility)
     private let statusMonitor: PiStatusMonitor
+    private let runtimeMonitor: PiRuntimeMonitor
     private var timer: DispatchSourceTimer?
     private var currentIntervalMilliseconds = PiActivityMonitor.activeIntervalMilliseconds
     private var latestSnapshot = PiActivitySnapshot.empty
@@ -48,8 +53,12 @@ final class PiActivityMonitor: @unchecked Sendable {
     private var pendingDispatchWorkItem: DispatchWorkItem?
     private var lastDispatchAt = Date.distantPast
 
-    init(statusMonitor: PiStatusMonitor = PiStatusMonitor()) {
+    init(
+        statusMonitor: PiStatusMonitor = PiStatusMonitor(),
+        runtimeMonitor: PiRuntimeMonitor = PiRuntimeMonitor()
+    ) {
         self.statusMonitor = statusMonitor
+        self.runtimeMonitor = runtimeMonitor
     }
 
     func start(onChange: @escaping @Sendable (PiActivitySnapshot) -> Void) {
@@ -121,18 +130,47 @@ final class PiActivityMonitor: @unchecked Sendable {
 
     private func poll() {
         _ = statusMonitor.refresh()
-        let sessions = statusMonitor.snapshots()
+        _ = runtimeMonitor.refresh()
         let liveIds = statusMonitor.liveSessionIds()
+        let sessions = Self.projectSessions(
+            statusSessions: statusMonitor.snapshots(),
+            liveSessionIds: liveIds,
+            runtimeSession: runtimeMonitor.snapshot()
+        )
         let nextSnapshot = PiActivitySnapshot(
             sessions: sessions,
             liveSessionIds: liveIds,
-            isPresent: !liveIds.isEmpty
+            isPresent: !liveIds.isEmpty || runtimeMonitor.isRunning
         )
         guard nextSnapshot != latestSnapshot else {
             return
         }
         latestSnapshot = nextSnapshot
         scheduleDispatch(of: nextSnapshot, now: Date())
+    }
+
+    /// Active/idle hook records are valid only while their originating Pi PID
+    /// is live. Terminal records remain available for the normal completion and
+    /// error visibility windows. The runtime fallback contributes idle presence
+    /// only when the hook stream has no snapshot for the same session.
+    static func projectSessions(
+        statusSessions: [SessionSnapshot],
+        liveSessionIds: Set<String>,
+        runtimeSession: SessionSnapshot?
+    ) -> [SessionSnapshot] {
+        var result = statusSessions.filter { session in
+            switch session.state {
+            case .idle, .thinking, .working, .attention:
+                return liveSessionIds.contains(session.threadId)
+            case .done, .error:
+                return true
+            }
+        }
+        if let runtimeSession,
+           !result.contains(where: { $0.threadId == runtimeSession.threadId }) {
+            result.append(runtimeSession)
+        }
+        return result
     }
 
     private func scheduleDispatch(of snapshot: PiActivitySnapshot, now: Date) {

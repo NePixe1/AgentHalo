@@ -89,6 +89,7 @@ func runHaloInteractionChecks() {
     testSessionMonitorsUseFastFileMetadata()
     testClaudePollingIsThrottledWhenCodexFocused()
     testGrokPollingIsThrottledWhenNotFocused()
+    testPiActivityFiltersDeadLifecycleAndAddsRuntimeFallback()
     testGrokPresencePrefersActiveSessionsFile()
     testGrokActivityDropsEndedAttention()
     testGrokLiveStandbyUsesStableGreenAggregate()
@@ -2572,6 +2573,58 @@ private func testGrokPollingIsThrottledWhenNotFocused() {
     expect(appDelegateSource.contains("case .pi:"), "AppDelegate standby/live-session path should handle Pi focus")
     expect(appDelegateSource.contains("piActivityMonitor"), "AppDelegate should delegate Pi polling to a background monitor")
     expect(!appDelegateSource.contains("activateGrok"), "Grok must not gain a click-to-activate terminal path")
+}
+
+private func testPiActivityFiltersDeadLifecycleAndAddsRuntimeFallback() {
+    let now = Date()
+    func snapshot(_ id: String, _ state: HaloState, active: Bool) -> SessionSnapshot {
+        SessionSnapshot(
+            threadId: id,
+            projectName: "AgentHalo",
+            workingDirectory: "/tmp/AgentHalo",
+            state: state,
+            action: "test",
+            lastEventAt: now,
+            completedAt: state == .done ? now : nil,
+            active: active,
+            agent: .pi
+        )
+    }
+
+    let runtime = snapshot("runtime", .idle, active: false)
+    let projected = PiActivityMonitor.projectSessions(
+        statusSessions: [
+            snapshot("dead-working", .working, active: true),
+            snapshot("live-thinking", .thinking, active: true),
+            snapshot("dead-idle", .idle, active: false),
+            snapshot("finished", .done, active: false),
+            snapshot("failed", .error, active: false),
+        ],
+        liveSessionIds: ["live-thinking"],
+        runtimeSession: runtime
+    )
+
+    expect(!projected.contains { $0.threadId == "dead-working" }, "dead Pi working record must be removed")
+    expect(!projected.contains { $0.threadId == "dead-idle" }, "dead Pi idle record must be removed")
+    expect(projected.contains { $0.threadId == "live-thinking" }, "live Pi activity remains visible")
+    expect(projected.contains { $0.threadId == "finished" }, "completion remains for its visibility window")
+    expect(projected.contains { $0.threadId == "failed" }, "error remains actionable")
+    expect(projected.contains { $0.threadId == "runtime" && $0.state == .idle }, "runtime fallback supplies standby")
+
+    let activity = PiActivitySnapshot(
+        sessions: [runtime, snapshot("dead-failed", .error, active: false)],
+        liveSessionIds: [],
+        isPresent: true
+    )
+    expect(activity.preferredStandbySession?.threadId, "runtime", "standby details prefer runtime idle session")
+
+    let deduplicated = PiActivityMonitor.projectSessions(
+        statusSessions: [snapshot("runtime", .thinking, active: true)],
+        liveSessionIds: ["runtime"],
+        runtimeSession: runtime
+    )
+    expect(deduplicated.count, 1, "runtime fallback must not duplicate a hook session")
+    expect(deduplicated.first?.state, HaloState.thinking, "hook lifecycle remains authoritative")
 }
 
 private func testGrokPresencePrefersActiveSessionsFile() {

@@ -761,6 +761,82 @@ func testPiStatusMonitorRefreshAndRotationRetention() throws {
     expect(snaps.contains { $0.threadId == "pi-b" && $0.state == .thinking }, true, "B retained")
 }
 
+func testPiRuntimeMonitorDetectsPreexistingSession() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-pi-runtime-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let sessions = root
+        .appendingPathComponent("sessions", isDirectory: true)
+        .appendingPathComponent("project", isDirectory: true)
+    try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+    let file = sessions.appendingPathComponent("runtime-session.jsonl")
+    let contents = """
+    {"type":"session","id":"pi-existing","cwd":"/Users/me/AgentHalo"}
+    {"type":"message","message":{"role":"assistant","provider":"openai","model":"pi-model","usage":{"input":20,"output":5,"cacheRead":3,"totalTokens":25}}}
+    """
+    try contents.write(to: file, atomically: true, encoding: .utf8)
+    try #"{"providers":{"openai":{"models":[{"id":"pi-model","contextWindow":100}]}}}"#
+        .write(to: root.appendingPathComponent("models.json"), atomically: true, encoding: .utf8)
+    let now = Date()
+    try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: file.path)
+
+    let process = PiRuntimeProcess(
+        processId: 12001,
+        parentProcessId: 1,
+        name: "pi",
+        startedAt: now.addingTimeInterval(-60)
+    )
+    let monitor = PiRuntimeMonitor(agentRoot: root, processReader: { [process] })
+    expect(monitor.refresh(now: now), true, "runtime monitor refreshes")
+    expect(monitor.isRunning, true, "preexisting Pi process is detected")
+    let snapshot = monitor.snapshot()
+    expect(snapshot?.threadId, "pi-existing", "runtime session id")
+    expect(snapshot?.projectName, "AgentHalo", "runtime project")
+    expect(snapshot?.state, HaloState.idle, "runtime fallback stays idle")
+    expect(snapshot?.modelName, "pi-model", "runtime model")
+    expect(snapshot?.inputTokens, Int64(20), "runtime input tokens")
+    expect(snapshot?.outputTokens, Int64(5), "runtime output tokens")
+    expectAlmost(snapshot?.contextUsedPercent ?? -1, 25, tolerance: 0.01, "runtime context")
+
+    let evidence = PiRuntimeMonitor.readLatestSession(agentRoot: root, now: now)
+    let shell = PiRuntimeProcess(
+        processId: 12002,
+        parentProcessId: 1,
+        name: "zsh",
+        startedAt: now.addingTimeInterval(-120)
+    )
+    let node = PiRuntimeProcess(
+        processId: 12003,
+        parentProcessId: shell.processId,
+        name: "node",
+        startedAt: now.addingTimeInterval(-60)
+    )
+    expect(
+        PiRuntimeMonitor.isRunning(session: evidence, now: now, processes: [shell, node]),
+        true,
+        "legacy node Pi with shell parent is detected"
+    )
+    expect(
+        PiRuntimeMonitor.isRunning(session: evidence, now: now, processes: [node]),
+        false,
+        "unrelated parentless node is rejected"
+    )
+    let stale = evidence.map {
+        PiRuntimeSessionEvidence(
+            sessionId: $0.sessionId,
+            workingDirectory: $0.workingDirectory,
+            path: $0.path,
+            lastModified: now.addingTimeInterval(-4 * 24 * 60 * 60),
+            length: $0.length
+        )
+    }
+    expect(
+        PiRuntimeMonitor.isRunning(session: stale, now: now, processes: [process]),
+        false,
+        "stale session evidence is rejected"
+    )
+}
+
 func testPiExtensionConfiguratorInstallsFromSource() throws {
     let home = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-pi-ext-\(UUID().uuidString)", isDirectory: true)
@@ -773,6 +849,9 @@ func testPiExtensionConfiguratorInstallsFromSource() throws {
     let text = try String(contentsOf: installed!, encoding: .utf8)
     expect(text.contains("agent_settled"), true, "has agent_settled")
     expect(text.contains("hasContextUsage"), true, "pairs context fields")
+    expect(text.contains(#"pi.on("input""#), false, "queued input cannot fake thinking")
+    expect(text.contains(#"stopReason !== "aborted""#), true, "aborted is terminal failure")
+    expect(text.contains("errorMessage: assistant?.errorMessage"), true, "failure detail is emitted")
     expect(
         text.contains("contextWindow: hasContextUsage ? context.contextWindow : null"),
         true,
@@ -4432,6 +4511,7 @@ testPiFocusedAgentPersistence()
 testPiStatusParseContextSentinelAndMapping()
 do {
     try testPiStatusMonitorRefreshAndRotationRetention()
+    try testPiRuntimeMonitorDetectsPreexistingSession()
     try testPiExtensionConfiguratorInstallsFromSource()
 } catch {
     fatalError("Pi status checks failed: \(error)")
