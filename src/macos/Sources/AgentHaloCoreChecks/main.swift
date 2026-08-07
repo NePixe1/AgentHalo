@@ -3988,6 +3988,57 @@ func testClaudeMainSessionDetailsResolverPrefersTranscriptSessionTitle() {
     expect(resolved.sessionDetails.sessionTitle, "整理归档 2026q3 测试", "Claude details should preserve transcript ai-title")
 }
 
+/// `/rename` writes `type=custom-title` with `customTitle` (not `ai-title`/`aiTitle`).
+func testClaudeSessionReducerReadsCustomTitleFromRename() {
+    let now = ISO8601DateFormatter().date(from: "2026-08-07T09:17:59Z")!
+    var reducer = ClaudeSessionReducer(filePath: "/tmp/custom-title.jsonl", now: now)
+    reducer.consume(
+        jsonLine: #"{"type":"user","timestamp":"2026-08-07T09:17:00Z","cwd":"/Users/wjs/work/xisoft/BidCheck","sessionId":"rename-session","message":{"role":"user","content":"你好"}}"#,
+        now: now
+    )
+    reducer.consume(
+        jsonLine: #"{"type":"custom-title","customTitle":"测试","sessionId":"rename-session"}"#,
+        now: now.addingTimeInterval(1)
+    )
+    expect(reducer.snapshot.sessionTitle, "测试", "custom-title from /rename should become sessionTitle")
+}
+
+func testClaudeSessionReducerCustomTitleOverridesAITitle() {
+    let now = ISO8601DateFormatter().date(from: "2026-08-07T09:17:59Z")!
+    var reducer = ClaudeSessionReducer(filePath: "/tmp/custom-over-ai.jsonl", now: now)
+    reducer.consume(
+        jsonLine: #"{"type":"ai-title","timestamp":"2026-08-07T09:17:00Z","sessionId":"s1","aiTitle":"Auto generated"}"#,
+        now: now
+    )
+    expect(reducer.snapshot.sessionTitle, "Auto generated", "ai-title alone should still work")
+    reducer.consume(
+        jsonLine: #"{"type":"custom-title","customTitle":"测试","sessionId":"s1"}"#,
+        now: now.addingTimeInterval(1)
+    )
+    expect(reducer.snapshot.sessionTitle, "测试", "user rename should replace ai-title")
+    reducer.consume(
+        jsonLine: #"{"type":"ai-title","timestamp":"2026-08-07T09:18:00Z","sessionId":"s1","aiTitle":"Later auto title"}"#,
+        now: now.addingTimeInterval(2)
+    )
+    expect(reducer.snapshot.sessionTitle, "测试", "later ai-title must not overwrite custom-title")
+
+    let resolved = ClaudeMainSessionDetailsResolver.resolve(
+        mainSessionId: "s1",
+        mainSessions: [reducer.snapshot],
+        liveSession: nil,
+        usage: ClaudeContextUsageSnapshot(
+            sessionId: "s1",
+            usedPercent: 14,
+            modelName: "deepseek-v4-flash",
+            inputTokens: 28_423,
+            outputTokens: 263,
+            updatedAt: now
+        )
+    )
+    expect(resolved.sessionDetails.sessionTitle, "测试", "details card should surface custom-title")
+    expect(resolved.sessionDetails.modelName, "deepseek-v4-flash", "model still comes from usage")
+}
+
 func testClaudeStatusMergerKeepsHookWhenTranscriptCompletionIsNewer() {
     let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:10Z")!
     let hookWorking = SessionSnapshot(
@@ -4493,6 +4544,9 @@ do {
     fatalError("\(error)")
 }
 testClaudeMainSessionDetailsResolverUsesExactSessionAndSafeLiveProject()
+testClaudeMainSessionDetailsResolverPrefersTranscriptSessionTitle()
+testClaudeSessionReducerReadsCustomTitleFromRename()
+testClaudeSessionReducerCustomTitleOverridesAITitle()
 testClaudeHookStopShowsDoneThenReadyWhileWaitingForInput()
 testStartupExecutablePathUsesAppBundleRoot()
 do {

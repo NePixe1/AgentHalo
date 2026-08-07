@@ -1138,6 +1138,46 @@ public static class Diagnostics
                     "Claude context percentage uses input tokens and window");
                 Directory.Delete(claudeMetricsHome, true);
 
+                // /rename writes custom-title; ai-title is only a fallback.
+                string claudeTitleHome = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-claude-title-" + Guid.NewGuid().ToString("N"));
+                string claudeTitleProject = Path.Combine(claudeTitleHome,
+                    ".claude", "projects", "project");
+                Directory.CreateDirectory(claudeTitleProject);
+                File.WriteAllText(Path.Combine(claudeTitleProject, "session.jsonl"),
+                    "{\"type\":\"ai-title\",\"aiTitle\":\"Auto generated\"}\n" +
+                    "{\"type\":\"custom-title\",\"customTitle\":\"测试\"," +
+                    "\"sessionId\":\"rename-session\"}\n" +
+                    "{\"type\":\"assistant\",\"message\":{\"model\":\"deepseek-v4-flash\"," +
+                    "\"usage\":{\"input_tokens\":28423,\"output_tokens\":263}}}\n",
+                    Encoding.UTF8);
+                ClaudeCodeMetrics titledMetrics =
+                    ClaudeCodeMetricsReader.Read(claudeTitleHome);
+                Assert(String.Equals(titledMetrics.SessionTitle, "测试",
+                        StringComparison.Ordinal),
+                    "Claude custom-title from /rename is preferred over ai-title");
+                Assert(String.Equals(titledMetrics.Model, "deepseek-v4-flash",
+                        StringComparison.Ordinal),
+                    "Claude model still reads alongside custom-title");
+                Directory.Delete(claudeTitleHome, true);
+
+                string claudeAiOnlyHome = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-claude-ai-title-" + Guid.NewGuid().ToString("N"));
+                string claudeAiOnlyProject = Path.Combine(claudeAiOnlyHome,
+                    ".claude", "projects", "project");
+                Directory.CreateDirectory(claudeAiOnlyProject);
+                File.WriteAllText(Path.Combine(claudeAiOnlyProject, "session.jsonl"),
+                    "{\"type\":\"ai-title\",\"aiTitle\":\"Only AI title\"}\n" +
+                    "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-4\"," +
+                    "\"usage\":{\"input_tokens\":100,\"output_tokens\":20}}}\n",
+                    Encoding.UTF8);
+                ClaudeCodeMetrics aiOnlyMetrics =
+                    ClaudeCodeMetricsReader.Read(claudeAiOnlyHome);
+                Assert(String.Equals(aiOnlyMetrics.SessionTitle, "Only AI title",
+                        StringComparison.Ordinal),
+                    "Claude ai-title still works when custom-title is absent");
+                Directory.Delete(claudeAiOnlyHome, true);
+
                 DateTime supersessionNow = DateTime.UtcNow;
                 SessionSnapshot oldError = new SessionSnapshot
                 {
