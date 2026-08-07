@@ -1043,11 +1043,11 @@ public static class Diagnostics
                     "\"command\":\"user-command\"}]}],\"PreToolUse\":[{\"matcher\":\".*\"," +
                     "\"hooks\":[{\"type\":\"command\",\"command\":\"old.exe AgentHaloHook.exe PreToolUse\"}]}]}}",
                     Encoding.UTF8);
-                ClaudeHookConfigurator.Configure(claudeHome, mainExe);
-                string configured = File.ReadAllText(claudeSettings, Encoding.UTF8);
                 string stagedHook = AgentHaloPaths.StatusHookExe(claudeHome);
+                AgentHaloRuntimeBootstrap.Bootstrap(claudeHome, mainExe);
+                string configured = File.ReadAllText(claudeSettings, Encoding.UTF8);
                 Assert(File.Exists(stagedHook),
-                    "Claude hook configurator stages bin\\status-hook.exe");
+                    "runtime bootstrap stages bin\\status-hook.exe");
                 Assert(configured.Contains("status-hook.exe") &&
                     configured.Contains("--claude-hook") &&
                     configured.Contains("PreToolUse") &&
@@ -1058,7 +1058,7 @@ public static class Diagnostics
                     !configured.Contains("old.exe AgentHaloHook.exe") &&
                     !configured.Contains("AgentHaloHook.exe"),
                     "Claude hook configurator rewrites settings onto preferred path");
-                ClaudeHookConfigurator.Configure(claudeHome, mainExe);
+                ClaudeHookConfigurator.Configure(claudeHome, stagedHook);
                 string configuredAgain = File.ReadAllText(claudeSettings, Encoding.UTF8);
                 Assert(CountOccurrences(configuredAgain, "--claude-hook") ==
                     CountOccurrences(configured, "--claude-hook"),
@@ -1069,7 +1069,7 @@ public static class Diagnostics
                         "--claude-hook PreToolUse",
                         "--claude-hook Stop"),
                     Encoding.UTF8);
-                ClaudeHookConfigurator.Configure(claudeHome, mainExe);
+                ClaudeHookConfigurator.Configure(claudeHome, stagedHook);
                 string repairedEvent = File.ReadAllText(claudeSettings, Encoding.UTF8);
                 Assert(CountOccurrences(repairedEvent, "--claude-hook PreToolUse") == 1,
                     "Claude hook configurator repairs a mismatched event argument");
@@ -1232,7 +1232,10 @@ public static class Diagnostics
                     return snapshot.ThreadId == "old-error";
                 }), "metadata-only Windows session does not suppress old error");
 
-                HaloSettings presenceSettings = new HaloSettings();
+                HaloSettings presenceSettings = new HaloSettings
+                {
+                    InstalledAt = supersessionNow.AddHours(-1).ToString("o")
+                };
                 using (CodexSessionMonitor presenceMonitor = new CodexSessionMonitor())
                 {
                     AggregateSnapshot standby = presenceMonitor.GetAggregate(
@@ -1749,12 +1752,13 @@ public static class Diagnostics
                         GrokSessionContextReader.EncodeWorkspaceDirectory(cwd);
                     string sessionDir = Path.Combine(sessionsRoot, encoded, sessionId);
                     Directory.CreateDirectory(sessionDir);
+                    DateTime cancelBaseUtc = DateTime.UtcNow.AddSeconds(-6);
                     File.WriteAllText(statusPath,
-                        "{\"timestamp\":\"2026-07-30T08:00:01.000Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"source\":\"grok-hook\"}\n" +
-                        "{\"timestamp\":\"2026-07-30T08:00:03.000Z\",\"event\":\"PreToolUse\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"toolName\":\"read_file\",\"source\":\"grok-hook\"}\n",
+                        "{\"timestamp\":\"" + cancelBaseUtc.AddSeconds(1).ToString("o") + "\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"source\":\"grok-hook\"}\n" +
+                        "{\"timestamp\":\"" + cancelBaseUtc.AddSeconds(3).ToString("o") + "\",\"event\":\"PreToolUse\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"toolName\":\"read_file\",\"source\":\"grok-hook\"}\n",
                         Encoding.UTF8);
                     File.WriteAllText(Path.Combine(sessionDir, "events.jsonl"),
-                        "{\"ts\":\"2026-07-30T08:00:01.500Z\",\"type\":\"turn_started\"}\n",
+                        "{\"ts\":\"" + cancelBaseUtc.AddSeconds(1.5).ToString("o") + "\",\"type\":\"turn_started\"}\n",
                         Encoding.UTF8);
 
                     GrokHookStatusMonitor cancelMonitor =
@@ -1767,7 +1771,7 @@ public static class Diagnostics
                         "precondition: working from PreToolUse");
 
                     File.AppendAllText(Path.Combine(sessionDir, "events.jsonl"),
-                        "{\"ts\":\"2026-07-30T08:00:04.000Z\",\"type\":\"turn_ended\",\"outcome\":\"cancelled\",\"cancellation_category\":\"mid_turn_abort\",\"cancellation_context\":{\"trigger\":\"esc\"}}\n",
+                        "{\"ts\":\"" + cancelBaseUtc.AddSeconds(4).ToString("o") + "\",\"type\":\"turn_ended\",\"outcome\":\"cancelled\",\"cancellation_category\":\"mid_turn_abort\",\"cancellation_context\":{\"trigger\":\"esc\"}}\n",
                         Encoding.UTF8);
                     Assert(cancelMonitor.Refresh(),
                         "cancel via events should change state");
@@ -1862,12 +1866,13 @@ public static class Diagnostics
                         GrokSessionContextReader.EncodeWorkspaceDirectory(cwd);
                     string sessionDir = Path.Combine(sessionsRoot, encoded, sessionId);
                     Directory.CreateDirectory(sessionDir);
+                    DateTime sendNowBaseUtc = DateTime.UtcNow.AddSeconds(-6);
                     File.WriteAllText(statusPath,
-                        "{\"timestamp\":\"2026-07-30T08:00:01.000Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"source\":\"grok-hook\"}\n" +
-                        "{\"timestamp\":\"2026-07-30T08:00:03.000Z\",\"event\":\"PreToolUse\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"toolName\":\"read_file\",\"source\":\"grok-hook\"}\n",
+                        "{\"timestamp\":\"" + sendNowBaseUtc.AddSeconds(1).ToString("o") + "\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"source\":\"grok-hook\"}\n" +
+                        "{\"timestamp\":\"" + sendNowBaseUtc.AddSeconds(3).ToString("o") + "\",\"event\":\"PreToolUse\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"toolName\":\"read_file\",\"source\":\"grok-hook\"}\n",
                         Encoding.UTF8);
                     File.WriteAllText(Path.Combine(sessionDir, "events.jsonl"),
-                        "{\"ts\":\"2026-07-30T08:00:01.500Z\",\"type\":\"turn_started\"}\n",
+                        "{\"ts\":\"" + sendNowBaseUtc.AddSeconds(1.5).ToString("o") + "\",\"type\":\"turn_started\"}\n",
                         Encoding.UTF8);
 
                     GrokHookStatusMonitor sendNowMonitor =
@@ -1880,11 +1885,11 @@ public static class Diagnostics
                         "precondition: working before send_now");
 
                     File.AppendAllText(statusPath,
-                        "{\"timestamp\":\"2026-07-30T08:00:04.004Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"source\":\"grok-hook\"}\n",
+                        "{\"timestamp\":\"" + sendNowBaseUtc.AddSeconds(4.004).ToString("o") + "\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"source\":\"grok-hook\"}\n",
                         Encoding.UTF8);
                     File.AppendAllText(Path.Combine(sessionDir, "events.jsonl"),
-                        "{\"ts\":\"2026-07-30T08:00:04.000Z\",\"type\":\"turn_ended\",\"outcome\":\"cancelled\",\"cancellation_category\":\"mid_turn_abort\",\"cancellation_context\":{\"trigger\":\"send_now\"}}\n" +
-                        "{\"ts\":\"2026-07-30T08:00:04.004Z\",\"type\":\"turn_started\",\"redirect_kind\":\"queued_after_cancel\"}\n",
+                        "{\"ts\":\"" + sendNowBaseUtc.AddSeconds(4).ToString("o") + "\",\"type\":\"turn_ended\",\"outcome\":\"cancelled\",\"cancellation_category\":\"mid_turn_abort\",\"cancellation_context\":{\"trigger\":\"send_now\"}}\n" +
+                        "{\"ts\":\"" + sendNowBaseUtc.AddSeconds(4.004).ToString("o") + "\",\"type\":\"turn_started\",\"redirect_kind\":\"queued_after_cancel\"}\n",
                         Encoding.UTF8);
                     Assert(sendNowMonitor.Refresh(), "send_now refresh changes state");
                     SessionSnapshot afterSteer =
