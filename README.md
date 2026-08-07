@@ -116,9 +116,55 @@ hooks = false
 
 This disables Claude hook import only (not skills, rules, MCP, or Claude Code itself). Restart the Grok session for the change to take effect. Any *other* hooks kept only in `~/.claude/settings.json` will also stop running under Grok.
 
-## Contributing and building
+## Build from source
 
-The README intentionally stays focused on installing and using Agent Halo. For architecture, source builds, diagnostics, shared-contract changes, and contributor checks, see **[AGENTS.md](AGENTS.md)**.
+Prefer a [GitHub release](https://github.com/NePixe1/AgentHalo/releases/latest) for everyday use. Build from source when you want the latest tree, a local change, or to verify a packaging path yourself.
+
+Clone the repository first, then run the platform steps from the **repo root**.
+
+### macOS
+
+**Requirements:** macOS 13 or later, and Xcode or the Command Line Tools (so `swift` is available).
+
+```bash
+# Build, package, run checks, and launch
+bash ./scripts/run-macos.sh --verify
+
+# Package only (no launch)
+bash ./scripts/build-macos.sh
+```
+
+- App bundle: `outputs/AgentHalo-macOS/AgentHalo.app`
+- Optional DMG after a successful package build: `bash ./scripts/create-dmg.sh`
+
+Quit a running local build with the menu bar item, or:
+
+```bash
+pkill -x AgentHaloMac
+```
+
+### Windows
+
+**Requirements:** Windows 10 or 11, and .NET Framework 4.8 so the C# compiler exists at:
+
+`%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe`
+
+```powershell
+.\scripts\build-windows.ps1
+```
+
+- Output: `outputs\AgentHalo\AgentHalo.exe`
+- Optional self-test after build:
+
+```powershell
+.\outputs\AgentHalo\AgentHalo.exe --self-test $env:TEMP\agent-halo-self-test.txt
+```
+
+Unsigned personal builds may trigger SmartScreen; release archives ship `SHA256.txt` for verification.
+
+## Contributing
+
+Architecture, shared-contract changes, diagnostics, and contributor checks are documented in **[AGENTS.md](AGENTS.md)**.
 
 ## License
 

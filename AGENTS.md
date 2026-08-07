@@ -4,16 +4,6 @@
 
 The entire UI must stay **minimal and refined** : ambient-first, low visual noise, restrained typography and chrome, no decorative clutter. Prefer calm density over busy panels; do not invent extra rows, badges, or copy that break the premium quiet aesthetic. Details panels, menus, and hover surfaces should match the halo itself—readable at a glance, never loud.
 
-## Documentation boundaries
-
-| Document | Audience and scope |
-| --- | --- |
-| `README.md` / `README.zh-CN.md` | Product overview, supported platforms, installation, everyday use, privacy, troubleshooting |
-| `AGENTS.md` | Architecture, runtime layout, source builds, diagnostics, implementation constraints, contributor checks |
-| `docs/` | Product intent, detailed visual behavior, cross-platform contracts, design records, implementation plans |
-
-Keep end-user behavior in the README, but move commands, internal paths, generated-source rules, and implementation detail here or into `docs/`.
-
 ## Product intent
 
 Agent Halo is a local, always-on-top desktop status ring for coding agents. Windows and macOS support Codex, Claude Code, and Grok Build. Ambient first: readable in peripheral vision; honest lifecycle inference; privacy-first (no session upload). Product framing: [docs/PRODUCT.md](docs/PRODUCT.md).

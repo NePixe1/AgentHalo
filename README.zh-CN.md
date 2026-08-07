@@ -116,9 +116,55 @@ hooks = false
 
 这只关闭 Claude hooks 导入，不影响 skills / rules / MCP，也不影响 Claude Code 本身。修改后需重启 Grok 会话才会生效。若你还有**仅**写在 `~/.claude/settings.json` 中的其它 hooks，关闭后它们在 Grok 中也不会再运行。
 
+## 从源码构建
+
+日常使用建议直接下载 [GitHub 最新版本](https://github.com/NePixe1/AgentHalo/releases/latest)。若需要最新代码、本地修改，或自行验证打包流程，可按下列步骤从源码构建。
+
+先克隆仓库，再在**仓库根目录**执行对应平台命令。
+
+### macOS
+
+**环境要求：** macOS 13 及以上，并安装 Xcode 或 Command Line Tools（保证 `swift` 可用）。
+
+```bash
+# 构建、打包、运行检查并启动
+bash ./scripts/run-macos.sh --verify
+
+# 仅打包（不启动）
+bash ./scripts/build-macos.sh
+```
+
+- 应用包输出：`outputs/AgentHalo-macOS/AgentHalo.app`
+- 打包成功后如需制作 DMG：`bash ./scripts/create-dmg.sh`
+
+退出本机构建版本可通过菜单栏，或：
+
+```bash
+pkill -x AgentHaloMac
+```
+
+### Windows
+
+**环境要求：** Windows 10 或 11，以及 .NET Framework 4.8，并确保 C# 编译器位于：
+
+`%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe`
+
+```powershell
+.\scripts\build-windows.ps1
+```
+
+- 输出：`outputs\AgentHalo\AgentHalo.exe`
+- 构建后可选自检：
+
+```powershell
+.\outputs\AgentHalo\AgentHalo.exe --self-test $env:TEMP\agent-halo-self-test.txt
+```
+
+未签名的个人构建可能触发 SmartScreen；正式发布压缩包会附带 `SHA256.txt` 供校验。
+
 ## 开发与贡献
 
-README 有意只保留安装与使用信息。架构、源码构建、诊断、共享契约修改与贡献者检查见 **[AGENTS.md](AGENTS.md)**。
+架构、共享契约修改、诊断与贡献者检查见 **[AGENTS.md](AGENTS.md)**。
 
 ## 许可证
 
