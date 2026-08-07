@@ -1558,7 +1558,10 @@ public static class Diagnostics
                     piExtensionSource.Contains("tool_execution_start"),
                     "Pi status extension is embedded with authoritative events");
                 Assert(piExtensionSource.Contains("hasContextUsage") &&
-                    !piExtensionSource.Contains("model.contextWindow"),
+                    piExtensionSource.Contains(
+                        "contextTokens: hasContextUsage ? context.tokens : null") &&
+                    piExtensionSource.Contains(
+                        "contextWindow: hasContextUsage ? context.contextWindow : null"),
                     "Pi extension only writes context tokens and window as a pair");
                 Assert(!piExtensionSource.Contains("prompt:") &&
                     !piExtensionSource.Contains("toolArgs") &&
@@ -1769,6 +1772,9 @@ public static class Diagnostics
                         "{\"type\":\"session\",\"version\":3," +
                         "\"id\":\"pi-runtime-file\",\"cwd\":\"C:\\\\work\\\\runtime\"}\n" +
                         "{\"type\":\"message\",\"message\":{" +
+                        "\"role\":\"user\",\"content\":[{" +
+                        "\"type\":\"text\",\"text\":\"How do I monitor Pi sessions?\"}]}}\n" +
+                        "{\"type\":\"message\",\"message\":{" +
                         "\"role\":\"assistant\",\"provider\":\"test-provider\"," +
                         "\"model\":\"test-model\",\"usage\":{" +
                         "\"input\":1200,\"output\":80,\"cacheRead\":22000," +
@@ -1782,6 +1788,8 @@ public static class Diagnostics
                         PiRuntimeMonitor.ReadLatestSession(piRuntimeRoot);
                     Assert(parsedPiRuntime != null &&
                         parsedPiRuntime.SessionId == "pi-runtime-file" &&
+                        parsedPiRuntime.SessionTitle ==
+                            "How do I monitor Pi sessions?" &&
                         parsedPiRuntime.WorkingDirectory == "C:\\work\\runtime" &&
                         parsedPiRuntime.Model == "test-model" &&
                         parsedPiRuntime.InputTokens == 1200 &&
@@ -1789,6 +1797,47 @@ public static class Diagnostics
                         parsedPiRuntime.ContextTokens == 23280 &&
                         parsedPiRuntime.ContextWindowTokens == 120000,
                         "Pi runtime fallback reads model, usage, and context telemetry");
+                    Assert(PiRuntimeMonitor.ResolveSessionTitleForTest(new[]
+                    {
+                        "{\"type\":\"session\"}",
+                        "{\"type\":\"message\",\"message\":{" +
+                            "\"role\":\"user\",\"content\":\"First question\"}}",
+                        "{\"type\":\"session_info\",\"name\":\"Named session\"}"
+                    }) == "Named session",
+                        "Pi explicit session name overrides the first user message");
+                    Assert(PiRuntimeMonitor.ResolveSessionTitleForTest(new[]
+                    {
+                        "{\"type\":\"session\"}",
+                        "{\"type\":\"message\",\"message\":{" +
+                            "\"role\":\"user\",\"content\":\"First question\"}}",
+                        "{\"type\":\"session_info\",\"name\":null}"
+                    }) == "First question",
+                        "Pi cleared session name falls back to first user message");
+
+                    List<SessionSnapshot> piMergeSnapshots =
+                        new List<SessionSnapshot>
+                        {
+                            new SessionSnapshot
+                            {
+                                ThreadId = "pi-runtime-file",
+                                ProjectName = "runtime",
+                                Agent = AgentKind.Pi,
+                                State = HaloState.Working
+                            }
+                        };
+                    HaloWindow.MergePiRuntimeSnapshot(piMergeSnapshots,
+                        new SessionSnapshot
+                        {
+                            ThreadId = "pi-runtime-file",
+                            ProjectName = "How do I monitor Pi sessions?",
+                            Agent = AgentKind.Pi,
+                            State = HaloState.Idle
+                        });
+                    Assert(piMergeSnapshots.Count == 1 &&
+                        piMergeSnapshots[0].ProjectName ==
+                            "How do I monitor Pi sessions?" &&
+                        piMergeSnapshots[0].State == HaloState.Working,
+                        "Pi runtime title enriches hook state without replacing activity");
                 }
                 finally
                 {
@@ -3298,7 +3347,7 @@ public static class Diagnostics
             piSessions.Add(new SessionSnapshot
             {
                 ThreadId = "preview-pi",
-                ProjectName = "AgentHalo",
+                ProjectName = "How do I monitor Pi sessions?",
                 WorkingDirectory = @"C:\work\AgentHalo",
                 State = HaloState.Thinking,
                 Action = "Thinking",

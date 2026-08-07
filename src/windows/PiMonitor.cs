@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
@@ -101,6 +102,7 @@ namespace CodexHalo
     internal sealed class PiSessionEvidence
     {
         public string SessionId;
+        public string SessionTitle;
         public string WorkingDirectory;
         public string Path;
         public DateTime CreatedUtc;
@@ -185,7 +187,9 @@ namespace CodexHalo
             return new SessionSnapshot
             {
                 ThreadId = latestSession.SessionId,
-                ProjectName = ProjectName(latestSession.WorkingDirectory),
+                ProjectName = String.IsNullOrWhiteSpace(latestSession.SessionTitle)
+                    ? ProjectName(latestSession.WorkingDirectory)
+                    : latestSession.SessionTitle,
                 WorkingDirectory = latestSession.WorkingDirectory,
                 State = HaloState.Idle,
                 Action = "Ready",
@@ -339,6 +343,7 @@ namespace CodexHalo
                     // produce a fake 0% context pill.
                     ContextTokens = -1
                 };
+                evidence.SessionTitle = ResolveSessionTitle(lines, serializer);
                 string changedProvider = null;
                 string changedModel = null;
                 for (int index = lines.Count - 1; index > 0; index--)
@@ -419,6 +424,130 @@ namespace CodexHalo
             {
                 return null;
             }
+        }
+
+        internal static string ResolveSessionTitleForTest(IEnumerable<string> lines)
+        {
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            serializer.MaxJsonLength = Int32.MaxValue;
+            return ResolveSessionTitle(lines, serializer);
+        }
+
+        private static string ResolveSessionTitle(IEnumerable<string> lines,
+            JavaScriptSerializer serializer)
+        {
+            string firstUserMessage = null;
+            string explicitName = null;
+            foreach (string line in lines ?? Enumerable.Empty<string>())
+            {
+                if (String.IsNullOrWhiteSpace(line) ||
+                    (line.IndexOf("\"type\":\"session_info\"",
+                         StringComparison.OrdinalIgnoreCase) < 0 &&
+                     (firstUserMessage != null || line.IndexOf("\"role\":\"user\"",
+                         StringComparison.OrdinalIgnoreCase) < 0)))
+                {
+                    continue;
+                }
+                Dictionary<string, object> entry;
+                try
+                {
+                    entry = serializer.DeserializeObject(line)
+                        as Dictionary<string, object>;
+                }
+                catch
+                {
+                    continue;
+                }
+                if (entry == null)
+                {
+                    continue;
+                }
+                string type = GetString(entry, "type");
+                if (String.Equals(type, "session_info",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    explicitName = NormalizeSessionTitle(GetString(entry, "name"));
+                    continue;
+                }
+                if (firstUserMessage != null || !String.Equals(type, "message",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                Dictionary<string, object> message = GetDictionary(entry, "message");
+                if (message == null || !String.Equals(GetString(message, "role"),
+                    "user", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                firstUserMessage = NormalizeSessionTitle(
+                    ExtractMessageText(message));
+            }
+            return !String.IsNullOrWhiteSpace(explicitName)
+                ? explicitName : firstUserMessage;
+        }
+
+        private static string ExtractMessageText(Dictionary<string, object> message)
+        {
+            object content;
+            if (message == null || !message.TryGetValue("content", out content) ||
+                content == null)
+            {
+                return null;
+            }
+            string text = content as string;
+            if (text != null)
+            {
+                return text;
+            }
+            IEnumerable blocks = content as IEnumerable;
+            if (blocks == null)
+            {
+                return null;
+            }
+            StringBuilder result = new StringBuilder();
+            foreach (object blockValue in blocks)
+            {
+                Dictionary<string, object> block =
+                    blockValue as Dictionary<string, object>;
+                if (block == null || !String.Equals(GetString(block, "type"), "text",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                string blockText = GetString(block, "text");
+                if (String.IsNullOrWhiteSpace(blockText))
+                {
+                    continue;
+                }
+                if (result.Length > 0) result.Append(' ');
+                result.Append(blockText);
+            }
+            return result.ToString();
+        }
+
+        private static string NormalizeSessionTitle(string value)
+        {
+            if (String.IsNullOrWhiteSpace(value))
+            {
+                return null;
+            }
+            StringBuilder result = new StringBuilder();
+            bool previousWhitespace = false;
+            foreach (char character in value)
+            {
+                bool whitespace = Char.IsWhiteSpace(character) || Char.IsControl(character);
+                if (whitespace)
+                {
+                    if (!previousWhitespace && result.Length > 0) result.Append(' ');
+                }
+                else
+                {
+                    result.Append(character);
+                }
+                previousWhitespace = whitespace;
+            }
+            return result.ToString().Trim();
         }
 
         private static long ReadContextWindow(string root, string provider, string model)
@@ -559,7 +688,7 @@ namespace CodexHalo
             return (isRunning ? "1" : "0") + "|" + session.SessionId + "|" +
                 session.LastWriteUtc.Ticks.ToString(CultureInfo.InvariantCulture) + "|" +
                 session.Length.ToString(CultureInfo.InvariantCulture) + "|" +
-                session.Model + "|" +
+                session.SessionTitle + "|" + session.Model + "|" +
                 session.ContextTokens.ToString(CultureInfo.InvariantCulture);
         }
 
