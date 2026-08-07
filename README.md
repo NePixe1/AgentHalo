@@ -40,7 +40,7 @@
 | Platform | Supported agents | Requirement |
 | --- | --- | --- |
 | Windows | Codex, Claude Code, Grok Build, Pi | Windows 10 or 11; .NET Framework 4.8 (usually preinstalled) |
-| macOS | Codex, Claude Code, Grok Build | macOS 13 or later |
+| macOS | Codex, Claude Code, Grok Build, Pi | macOS 13 or later |
 
 Install and sign in to at least one supported agent before using Agent Halo.
 
@@ -65,7 +65,7 @@ Official accounts do not need an OpenAI API key. When available, usage refresh r
 ## Quick usage
 
 - **Drag** the halo to move it; it snaps lightly to screen edges.
-- **Hover** for status and usage / session details; Windows can switch **Codex / CC / Grok / Pi**.
+- **Hover** for status and usage / session details; switch **Codex / CC / Grok / Pi** from the agent toggle.
 - **Click** the halo to bring the Codex window forward when relevant.
 - **Right-click** to choose **Monitored Agents** and the **Current Agent**, or access state previews, temporary pause, startup, always-on-top behavior, halo size (`75% / 100% / 125%`), **Reset Position**, and quit. At least one agent remains enabled; pause clears on the next launch.
 - After a display change, an off-screen halo recovers to the primary display. On macOS, it can also return to its remembered display when that display reconnects.

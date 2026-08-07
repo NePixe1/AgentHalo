@@ -687,7 +687,11 @@ private func testFocusSubmenuIncludesGrok() {
     let titles = submenu.items.map(\.title)
 
     expect(titles.contains("Grok"), "focused-agent submenu should list Grok")
-    expect(titles == ["Codex", "Claude Code", "Grok"], "focus menu order should be Codex, Claude Code, Grok")
+    expect(titles.contains("Pi"), "focused-agent submenu should list Pi")
+    expect(
+        titles == ["Codex", "Claude Code", "Grok", "Pi"],
+        "focus menu order should be Codex, Claude Code, Grok, Pi"
+    )
 
     let grokItem = menuItem(titled: "Grok", in: submenu)
     NSApplication.shared.sendAction(grokItem.action!, to: grokItem.target, from: grokItem)
@@ -698,6 +702,15 @@ private func testFocusSubmenuIncludesGrok() {
 
     expect(checkedTitles == ["Grok"], "Grok focus should be checked after selection")
     expect(loaded.focusedAgent, .grok, "focused agent should persist Grok after menu selection")
+
+    let piItem = menuItem(titled: "Pi", in: refreshedSubmenu)
+    NSApplication.shared.sendAction(piItem.action!, to: piItem.target, from: piItem)
+    let afterPi = focusedAgentSubmenu(in: delegate.makeHaloContextMenu())
+    expect(
+        afterPi.items.filter { $0.state == .on }.map(\.title) == ["Pi"],
+        "Pi focus should be checked after selection"
+    )
+    expect(store.load().focusedAgent, .pi, "focused agent should persist Pi after menu selection")
 }
 
 @MainActor
@@ -2221,9 +2234,8 @@ private func testUsageMonitoringLifecycleWiring() {
     )
     expect(
         launchSource.contains("startUsageRefreshLoop()")
-            && launchSource.contains(
-                "requestUsageRefresh(for: Self.usageProviderID(for: settings.focusedAgent))"
-            )
+            && launchSource.contains("usageProviderID(for: settings.focusedAgent)")
+            && launchSource.contains("requestUsageRefresh(for:")
             && launchSource.range(of: "L10n.shared.setLanguage")!.lowerBound
                 < launchSource.range(of: "startUsageRefreshLoop()")!.lowerBound,
         "launch should start the Usage loop and refresh the current Provider"
@@ -2246,7 +2258,8 @@ private func testUsageMonitoringLifecycleWiring() {
         "showDetails should render current state before preparing and refreshing Usage"
     )
     expect(
-        selectionSource.contains("requestUsageRefresh(for: Self.usageProviderID(for: agent))"),
+        selectionSource.contains("usageProviderID(for: agent)")
+            && selectionSource.contains("requestUsageRefresh(for:"),
         "agent selection should prepare and refresh the target Provider"
     )
     expect(
@@ -2284,16 +2297,16 @@ private func testUsageMonitoringLifecycleWiring() {
     )
     expect(
         loopSource.contains("Task.sleep(nanoseconds:")
-            && loopSource.contains(
-                "requestUsageRefresh(for: Self.usageProviderID(for: settings.focusedAgent))"
-            ),
+            && loopSource.contains("usageProviderID(for: self.settings.focusedAgent)")
+            && loopSource.contains("requestUsageRefresh(for:"),
         "the dedicated low-frequency loop should refresh the currently focused Provider"
     )
     expect(
         source.contains("case .codex:") && source.contains("return .codex")
             && source.contains("case .claudeCode:") && source.contains("return .claude")
-            && source.contains("case .grok:") && source.contains("return .grok"),
-        "AgentKind should map totally to its Usage Provider"
+            && source.contains("case .grok:") && source.contains("return .grok")
+            && source.contains("case .pi:") && source.contains("return nil"),
+        "AgentKind should map to its Usage Provider (Pi is session-only)"
     )
     expect(
         terminationSource.contains("cancelLocalUsageTasks()")
@@ -2552,10 +2565,12 @@ private func testGrokPollingIsThrottledWhenNotFocused() {
     expect(appDelegateSource.contains("grokActivityMonitor"), "AppDelegate should delegate Grok polling to a background monitor")
     expect(appDelegateSource.contains("grokSnapshots()"), "AppDelegate should merge Grok snapshots into the aggregate")
     expect(
-        appDelegateSource.contains("codexActivitySnapshot.sessions + claudeSnapshots() + grokSnapshots()"),
-        "AppDelegate should aggregate codex + claude + grok snapshots"
+        appDelegateSource.contains("codexActivitySnapshot.sessions + claudeSnapshots() + grokSnapshots() + piSnapshots()"),
+        "AppDelegate should aggregate codex + claude + grok + pi snapshots"
     )
     expect(appDelegateSource.contains("case .grok:"), "AppDelegate standby/live-session path should handle Grok focus")
+    expect(appDelegateSource.contains("case .pi:"), "AppDelegate standby/live-session path should handle Pi focus")
+    expect(appDelegateSource.contains("piActivityMonitor"), "AppDelegate should delegate Pi polling to a background monitor")
     expect(!appDelegateSource.contains("activateGrok"), "Grok must not gain a click-to-activate terminal path")
 }
 
@@ -3129,6 +3144,7 @@ private func testUsageProviderMappingIsTotal() {
     expect(AppDelegate.usageProviderID(for: .codex), .codex, "Codex Provider mapping")
     expect(AppDelegate.usageProviderID(for: .claudeCode), .claude, "Claude Provider mapping")
     expect(AppDelegate.usageProviderID(for: .grok), .grok, "grok focus maps to grok usage")
+    expect(AppDelegate.usageProviderID(for: .pi) == nil, true, "Pi has no official usage provider")
 }
 
 @MainActor
@@ -3147,15 +3163,22 @@ private func testAgentToggleUsesSharedSVGAssets() {
         .deletingLastPathComponent()
         .appendingPathComponent("scripts/build-macos.sh")
 
+    let piURL = assetDirectory.appendingPathComponent("pi.svg")
     expect(FileManager.default.fileExists(atPath: codexURL.path), "Codex SVG should live in shared assets")
     expect(FileManager.default.fileExists(atPath: claudeURL.path), "Claude SVG should live in shared assets")
     expect(FileManager.default.fileExists(atPath: grokURL.path), "Grok SVG should live in shared assets")
+    expect(FileManager.default.fileExists(atPath: piURL.path), "Pi SVG should live in shared assets")
 
     let detailsSource = try? String(contentsOf: detailsSourceURL, encoding: .utf8)
     expect(detailsSource?.contains("<svg") == false, "DetailsPanel should not embed SVG markup")
     expect(
-        detailsSource?.contains("agentToggle.widthAnchor.constraint(equalToConstant: 108)") == true,
-        "details panel agent toggle should be wide enough for three icons"
+        detailsSource?.contains("agentToggle.widthAnchor.constraint(equalToConstant: 144)") == true,
+        "details panel agent toggle should be wide enough for four icons"
+    )
+    expect(
+        detailsSource?.contains("assetName: \"pi\"") == true
+            || detailsSource?.contains("assetName: \"pi\"") == true,
+        "details panel should load the Pi agent icon"
     )
 
     let buildScript = try? String(contentsOf: buildScriptURL, encoding: .utf8)
@@ -3172,7 +3195,7 @@ private func testAgentToggleUsesSharedSVGAssets() {
 
 @MainActor
 private func testAgentToggleUsesCodexAndClaudeIcons() {
-    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 108, height: 24))
+    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 144, height: 24))
     let descendants = allDescendants(of: toggle)
     let visibleLabels = descendants
         .compactMap { $0 as? NSTextField }
@@ -3183,38 +3206,49 @@ private func testAgentToggleUsesCodexAndClaudeIcons() {
     expect(!visibleLabels.contains("Codex"), "agent toggle should replace the Codex text with an icon")
     expect(!visibleLabels.contains("CC"), "agent toggle should replace the CC text with an icon")
     expect(!visibleLabels.contains("Grok"), "agent toggle should replace the Grok text with an icon")
-    expect(icons.count == 3, "agent toggle should render one icon for each agent")
+    expect(!visibleLabels.contains("Pi"), "agent toggle should replace the Pi text with an icon")
+    expect(icons.count == 4, "agent toggle should render one icon for each agent")
     expect(icons.allSatisfy { $0.image != nil }, "agent toggle should load all shared SVG images")
 }
 
 @MainActor
 private func testAgentToggleDimsInactiveIconMoreStrongly() {
-    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 108, height: 24))
+    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 144, height: 24))
     let icons = allDescendants(of: toggle).compactMap { $0 as? NSImageView }
 
-    expect(icons.count == 3, "agent toggle should expose all agent icons for opacity checks")
-    guard icons.count == 3 else { return }
+    expect(icons.count == 4, "agent toggle should expose all agent icons for opacity checks")
+    guard icons.count == 4 else { return }
 
     expect(icons[0].alphaValue, 1, "selected Codex icon should remain fully opaque")
     expect(icons[1].alphaValue, 0.40, "inactive Claude Code icon should use stronger dimming")
     expect(icons[2].alphaValue, 0.40, "inactive Grok icon should use stronger dimming")
+    expect(icons[3].alphaValue, 0.40, "inactive Pi icon should use stronger dimming")
 
     toggle.setAgent(.claudeCode)
 
     expect(icons[0].alphaValue, 0.40, "inactive Codex icon should use stronger dimming")
     expect(icons[1].alphaValue, 1, "selected Claude Code icon should remain fully opaque")
     expect(icons[2].alphaValue, 0.40, "inactive Grok icon should stay dimmed")
+    expect(icons[3].alphaValue, 0.40, "inactive Pi icon should stay dimmed")
 
     toggle.setAgent(.grok)
 
     expect(icons[0].alphaValue, 0.40, "inactive Codex icon should stay dimmed")
     expect(icons[1].alphaValue, 0.40, "inactive Claude Code icon should stay dimmed")
     expect(icons[2].alphaValue, 1, "selected Grok icon should remain fully opaque")
+    expect(icons[3].alphaValue, 0.40, "inactive Pi icon should stay dimmed")
+
+    toggle.setAgent(.pi)
+
+    expect(icons[0].alphaValue, 0.40, "inactive Codex icon should stay dimmed")
+    expect(icons[1].alphaValue, 0.40, "inactive Claude Code icon should stay dimmed")
+    expect(icons[2].alphaValue, 0.40, "inactive Grok icon should stay dimmed")
+    expect(icons[3].alphaValue, 1, "selected Pi icon should remain fully opaque")
 }
 
 @MainActor
 private func testAgentToggleSelectionPillFitsItsIconWidth() {
-    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 108, height: 24))
+    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 144, height: 24))
     toggle.layoutSubtreeIfNeeded()
 
     let selectionPill = toggle.subviews.first?.subviews.first
@@ -3227,41 +3261,49 @@ private func testAgentToggleSelectionPillFitsItsIconWidth() {
 
 @MainActor
 private func testAgentToggleKeepsWholeControlClickable() {
-    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 108, height: 24))
+    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 144, height: 24))
     toggle.layoutSubtreeIfNeeded()
 
     expect(
-        toggle.hitTest(NSPoint(x: 90, y: 12)) === toggle,
+        toggle.hitTest(NSPoint(x: 120, y: 12)) === toggle,
         "agent icons should not intercept clicks from the toggle"
     )
 }
 
 @MainActor
 private func testAgentToggleSupportsThreeAgentsIncludingGrok() {
-    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 108, height: 24))
+    let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 144, height: 24))
     toggle.layoutSubtreeIfNeeded()
 
-    expect(toggle.bounds.width, 108, "three-way agent toggle should use a wider control")
+    expect(toggle.bounds.width, 144, "four-way agent toggle should use a wider control")
 
     toggle.setAgent(.grok)
     expect(toggle.selectedAgent, .grok, "setAgent(.grok) should select Grok")
+
+    toggle.setAgent(.pi)
+    expect(toggle.selectedAgent, .pi, "setAgent(.pi) should select Pi")
 
     toggle.setAgent(.codex)
     expect(toggle.selectedAgent, .codex, "setAgent should restore Codex")
 
     var selected: AgentKind?
     toggle.onAgentSelected = { selected = $0 }
+    // slots: 0-36 Codex, 36-72 Claude, 72-108 Grok, 108-144 Pi
     toggle.selectAgentAtXForTesting(90)
-    expect(toggle.selectedAgent, .grok, "clicking the right third should select Grok")
-    expect(selected, .grok, "right-third click should emit Grok")
+    expect(toggle.selectedAgent, .grok, "clicking the Grok slot should select Grok")
+    expect(selected, .grok, "Grok-slot click should emit Grok")
+
+    toggle.selectAgentAtXForTesting(126)
+    expect(toggle.selectedAgent, .pi, "clicking the Pi slot should select Pi")
+    expect(selected, .pi, "Pi-slot click should emit Pi")
 
     toggle.selectAgentAtXForTesting(18)
-    expect(toggle.selectedAgent, .codex, "clicking the left third should select Codex")
-    expect(selected, .codex, "left-third click should emit Codex")
+    expect(toggle.selectedAgent, .codex, "clicking the left slot should select Codex")
+    expect(selected, .codex, "left-slot click should emit Codex")
 
     toggle.selectAgentAtXForTesting(54)
-    expect(toggle.selectedAgent, .claudeCode, "clicking the middle third should select Claude Code")
-    expect(selected, .claudeCode, "middle-third click should emit Claude Code")
+    expect(toggle.selectedAgent, .claudeCode, "clicking the Claude slot should select Claude Code")
+    expect(selected, .claudeCode, "Claude-slot click should emit Claude Code")
 }
 
 @MainActor

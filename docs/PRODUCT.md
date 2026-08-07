@@ -30,7 +30,7 @@ window: "What needs me right now?"
 
 - Native Windows (WPF) and macOS (Swift) apps, transparent and always on top.
 - Smooth composition-clock animation.
-- Local lifecycle monitoring for Codex, Claude Code, and Grok Build on both platforms, plus Pi on Windows.
+- Local lifecycle monitoring for Codex, Claude Code, Grok Build, and Pi on both Windows and macOS.
 - Multiple-session aggregation with priority ordering.
 - Configurable agent visibility with focused polling on Windows to limit background overhead.
 - Hover-to-inspect usage, context, or session details.
