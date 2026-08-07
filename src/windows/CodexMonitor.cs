@@ -876,6 +876,10 @@ public sealed class CodexSessionMonitor : IDisposable
             lock (sync)
             {
                 EnsureSessionWatcher();
+                if (sessionWatcher != null)
+                {
+                    sessionWatcher.EnableRaisingEvents = true;
+                }
             }
             timer.Change(0, 220);
         }
@@ -883,6 +887,14 @@ public sealed class CodexSessionMonitor : IDisposable
         public void Stop()
         {
             timer.Change(Timeout.Infinite, Timeout.Infinite);
+            lock (sync)
+            {
+                if (sessionWatcher != null)
+                {
+                    sessionWatcher.EnableRaisingEvents = false;
+                }
+                pendingSessionPaths.Clear();
+            }
         }
 
         private void OnTick(object state)

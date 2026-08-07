@@ -52,6 +52,11 @@ namespace CodexHalo
             return Path.Combine(LogsDirectory(userProfile), "grok-status.jsonl");
         }
 
+        public static string PiStatusLog(string userProfile = null)
+        {
+            return Path.Combine(LogsDirectory(userProfile), "pi-status.jsonl");
+        }
+
         public static string ClaudeContextsDirectory(string userProfile = null)
         {
             return Path.Combine(CacheDirectory(userProfile), "claude-contexts");

@@ -37,6 +37,8 @@ public sealed class HaloWindow : Window
         private readonly ClaudeHookStatusMonitor claudeMonitor;
         private readonly ClaudeTranscriptSessionMonitor claudeTranscriptMonitor;
         private readonly GrokHookStatusMonitor grokMonitor;
+        private readonly PiStatusMonitor piMonitor;
+        private readonly PiRuntimeMonitor piRuntimeMonitor;
         private readonly HaloVisual visual;
         private readonly DetailsWindow details;
         private readonly Forms.NotifyIcon tray;
@@ -54,12 +56,18 @@ public sealed class HaloWindow : Window
         private bool codexWasForeground;
         private bool? lastCodexRunning;
         private bool? lastGrokPresent;
+        private bool? lastPiPresent;
         private DateTime activeErrorUtc;
         private DateTime errorDimmedUtc;
         private ErrorPresentation errorPresentation = ErrorPresentation.Flashing;
         private Forms.ToolStripMenuItem codexAgentItem;
         private Forms.ToolStripMenuItem claudeAgentItem;
         private Forms.ToolStripMenuItem grokAgentItem;
+        private Forms.ToolStripMenuItem piAgentItem;
+        private Forms.ToolStripMenuItem enabledCodexAgentItem;
+        private Forms.ToolStripMenuItem enabledClaudeAgentItem;
+        private Forms.ToolStripMenuItem enabledGrokAgentItem;
+        private Forms.ToolStripMenuItem enabledPiAgentItem;
 
         public HaloWindow(HaloSettings appSettings)
         {
@@ -92,6 +100,7 @@ public sealed class HaloWindow : Window
             hitSurface.Children.Add(visual);
             Content = hitSurface;
             details = new DetailsWindow();
+            details.SetEnabledAgents(settings.GetEnabledAgents());
             details.AgentSelected += delegate(AgentKind agent)
             {
                 Dispatcher.BeginInvoke(new Action(delegate { SetFocusedAgent(agent); }));
@@ -100,6 +109,8 @@ public sealed class HaloWindow : Window
             claudeMonitor = new ClaudeHookStatusMonitor();
             claudeTranscriptMonitor = new ClaudeTranscriptSessionMonitor();
             grokMonitor = new GrokHookStatusMonitor();
+            piMonitor = new PiStatusMonitor();
+            piRuntimeMonitor = new PiRuntimeMonitor();
             monitor.Changed += delegate { RefreshState(); };
             foregroundTimer = new DispatcherTimer(DispatcherPriority.Background);
             foregroundTimer.Interval = TimeSpan.FromMilliseconds(300);
@@ -209,7 +220,7 @@ public sealed class HaloWindow : Window
             AgentHaloRuntimeBootstrap.Bootstrap();
             RestorePosition();
             RecoverHaloIfOffscreen();
-            monitor.Start();
+            UpdateFocusedAgentMonitoring();
             ConfigureFocusedUsageProvider(settings.GetFocusedAgent());
             RefreshState();
             codexWasForeground = IsCodexForeground();
@@ -231,16 +242,25 @@ public sealed class HaloWindow : Window
 
         private void OnForegroundTick(object sender, EventArgs e)
         {
-            AgentKind focusedAgent = settings.GetFocusedAgent();
-            bool claudeChanged = claudeMonitor.Refresh();
-            claudeChanged = claudeTranscriptMonitor.Refresh() || claudeChanged;
-            if (claudeChanged && focusedAgent == AgentKind.ClaudeCode)
+            if (settings.Paused)
             {
-                RefreshState();
+                return;
             }
-            bool grokChanged = grokMonitor.Refresh();
+            AgentKind focusedAgent = settings.GetFocusedAgent();
+            if (focusedAgent == AgentKind.ClaudeCode)
+            {
+                bool claudeChanged = claudeMonitor.Refresh();
+                claudeChanged = claudeTranscriptMonitor.Refresh() || claudeChanged;
+                if (claudeChanged || (aggregate != null &&
+                    aggregate.State == HaloState.Done))
+                {
+                    RefreshState();
+                }
+                return;
+            }
             if (focusedAgent == AgentKind.Grok)
             {
+                bool grokChanged = grokMonitor.Refresh();
                 bool grokPresent = GrokActiveSessionsReader.HasLiveSession(
                     Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
                 bool grokPresenceChanged = !lastGrokPresent.HasValue ||
@@ -251,6 +271,23 @@ public sealed class HaloWindow : Window
                 {
                     RefreshState();
                 }
+                return;
+            }
+            if (focusedAgent == AgentKind.Pi)
+            {
+                bool piChanged = piMonitor.Refresh();
+                bool piRuntimeChanged = piRuntimeMonitor.Refresh();
+                bool piPresent = piMonitor.LiveSessionIds().Count > 0 ||
+                    piRuntimeMonitor.IsRunning;
+                bool piPresenceChanged = !lastPiPresent.HasValue ||
+                    lastPiPresent.Value != piPresent;
+                lastPiPresent = piPresent;
+                if (piChanged || piRuntimeChanged || piPresenceChanged ||
+                    (aggregate != null && aggregate.State == HaloState.Done))
+                {
+                    RefreshState();
+                }
+                return;
             }
             // Re-evaluate presence on every tick so offline becomes visible as
             // soon as the main Codex process exits — even if residual helpers
@@ -444,6 +481,75 @@ public sealed class HaloWindow : Window
                 tray.Text = ("Agent Halo · " + grokDisplayAggregate.Label).Substring(0,
                     Math.Min(63, ("Agent Halo · " + grokDisplayAggregate.Label).Length));
                 details.UpdateContent(grokDisplayAggregate, aggregate.Sessions);
+                UpdateAgentMenuChecks();
+                return;
+            }
+
+            if (settings.GetFocusedAgent() == AgentKind.Pi)
+            {
+                piMonitor.Refresh();
+                piRuntimeMonitor.Refresh();
+                HashSet<string> livePiSessionIds = piMonitor.LiveSessionIds();
+                bool piPresent = livePiSessionIds.Count > 0 ||
+                    piRuntimeMonitor.IsRunning;
+                lastPiPresent = piPresent;
+                List<SessionSnapshot> piSnapshots = piMonitor.Snapshots();
+                SessionSnapshot runtimeSnapshot = piRuntimeMonitor.Snapshot();
+                if (runtimeSnapshot != null && !piSnapshots.Any(
+                    delegate(SessionSnapshot item)
+                    {
+                        return item != null && String.Equals(item.ThreadId,
+                            runtimeSnapshot.ThreadId, StringComparison.OrdinalIgnoreCase);
+                    }))
+                {
+                    piSnapshots.Add(runtimeSnapshot);
+                }
+                aggregate = BuildPiAggregateForTest(piSnapshots,
+                    settings.Paused, livePiSessionIds, piPresent, DateTime.UtcNow);
+                if (demoState.HasValue)
+                {
+                    aggregate.State = demoState.Value;
+                    aggregate.Label = CodexSessionMonitor.StateLabel(demoState.Value);
+                    aggregate.Detail = "Preview mode";
+                }
+                int piCount = aggregate.Sessions == null ? 0 : aggregate.Sessions.Count;
+                bool showPiStandby = !demoState.HasValue && !settings.Paused &&
+                    aggregate.State == HaloState.Idle && piPresent;
+                visual.SetSteadyDone(showPiStandby);
+                visual.SetErrorPresentation(demoErrorPresentation ??
+                    ErrorPresentation.Flashing);
+                visual.SetState(showPiStandby ? HaloState.Done : aggregate.State,
+                    showPiStandby ? "STANDBY" : aggregate.Label, piCount);
+                visual.SetAnswerStreaming(false);
+                AggregateSnapshot piDisplayAggregate = aggregate;
+                if (showPiStandby)
+                {
+                    piDisplayAggregate = new AggregateSnapshot
+                    {
+                        State = HaloState.Done,
+                        Label = "STANDBY",
+                        Detail = L10n.Instance["status.standby_pi"],
+                        Sessions = aggregate.Sessions,
+                        AnswerStreaming = false,
+                        FocusedAgent = AgentKind.Pi
+                    };
+                }
+                else if (!demoState.HasValue && aggregate.State == HaloState.Idle)
+                {
+                    piDisplayAggregate = new AggregateSnapshot
+                    {
+                        State = HaloState.Idle,
+                        Label = aggregate.Label,
+                        Detail = L10n.Instance["status.offline_pi"],
+                        Sessions = aggregate.Sessions,
+                        AnswerStreaming = false,
+                        FocusedAgent = AgentKind.Pi
+                    };
+                }
+                displayAggregate = piDisplayAggregate;
+                tray.Text = ("Agent Halo · " + piDisplayAggregate.Label).Substring(0,
+                    Math.Min(63, ("Agent Halo · " + piDisplayAggregate.Label).Length));
+                details.UpdateContent(piDisplayAggregate, aggregate.Sessions);
                 UpdateAgentMenuChecks();
                 return;
             }
@@ -679,7 +785,8 @@ public sealed class HaloWindow : Window
         private List<SessionSnapshot> DetailsSessions(AggregateSnapshot detailsAggregate)
         {
             AgentKind focused = settings.GetFocusedAgent();
-            if (focused == AgentKind.ClaudeCode || focused == AgentKind.Grok)
+            if (focused == AgentKind.ClaudeCode || focused == AgentKind.Grok ||
+                focused == AgentKind.Pi)
             {
                 return detailsAggregate == null || detailsAggregate.Sessions == null
                     ? new List<SessionSnapshot>() : detailsAggregate.Sessions;
@@ -945,6 +1052,89 @@ public sealed class HaloWindow : Window
                 DateTime.UtcNow);
         }
 
+        internal static AggregateSnapshot BuildPiAggregateForTest(
+            IList<SessionSnapshot> allSessions,
+            bool paused,
+            ISet<string> liveSessionIds,
+            DateTime now)
+        {
+            bool present = liveSessionIds != null && liveSessionIds.Count > 0;
+            return BuildPiAggregateForTest(allSessions, paused, liveSessionIds,
+                present, now);
+        }
+
+        internal static AggregateSnapshot BuildPiAggregateForTest(
+            IList<SessionSnapshot> allSessions,
+            bool paused,
+            ISet<string> liveSessionIds,
+            bool present,
+            DateTime now)
+        {
+            List<SessionSnapshot> source = allSessions == null
+                ? new List<SessionSnapshot>()
+                : allSessions.Where(delegate(SessionSnapshot snapshot)
+                {
+                    return snapshot != null && snapshot.Agent == AgentKind.Pi;
+                }).ToList();
+            List<SessionSnapshot> sessions = source.Where(delegate(SessionSnapshot snapshot)
+            {
+                bool live = liveSessionIds != null &&
+                    liveSessionIds.Contains(snapshot.ThreadId);
+                return IsHookActivitySessionVisible(snapshot, now, live);
+            }).OrderBy(delegate(SessionSnapshot snapshot)
+            {
+                return CodexSessionMonitor.StatePriority(snapshot.State);
+            }).ThenByDescending(delegate(SessionSnapshot snapshot)
+            {
+                return snapshot.LastEventUtc;
+            }).ToList();
+            AggregateSnapshot result = new AggregateSnapshot
+            {
+                FocusedAgent = AgentKind.Pi,
+                Sessions = sessions
+            };
+            if (paused)
+            {
+                result.State = HaloState.Idle;
+                result.Label = "PAUSED";
+                result.Detail = "Monitoring paused";
+            }
+            else if (sessions.Count == 0)
+            {
+                // Keep the newest live idle snapshot for the details panel so
+                // project/model/token/context do not disappear in STANDBY.
+                if (present)
+                {
+                    result.Sessions = source.Where(delegate(SessionSnapshot snapshot)
+                    {
+                        return (liveSessionIds != null &&
+                                liveSessionIds.Contains(snapshot.ThreadId)) ||
+                            String.Equals(snapshot.EvidenceKind, "runtime-session",
+                                StringComparison.OrdinalIgnoreCase);
+                    }).OrderByDescending(delegate(SessionSnapshot snapshot)
+                    {
+                        return snapshot.LastEventUtc;
+                    }).Take(1).ToList();
+                }
+                result.State = HaloState.Idle;
+                result.Label = CodexSessionMonitor.StateLabel(HaloState.Idle);
+                result.Detail = present
+                    ? L10n.Instance["status.standby_pi"]
+                    : L10n.Instance["status.offline_pi"];
+            }
+            else
+            {
+                SessionSnapshot primary = sessions[0];
+                result.State = primary.State;
+                result.Label = CodexSessionMonitor.StateLabel(primary.State);
+                result.Detail = sessions.Count == 1
+                    ? primary.ProjectName + " · " + primary.Action
+                    : primary.ProjectName + " +" +
+                        (sessions.Count - 1).ToString(CultureInfo.InvariantCulture);
+            }
+            return result;
+        }
+
         internal static bool ShouldRefreshGrokStateForTick(
             bool monitorChanged,
             bool presenceChanged,
@@ -1132,16 +1322,42 @@ public sealed class HaloWindow : Window
                 Dispatcher.BeginInvoke(new Action(delegate
                 {
                     settings.Paused = pause.Checked;
+                    UpdateFocusedAgentMonitoring();
+                    if (settings.Paused)
+                    {
+                        SuspendFocusedUsageProviders();
+                    }
+                    else
+                    {
+                        ConfigureFocusedUsageProvider(settings.GetFocusedAgent());
+                    }
                     RefreshState();
                 }));
             };
             menu.Items.Add(pause);
+
+            Forms.ToolStripMenuItem enabledAgentMenu =
+                new Forms.ToolStripMenuItem(L10n.Instance["menu.enabled_agents"]);
+            enabledCodexAgentItem = CreateEnabledAgentItem(
+                AgentKind.Codex, "Codex");
+            enabledClaudeAgentItem = CreateEnabledAgentItem(
+                AgentKind.ClaudeCode, "Claude Code");
+            enabledGrokAgentItem = CreateEnabledAgentItem(
+                AgentKind.Grok, "Grok");
+            enabledPiAgentItem = CreateEnabledAgentItem(
+                AgentKind.Pi, "Pi");
+            enabledAgentMenu.DropDownItems.Add(enabledCodexAgentItem);
+            enabledAgentMenu.DropDownItems.Add(enabledClaudeAgentItem);
+            enabledAgentMenu.DropDownItems.Add(enabledGrokAgentItem);
+            enabledAgentMenu.DropDownItems.Add(enabledPiAgentItem);
+            menu.Items.Add(enabledAgentMenu);
 
             Forms.ToolStripMenuItem agentMenu =
                 new Forms.ToolStripMenuItem(L10n.Instance["menu.focus_target"]);
             codexAgentItem = new Forms.ToolStripMenuItem("Codex");
             claudeAgentItem = new Forms.ToolStripMenuItem("Claude Code");
             grokAgentItem = new Forms.ToolStripMenuItem("Grok");
+            piAgentItem = new Forms.ToolStripMenuItem("Pi");
             codexAgentItem.Click += delegate
             {
                 Dispatcher.BeginInvoke(new Action(delegate
@@ -1163,9 +1379,17 @@ public sealed class HaloWindow : Window
                     SetFocusedAgent(AgentKind.Grok);
                 }));
             };
+            piAgentItem.Click += delegate
+            {
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    SetFocusedAgent(AgentKind.Pi);
+                }));
+            };
             agentMenu.DropDownItems.Add(codexAgentItem);
             agentMenu.DropDownItems.Add(claudeAgentItem);
             agentMenu.DropDownItems.Add(grokAgentItem);
+            agentMenu.DropDownItems.Add(piAgentItem);
             menu.Items.Add(agentMenu);
 
             // Language submenu
@@ -1235,12 +1459,17 @@ public sealed class HaloWindow : Window
 
         private void SetFocusedAgent(AgentKind agent)
         {
+            if (!settings.IsAgentEnabled(agent))
+            {
+                return;
+            }
             if (settings.GetFocusedAgent() != agent)
             {
                 SuspendFocusedUsageProviders();
                 settings.SetFocusedAgent(agent);
                 SettingsStorage.Save(settings);
             }
+            UpdateFocusedAgentMonitoring();
             ConfigureFocusedUsageProvider(agent);
             RefreshState();
             if (details.IsVisible)
@@ -1253,7 +1482,8 @@ public sealed class HaloWindow : Window
 
         private void UpdateAgentMenuChecks()
         {
-            if (codexAgentItem == null || claudeAgentItem == null || grokAgentItem == null)
+            if (codexAgentItem == null || claudeAgentItem == null ||
+                grokAgentItem == null || piAgentItem == null)
             {
                 return;
             }
@@ -1261,6 +1491,77 @@ public sealed class HaloWindow : Window
             codexAgentItem.Checked = focused == AgentKind.Codex;
             claudeAgentItem.Checked = focused == AgentKind.ClaudeCode;
             grokAgentItem.Checked = focused == AgentKind.Grok;
+            piAgentItem.Checked = focused == AgentKind.Pi;
+            codexAgentItem.Visible = settings.IsAgentEnabled(AgentKind.Codex);
+            claudeAgentItem.Visible = settings.IsAgentEnabled(AgentKind.ClaudeCode);
+            grokAgentItem.Visible = settings.IsAgentEnabled(AgentKind.Grok);
+            piAgentItem.Visible = settings.IsAgentEnabled(AgentKind.Pi);
+
+            if (enabledCodexAgentItem != null)
+            {
+                enabledCodexAgentItem.Checked =
+                    settings.IsAgentEnabled(AgentKind.Codex);
+                enabledClaudeAgentItem.Checked =
+                    settings.IsAgentEnabled(AgentKind.ClaudeCode);
+                enabledGrokAgentItem.Checked =
+                    settings.IsAgentEnabled(AgentKind.Grok);
+                enabledPiAgentItem.Checked =
+                    settings.IsAgentEnabled(AgentKind.Pi);
+            }
+        }
+
+        private Forms.ToolStripMenuItem CreateEnabledAgentItem(
+            AgentKind agent, string title)
+        {
+            Forms.ToolStripMenuItem item = new Forms.ToolStripMenuItem(title);
+            item.CheckOnClick = true;
+            item.Checked = settings.IsAgentEnabled(agent);
+            item.Click += delegate
+            {
+                bool enabled = item.Checked;
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    if (!settings.SetAgentEnabled(agent, enabled))
+                    {
+                        item.Checked = true;
+                        return;
+                    }
+                    SuspendFocusedUsageProviders();
+                    details.SetEnabledAgents(settings.GetEnabledAgents());
+                    UpdateFocusedAgentMonitoring();
+                    ConfigureFocusedUsageProvider(settings.GetFocusedAgent());
+                    SettingsStorage.Save(settings);
+                    UpdateAgentMenuChecks();
+                    RefreshState();
+                    if (details.IsVisible)
+                    {
+                        AggregateSnapshot detailsAggregate = displayAggregate ?? aggregate;
+                        details.UpdateContent(detailsAggregate,
+                            DetailsSessions(detailsAggregate));
+                        PositionDetails();
+                    }
+                }));
+            };
+            return item;
+        }
+
+        private void UpdateFocusedAgentMonitoring()
+        {
+            if (ShouldRunCodexMonitor(settings))
+            {
+                monitor.Start();
+            }
+            else
+            {
+                monitor.Stop();
+            }
+        }
+
+        internal static bool ShouldRunCodexMonitor(HaloSettings candidate)
+        {
+            return candidate != null && !candidate.Paused &&
+                candidate.GetFocusedAgent() == AgentKind.Codex &&
+                candidate.IsAgentEnabled(AgentKind.Codex);
         }
 
         private void AddPreviewItem(Forms.ToolStripMenuItem parent, string title,

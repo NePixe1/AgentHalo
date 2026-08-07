@@ -30,7 +30,7 @@
 ## Features
 
 - **Status at a glance.** One ambient ring distinguishes planning, tool execution, completion, requests for input, and blocking failures. A completed task keeps breathing until it is acknowledged.
-- **Multiple agents, one focused signal.** Agent Halo watches the supported agents in parallel while the selected agent controls the ring and detail panel. Switching focus does not stop the others from being monitored.
+- **Multiple agents, one focused signal.** Choose which agents appear from the tray menu; the current agent controls the ring and details. Windows actively polls only the current agent to reduce background overhead.
 - **Useful detail on demand.** Hover to see official usage limits, context, or session details. Custom Codex / API-key sessions show project, model, and current-turn input/output tokens without exposing API keys, base URLs, or relay names—and without inventing official quota data.
 - **A native desktop companion.** The always-on-top Windows and macOS apps need no browser or cloud dashboard. Drag and edge-snap the halo, resize it, pause monitoring, control startup, and recover it after a display change.
 - **Local by design.** Lifecycle and session content stay on your machine. Official usage refreshes reuse an existing provider sign-in; Agent Halo does not require or read an OpenAI API key.
@@ -39,7 +39,7 @@
 
 | Platform | Supported agents | Requirement |
 | --- | --- | --- |
-| Windows | Codex, Claude Code, Grok Build | Windows 10 or 11; .NET Framework 4.8 (usually preinstalled) |
+| Windows | Codex, Claude Code, Grok Build, Pi | Windows 10 or 11; .NET Framework 4.8 (usually preinstalled) |
 | macOS | Codex, Claude Code, Grok Build | macOS 13 or later |
 
 Install and sign in to at least one supported agent before using Agent Halo.
@@ -65,9 +65,9 @@ Official accounts do not need an OpenAI API key. When available, usage refresh r
 ## Quick usage
 
 - **Drag** the halo to move it; it snaps lightly to screen edges.
-- **Hover** for status and usage / session details; switch **Codex / CC / Grok** on either platform.
+- **Hover** for status and usage / session details; Windows can switch **Codex / CC / Grok / Pi**.
 - **Click** the halo to bring the Codex window forward when relevant.
-- **Right-click** for state previews, temporary pause, startup, always-on-top behavior, halo size (`75% / 100% / 125%`), **Reset Position**, and quit. Pause clears on the next launch.
+- **Right-click** to choose **Monitored Agents** and the **Current Agent**, or access state previews, temporary pause, startup, always-on-top behavior, halo size (`75% / 100% / 125%`), **Reset Position**, and quit. At least one agent remains enabled; pause clears on the next launch.
 - After a display change, an off-screen halo recovers to the primary display. On macOS, it can also return to its remembered display when that display reconnects.
 
 ## Status colors

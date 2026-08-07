@@ -59,6 +59,11 @@ namespace CodexHalo
                 GrokHookConfigurator.Configure(home, hookExe);
             }
 
+            // Pi loads TypeScript extensions directly from ~/.pi/agent/extensions.
+            // The source is embedded in AgentHalo.exe, so installed builds do not
+            // depend on repository or docs files at runtime.
+            PiExtensionConfigurator.Configure(home);
+
             // Settings now point at bin\status-hook.exe — drop unreferenced
             // root-level AgentHaloHook.exe leftovers.
             AgentHaloBinaryStaging.ScrubUnreferencedLegacyBinaries(home);
