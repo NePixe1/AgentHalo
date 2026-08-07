@@ -105,6 +105,14 @@ namespace CodexHalo
         public string Path;
         public DateTime CreatedUtc;
         public DateTime LastWriteUtc;
+        public long Length;
+        public string Provider;
+        public string Model;
+        public long InputTokens;
+        public long OutputTokens;
+        public long CacheReadTokens;
+        public long ContextTokens;
+        public long ContextWindowTokens;
     }
 
     internal sealed class PiRuntimeProcess
@@ -152,10 +160,10 @@ namespace CodexHalo
                 return false;
             }
             nextCheckUtc = now.Add(CheckInterval);
-            bool before = running;
+            string before = RuntimeFingerprint(running, latestSession);
             try
             {
-                latestSession = ReadLatestSession(agentRoot);
+                latestSession = ReadLatestSession(agentRoot, latestSession);
                 running = IsRunningForTest(latestSession, now, ReadProcesses());
             }
             catch (Exception ex)
@@ -164,7 +172,8 @@ namespace CodexHalo
                 running = false;
                 latestSession = null;
             }
-            return before != running;
+            return !String.Equals(before, RuntimeFingerprint(running, latestSession),
+                StringComparison.Ordinal);
         }
 
         public SessionSnapshot Snapshot()
@@ -186,7 +195,14 @@ namespace CodexHalo
                 TurnPhase = AgentTurnPhase.None,
                 Activity = AgentActivityKind.None,
                 EvidenceSource = AgentEvidenceSource.PiExtension,
-                EvidenceKind = "runtime-session"
+                EvidenceKind = "runtime-session",
+                ModelName = latestSession.Model,
+                ModelProvider = latestSession.Provider,
+                TurnInputTokens = latestSession.InputTokens,
+                TurnCachedInputTokens = latestSession.CacheReadTokens,
+                TurnOutputTokens = latestSession.OutputTokens,
+                ContextInputTokens = latestSession.ContextTokens,
+                ContextWindowTokens = latestSession.ContextWindowTokens
             };
         }
 
@@ -239,15 +255,34 @@ namespace CodexHalo
 
         internal static PiSessionEvidence ReadLatestSession(string root)
         {
+            return ReadLatestSession(root, null);
+        }
+
+        private static PiSessionEvidence ReadLatestSession(string root,
+            PiSessionEvidence previous)
+        {
             string sessionsRoot = Path.Combine(root ?? String.Empty, "sessions");
             if (!Directory.Exists(sessionsRoot))
             {
                 return null;
             }
-            foreach (string file in Directory.EnumerateFiles(sessionsRoot, "*.jsonl",
-                SearchOption.AllDirectories).OrderByDescending(File.GetLastWriteTimeUtc))
+            foreach (FileInfo file in Directory.EnumerateFiles(sessionsRoot, "*.jsonl",
+                SearchOption.AllDirectories).Select(delegate(string path)
+                {
+                    return new FileInfo(path);
+                }).OrderByDescending(delegate(FileInfo info)
+                {
+                    return info.LastWriteTimeUtc;
+                }))
             {
-                PiSessionEvidence evidence = ReadSessionHeader(file);
+                if (previous != null && String.Equals(previous.Path, file.FullName,
+                    StringComparison.OrdinalIgnoreCase) &&
+                    previous.LastWriteUtc == file.LastWriteTimeUtc &&
+                    previous.Length == file.Length)
+                {
+                    return previous;
+                }
+                PiSessionEvidence evidence = ReadSession(file.FullName, root);
                 if (evidence != null)
                 {
                     return evidence;
@@ -256,19 +291,29 @@ namespace CodexHalo
             return null;
         }
 
-        private static PiSessionEvidence ReadSessionHeader(string file)
+        private static PiSessionEvidence ReadSession(string file, string root)
         {
             try
             {
-                string firstLine;
+                List<string> lines = new List<string>();
                 using (FileStream stream = new FileStream(file, FileMode.Open,
                     FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
                 using (StreamReader reader = new StreamReader(stream, Encoding.UTF8, true))
                 {
-                    firstLine = reader.ReadLine();
+                    string line;
+                    while ((line = reader.ReadLine()) != null)
+                    {
+                        lines.Add(line);
+                    }
                 }
-                Dictionary<string, object> data = new JavaScriptSerializer()
-                    .DeserializeObject(firstLine) as Dictionary<string, object>;
+                if (lines.Count == 0)
+                {
+                    return null;
+                }
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                serializer.MaxJsonLength = Int32.MaxValue;
+                Dictionary<string, object> data = serializer.DeserializeObject(lines[0])
+                    as Dictionary<string, object>;
                 object type;
                 if (data == null || !data.TryGetValue("type", out type) ||
                     !String.Equals(Convert.ToString(type, CultureInfo.InvariantCulture),
@@ -279,7 +324,7 @@ namespace CodexHalo
                 object id;
                 object cwd;
                 FileInfo info = new FileInfo(file);
-                return new PiSessionEvidence
+                PiSessionEvidence evidence = new PiSessionEvidence
                 {
                     SessionId = data.TryGetValue("id", out id) && id != null
                         ? Convert.ToString(id, CultureInfo.InvariantCulture)
@@ -288,13 +333,228 @@ namespace CodexHalo
                         ? Convert.ToString(cwd, CultureInfo.InvariantCulture) : null,
                     Path = file,
                     CreatedUtc = info.CreationTimeUtc,
-                    LastWriteUtc = info.LastWriteTimeUtc
+                    LastWriteUtc = info.LastWriteTimeUtc,
+                    Length = info.Length
                 };
+                string changedProvider = null;
+                string changedModel = null;
+                for (int index = lines.Count - 1; index > 0; index--)
+                {
+                    string line = lines[index];
+                    if (line.IndexOf("\"role\":\"assistant\"",
+                        StringComparison.OrdinalIgnoreCase) < 0 &&
+                        line.IndexOf("\"type\":\"model_change\"",
+                            StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        continue;
+                    }
+                    Dictionary<string, object> entry;
+                    try
+                    {
+                        entry = serializer.DeserializeObject(line)
+                            as Dictionary<string, object>;
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+                    if (entry == null)
+                    {
+                        continue;
+                    }
+                    string entryType = GetString(entry, "type");
+                    if (String.Equals(entryType, "model_change",
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (String.IsNullOrWhiteSpace(changedModel))
+                        {
+                            changedProvider = GetString(entry, "provider");
+                            changedModel = GetString(entry, "modelId");
+                        }
+                        continue;
+                    }
+                    Dictionary<string, object> message = GetDictionary(entry, "message");
+                    if (message == null || !String.Equals(GetString(message, "role"),
+                        "assistant", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                    evidence.Provider = String.IsNullOrWhiteSpace(changedProvider)
+                        ? GetString(message, "provider") : changedProvider;
+                    evidence.Model = String.IsNullOrWhiteSpace(changedModel)
+                        ? GetString(message, "model") : changedModel;
+                    Dictionary<string, object> usage = GetDictionary(message, "usage");
+                    if (usage != null)
+                    {
+                        evidence.InputTokens = GetLong(usage, "input");
+                        evidence.OutputTokens = GetLong(usage, "output");
+                        evidence.CacheReadTokens = GetLong(usage, "cacheRead");
+                        evidence.ContextTokens = GetLong(usage, "totalTokens");
+                        if (evidence.ContextTokens <= 0)
+                        {
+                            evidence.ContextTokens = evidence.InputTokens +
+                                evidence.OutputTokens + evidence.CacheReadTokens +
+                                GetLong(usage, "cacheWrite");
+                        }
+                    }
+                    break;
+                }
+                if (String.IsNullOrWhiteSpace(evidence.Model) &&
+                    !String.IsNullOrWhiteSpace(changedModel))
+                {
+                    evidence.Provider = changedProvider;
+                    evidence.Model = changedModel;
+                }
+                evidence.ContextWindowTokens = ReadContextWindow(root,
+                    evidence.Provider, evidence.Model);
+                return evidence;
             }
             catch
             {
                 return null;
             }
+        }
+
+        private static long ReadContextWindow(string root, string provider, string model)
+        {
+            if (String.IsNullOrWhiteSpace(model))
+            {
+                return 0;
+            }
+            foreach (string name in new string[] { "models.json", "models-store.json" })
+            {
+                string path = Path.Combine(root ?? String.Empty, name);
+                if (!File.Exists(path))
+                {
+                    continue;
+                }
+                try
+                {
+                    object parsed = new JavaScriptSerializer().DeserializeObject(
+                        File.ReadAllText(path, Encoding.UTF8));
+                    long value = FindContextWindow(parsed, provider, model, null);
+                    if (value > 0)
+                    {
+                        return value;
+                    }
+                }
+                catch
+                {
+                }
+            }
+            return 0;
+        }
+
+        private static long FindContextWindow(object node, string provider,
+            string model, string inheritedProvider)
+        {
+            Dictionary<string, object> data = node as Dictionary<string, object>;
+            if (data != null)
+            {
+                string currentProvider = GetString(data, "provider");
+                if (String.IsNullOrWhiteSpace(currentProvider))
+                {
+                    currentProvider = inheritedProvider;
+                }
+                string id = GetString(data, "id");
+                if (String.IsNullOrWhiteSpace(id)) id = GetString(data, "model");
+                if (String.IsNullOrWhiteSpace(id)) id = GetString(data, "modelId");
+                if (String.Equals(id, model, StringComparison.OrdinalIgnoreCase) &&
+                    (String.IsNullOrWhiteSpace(provider) ||
+                     String.IsNullOrWhiteSpace(currentProvider) ||
+                     String.Equals(currentProvider, provider,
+                         StringComparison.OrdinalIgnoreCase)))
+                {
+                    long value = GetLong(data, "contextWindow");
+                    if (value <= 0) value = GetLong(data, "context_window");
+                    if (value > 0)
+                    {
+                        return value;
+                    }
+                }
+                object providersValue;
+                Dictionary<string, object> providers = data.TryGetValue("providers",
+                    out providersValue) ? providersValue as Dictionary<string, object> : null;
+                if (providers != null)
+                {
+                    foreach (KeyValuePair<string, object> pair in providers)
+                    {
+                        long value = FindContextWindow(pair.Value, provider, model,
+                            pair.Key);
+                        if (value > 0) return value;
+                    }
+                }
+                foreach (KeyValuePair<string, object> pair in data)
+                {
+                    if (String.Equals(pair.Key, "providers",
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                    string childProvider = currentProvider;
+                    Dictionary<string, object> child =
+                        pair.Value as Dictionary<string, object>;
+                    if (child != null && child.ContainsKey("models") &&
+                        String.IsNullOrWhiteSpace(childProvider))
+                    {
+                        childProvider = pair.Key;
+                    }
+                    long value = FindContextWindow(pair.Value, provider, model,
+                        childProvider);
+                    if (value > 0) return value;
+                }
+                return 0;
+            }
+            object[] items = node as object[];
+            if (items != null)
+            {
+                foreach (object item in items)
+                {
+                    long value = FindContextWindow(item, provider, model,
+                        inheritedProvider);
+                    if (value > 0) return value;
+                }
+            }
+            return 0;
+        }
+
+        private static Dictionary<string, object> GetDictionary(
+            Dictionary<string, object> data, string key)
+        {
+            object value;
+            return data != null && data.TryGetValue(key, out value)
+                ? value as Dictionary<string, object> : null;
+        }
+
+        private static string GetString(Dictionary<string, object> data, string key)
+        {
+            object value;
+            return data != null && data.TryGetValue(key, out value) && value != null
+                ? Convert.ToString(value, CultureInfo.InvariantCulture) : null;
+        }
+
+        private static long GetLong(Dictionary<string, object> data, string key)
+        {
+            object value;
+            long result;
+            return data != null && data.TryGetValue(key, out value) && value != null &&
+                Int64.TryParse(Convert.ToString(value, CultureInfo.InvariantCulture),
+                    NumberStyles.Any, CultureInfo.InvariantCulture, out result)
+                ? result : 0;
+        }
+
+        private static string RuntimeFingerprint(bool isRunning,
+            PiSessionEvidence session)
+        {
+            if (session == null)
+            {
+                return isRunning ? "1" : "0";
+            }
+            return (isRunning ? "1" : "0") + "|" + session.SessionId + "|" +
+                session.LastWriteUtc.Ticks.ToString(CultureInfo.InvariantCulture) + "|" +
+                session.Length.ToString(CultureInfo.InvariantCulture) + "|" +
+                session.Model + "|" +
+                session.ContextTokens.ToString(CultureInfo.InvariantCulture);
         }
 
         private static List<PiRuntimeProcess> ReadProcesses()

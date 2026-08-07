@@ -42,6 +42,14 @@ public static class Diagnostics
                 result["session_id"] = snapshot == null ? null : snapshot.ThreadId;
                 result["project"] = snapshot == null ? null : snapshot.ProjectName;
                 result["evidence"] = snapshot == null ? null : snapshot.EvidenceKind;
+                result["model"] = snapshot == null ? null : snapshot.ModelName;
+                result["provider"] = snapshot == null ? null : snapshot.ModelProvider;
+                result["input_tokens"] = snapshot == null ? 0 : snapshot.TurnInputTokens;
+                result["output_tokens"] = snapshot == null ? 0 : snapshot.TurnOutputTokens;
+                result["context_tokens"] = snapshot == null ? 0 :
+                    snapshot.ContextInputTokens;
+                result["context_window"] = snapshot == null ? 0 :
+                    snapshot.ContextWindowTokens;
                 File.WriteAllText(outputPath,
                     new JavaScriptSerializer().Serialize(result),
                     new UTF8Encoding(false));
@@ -1659,14 +1667,28 @@ public static class Diagnostics
                     string piRuntimeFile = Path.Combine(piRuntimeSessions, "session.jsonl");
                     File.WriteAllText(piRuntimeFile,
                         "{\"type\":\"session\",\"version\":3," +
-                        "\"id\":\"pi-runtime-file\",\"cwd\":\"C:\\\\work\\\\runtime\"}\n",
+                        "\"id\":\"pi-runtime-file\",\"cwd\":\"C:\\\\work\\\\runtime\"}\n" +
+                        "{\"type\":\"message\",\"message\":{" +
+                        "\"role\":\"assistant\",\"provider\":\"test-provider\"," +
+                        "\"model\":\"test-model\",\"usage\":{" +
+                        "\"input\":1200,\"output\":80,\"cacheRead\":22000," +
+                        "\"cacheWrite\":0,\"totalTokens\":23280}}}\n",
+                        Encoding.UTF8);
+                    File.WriteAllText(Path.Combine(piRuntimeRoot, "models.json"),
+                        "{\"providers\":{\"test-provider\":{\"models\":[{" +
+                        "\"id\":\"test-model\",\"contextWindow\":120000}]}}}",
                         Encoding.UTF8);
                     PiSessionEvidence parsedPiRuntime =
                         PiRuntimeMonitor.ReadLatestSession(piRuntimeRoot);
                     Assert(parsedPiRuntime != null &&
                         parsedPiRuntime.SessionId == "pi-runtime-file" &&
-                        parsedPiRuntime.WorkingDirectory == "C:\\work\\runtime",
-                        "Pi runtime fallback reads the latest transcript header");
+                        parsedPiRuntime.WorkingDirectory == "C:\\work\\runtime" &&
+                        parsedPiRuntime.Model == "test-model" &&
+                        parsedPiRuntime.InputTokens == 1200 &&
+                        parsedPiRuntime.OutputTokens == 80 &&
+                        parsedPiRuntime.ContextTokens == 23280 &&
+                        parsedPiRuntime.ContextWindowTokens == 120000,
+                        "Pi runtime fallback reads model, usage, and context telemetry");
                 }
                 finally
                 {
