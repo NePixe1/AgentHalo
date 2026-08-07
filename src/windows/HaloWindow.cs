@@ -495,15 +495,7 @@ public sealed class HaloWindow : Window
                 lastPiPresent = piPresent;
                 List<SessionSnapshot> piSnapshots = piMonitor.Snapshots();
                 SessionSnapshot runtimeSnapshot = piRuntimeMonitor.Snapshot();
-                if (runtimeSnapshot != null && !piSnapshots.Any(
-                    delegate(SessionSnapshot item)
-                    {
-                        return item != null && String.Equals(item.ThreadId,
-                            runtimeSnapshot.ThreadId, StringComparison.OrdinalIgnoreCase);
-                    }))
-                {
-                    piSnapshots.Add(runtimeSnapshot);
-                }
+                MergePiRuntimeSnapshot(piSnapshots, runtimeSnapshot);
                 aggregate = BuildPiAggregateForTest(piSnapshots,
                     settings.Paused, livePiSessionIds, piPresent, DateTime.UtcNow);
                 if (demoState.HasValue)
@@ -1061,6 +1053,30 @@ public sealed class HaloWindow : Window
             bool present = liveSessionIds != null && liveSessionIds.Count > 0;
             return BuildPiAggregateForTest(allSessions, paused, liveSessionIds,
                 present, now);
+        }
+
+        internal static void MergePiRuntimeSnapshot(
+            List<SessionSnapshot> snapshots, SessionSnapshot runtimeSnapshot)
+        {
+            if (snapshots == null || runtimeSnapshot == null)
+            {
+                return;
+            }
+            SessionSnapshot matching = snapshots.FirstOrDefault(
+                delegate(SessionSnapshot item)
+                {
+                    return item != null && String.Equals(item.ThreadId,
+                        runtimeSnapshot.ThreadId, StringComparison.OrdinalIgnoreCase);
+                });
+            if (matching == null)
+            {
+                snapshots.Add(runtimeSnapshot);
+                return;
+            }
+            if (!String.IsNullOrWhiteSpace(runtimeSnapshot.ProjectName))
+            {
+                matching.ProjectName = runtimeSnapshot.ProjectName;
+            }
         }
 
         internal static AggregateSnapshot BuildPiAggregateForTest(

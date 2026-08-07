@@ -568,8 +568,10 @@ public sealed class DetailsWindow : Window
             claudeModelRow.Margin = new Thickness(0);
             claudeTokenRow.Margin = new Thickness(0);
             claudeProjectValue.Text = primary == null
-                ? L10n.Instance["quota.no_data"] : ProjectLeaf(primary.WorkingDirectory) ??
-                    primary.ProjectName ?? "Pi";
+                ? L10n.Instance["quota.no_data"]
+                : (!String.IsNullOrWhiteSpace(primary.ProjectName)
+                    ? primary.ProjectName
+                    : ProjectLeaf(primary.WorkingDirectory) ?? "Pi");
             claudeModelValue.Text = primary == null ||
                 String.IsNullOrWhiteSpace(primary.ModelName)
                 ? L10n.Instance["quota.no_data"] : primary.ModelName;
