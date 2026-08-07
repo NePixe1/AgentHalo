@@ -853,10 +853,12 @@ public sealed class DetailsWindow : Window
             }
             contextHoldAgent = currentAgent;
 
-            // STANDBY ignores frozen disk/usage occupancy so the pill does not
-            // stick forever while the agent process is merely idle. Soft-hold
-            // the last live percent instead (Codex / Claude parity with macOS).
-            double? livePercent = (isOffline || isStandby) ? null : sourcePercent;
+            // Codex/Claude can leave frozen disk readings behind while idle, so
+            // STANDBY soft-holds their last active value. Pi's live session
+            // transcript remains the authoritative current-session occupancy
+            // while Pi is waiting, so keep a valid Pi reading visible.
+            double? livePercent = SelectLiveContextSource(
+                currentAgent, sourcePercent, isOffline, isStandby);
 
             ContextDisplayResolution resolved = ResolveContextDisplay(
                 livePercent,
@@ -883,6 +885,17 @@ public sealed class DetailsWindow : Window
                 contextMeter.IsAvailable = false;
                 contextMeter.Value = 0;
             }
+        }
+
+        internal static double? SelectLiveContextSource(
+            AgentKind agent,
+            double? sourcePercent,
+            bool isOffline,
+            bool isStandby)
+        {
+            if (isOffline) return null;
+            if (isStandby && agent != AgentKind.Pi) return null;
+            return sourcePercent;
         }
 
         /// <summary>

@@ -1452,6 +1452,17 @@ public static class Diagnostics
                 Assert(standbyIgnoresLive.DisplayPercent.HasValue &&
                     Math.Abs(standbyIgnoresLive.DisplayPercent.Value - 55.0) < 0.001,
                     "STANDBY soft-hold uses remembered percent only");
+                Assert(!DetailsWindow.SelectLiveContextSource(
+                        AgentKind.Codex, 41.0, false, true).HasValue,
+                    "Codex STANDBY still ignores a frozen source reading");
+                double? piStandbyContext = DetailsWindow.SelectLiveContextSource(
+                    AgentKind.Pi, 41.0, false, true);
+                Assert(piStandbyContext.HasValue &&
+                    Math.Abs(piStandbyContext.Value - 41.0) < 0.001,
+                    "Pi STANDBY keeps live session context visible");
+                Assert(!DetailsWindow.SelectLiveContextSource(
+                        AgentKind.Pi, 41.0, true, false).HasValue,
+                    "Pi OFFLINE hides context immediately");
 
                 // Focused agent grok persistence
                 HaloSettings grokSettings = new HaloSettings();
