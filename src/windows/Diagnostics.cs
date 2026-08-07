@@ -30,6 +30,31 @@ namespace CodexHalo
 {
 public static class Diagnostics
     {
+        public static int WritePiRuntimeSnapshot(string outputPath)
+        {
+            try
+            {
+                PiRuntimeMonitor monitor = new PiRuntimeMonitor();
+                monitor.Refresh();
+                SessionSnapshot snapshot = monitor.Snapshot();
+                Dictionary<string, object> result = new Dictionary<string, object>();
+                result["running"] = monitor.IsRunning;
+                result["session_id"] = snapshot == null ? null : snapshot.ThreadId;
+                result["project"] = snapshot == null ? null : snapshot.ProjectName;
+                result["evidence"] = snapshot == null ? null : snapshot.EvidenceKind;
+                File.WriteAllText(outputPath,
+                    new JavaScriptSerializer().Serialize(result),
+                    new UTF8Encoding(false));
+                return monitor.IsRunning ? 0 : 2;
+            }
+            catch (Exception ex)
+            {
+                File.WriteAllText(outputPath, "{\"running\":false,\"detail\":\"" +
+                    EscapeJson(ex.GetType().Name) + "\"}", new UTF8Encoding(false));
+                return 1;
+            }
+        }
+
         public static int WriteCodexUsageSnapshot(string outputPath)
         {
             CodexUsageMonitor monitor = null;
@@ -1567,6 +1592,86 @@ public static class Diagnostics
                 Assert(piAggregate.State == HaloState.Working &&
                     piAggregate.FocusedAgent == AgentKind.Pi,
                     "Pi aggregate exposes active working state");
+
+                DateTime piRuntimeNow = DateTime.UtcNow;
+                PiSessionEvidence piRuntimeEvidence = new PiSessionEvidence
+                {
+                    SessionId = "pi-runtime-test",
+                    WorkingDirectory = "C:\\work\\runtime",
+                    CreatedUtc = piRuntimeNow.AddMinutes(-20),
+                    LastWriteUtc = piRuntimeNow.AddMinutes(-1)
+                };
+                List<PiRuntimeProcess> piRuntimeProcesses = new List<PiRuntimeProcess>
+                {
+                    new PiRuntimeProcess
+                    {
+                        ProcessId = 100,
+                        ParentProcessId = 1,
+                        Name = "pwsh.exe",
+                        StartedUtc = piRuntimeNow.AddHours(-2)
+                    },
+                    new PiRuntimeProcess
+                    {
+                        ProcessId = 101,
+                        ParentProcessId = 100,
+                        Name = "node.exe",
+                        StartedUtc = piRuntimeNow.AddHours(-1)
+                    }
+                };
+                Assert(PiRuntimeMonitor.IsRunningForTest(piRuntimeEvidence,
+                    piRuntimeNow, piRuntimeProcesses),
+                    "Pi runtime fallback recognizes a shell-hosted Node session");
+                Assert(!PiRuntimeMonitor.IsRunningForTest(new PiSessionEvidence
+                {
+                    SessionId = "stale",
+                    LastWriteUtc = piRuntimeNow.AddDays(-4)
+                }, piRuntimeNow, piRuntimeProcesses),
+                    "Pi runtime fallback rejects stale session evidence");
+
+                SessionSnapshot piRuntimeSnapshot = new SessionSnapshot
+                {
+                    ThreadId = "pi-runtime-test",
+                    ProjectName = "runtime",
+                    WorkingDirectory = "C:\\work\\runtime",
+                    State = HaloState.Idle,
+                    Action = "Ready",
+                    LastEventUtc = piRuntimeNow.AddMinutes(-1),
+                    Agent = AgentKind.Pi,
+                    EvidenceSource = AgentEvidenceSource.PiExtension,
+                    EvidenceKind = "runtime-session"
+                };
+                AggregateSnapshot piRuntimeAggregate =
+                    HaloWindow.BuildPiAggregateForTest(
+                        new List<SessionSnapshot> { piRuntimeSnapshot }, false,
+                        new HashSet<string>(StringComparer.OrdinalIgnoreCase), true,
+                        piRuntimeNow);
+                Assert(piRuntimeAggregate.State == HaloState.Idle &&
+                    piRuntimeAggregate.Sessions.Count == 1 &&
+                    piRuntimeAggregate.Detail == L10n.Instance["status.standby_pi"],
+                    "Pi runtime fallback exposes standby with project context");
+
+                string piRuntimeRoot = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-pi-runtime-" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    string piRuntimeSessions = Path.Combine(piRuntimeRoot, "sessions", "demo");
+                    Directory.CreateDirectory(piRuntimeSessions);
+                    string piRuntimeFile = Path.Combine(piRuntimeSessions, "session.jsonl");
+                    File.WriteAllText(piRuntimeFile,
+                        "{\"type\":\"session\",\"version\":3," +
+                        "\"id\":\"pi-runtime-file\",\"cwd\":\"C:\\\\work\\\\runtime\"}\n",
+                        Encoding.UTF8);
+                    PiSessionEvidence parsedPiRuntime =
+                        PiRuntimeMonitor.ReadLatestSession(piRuntimeRoot);
+                    Assert(parsedPiRuntime != null &&
+                        parsedPiRuntime.SessionId == "pi-runtime-file" &&
+                        parsedPiRuntime.WorkingDirectory == "C:\\work\\runtime",
+                        "Pi runtime fallback reads the latest transcript header");
+                }
+                finally
+                {
+                    try { Directory.Delete(piRuntimeRoot, true); } catch { }
+                }
 
                 // Hook routing: Grok env must write logs/grok-status.jsonl only
                 // and normalize snake_case event names to PascalCase.

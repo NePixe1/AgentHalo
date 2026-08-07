@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Web.Script.Serialization;
 
@@ -16,14 +17,7 @@ namespace CodexHalo
 
         public static string Configure(string userProfile = null)
         {
-            string root = Environment.GetEnvironmentVariable("PI_CODING_AGENT_DIR");
-            if (String.IsNullOrWhiteSpace(root))
-            {
-                string home = String.IsNullOrWhiteSpace(userProfile)
-                    ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
-                    : userProfile;
-                root = Path.Combine(home, ".pi", "agent");
-            }
+            string root = ResolveAgentRoot(userProfile);
             string target = Path.Combine(root, "extensions", "agent-halo-status.ts");
             try
             {
@@ -53,6 +47,19 @@ namespace CodexHalo
                 SettingsStorage.Log("Pi extension configure failed: " + ex.Message);
                 return null;
             }
+        }
+
+        internal static string ResolveAgentRoot(string userProfile = null)
+        {
+            string root = Environment.GetEnvironmentVariable("PI_CODING_AGENT_DIR");
+            if (!String.IsNullOrWhiteSpace(root))
+            {
+                return root;
+            }
+            string home = String.IsNullOrWhiteSpace(userProfile)
+                ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+                : userProfile;
+            return Path.Combine(home, ".pi", "agent");
         }
 
         internal static string ReadEmbeddedSource()
@@ -89,6 +96,308 @@ namespace CodexHalo
         public long CacheReadTokens;
         public long ContextTokens;
         public long ContextWindowTokens;
+    }
+
+    internal sealed class PiSessionEvidence
+    {
+        public string SessionId;
+        public string WorkingDirectory;
+        public string Path;
+        public DateTime CreatedUtc;
+        public DateTime LastWriteUtc;
+    }
+
+    internal sealed class PiRuntimeProcess
+    {
+        public int ProcessId;
+        public int ParentProcessId;
+        public string Name;
+        public DateTime StartedUtc;
+    }
+
+    /// <summary>
+    /// Presence fallback for Pi sessions that were already running before the
+    /// Agent Halo extension was installed. Hook records remain authoritative;
+    /// this reader only decides whether Pi itself is still online.
+    /// </summary>
+    internal sealed class PiRuntimeMonitor
+    {
+        private static readonly TimeSpan CheckInterval = TimeSpan.FromSeconds(2);
+        private static readonly TimeSpan SessionEvidenceLifetime = TimeSpan.FromDays(3);
+        private readonly string agentRoot;
+        private DateTime nextCheckUtc = DateTime.MinValue;
+        private bool running;
+        private PiSessionEvidence latestSession;
+
+        public PiRuntimeMonitor()
+            : this(PiExtensionConfigurator.ResolveAgentRoot())
+        {
+        }
+
+        internal PiRuntimeMonitor(string root)
+        {
+            agentRoot = root;
+        }
+
+        public bool IsRunning
+        {
+            get { return running; }
+        }
+
+        public bool Refresh()
+        {
+            DateTime now = DateTime.UtcNow;
+            if (now < nextCheckUtc)
+            {
+                return false;
+            }
+            nextCheckUtc = now.Add(CheckInterval);
+            bool before = running;
+            try
+            {
+                latestSession = ReadLatestSession(agentRoot);
+                running = IsRunningForTest(latestSession, now, ReadProcesses());
+            }
+            catch (Exception ex)
+            {
+                SettingsStorage.Log("Pi runtime detection failed: " + ex.Message);
+                running = false;
+                latestSession = null;
+            }
+            return before != running;
+        }
+
+        public SessionSnapshot Snapshot()
+        {
+            if (!running || latestSession == null)
+            {
+                return null;
+            }
+            return new SessionSnapshot
+            {
+                ThreadId = latestSession.SessionId,
+                ProjectName = ProjectName(latestSession.WorkingDirectory),
+                WorkingDirectory = latestSession.WorkingDirectory,
+                State = HaloState.Idle,
+                Action = "Ready",
+                LastEventUtc = latestSession.LastWriteUtc,
+                Active = false,
+                Agent = AgentKind.Pi,
+                TurnPhase = AgentTurnPhase.None,
+                Activity = AgentActivityKind.None,
+                EvidenceSource = AgentEvidenceSource.PiExtension,
+                EvidenceKind = "runtime-session"
+            };
+        }
+
+        internal static bool IsRunningForTest(PiSessionEvidence session,
+            DateTime nowUtc, IList<PiRuntimeProcess> processes)
+        {
+            if (session == null || processes == null ||
+                session.LastWriteUtc == DateTime.MinValue ||
+                session.LastWriteUtc > nowUtc.AddMinutes(5) ||
+                nowUtc - session.LastWriteUtc > SessionEvidenceLifetime)
+            {
+                return false;
+            }
+            Dictionary<int, PiRuntimeProcess> byId = processes
+                .Where(delegate(PiRuntimeProcess item)
+                {
+                    return item != null && item.ProcessId > 0;
+                }).GroupBy(delegate(PiRuntimeProcess item) { return item.ProcessId; })
+                .ToDictionary(delegate(IGrouping<int, PiRuntimeProcess> group)
+                {
+                    return group.Key;
+                }, delegate(IGrouping<int, PiRuntimeProcess> group)
+                {
+                    return group.First();
+                });
+            foreach (PiRuntimeProcess process in byId.Values)
+            {
+                if (!IsNodeProcess(process.Name))
+                {
+                    continue;
+                }
+                PiRuntimeProcess parent;
+                if (!byId.TryGetValue(process.ParentProcessId, out parent) ||
+                    !IsShellProcess(parent.Name))
+                {
+                    continue;
+                }
+                // A Pi process may stay alive across several session files. A
+                // session write after the process started ties the two together
+                // without relying on command-line access, which can be denied
+                // when Pi runs in an elevated terminal.
+                if (process.StartedUtc == DateTime.MinValue ||
+                    process.StartedUtc <= session.LastWriteUtc.AddSeconds(5))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        internal static PiSessionEvidence ReadLatestSession(string root)
+        {
+            string sessionsRoot = Path.Combine(root ?? String.Empty, "sessions");
+            if (!Directory.Exists(sessionsRoot))
+            {
+                return null;
+            }
+            foreach (string file in Directory.EnumerateFiles(sessionsRoot, "*.jsonl",
+                SearchOption.AllDirectories).OrderByDescending(File.GetLastWriteTimeUtc))
+            {
+                PiSessionEvidence evidence = ReadSessionHeader(file);
+                if (evidence != null)
+                {
+                    return evidence;
+                }
+            }
+            return null;
+        }
+
+        private static PiSessionEvidence ReadSessionHeader(string file)
+        {
+            try
+            {
+                string firstLine;
+                using (FileStream stream = new FileStream(file, FileMode.Open,
+                    FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                using (StreamReader reader = new StreamReader(stream, Encoding.UTF8, true))
+                {
+                    firstLine = reader.ReadLine();
+                }
+                Dictionary<string, object> data = new JavaScriptSerializer()
+                    .DeserializeObject(firstLine) as Dictionary<string, object>;
+                object type;
+                if (data == null || !data.TryGetValue("type", out type) ||
+                    !String.Equals(Convert.ToString(type, CultureInfo.InvariantCulture),
+                        "session", StringComparison.OrdinalIgnoreCase))
+                {
+                    return null;
+                }
+                object id;
+                object cwd;
+                FileInfo info = new FileInfo(file);
+                return new PiSessionEvidence
+                {
+                    SessionId = data.TryGetValue("id", out id) && id != null
+                        ? Convert.ToString(id, CultureInfo.InvariantCulture)
+                        : Path.GetFileNameWithoutExtension(file),
+                    WorkingDirectory = data.TryGetValue("cwd", out cwd) && cwd != null
+                        ? Convert.ToString(cwd, CultureInfo.InvariantCulture) : null,
+                    Path = file,
+                    CreatedUtc = info.CreationTimeUtc,
+                    LastWriteUtc = info.LastWriteTimeUtc
+                };
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static List<PiRuntimeProcess> ReadProcesses()
+        {
+            List<PiRuntimeProcess> result = new List<PiRuntimeProcess>();
+            IntPtr snapshot = CreateToolhelp32Snapshot(2, 0);
+            if (snapshot == new IntPtr(-1))
+            {
+                return result;
+            }
+            try
+            {
+                ProcessEntry entry = new ProcessEntry();
+                entry.Size = (uint)Marshal.SizeOf(typeof(ProcessEntry));
+                if (!Process32First(snapshot, ref entry))
+                {
+                    return result;
+                }
+                do
+                {
+                    DateTime started = DateTime.MinValue;
+                    try
+                    {
+                        using (Process process = Process.GetProcessById((int)entry.ProcessId))
+                        {
+                            started = process.StartTime.ToUniversalTime();
+                        }
+                    }
+                    catch
+                    {
+                    }
+                    result.Add(new PiRuntimeProcess
+                    {
+                        ProcessId = (int)entry.ProcessId,
+                        ParentProcessId = (int)entry.ParentProcessId,
+                        Name = entry.ExecutableFile,
+                        StartedUtc = started
+                    });
+                    entry.Size = (uint)Marshal.SizeOf(typeof(ProcessEntry));
+                }
+                while (Process32Next(snapshot, ref entry));
+            }
+            finally
+            {
+                CloseHandle(snapshot);
+            }
+            return result;
+        }
+
+        private static bool IsNodeProcess(string name)
+        {
+            string value = Path.GetFileNameWithoutExtension(name ?? String.Empty);
+            return String.Equals(value, "node", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(value, "pi", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsShellProcess(string name)
+        {
+            string value = Path.GetFileNameWithoutExtension(name ?? String.Empty);
+            return String.Equals(value, "pwsh", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(value, "powershell", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(value, "cmd", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string ProjectName(string workingDirectory)
+        {
+            if (String.IsNullOrWhiteSpace(workingDirectory))
+            {
+                return "Pi";
+            }
+            string trimmed = workingDirectory.TrimEnd(Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar);
+            string leaf = Path.GetFileName(trimmed);
+            return String.IsNullOrWhiteSpace(leaf) ? "Pi" : leaf;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct ProcessEntry
+        {
+            public uint Size;
+            public uint Usage;
+            public uint ProcessId;
+            public IntPtr DefaultHeapId;
+            public uint ModuleId;
+            public uint Threads;
+            public uint ParentProcessId;
+            public int BasePriority;
+            public uint Flags;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+            public string ExecutableFile;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool Process32First(IntPtr snapshot, ref ProcessEntry entry);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool Process32Next(IntPtr snapshot, ref ProcessEntry entry);
+
+        [DllImport("kernel32.dll")]
+        private static extern bool CloseHandle(IntPtr handle);
     }
 
     public sealed class PiStatusMonitor

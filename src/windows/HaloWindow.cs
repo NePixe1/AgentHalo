@@ -38,6 +38,7 @@ public sealed class HaloWindow : Window
         private readonly ClaudeTranscriptSessionMonitor claudeTranscriptMonitor;
         private readonly GrokHookStatusMonitor grokMonitor;
         private readonly PiStatusMonitor piMonitor;
+        private readonly PiRuntimeMonitor piRuntimeMonitor;
         private readonly HaloVisual visual;
         private readonly DetailsWindow details;
         private readonly Forms.NotifyIcon tray;
@@ -109,6 +110,7 @@ public sealed class HaloWindow : Window
             claudeTranscriptMonitor = new ClaudeTranscriptSessionMonitor();
             grokMonitor = new GrokHookStatusMonitor();
             piMonitor = new PiStatusMonitor();
+            piRuntimeMonitor = new PiRuntimeMonitor();
             monitor.Changed += delegate { RefreshState(); };
             foregroundTimer = new DispatcherTimer(DispatcherPriority.Background);
             foregroundTimer.Interval = TimeSpan.FromMilliseconds(300);
@@ -274,11 +276,13 @@ public sealed class HaloWindow : Window
             if (focusedAgent == AgentKind.Pi)
             {
                 bool piChanged = piMonitor.Refresh();
-                bool piPresent = piMonitor.LiveSessionIds().Count > 0;
+                bool piRuntimeChanged = piRuntimeMonitor.Refresh();
+                bool piPresent = piMonitor.LiveSessionIds().Count > 0 ||
+                    piRuntimeMonitor.IsRunning;
                 bool piPresenceChanged = !lastPiPresent.HasValue ||
                     lastPiPresent.Value != piPresent;
                 lastPiPresent = piPresent;
-                if (piChanged || piPresenceChanged ||
+                if (piChanged || piRuntimeChanged || piPresenceChanged ||
                     (aggregate != null && aggregate.State == HaloState.Done))
                 {
                     RefreshState();
@@ -484,11 +488,24 @@ public sealed class HaloWindow : Window
             if (settings.GetFocusedAgent() == AgentKind.Pi)
             {
                 piMonitor.Refresh();
+                piRuntimeMonitor.Refresh();
                 HashSet<string> livePiSessionIds = piMonitor.LiveSessionIds();
-                bool piPresent = livePiSessionIds.Count > 0;
+                bool piPresent = livePiSessionIds.Count > 0 ||
+                    piRuntimeMonitor.IsRunning;
                 lastPiPresent = piPresent;
-                aggregate = BuildPiAggregateForTest(piMonitor.Snapshots(),
-                    settings.Paused, livePiSessionIds, DateTime.UtcNow);
+                List<SessionSnapshot> piSnapshots = piMonitor.Snapshots();
+                SessionSnapshot runtimeSnapshot = piRuntimeMonitor.Snapshot();
+                if (runtimeSnapshot != null && !piSnapshots.Any(
+                    delegate(SessionSnapshot item)
+                    {
+                        return item != null && String.Equals(item.ThreadId,
+                            runtimeSnapshot.ThreadId, StringComparison.OrdinalIgnoreCase);
+                    }))
+                {
+                    piSnapshots.Add(runtimeSnapshot);
+                }
+                aggregate = BuildPiAggregateForTest(piSnapshots,
+                    settings.Paused, livePiSessionIds, piPresent, DateTime.UtcNow);
                 if (demoState.HasValue)
                 {
                     aggregate.State = demoState.Value;
@@ -1042,6 +1059,17 @@ public sealed class HaloWindow : Window
             DateTime now)
         {
             bool present = liveSessionIds != null && liveSessionIds.Count > 0;
+            return BuildPiAggregateForTest(allSessions, paused, liveSessionIds,
+                present, now);
+        }
+
+        internal static AggregateSnapshot BuildPiAggregateForTest(
+            IList<SessionSnapshot> allSessions,
+            bool paused,
+            ISet<string> liveSessionIds,
+            bool present,
+            DateTime now)
+        {
             List<SessionSnapshot> source = allSessions == null
                 ? new List<SessionSnapshot>()
                 : allSessions.Where(delegate(SessionSnapshot snapshot)
@@ -1079,7 +1107,10 @@ public sealed class HaloWindow : Window
                 {
                     result.Sessions = source.Where(delegate(SessionSnapshot snapshot)
                     {
-                        return liveSessionIds.Contains(snapshot.ThreadId);
+                        return (liveSessionIds != null &&
+                                liveSessionIds.Contains(snapshot.ThreadId)) ||
+                            String.Equals(snapshot.EvidenceKind, "runtime-session",
+                                StringComparison.OrdinalIgnoreCase);
                     }).OrderByDescending(delegate(SessionSnapshot snapshot)
                     {
                         return snapshot.LastEventUtc;
