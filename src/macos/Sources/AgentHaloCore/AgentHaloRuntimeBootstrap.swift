@@ -66,6 +66,9 @@ public enum AgentHaloRuntimeBootstrap {
             homeDirectory: homeDirectory,
             bundledProxyBinary: proxy
         )
+        // Shared TS extension (no separate binary). Install/overwrite when the
+        // embedded source differs from ~/.pi/agent/extensions/agent-halo-status.ts.
+        PiExtensionConfigurator.configure(homeDirectory: homeDirectory)
 
         // Settings now point at bin/* — drop root-level legacy binaries that
         // nothing references anymore (claude-code-status-hook, etc.).

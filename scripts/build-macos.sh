@@ -20,6 +20,12 @@ mkdir -p "$mac_locales"
 cp "$shared_locales/zh.json" "$mac_locales/zh.json"
 cp "$shared_locales/en.json" "$mac_locales/en.json"
 
+# Sync shared Pi extension into AgentHaloCore resources (same mirror pattern).
+shared_pi_extension="$repo_root/src/shared/integrations/pi/agent-halo-status.ts"
+mac_pi_dir="$mac_root/Sources/AgentHaloCore/integrations/pi"
+mkdir -p "$mac_pi_dir"
+cp "$shared_pi_extension" "$mac_pi_dir/agent-halo-status.ts"
+
 cd "$mac_root"
 # Rebuild hook/proxy before CoreChecks so isolation tests do not run stale
 # binaries that still write legacy ~/.agent-halo/* paths.

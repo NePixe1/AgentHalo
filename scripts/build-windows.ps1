@@ -63,7 +63,8 @@ $bitmap.Dispose()
 $referenceArgs = $references | ForEach-Object { "/reference:$_" }
 $resourceArgs = @(
     "/resource:$(Join-Path $windowsLocales "zh.json"),CodexHalo.locales.zh.json",
-    "/resource:$(Join-Path $windowsLocales "en.json"),CodexHalo.locales.en.json"
+    "/resource:$(Join-Path $windowsLocales "en.json"),CodexHalo.locales.en.json",
+    "/resource:$(Join-Path $root "src\shared\integrations\pi\agent-halo-status.ts"),AgentHalo.PiStatusExtension"
 )
 $exe = Join-Path $output "AgentHalo.exe"
 $sources = Get-ChildItem -LiteralPath $windows -Filter *.cs |
