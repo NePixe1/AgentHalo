@@ -1162,8 +1162,8 @@ private func testDetailsPanelShowsSessionCardForAPIKey() {
     expect(panel.sessionCardModelForTesting, "gpt-5.5", "card model")
     expect(panel.sessionCardTokensForTesting, "↑ 38k  ·  ↓ 1.2k", "card tokens")
     expect(panel.sessionCardTitleToolTipForTesting, "Redesign details", "title tooltip")
-    expect(panel.sessionBodySlotHeightForTesting, 72, "body slot height constant")
-    expect(panel.sessionCardHeightForTesting, 72, "card matches body slot height")
+    expect(panel.sessionBodySlotHeightForTesting, 68, "body slot height constant")
+    expect(panel.sessionCardHeightForTesting, 68, "card matches body slot height")
 }
 
 @MainActor
@@ -1199,7 +1199,7 @@ private func testDetailsPanelBlankStandbyUsesSoftEmptyNotDashCard() {
         "STANDBY blank shows No session"
     )
     expect(!panel.apiKeyChipHiddenForTesting, "STANDBY API Key still shows mode chip")
-    expect(panel.sessionBodySlotHeightForTesting, 72, "blank empty keeps body slot height")
+    expect(panel.sessionBodySlotHeightForTesting, 68, "blank empty keeps body slot height")
 }
 
 @MainActor
@@ -1276,8 +1276,8 @@ private func testDetailsPanelClearsContextAndSessionRowsOffline() {
     expect(panel.sessionCardModelForTesting, "--", "offline must clear card model")
     expect(panel.sessionCardTokensForTesting, "↑ --  ·  ↓ --", "offline must clear card tokens")
     expect(panel.sessionCardTitleToolTipForTesting == nil, "offline must clear title tooltip")
-    expect(panel.sessionBodySlotHeightForTesting, 72, "empty slot height")
-    expect(panel.emptyBodyHeightForTesting, 72, "empty rect matches card height")
+    expect(panel.sessionBodySlotHeightForTesting, 68, "empty slot height")
+    expect(panel.emptyBodyHeightForTesting, 68, "empty rect matches card height")
 }
 
 @MainActor

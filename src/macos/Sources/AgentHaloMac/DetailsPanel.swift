@@ -22,7 +22,9 @@ class DetailsPanel: NSPanel {
     private static let contextPillWidth: CGFloat = 42
     private static let contextPillHorizontalPadding: CGFloat = 3
     /// Fixed session body slot height (Scheme B). Keep panel fitted height at 172.
-    private static let sessionBodyHeight: CGFloat = 72
+    /// Slightly under the original 72 so the card bottom sits higher and outer
+    /// bottom padding matches the top chrome more closely (equalizer absorbs the delta).
+    private static let sessionBodyHeight: CGFloat = 68
     private static let apiKeyChipSpacing: CGFloat = 6
     /// After COMPLETE settles into STANDBY (empty sessions), keep the last live
     /// context percent for this long before hiding. OFFLINE still clears immediately.
@@ -119,8 +121,9 @@ class DetailsPanel: NSPanel {
         // ambiguity that shrank empty/card to label-hugging size (right-biased).
         metadataGroup.translatesAutoresizingMaskIntoConstraints = false
         // Bottom inset keeps session body contribution aligned with the 70pt
-        // usage group so fitted panel height stays 172 (11 + 72 + 3 == 16 + 70).
-        let sessionBodyBottomEqualizer: CGFloat = 3
+        // usage group so fitted panel height stays 172 (11 + 68 + 7 == 16 + 70).
+        // Larger equalizer lifts the card bottom edge without moving title/detail.
+        let sessionBodyBottomEqualizer: CGFloat = 7
 
         bodySlot.translatesAutoresizingMaskIntoConstraints = false
         emptyBody.translatesAutoresizingMaskIntoConstraints = false
@@ -1021,7 +1024,7 @@ private final class SessionCardView: NSView {
         modelChip.addSubview(modelLabel)
         addSubview(tokenLabel)
 
-        // Content vertically centered inside the fixed 72pt body slot.
+        // Content vertically centered inside the fixed body slot.
         NSLayoutConstraint.activate([
             titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
