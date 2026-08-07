@@ -3611,8 +3611,16 @@ public static class Diagnostics
             window.Content = visual;
             window.Show();
 
+            double benchmarkSeconds = 4;
+            double configuredSeconds;
+            if (Double.TryParse(Environment.GetEnvironmentVariable(
+                    "AGENTHALO_BENCHMARK_SECONDS"), NumberStyles.Float,
+                    CultureInfo.InvariantCulture, out configuredSeconds))
+            {
+                benchmarkSeconds = Math.Max(1, Math.Min(60, configuredSeconds));
+            }
             DispatcherTimer measurement = new DispatcherTimer();
-            measurement.Interval = TimeSpan.FromSeconds(4);
+            measurement.Interval = TimeSpan.FromSeconds(benchmarkSeconds);
             measurement.Tick += delegate
             {
                 measurement.Stop();

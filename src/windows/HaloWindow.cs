@@ -236,15 +236,20 @@ public sealed class HaloWindow : Window
         private void OnForegroundTick(object sender, EventArgs e)
         {
             AgentKind focusedAgent = settings.GetFocusedAgent();
-            bool claudeChanged = claudeMonitor.Refresh();
-            claudeChanged = claudeTranscriptMonitor.Refresh() || claudeChanged;
-            if (claudeChanged && focusedAgent == AgentKind.ClaudeCode)
+            if (focusedAgent == AgentKind.ClaudeCode)
             {
-                RefreshState();
+                bool claudeChanged = claudeMonitor.Refresh();
+                claudeChanged = claudeTranscriptMonitor.Refresh() || claudeChanged;
+                if (claudeChanged || (aggregate != null &&
+                    aggregate.State == HaloState.Done))
+                {
+                    RefreshState();
+                }
+                return;
             }
-            bool grokChanged = grokMonitor.Refresh();
             if (focusedAgent == AgentKind.Grok)
             {
+                bool grokChanged = grokMonitor.Refresh();
                 bool grokPresent = GrokActiveSessionsReader.HasLiveSession(
                     Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
                 bool grokPresenceChanged = !lastGrokPresent.HasValue ||
@@ -255,10 +260,11 @@ public sealed class HaloWindow : Window
                 {
                     RefreshState();
                 }
+                return;
             }
-            bool piChanged = piMonitor.Refresh();
             if (focusedAgent == AgentKind.Pi)
             {
+                bool piChanged = piMonitor.Refresh();
                 bool piPresent = piMonitor.LiveSessionIds().Count > 0;
                 bool piPresenceChanged = !lastPiPresent.HasValue ||
                     lastPiPresent.Value != piPresent;
@@ -268,6 +274,7 @@ public sealed class HaloWindow : Window
                 {
                     RefreshState();
                 }
+                return;
             }
             // Re-evaluate presence on every tick so offline becomes visible as
             // soon as the main Codex process exits — even if residual helpers

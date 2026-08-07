@@ -1283,7 +1283,7 @@ public sealed class DetailsWindow : Window
             Grid.SetColumn(grokBorder, 2);
             hitLayer.Children.Add(grokBorder);
 
-            Viewbox piIconBox = CreateSwitchIcon(PiIconPath, 18, out piIcon);
+            Viewbox piIconBox = CreateSwitchIcon(PiIconPath, 13.5, out piIcon);
             piBorder = new Border
             {
                 Background = System.Windows.Media.Brushes.Transparent,
