@@ -30,7 +30,7 @@
 ## Features
 
 - **Status at a glance.** One ambient ring distinguishes planning, tool execution, completion, requests for input, and blocking failures. A completed task keeps breathing until it is acknowledged.
-- **Multiple agents, one focused signal.** Agent Halo watches the supported agents in parallel while the selected agent controls the ring and detail panel. Switching focus does not stop the others from being monitored.
+- **Multiple agents, one focused signal.** Choose which agents appear from the tray menu; the current agent controls the ring and details. Windows actively polls only the current agent to reduce background overhead.
 - **Useful detail on demand.** Hover to see official usage limits, context, or session details. Custom Codex / API-key sessions show project, model, and current-turn input/output tokens without exposing API keys, base URLs, or relay names—and without inventing official quota data.
 - **A native desktop companion.** The always-on-top Windows and macOS apps need no browser or cloud dashboard. Drag and edge-snap the halo, resize it, pause monitoring, control startup, and recover it after a display change.
 - **Local by design.** Lifecycle and session content stay on your machine. Official usage refreshes reuse an existing provider sign-in; Agent Halo does not require or read an OpenAI API key.
@@ -39,8 +39,8 @@
 
 | Platform | Supported agents | Requirement |
 | --- | --- | --- |
-| Windows | Codex, Claude Code, Grok Build | Windows 10 or 11; .NET Framework 4.8 (usually preinstalled) |
-| macOS | Codex, Claude Code, Grok Build | macOS 13 or later |
+| Windows | Codex, Claude Code, Grok Build, Pi | Windows 10 or 11; .NET Framework 4.8 (usually preinstalled) |
+| macOS | Codex, Claude Code, Grok Build, Pi | macOS 13 or later |
 
 Install and sign in to at least one supported agent before using Agent Halo.
 
@@ -65,9 +65,9 @@ Official accounts do not need an OpenAI API key. When available, usage refresh r
 ## Quick usage
 
 - **Drag** the halo to move it; it snaps lightly to screen edges.
-- **Hover** for status and usage / session details; switch **Codex / CC / Grok** on either platform.
+- **Hover** for status and usage / session details; switch **Codex / CC / Grok / Pi** from the agent toggle.
 - **Click** the halo to bring the Codex window forward when relevant.
-- **Right-click** for state previews, temporary pause, startup, always-on-top behavior, halo size (`75% / 100% / 125%`), **Reset Position**, and quit. Pause clears on the next launch.
+- **Right-click** to choose **Monitored Agents** and the **Current Agent**, or access state previews, temporary pause, startup, always-on-top behavior, halo size (`75% / 100% / 125%`), **Reset Position**, and quit. At least one agent remains enabled; pause clears on the next launch.
 - After a display change, an off-screen halo recovers to the primary display. On macOS, it can also return to its remembered display when that display reconnects.
 
 ## Status colors
@@ -116,9 +116,55 @@ hooks = false
 
 This disables Claude hook import only (not skills, rules, MCP, or Claude Code itself). Restart the Grok session for the change to take effect. Any *other* hooks kept only in `~/.claude/settings.json` will also stop running under Grok.
 
-## Contributing and building
+## Build from source
 
-The README intentionally stays focused on installing and using Agent Halo. For architecture, source builds, diagnostics, shared-contract changes, and contributor checks, see **[AGENTS.md](AGENTS.md)**.
+Prefer a [GitHub release](https://github.com/NePixe1/AgentHalo/releases/latest) for everyday use. Build from source when you want the latest tree, a local change, or to verify a packaging path yourself.
+
+Clone the repository first, then run the platform steps from the **repo root**.
+
+### macOS
+
+**Requirements:** macOS 13 or later, and Xcode or the Command Line Tools (so `swift` is available).
+
+```bash
+# Build, package, run checks, and launch
+bash ./scripts/run-macos.sh --verify
+
+# Package only (no launch)
+bash ./scripts/build-macos.sh
+```
+
+- App bundle: `outputs/AgentHalo-macOS/AgentHalo.app`
+- Optional DMG after a successful package build: `bash ./scripts/create-dmg.sh`
+
+Quit a running local build with the menu bar item, or:
+
+```bash
+pkill -x AgentHaloMac
+```
+
+### Windows
+
+**Requirements:** Windows 10 or 11, and .NET Framework 4.8 so the C# compiler exists at:
+
+`%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe`
+
+```powershell
+.\scripts\build-windows.ps1
+```
+
+- Output: `outputs\AgentHalo\AgentHalo.exe`
+- Optional self-test after build:
+
+```powershell
+.\outputs\AgentHalo\AgentHalo.exe --self-test $env:TEMP\agent-halo-self-test.txt
+```
+
+Unsigned personal builds may trigger SmartScreen; release archives ship `SHA256.txt` for verification.
+
+## Contributing
+
+Architecture, shared-contract changes, diagnostics, and contributor checks are documented in **[AGENTS.md](AGENTS.md)**.
 
 ## License
 

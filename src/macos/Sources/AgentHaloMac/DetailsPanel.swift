@@ -437,12 +437,12 @@ class DetailsPanel: NSPanel {
                 focusedAgent: .codex,
                 now: now
             )
-        case .grok, .claudeCode:
-            // Grok/Claude context is disk- or statusline-backed on full content
-            // refresh. Only STANDBY/OFFLINE status ticks should touch the pill:
-            // STANDBY soft-holds the last live percent; OFFLINE clears immediately.
-            // Active labels leave existing metadata alone (status-only path must
-            // not wipe context when sessions briefly look empty).
+        case .grok, .claudeCode, .pi:
+            // Grok/Claude/Pi context is disk-, statusline-, or extension-backed on
+            // full content refresh. Only STANDBY/OFFLINE status ticks should touch
+            // the pill: STANDBY soft-holds the last live percent; OFFLINE clears
+            // immediately. Active labels leave existing metadata alone (status-only
+            // path must not wipe context when sessions briefly look empty).
             if isOffline || isStandby {
                 updateContext(
                     nil,
@@ -602,7 +602,7 @@ class DetailsPanel: NSPanel {
             row.heightAnchor.constraint(equalToConstant: 24),
             agentToggle.leadingAnchor.constraint(equalTo: row.leadingAnchor),
             agentToggle.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            agentToggle.widthAnchor.constraint(equalToConstant: 108),
+            agentToggle.widthAnchor.constraint(equalToConstant: 144),
             agentToggle.heightAnchor.constraint(equalToConstant: 24),
             // Right-to-left: [context][gap][API Key chip]
             apiKeyChip.trailingAnchor.constraint(equalTo: row.trailingAnchor),
@@ -1297,7 +1297,9 @@ final class AgentToggleView: NSView {
     private let codexIcon = NSImageView()
     private let claudeIcon = NSImageView()
     private let grokIcon = NSImageView()
+    private let piIcon = NSImageView()
     private var activeBgConstraints: [NSLayoutConstraint] = []
+    private static let agentCount: CGFloat = 4
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -1335,30 +1337,39 @@ final class AgentToggleView: NSView {
         configureIcon(codexIcon, assetName: "codex", accessibilityLabel: "Codex")
         configureIcon(claudeIcon, assetName: "claude-code", accessibilityLabel: "Claude Code")
         configureIcon(grokIcon, assetName: "grok", accessibilityLabel: "Grok")
+        configureIcon(piIcon, assetName: "pi", accessibilityLabel: "Pi")
         bgView.addSubview(codexIcon)
         bgView.addSubview(claudeIcon)
         bgView.addSubview(grokIcon)
+        bgView.addSubview(piIcon)
 
+        let slot = 1.0 / Self.agentCount
         NSLayoutConstraint.activate([
             bgView.leadingAnchor.constraint(equalTo: leadingAnchor),
             bgView.trailingAnchor.constraint(equalTo: trailingAnchor),
             bgView.topAnchor.constraint(equalTo: topAnchor),
             bgView.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            codexIcon.leadingAnchor.constraint(equalTo: bgView.leadingAnchor, constant: 3),
+            codexIcon.leadingAnchor.constraint(equalTo: bgView.leadingAnchor, constant: 2),
             codexIcon.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
-            codexIcon.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: 1.0 / 3.0, constant: -2),
+            codexIcon.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: slot, constant: -2),
             codexIcon.heightAnchor.constraint(equalToConstant: 18),
 
-            claudeIcon.centerXAnchor.constraint(equalTo: bgView.centerXAnchor),
+            claudeIcon.leadingAnchor.constraint(equalTo: codexIcon.trailingAnchor),
             claudeIcon.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
-            claudeIcon.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: 1.0 / 3.0, constant: -2),
+            claudeIcon.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: slot, constant: -2),
             claudeIcon.heightAnchor.constraint(equalToConstant: 18),
 
-            grokIcon.trailingAnchor.constraint(equalTo: bgView.trailingAnchor, constant: -3),
+            grokIcon.leadingAnchor.constraint(equalTo: claudeIcon.trailingAnchor),
             grokIcon.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
-            grokIcon.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: 1.0 / 3.0, constant: -2),
+            grokIcon.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: slot, constant: -2),
             grokIcon.heightAnchor.constraint(equalToConstant: 18),
+
+            piIcon.leadingAnchor.constraint(equalTo: grokIcon.trailingAnchor),
+            piIcon.trailingAnchor.constraint(equalTo: bgView.trailingAnchor, constant: -2),
+            piIcon.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
+            piIcon.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: slot, constant: -2),
+            piIcon.heightAnchor.constraint(equalToConstant: 18),
         ])
 
         updateSelectedState(animated: false)
@@ -1399,6 +1410,7 @@ final class AgentToggleView: NSView {
         codexIcon.alphaValue = selectedAgent == .codex ? 1 : 0.40
         claudeIcon.alphaValue = selectedAgent == .claudeCode ? 1 : 0.40
         grokIcon.alphaValue = selectedAgent == .grok ? 1 : 0.40
+        piIcon.alphaValue = selectedAgent == .pi ? 1 : 0.40
     }
 
     private func icon(for agent: AgentKind) -> NSImageView {
@@ -1406,6 +1418,7 @@ final class AgentToggleView: NSView {
         case .codex: return codexIcon
         case .claudeCode: return claudeIcon
         case .grok: return grokIcon
+        case .pi: return piIcon
         }
     }
 
@@ -1423,15 +1436,10 @@ final class AgentToggleView: NSView {
     }
 
     private func selectAgent(atX x: CGFloat) {
-        let third = bounds.width / 3
-        let newAgent: AgentKind
-        if x < third {
-            newAgent = .codex
-        } else if x < third * 2 {
-            newAgent = .claudeCode
-        } else {
-            newAgent = .grok
-        }
+        let slot = max(bounds.width / Self.agentCount, 1)
+        let index = min(Int(Self.agentCount) - 1, max(0, Int(x / slot)))
+        let agents: [AgentKind] = [.codex, .claudeCode, .grok, .pi]
+        let newAgent = agents[index]
         if newAgent != selectedAgent {
             selectedAgent = newAgent
             onAgentSelected?(newAgent)

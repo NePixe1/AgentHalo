@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -151,11 +152,16 @@ public sealed class DetailsWindow : Window
         private readonly Border codexSwitch;
         private readonly Border claudeSwitch;
         private readonly Border grokSwitch;
+        private readonly Border piSwitch;
         private readonly Border switchThumb;
         private readonly TranslateTransform switchThumbTransform;
         private readonly System.Windows.Shapes.Path codexSwitchIcon;
         private readonly Canvas claudeSwitchIcon;
         private readonly System.Windows.Shapes.Path grokSwitchIcon;
+        private readonly System.Windows.Shapes.Path piSwitchIcon;
+        private Grid agentSwitcher;
+        private Grid agentSwitchHitLayer;
+        private readonly List<AgentKind> enabledAgents;
         private readonly StackPanel quotaGroup;
         private readonly Grid dataLayer;
         /// <summary>Fixed-height session body host (Scheme B). Mirrors macOS H_body ≈ 72.</summary>
@@ -210,6 +216,7 @@ public sealed class DetailsWindow : Window
             UseLayoutRounding = true;
             SnapsToDevicePixels = true;
             SourceInitialized += OnSourceInitialized;
+            enabledAgents = HaloSettings.SupportedAgents().ToList();
 
             shell = new Border();
             shell.CornerRadius = new CornerRadius(16);
@@ -235,8 +242,9 @@ public sealed class DetailsWindow : Window
             top.ColumnDefinitions.Add(new ColumnDefinition());
             top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             Grid switcher = CreateAgentSwitch(out codexSwitch, out claudeSwitch,
-                out grokSwitch, out switchThumb, out switchThumbTransform,
-                out codexSwitchIcon, out claudeSwitchIcon, out grokSwitchIcon);
+                out grokSwitch, out piSwitch, out switchThumb, out switchThumbTransform,
+                out codexSwitchIcon, out claudeSwitchIcon, out grokSwitchIcon,
+                out piSwitchIcon);
             switcher.HorizontalAlignment = HorizontalAlignment.Left;
             switcher.VerticalAlignment = VerticalAlignment.Center;
             top.Children.Add(switcher);
@@ -357,6 +365,10 @@ public sealed class DetailsWindow : Window
                 {
                     return L10n.Instance["status.offline_grok"];
                 }
+                if (aggregate.FocusedAgent == AgentKind.Pi)
+                {
+                    return L10n.Instance["status.offline_pi"];
+                }
                 return L10n.Instance["status.offline_codex"];
             }
             if (String.Equals(aggregate.Label, "STANDBY",
@@ -443,6 +455,10 @@ public sealed class DetailsWindow : Window
             {
                 RefreshGrokDetails();
             }
+            else if (currentAgent == AgentKind.Pi)
+            {
+                RefreshPiDetails();
+            }
             else
             {
                 RefreshCodexDetails();
@@ -483,6 +499,10 @@ public sealed class DetailsWindow : Window
                             Environment.SpecialFolder.UserProfile));
                 ShowSessionBody(showAPIKeyChip, true, null, null, null);
             }
+            else if (currentAgent == AgentKind.Pi)
+            {
+                ShowSessionBody(false, true, null, null, null);
+            }
             else if (codexMetrics != null && codexMetrics.IsCustomApi)
             {
                 ShowSessionBody(true, true, null, null, null);
@@ -517,6 +537,36 @@ public sealed class DetailsWindow : Window
             ShowSessionBody(ShouldShowClaudeAPIKeyChip(metrics),
                 false, title, model, tokens);
             SetContextPercent(metrics.HasContext, metrics.ContextUsedPercent);
+        }
+
+        private void RefreshPiDetails()
+        {
+            SessionSnapshot primary = currentSessions == null ? null :
+                currentSessions.Where(delegate(SessionSnapshot session)
+                {
+                    return session != null && session.Agent == AgentKind.Pi;
+                }).OrderByDescending(delegate(SessionSnapshot session)
+                {
+                    return session.LastEventUtc;
+                }).FirstOrDefault();
+            string title = primary == null ? null
+                : (!String.IsNullOrWhiteSpace(primary.ProjectName)
+                    ? primary.ProjectName
+                    : ProjectLeaf(primary.WorkingDirectory) ?? "Pi");
+            string model = primary == null ||
+                String.IsNullOrWhiteSpace(primary.ModelName)
+                ? null : primary.ModelName;
+            bool hasTokens = primary != null &&
+                (primary.TurnInputTokens > 0 || primary.TurnOutputTokens > 0);
+            string tokens = hasTokens
+                ? FormatTokenPair(true, primary.TurnInputTokens,
+                    primary.TurnOutputTokens)
+                : null;
+            ShowSessionBody(false, false, title, model, tokens);
+            bool hasContext = primary != null && primary.ContextInputTokens >= 0 &&
+                primary.ContextWindowTokens > 0;
+            SetContextPercent(hasContext, hasContext
+                ? primary.ContextInputTokens * 100.0 / primary.ContextWindowTokens : 0);
         }
 
         private void RefreshCodexDetails()
@@ -630,6 +680,18 @@ public sealed class DetailsWindow : Window
             SetContextPercent(metrics.HasContext, metrics.ContextUsedPercent);
         }
 
+        private static string ProjectLeaf(string workingDirectory)
+        {
+            if (String.IsNullOrWhiteSpace(workingDirectory))
+            {
+                return null;
+            }
+            string trimmed = workingDirectory.TrimEnd(
+                Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string leaf = Path.GetFileName(trimmed);
+            return String.IsNullOrWhiteSpace(leaf) ? null : leaf;
+        }
+
         private void RefreshQuota()
         {
             HideAPIKeySessionChrome();
@@ -712,10 +774,12 @@ public sealed class DetailsWindow : Window
             }
             contextHoldAgent = currentAgent;
 
-            // STANDBY ignores frozen disk/usage occupancy so the pill does not
-            // stick forever while the agent process is merely idle. Soft-hold
-            // the last live percent instead (Codex / Claude parity with macOS).
-            double? livePercent = (isOffline || isStandby) ? null : sourcePercent;
+            // Codex/Claude can leave frozen disk readings behind while idle, so
+            // STANDBY soft-holds their last active value. Pi's live session
+            // transcript remains the authoritative current-session occupancy
+            // while Pi is waiting, so keep a valid Pi reading visible.
+            double? livePercent = SelectLiveContextSource(
+                currentAgent, sourcePercent, isOffline, isStandby);
 
             ContextDisplayResolution resolved = ResolveContextDisplay(
                 livePercent,
@@ -742,6 +806,17 @@ public sealed class DetailsWindow : Window
                 contextMeter.IsAvailable = false;
                 contextMeter.Value = 0;
             }
+        }
+
+        internal static double? SelectLiveContextSource(
+            AgentKind agent,
+            double? sourcePercent,
+            bool isOffline,
+            bool isStandby)
+        {
+            if (isOffline) return null;
+            if (isStandby && agent != AgentKind.Pi) return null;
+            return sourcePercent;
         }
 
         /// <summary>
@@ -817,10 +892,61 @@ public sealed class DetailsWindow : Window
 
         private void SelectAgent(AgentKind agent)
         {
+            if (!enabledAgents.Contains(agent))
+            {
+                return;
+            }
             if (AgentSelected != null)
             {
                 AgentSelected(agent);
             }
+        }
+
+        public void SetEnabledAgents(IEnumerable<AgentKind> agents)
+        {
+            enabledAgents.Clear();
+            if (agents != null)
+            {
+                foreach (AgentKind candidate in HaloSettings.SupportedAgents())
+                {
+                    if (agents.Contains(candidate))
+                    {
+                        enabledAgents.Add(candidate);
+                    }
+                }
+            }
+            if (enabledAgents.Count == 0)
+            {
+                enabledAgents.Add(AgentKind.Codex);
+            }
+            ApplyAgentSwitchLayout();
+            UpdateAgentSwitch();
+        }
+
+        private void ApplyAgentSwitchLayout()
+        {
+            if (agentSwitcher == null || agentSwitchHitLayer == null)
+            {
+                return;
+            }
+            Border[] borders = { codexSwitch, claudeSwitch, grokSwitch, piSwitch };
+            AgentKind[] agents = HaloSettings.SupportedAgents();
+            for (int i = 0; i < borders.Length; i++)
+            {
+                borders[i].Visibility = Visibility.Collapsed;
+                agentSwitcher.ColumnDefinitions[i].Width = new GridLength(0);
+                agentSwitchHitLayer.ColumnDefinitions[i].Width = new GridLength(0);
+            }
+            for (int i = 0; i < enabledAgents.Count; i++)
+            {
+                int sourceIndex = Array.IndexOf(agents, enabledAgents[i]);
+                Border border = borders[sourceIndex];
+                border.Visibility = Visibility.Visible;
+                Grid.SetColumn(border, i);
+                agentSwitcher.ColumnDefinitions[i].Width = new GridLength(46);
+                agentSwitchHitLayer.ColumnDefinitions[i].Width = new GridLength(46);
+            }
+            agentSwitcher.Width = 46 * enabledAgents.Count;
         }
 
         private void UpdateAgentSwitch()
@@ -831,22 +957,15 @@ public sealed class DetailsWindow : Window
                 currentAgent == AgentKind.ClaudeCode);
             StyleGrokSwitch(grokSwitch, grokSwitchIcon,
                 currentAgent == AgentKind.Grok);
+            StylePiSwitch(piSwitch, piSwitchIcon,
+                currentAgent == AgentKind.Pi);
             MoveSwitchThumb(currentAgent);
         }
 
         private void MoveSwitchThumb(AgentKind agent)
         {
-            // Three equal columns (~48.67 each) on a 146-wide track; thumb is 44
-            // with 3px inset. Index 0/1/2 → 0 / 48 / 96.
-            double target = 0;
-            if (agent == AgentKind.ClaudeCode)
-            {
-                target = 48;
-            }
-            else if (agent == AgentKind.Grok)
-            {
-                target = 96;
-            }
+            int index = enabledAgents.IndexOf(agent);
+            double target = Math.Max(0, index) * 46;
             if (!IsVisible)
             {
                 switchThumbTransform.X = target;
@@ -896,6 +1015,15 @@ public sealed class DetailsWindow : Window
         {
             border.Opacity = selected ? 1.0 : 0.58;
             icon.Fill = new SolidColorBrush(MediaColor.FromRgb(17, 17, 17));
+        }
+
+        private static void StylePiSwitch(Border border,
+            System.Windows.Shapes.Path icon, bool selected)
+        {
+            border.Opacity = selected ? 1.0 : 0.58;
+            icon.Fill = new SolidColorBrush(selected
+                ? MediaColor.FromRgb(48, 116, 151)
+                : MediaColor.FromRgb(112, 132, 143));
         }
 
         private void ApplyQuotaMetrics(UsageMetrics metrics)
@@ -1226,16 +1354,27 @@ public sealed class DetailsWindow : Window
         private const string GrokIconPath =
             "M9.27 15.29l7.978-5.897c.391-.29.95-.177 1.137.272.98 2.369.542 5.215-1.41 7.169-1.951 1.954-4.667 2.382-7.149 1.406l-2.711 1.257c3.889 2.661 8.611 2.003 11.562-.953 2.341-2.344 3.066-5.539 2.388-8.42l.006.007c-.983-4.232.242-5.924 2.75-9.383.06-.082.12-.164.179-.248l-3.301 3.305v-.01L9.267 15.292M7.623 16.723c-2.792-2.67-2.31-6.801.071-9.184 1.761-1.763 4.647-2.483 7.166-1.425l2.705-1.25a7.808 7.808 0 00-1.829-1A8.975 8.975 0 005.984 5.83c-2.533 2.536-3.33 6.436-1.962 9.764 1.022 2.487-.653 4.246-2.34 6.022-.599.63-1.199 1.259-1.682 1.925l7.62-6.815";
 
+        // Official Pi mark from https://pi.dev/logo-auto.svg, mirrored in
+        // src/shared/assets/agent-switch/pi.svg for cross-platform reuse.
+        private const string PiIconPath =
+            "M165.29 165.29H517.36V400H400V517.36H282.65V634.72H165.29Z " +
+            "M282.65 282.65V400H400V282.65Z " +
+            "M517.36 400H634.72V634.72H517.36Z";
+
         private Grid CreateAgentSwitch(out Border codexBorder,
-            out Border claudeBorder, out Border grokBorder, out Border thumb,
+            out Border claudeBorder, out Border grokBorder, out Border piBorder,
+            out Border thumb,
             out TranslateTransform thumbTransform,
             out System.Windows.Shapes.Path codexIcon,
             out Canvas claudeIcon,
-            out System.Windows.Shapes.Path grokIcon)
+            out System.Windows.Shapes.Path grokIcon,
+            out System.Windows.Shapes.Path piIcon)
         {
             Grid shell = new Grid();
-            shell.Width = 146;
+            agentSwitcher = shell;
+            shell.Width = 184;
             shell.Height = 32;
+            shell.ColumnDefinitions.Add(new ColumnDefinition());
             shell.ColumnDefinitions.Add(new ColumnDefinition());
             shell.ColumnDefinitions.Add(new ColumnDefinition());
             shell.ColumnDefinitions.Add(new ColumnDefinition());
@@ -1246,7 +1385,7 @@ public sealed class DetailsWindow : Window
                 BorderBrush = new SolidColorBrush(MediaColor.FromRgb(221, 233, 238)),
                 BorderThickness = new Thickness(1)
             };
-            Grid.SetColumnSpan(background, 3);
+            Grid.SetColumnSpan(background, 4);
             shell.Children.Add(background);
 
             thumbTransform = new TranslateTransform();
@@ -1255,7 +1394,7 @@ public sealed class DetailsWindow : Window
                 Width = 44,
                 Height = 26,
                 CornerRadius = new CornerRadius(13),
-                Margin = new Thickness(3),
+                Margin = new Thickness(1, 3, 0, 3),
                 HorizontalAlignment = HorizontalAlignment.Left,
                 VerticalAlignment = VerticalAlignment.Center,
                 Background = new SolidColorBrush(MediaColor.FromRgb(225, 249, 255)),
@@ -1270,14 +1409,16 @@ public sealed class DetailsWindow : Window
                     Color = MediaColor.FromRgb(66, 178, 205)
                 }
             };
-            Grid.SetColumnSpan(thumb, 3);
+            Grid.SetColumnSpan(thumb, 4);
             shell.Children.Add(thumb);
 
             Grid hitLayer = new Grid();
+            agentSwitchHitLayer = hitLayer;
             hitLayer.ColumnDefinitions.Add(new ColumnDefinition());
             hitLayer.ColumnDefinitions.Add(new ColumnDefinition());
             hitLayer.ColumnDefinitions.Add(new ColumnDefinition());
-            Grid.SetColumnSpan(hitLayer, 3);
+            hitLayer.ColumnDefinitions.Add(new ColumnDefinition());
+            Grid.SetColumnSpan(hitLayer, 4);
 
             Viewbox codexIconBox = CreateSwitchIcon(OpenAiBlossomIconPath, 18,
                 out codexIcon);
@@ -1317,6 +1458,21 @@ public sealed class DetailsWindow : Window
             grokBorder.MouseLeftButtonUp += delegate { SelectAgent(AgentKind.Grok); };
             Grid.SetColumn(grokBorder, 2);
             hitLayer.Children.Add(grokBorder);
+
+            Viewbox piIconBox = CreateSwitchIcon(PiIconPath, 13.5, out piIcon);
+            SetGeometryFillRule(piIcon.Data, FillRule.EvenOdd);
+            // The official mark is geometrically centered but carries more ink on the left.
+            piIconBox.RenderTransform = new TranslateTransform(0.9, 0);
+            piBorder = new Border
+            {
+                Background = System.Windows.Media.Brushes.Transparent,
+                Child = piIconBox,
+                Cursor = System.Windows.Input.Cursors.Hand,
+                Padding = new Thickness(0)
+            };
+            piBorder.MouseLeftButtonUp += delegate { SelectAgent(AgentKind.Pi); };
+            Grid.SetColumn(piBorder, 3);
+            hitLayer.Children.Add(piBorder);
             shell.Children.Add(hitLayer);
             return shell;
         }

@@ -30,6 +30,39 @@ namespace CodexHalo
 {
 public static class Diagnostics
     {
+        public static int WritePiRuntimeSnapshot(string outputPath)
+        {
+            try
+            {
+                PiRuntimeMonitor monitor = new PiRuntimeMonitor();
+                monitor.Refresh();
+                SessionSnapshot snapshot = monitor.Snapshot();
+                Dictionary<string, object> result = new Dictionary<string, object>();
+                result["running"] = monitor.IsRunning;
+                result["session_id"] = snapshot == null ? null : snapshot.ThreadId;
+                result["project"] = snapshot == null ? null : snapshot.ProjectName;
+                result["evidence"] = snapshot == null ? null : snapshot.EvidenceKind;
+                result["model"] = snapshot == null ? null : snapshot.ModelName;
+                result["provider"] = snapshot == null ? null : snapshot.ModelProvider;
+                result["input_tokens"] = snapshot == null ? 0 : snapshot.TurnInputTokens;
+                result["output_tokens"] = snapshot == null ? 0 : snapshot.TurnOutputTokens;
+                result["context_tokens"] = snapshot == null ? 0 :
+                    snapshot.ContextInputTokens;
+                result["context_window"] = snapshot == null ? 0 :
+                    snapshot.ContextWindowTokens;
+                File.WriteAllText(outputPath,
+                    new JavaScriptSerializer().Serialize(result),
+                    new UTF8Encoding(false));
+                return monitor.IsRunning ? 0 : 2;
+            }
+            catch (Exception ex)
+            {
+                File.WriteAllText(outputPath, "{\"running\":false,\"detail\":\"" +
+                    EscapeJson(ex.GetType().Name) + "\"}", new UTF8Encoding(false));
+                return 1;
+            }
+        }
+
         public static int WriteCodexUsageSnapshot(string outputPath)
         {
             CodexUsageMonitor monitor = null;
@@ -1053,11 +1086,11 @@ public static class Diagnostics
                     "\"command\":\"user-command\"}]}],\"PreToolUse\":[{\"matcher\":\".*\"," +
                     "\"hooks\":[{\"type\":\"command\",\"command\":\"old.exe AgentHaloHook.exe PreToolUse\"}]}]}}",
                     Encoding.UTF8);
-                ClaudeHookConfigurator.Configure(claudeHome, mainExe);
-                string configured = File.ReadAllText(claudeSettings, Encoding.UTF8);
                 string stagedHook = AgentHaloPaths.StatusHookExe(claudeHome);
+                AgentHaloRuntimeBootstrap.Bootstrap(claudeHome, mainExe);
+                string configured = File.ReadAllText(claudeSettings, Encoding.UTF8);
                 Assert(File.Exists(stagedHook),
-                    "Claude hook configurator stages bin\\status-hook.exe");
+                    "runtime bootstrap stages bin\\status-hook.exe");
                 Assert(configured.Contains("status-hook.exe") &&
                     configured.Contains("--claude-hook") &&
                     configured.Contains("PreToolUse") &&
@@ -1068,7 +1101,7 @@ public static class Diagnostics
                     !configured.Contains("old.exe AgentHaloHook.exe") &&
                     !configured.Contains("AgentHaloHook.exe"),
                     "Claude hook configurator rewrites settings onto preferred path");
-                ClaudeHookConfigurator.Configure(claudeHome, mainExe);
+                ClaudeHookConfigurator.Configure(claudeHome, stagedHook);
                 string configuredAgain = File.ReadAllText(claudeSettings, Encoding.UTF8);
                 Assert(CountOccurrences(configuredAgain, "--claude-hook") ==
                     CountOccurrences(configured, "--claude-hook"),
@@ -1079,7 +1112,7 @@ public static class Diagnostics
                         "--claude-hook PreToolUse",
                         "--claude-hook Stop"),
                     Encoding.UTF8);
-                ClaudeHookConfigurator.Configure(claudeHome, mainExe);
+                ClaudeHookConfigurator.Configure(claudeHome, stagedHook);
                 string repairedEvent = File.ReadAllText(claudeSettings, Encoding.UTF8);
                 Assert(CountOccurrences(repairedEvent, "--claude-hook PreToolUse") == 1,
                     "Claude hook configurator repairs a mismatched event argument");
@@ -1282,7 +1315,10 @@ public static class Diagnostics
                     return snapshot.ThreadId == "old-error";
                 }), "metadata-only Windows session does not suppress old error");
 
-                HaloSettings presenceSettings = new HaloSettings();
+                HaloSettings presenceSettings = new HaloSettings
+                {
+                    InstalledAt = supersessionNow.AddHours(-1).ToString("o")
+                };
                 using (CodexSessionMonitor presenceMonitor = new CodexSessionMonitor())
                 {
                     AggregateSnapshot standby = presenceMonitor.GetAggregate(
@@ -1466,6 +1502,17 @@ public static class Diagnostics
                 Assert(standbyIgnoresLive.DisplayPercent.HasValue &&
                     Math.Abs(standbyIgnoresLive.DisplayPercent.Value - 55.0) < 0.001,
                     "STANDBY soft-hold uses remembered percent only");
+                Assert(!DetailsWindow.SelectLiveContextSource(
+                        AgentKind.Codex, 41.0, false, true).HasValue,
+                    "Codex STANDBY still ignores a frozen source reading");
+                double? piStandbyContext = DetailsWindow.SelectLiveContextSource(
+                    AgentKind.Pi, 41.0, false, true);
+                Assert(piStandbyContext.HasValue &&
+                    Math.Abs(piStandbyContext.Value - 41.0) < 0.001,
+                    "Pi STANDBY keeps live session context visible");
+                Assert(!DetailsWindow.SelectLiveContextSource(
+                        AgentKind.Pi, 41.0, true, false).HasValue,
+                    "Pi OFFLINE hides context immediately");
 
                 // Focused agent grok persistence
                 HaloSettings grokSettings = new HaloSettings();
@@ -1487,10 +1534,12 @@ public static class Diagnostics
                 Assert(invalidFocus != null &&
                     invalidFocus.GetFocusedAgent() == AgentKind.Codex,
                     "invalid focusedAgent falls back to Codex");
-                // Load() repair accepts only codex/claudeCode/grok; "nope" would reset string.
+                // Load() repair accepts only known agent values; "nope" resets.
                 Assert(!String.Equals(invalidFocus.FocusedAgent, "grok",
                     StringComparison.OrdinalIgnoreCase) &&
                     !String.Equals(invalidFocus.FocusedAgent, "claudeCode",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    !String.Equals(invalidFocus.FocusedAgent, "pi",
                         StringComparison.OrdinalIgnoreCase) &&
                     !String.Equals(invalidFocus.FocusedAgent, "codex",
                         StringComparison.OrdinalIgnoreCase),
@@ -1509,6 +1558,341 @@ public static class Diagnostics
                     String.Equals(claudeFocusSettings.FocusedAgent, "claudeCode",
                         StringComparison.OrdinalIgnoreCase),
                     "claudeCode focus still persists");
+
+                HaloSettings piFocusSettings = new HaloSettings();
+                piFocusSettings.SetFocusedAgent(AgentKind.Pi);
+                Assert(piFocusSettings.GetFocusedAgent() == AgentKind.Pi &&
+                    String.Equals(piFocusSettings.FocusedAgent, "pi",
+                        StringComparison.OrdinalIgnoreCase),
+                    "pi focus persists");
+
+                HaloSettings legacyAgents = settingsSerializer.Deserialize<HaloSettings>(
+                    "{\"FocusedAgent\":\"grok\"}");
+                legacyAgents.NormalizeEnabledAgents();
+                Assert(legacyAgents.GetEnabledAgents().Count == 4 &&
+                    legacyAgents.GetFocusedAgent() == AgentKind.Grok,
+                    "legacy settings enable every supported agent");
+
+                HaloSettings filteredAgents = settingsSerializer.Deserialize<HaloSettings>(
+                    "{\"FocusedAgent\":\"claudeCode\",\"EnabledAgents\":[\"codex\",\"pi\"]}");
+                Assert(filteredAgents.NormalizeEnabledAgents() &&
+                    filteredAgents.GetEnabledAgents().SequenceEqual(new[]
+                    {
+                        AgentKind.Codex, AgentKind.Pi
+                    }) && filteredAgents.GetFocusedAgent() == AgentKind.Codex,
+                    "disabled focused agent falls back to first enabled agent");
+                Assert(filteredAgents.SetAgentEnabled(AgentKind.Codex, false) &&
+                    filteredAgents.GetFocusedAgent() == AgentKind.Pi &&
+                    filteredAgents.GetEnabledAgents().SequenceEqual(new[]
+                    {
+                        AgentKind.Pi
+                    }), "disabling focused agent selects the remaining agent");
+                Assert(!filteredAgents.SetAgentEnabled(AgentKind.Pi, false) &&
+                    filteredAgents.IsAgentEnabled(AgentKind.Pi),
+                    "settings keep at least one monitored agent");
+
+                HaloSettings monitorSettings = new HaloSettings();
+                Assert(HaloWindow.ShouldRunCodexMonitor(monitorSettings),
+                    "Codex monitor runs while Codex is focused");
+                monitorSettings.SetFocusedAgent(AgentKind.Pi);
+                Assert(!HaloWindow.ShouldRunCodexMonitor(monitorSettings),
+                    "Codex monitor stops while another agent is focused");
+                monitorSettings.SetFocusedAgent(AgentKind.Codex);
+                monitorSettings.Paused = true;
+                Assert(!HaloWindow.ShouldRunCodexMonitor(monitorSettings),
+                    "Codex monitor stops while monitoring is paused");
+
+                string piExtensionSource = PiExtensionConfigurator.ReadEmbeddedSource();
+                Assert(!String.IsNullOrWhiteSpace(piExtensionSource) &&
+                    piExtensionSource.Contains("agent_settled") &&
+                    piExtensionSource.Contains("tool_execution_start"),
+                    "Pi status extension is embedded with authoritative events");
+                Assert(piExtensionSource.Contains("hasContextUsage") &&
+                    piExtensionSource.Contains(
+                        "contextTokens: hasContextUsage ? context.tokens : null") &&
+                    piExtensionSource.Contains(
+                        "contextWindow: hasContextUsage ? context.contextWindow : null"),
+                    "Pi extension only writes context tokens and window as a pair");
+                Assert(!piExtensionSource.Contains("prompt:") &&
+                    !piExtensionSource.Contains("toolArgs") &&
+                    !piExtensionSource.Contains("baseUrl"),
+                    "Pi extension excludes prompts, tool arguments and provider URLs");
+
+                string oldPiRoot = Environment.GetEnvironmentVariable(
+                    "PI_CODING_AGENT_DIR");
+                string piAgentRoot = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-pi-extension-" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    Environment.SetEnvironmentVariable("PI_CODING_AGENT_DIR", piAgentRoot);
+                    string installedPiExtension = PiExtensionConfigurator.Configure();
+                    Assert(File.Exists(installedPiExtension) &&
+                        String.Equals(File.ReadAllText(installedPiExtension, Encoding.UTF8),
+                            piExtensionSource, StringComparison.Ordinal),
+                        "Pi extension installs atomically from the embedded source");
+                }
+                finally
+                {
+                    Environment.SetEnvironmentVariable("PI_CODING_AGENT_DIR", oldPiRoot);
+                }
+
+                string piStatusHome = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-pi-status-" + Guid.NewGuid().ToString("N"));
+                string piStatusPath = AgentHaloPaths.PiStatusLog(piStatusHome);
+                Directory.CreateDirectory(Path.GetDirectoryName(piStatusPath));
+                string piNow = DateTime.UtcNow.ToString("o");
+                int currentPid = Process.GetCurrentProcess().Id;
+                File.WriteAllText(piStatusPath,
+                    "{\"version\":1,\"timestamp\":\"" + piNow +
+                    "\",\"source\":\"pi-extension\",\"event\":\"tool_execution_start\"," +
+                    "\"state\":\"working\",\"pid\":" +
+                    currentPid.ToString(CultureInfo.InvariantCulture) +
+                    ",\"sessionId\":\"pi-self-test\",\"cwd\":\"C:\\\\work\\\\demo\"," +
+                    "\"provider\":\"test-provider\",\"model\":\"test-model\"," +
+                    "\"contextTokens\":24000,\"contextWindow\":120000," +
+                    "\"inputTokens\":1200,\"outputTokens\":80," +
+                    "\"toolName\":\"read\"}\n", Encoding.UTF8);
+                PiStatusMonitor piStatusMonitor = new PiStatusMonitor(piStatusPath);
+                Assert(piStatusMonitor.Refresh(), "Pi status log refreshes");
+                List<SessionSnapshot> piSnapshots = piStatusMonitor.Snapshots();
+                Assert(piSnapshots.Count == 1 &&
+                    piSnapshots[0].Agent == AgentKind.Pi &&
+                    piSnapshots[0].State == HaloState.Working &&
+                    piSnapshots[0].ModelName == "test-model" &&
+                    piSnapshots[0].ContextInputTokens == 24000 &&
+                    piStatusMonitor.LiveSessionIds().Contains("pi-self-test"),
+                    "Pi status maps working/model/context and validates live pid");
+                AggregateSnapshot piAggregate = HaloWindow.BuildPiAggregateForTest(
+                    piSnapshots, false, piStatusMonitor.LiveSessionIds(), DateTime.UtcNow);
+                Assert(piAggregate.State == HaloState.Working &&
+                    piAggregate.FocusedAgent == AgentKind.Pi,
+                    "Pi aggregate exposes active working state");
+
+                // Null context fields must stay "unknown" (-1), not a fake 0%.
+                PiStatusRecord piNullContext = PiStatusMonitor.Parse(
+                    "{\"version\":1,\"timestamp\":\"" + piNow +
+                    "\",\"source\":\"pi-extension\",\"event\":\"turn_start\"," +
+                    "\"state\":\"thinking\",\"pid\":" +
+                    currentPid.ToString(CultureInfo.InvariantCulture) +
+                    ",\"sessionId\":\"pi-null-context\",\"cwd\":\"C:\\\\work\\\\demo\"," +
+                    "\"model\":\"test-model\",\"contextTokens\":null," +
+                    "\"contextWindow\":null}");
+                Assert(piNullContext != null &&
+                    piNullContext.ContextTokens == -1 &&
+                    piNullContext.ContextWindowTokens == -1,
+                    "Pi status treats missing context tokens/window as unknown");
+                // Window-only (legacy) payloads also map null tokens to -1 so
+                // DetailsWindow hasContext stays false.
+                PiStatusRecord piWindowOnly = PiStatusMonitor.Parse(
+                    "{\"version\":1,\"timestamp\":\"" + piNow +
+                    "\",\"source\":\"pi-extension\",\"event\":\"turn_start\"," +
+                    "\"state\":\"thinking\",\"pid\":" +
+                    currentPid.ToString(CultureInfo.InvariantCulture) +
+                    ",\"sessionId\":\"pi-window-only\",\"cwd\":\"C:\\\\work\\\\demo\"," +
+                    "\"model\":\"test-model\",\"contextTokens\":null," +
+                    "\"contextWindow\":200000}");
+                Assert(piWindowOnly != null &&
+                    piWindowOnly.ContextTokens == -1 &&
+                    piWindowOnly.ContextWindowTokens == 200000 &&
+                    !(piWindowOnly.ContextTokens >= 0 &&
+                        piWindowOnly.ContextWindowTokens > 0),
+                    "Pi status rejects window-only context as available");
+                PiStatusRecord piZeroContext = PiStatusMonitor.Parse(
+                    "{\"version\":1,\"timestamp\":\"" + piNow +
+                    "\",\"source\":\"pi-extension\",\"event\":\"agent_settled\"," +
+                    "\"state\":\"done\",\"pid\":" +
+                    currentPid.ToString(CultureInfo.InvariantCulture) +
+                    ",\"sessionId\":\"pi-zero-context\",\"cwd\":\"C:\\\\work\\\\demo\"," +
+                    "\"model\":\"test-model\",\"contextTokens\":0," +
+                    "\"contextWindow\":200000}");
+                Assert(piZeroContext != null &&
+                    piZeroContext.ContextTokens == 0 &&
+                    piZeroContext.ContextWindowTokens == 200000,
+                    "Pi status preserves real zero context usage");
+
+                // After log rotation the new file may only contain one session's
+                // next line; other still-live sessions must be retained.
+                string piRotateHome = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-pi-rotate-" + Guid.NewGuid().ToString("N"));
+                string piRotatePath = AgentHaloPaths.PiStatusLog(piRotateHome);
+                Directory.CreateDirectory(Path.GetDirectoryName(piRotatePath));
+                string pidText = currentPid.ToString(CultureInfo.InvariantCulture);
+                File.WriteAllText(piRotatePath,
+                    "{\"version\":1,\"timestamp\":\"" + piNow +
+                    "\",\"source\":\"pi-extension\",\"event\":\"thinking_start\"," +
+                    "\"state\":\"thinking\",\"pid\":" + pidText +
+                    ",\"sessionId\":\"pi-rotate-a\",\"cwd\":\"C:\\\\a\"," +
+                    "\"model\":\"m\"}\n" +
+                    "{\"version\":1,\"timestamp\":\"" + piNow +
+                    "\",\"source\":\"pi-extension\",\"event\":\"thinking_start\"," +
+                    "\"state\":\"thinking\",\"pid\":" + pidText +
+                    ",\"sessionId\":\"pi-rotate-b\",\"cwd\":\"C:\\\\b\"," +
+                    "\"model\":\"m\"}\n", Encoding.UTF8);
+                PiStatusMonitor piRotateMonitor = new PiStatusMonitor(piRotatePath);
+                Assert(piRotateMonitor.Refresh(), "Pi rotate baseline refresh");
+                Assert(piRotateMonitor.Snapshots().Count == 2,
+                    "Pi rotate baseline has both sessions");
+                // Simulate rotation: truncate/replace with only session A's next event.
+                File.WriteAllText(piRotatePath,
+                    "{\"version\":1,\"timestamp\":\"" +
+                    DateTime.UtcNow.ToString("o") +
+                    "\",\"source\":\"pi-extension\",\"event\":\"text_start\"," +
+                    "\"state\":\"working\",\"pid\":" + pidText +
+                    ",\"sessionId\":\"pi-rotate-a\",\"cwd\":\"C:\\\\a\"," +
+                    "\"model\":\"m\"}\n", Encoding.UTF8);
+                Assert(piRotateMonitor.Refresh(), "Pi rotate post-rotation refresh");
+                List<SessionSnapshot> rotated = piRotateMonitor.Snapshots();
+                Assert(rotated.Count == 2 &&
+                    rotated.Any(delegate(SessionSnapshot s)
+                    {
+                        return s.ThreadId == "pi-rotate-a" && s.State == HaloState.Working;
+                    }) &&
+                    rotated.Any(delegate(SessionSnapshot s)
+                    {
+                        return s.ThreadId == "pi-rotate-b" && s.State == HaloState.Thinking;
+                    }),
+                    "Pi status retains live sessions across log rotation");
+                try { Directory.Delete(piRotateHome, true); } catch { }
+
+                DateTime piRuntimeNow = DateTime.UtcNow;
+                PiSessionEvidence piRuntimeEvidence = new PiSessionEvidence
+                {
+                    SessionId = "pi-runtime-test",
+                    WorkingDirectory = "C:\\work\\runtime",
+                    CreatedUtc = piRuntimeNow.AddMinutes(-20),
+                    LastWriteUtc = piRuntimeNow.AddMinutes(-1)
+                };
+                List<PiRuntimeProcess> piRuntimeProcesses = new List<PiRuntimeProcess>
+                {
+                    new PiRuntimeProcess
+                    {
+                        ProcessId = 100,
+                        ParentProcessId = 1,
+                        Name = "pwsh.exe",
+                        StartedUtc = piRuntimeNow.AddHours(-2)
+                    },
+                    new PiRuntimeProcess
+                    {
+                        ProcessId = 101,
+                        ParentProcessId = 100,
+                        Name = "node.exe",
+                        StartedUtc = piRuntimeNow.AddHours(-1)
+                    }
+                };
+                Assert(PiRuntimeMonitor.IsRunningForTest(piRuntimeEvidence,
+                    piRuntimeNow, piRuntimeProcesses),
+                    "Pi runtime fallback recognizes a shell-hosted Node session");
+                Assert(!PiRuntimeMonitor.IsRunningForTest(new PiSessionEvidence
+                {
+                    SessionId = "stale",
+                    LastWriteUtc = piRuntimeNow.AddDays(-4)
+                }, piRuntimeNow, piRuntimeProcesses),
+                    "Pi runtime fallback rejects stale session evidence");
+
+                SessionSnapshot piRuntimeSnapshot = new SessionSnapshot
+                {
+                    ThreadId = "pi-runtime-test",
+                    ProjectName = "runtime",
+                    WorkingDirectory = "C:\\work\\runtime",
+                    State = HaloState.Idle,
+                    Action = "Ready",
+                    LastEventUtc = piRuntimeNow.AddMinutes(-1),
+                    Agent = AgentKind.Pi,
+                    EvidenceSource = AgentEvidenceSource.PiExtension,
+                    EvidenceKind = "runtime-session"
+                };
+                AggregateSnapshot piRuntimeAggregate =
+                    HaloWindow.BuildPiAggregateForTest(
+                        new List<SessionSnapshot> { piRuntimeSnapshot }, false,
+                        new HashSet<string>(StringComparer.OrdinalIgnoreCase), true,
+                        piRuntimeNow);
+                Assert(piRuntimeAggregate.State == HaloState.Idle &&
+                    piRuntimeAggregate.Sessions.Count == 1 &&
+                    piRuntimeAggregate.Detail == L10n.Instance["status.standby_pi"],
+                    "Pi runtime fallback exposes standby with project context");
+
+                string piRuntimeRoot = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-pi-runtime-" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    string piRuntimeSessions = Path.Combine(piRuntimeRoot, "sessions", "demo");
+                    Directory.CreateDirectory(piRuntimeSessions);
+                    string piRuntimeFile = Path.Combine(piRuntimeSessions, "session.jsonl");
+                    File.WriteAllText(piRuntimeFile,
+                        "{\"type\":\"session\",\"version\":3," +
+                        "\"id\":\"pi-runtime-file\",\"cwd\":\"C:\\\\work\\\\runtime\"}\n" +
+                        "{\"type\":\"message\",\"message\":{" +
+                        "\"role\":\"user\",\"content\":[{" +
+                        "\"type\":\"text\",\"text\":\"How do I monitor Pi sessions?\"}]}}\n" +
+                        "{\"type\":\"message\",\"message\":{" +
+                        "\"role\":\"assistant\",\"provider\":\"test-provider\"," +
+                        "\"model\":\"test-model\",\"usage\":{" +
+                        "\"input\":1200,\"output\":80,\"cacheRead\":22000," +
+                        "\"cacheWrite\":0,\"totalTokens\":23280}}}\n",
+                        Encoding.UTF8);
+                    File.WriteAllText(Path.Combine(piRuntimeRoot, "models.json"),
+                        "{\"providers\":{\"test-provider\":{\"models\":[{" +
+                        "\"id\":\"test-model\",\"contextWindow\":120000}]}}}",
+                        Encoding.UTF8);
+                    PiSessionEvidence parsedPiRuntime =
+                        PiRuntimeMonitor.ReadLatestSession(piRuntimeRoot);
+                    Assert(parsedPiRuntime != null &&
+                        parsedPiRuntime.SessionId == "pi-runtime-file" &&
+                        parsedPiRuntime.SessionTitle ==
+                            "How do I monitor Pi sessions?" &&
+                        parsedPiRuntime.WorkingDirectory == "C:\\work\\runtime" &&
+                        parsedPiRuntime.Model == "test-model" &&
+                        parsedPiRuntime.InputTokens == 1200 &&
+                        parsedPiRuntime.OutputTokens == 80 &&
+                        parsedPiRuntime.ContextTokens == 23280 &&
+                        parsedPiRuntime.ContextWindowTokens == 120000,
+                        "Pi runtime fallback reads model, usage, and context telemetry");
+                    Assert(PiRuntimeMonitor.ResolveSessionTitleForTest(new[]
+                    {
+                        "{\"type\":\"session\"}",
+                        "{\"type\":\"message\",\"message\":{" +
+                            "\"role\":\"user\",\"content\":\"First question\"}}",
+                        "{\"type\":\"session_info\",\"name\":\"Named session\"}"
+                    }) == "Named session",
+                        "Pi explicit session name overrides the first user message");
+                    Assert(PiRuntimeMonitor.ResolveSessionTitleForTest(new[]
+                    {
+                        "{\"type\":\"session\"}",
+                        "{\"type\":\"message\",\"message\":{" +
+                            "\"role\":\"user\",\"content\":\"First question\"}}",
+                        "{\"type\":\"session_info\",\"name\":null}"
+                    }) == "First question",
+                        "Pi cleared session name falls back to first user message");
+
+                    List<SessionSnapshot> piMergeSnapshots =
+                        new List<SessionSnapshot>
+                        {
+                            new SessionSnapshot
+                            {
+                                ThreadId = "pi-runtime-file",
+                                ProjectName = "runtime",
+                                Agent = AgentKind.Pi,
+                                State = HaloState.Working
+                            }
+                        };
+                    HaloWindow.MergePiRuntimeSnapshot(piMergeSnapshots,
+                        new SessionSnapshot
+                        {
+                            ThreadId = "pi-runtime-file",
+                            ProjectName = "How do I monitor Pi sessions?",
+                            Agent = AgentKind.Pi,
+                            State = HaloState.Idle
+                        });
+                    Assert(piMergeSnapshots.Count == 1 &&
+                        piMergeSnapshots[0].ProjectName ==
+                            "How do I monitor Pi sessions?" &&
+                        piMergeSnapshots[0].State == HaloState.Working,
+                        "Pi runtime title enriches hook state without replacing activity");
+                }
+                finally
+                {
+                    try { Directory.Delete(piRuntimeRoot, true); } catch { }
+                }
 
                 // Hook routing: Grok env must write logs/grok-status.jsonl only
                 // and normalize snake_case event names to PascalCase.
@@ -1799,12 +2183,13 @@ public static class Diagnostics
                         GrokSessionContextReader.EncodeWorkspaceDirectory(cwd);
                     string sessionDir = Path.Combine(sessionsRoot, encoded, sessionId);
                     Directory.CreateDirectory(sessionDir);
+                    DateTime cancelBaseUtc = DateTime.UtcNow.AddSeconds(-6);
                     File.WriteAllText(statusPath,
-                        "{\"timestamp\":\"2026-07-30T08:00:01.000Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"source\":\"grok-hook\"}\n" +
-                        "{\"timestamp\":\"2026-07-30T08:00:03.000Z\",\"event\":\"PreToolUse\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"toolName\":\"read_file\",\"source\":\"grok-hook\"}\n",
+                        "{\"timestamp\":\"" + cancelBaseUtc.AddSeconds(1).ToString("o") + "\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"source\":\"grok-hook\"}\n" +
+                        "{\"timestamp\":\"" + cancelBaseUtc.AddSeconds(3).ToString("o") + "\",\"event\":\"PreToolUse\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"toolName\":\"read_file\",\"source\":\"grok-hook\"}\n",
                         Encoding.UTF8);
                     File.WriteAllText(Path.Combine(sessionDir, "events.jsonl"),
-                        "{\"ts\":\"2026-07-30T08:00:01.500Z\",\"type\":\"turn_started\"}\n",
+                        "{\"ts\":\"" + cancelBaseUtc.AddSeconds(1.5).ToString("o") + "\",\"type\":\"turn_started\"}\n",
                         Encoding.UTF8);
 
                     GrokHookStatusMonitor cancelMonitor =
@@ -1817,7 +2202,7 @@ public static class Diagnostics
                         "precondition: working from PreToolUse");
 
                     File.AppendAllText(Path.Combine(sessionDir, "events.jsonl"),
-                        "{\"ts\":\"2026-07-30T08:00:04.000Z\",\"type\":\"turn_ended\",\"outcome\":\"cancelled\",\"cancellation_category\":\"mid_turn_abort\",\"cancellation_context\":{\"trigger\":\"esc\"}}\n",
+                        "{\"ts\":\"" + cancelBaseUtc.AddSeconds(4).ToString("o") + "\",\"type\":\"turn_ended\",\"outcome\":\"cancelled\",\"cancellation_category\":\"mid_turn_abort\",\"cancellation_context\":{\"trigger\":\"esc\"}}\n",
                         Encoding.UTF8);
                     Assert(cancelMonitor.Refresh(),
                         "cancel via events should change state");
@@ -1912,12 +2297,13 @@ public static class Diagnostics
                         GrokSessionContextReader.EncodeWorkspaceDirectory(cwd);
                     string sessionDir = Path.Combine(sessionsRoot, encoded, sessionId);
                     Directory.CreateDirectory(sessionDir);
+                    DateTime sendNowBaseUtc = DateTime.UtcNow.AddSeconds(-6);
                     File.WriteAllText(statusPath,
-                        "{\"timestamp\":\"2026-07-30T08:00:01.000Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"source\":\"grok-hook\"}\n" +
-                        "{\"timestamp\":\"2026-07-30T08:00:03.000Z\",\"event\":\"PreToolUse\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"toolName\":\"read_file\",\"source\":\"grok-hook\"}\n",
+                        "{\"timestamp\":\"" + sendNowBaseUtc.AddSeconds(1).ToString("o") + "\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"source\":\"grok-hook\"}\n" +
+                        "{\"timestamp\":\"" + sendNowBaseUtc.AddSeconds(3).ToString("o") + "\",\"event\":\"PreToolUse\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"toolName\":\"read_file\",\"source\":\"grok-hook\"}\n",
                         Encoding.UTF8);
                     File.WriteAllText(Path.Combine(sessionDir, "events.jsonl"),
-                        "{\"ts\":\"2026-07-30T08:00:01.500Z\",\"type\":\"turn_started\"}\n",
+                        "{\"ts\":\"" + sendNowBaseUtc.AddSeconds(1.5).ToString("o") + "\",\"type\":\"turn_started\"}\n",
                         Encoding.UTF8);
 
                     GrokHookStatusMonitor sendNowMonitor =
@@ -1930,11 +2316,11 @@ public static class Diagnostics
                         "precondition: working before send_now");
 
                     File.AppendAllText(statusPath,
-                        "{\"timestamp\":\"2026-07-30T08:00:04.004Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"source\":\"grok-hook\"}\n",
+                        "{\"timestamp\":\"" + sendNowBaseUtc.AddSeconds(4.004).ToString("o") + "\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"source\":\"grok-hook\"}\n",
                         Encoding.UTF8);
                     File.AppendAllText(Path.Combine(sessionDir, "events.jsonl"),
-                        "{\"ts\":\"2026-07-30T08:00:04.000Z\",\"type\":\"turn_ended\",\"outcome\":\"cancelled\",\"cancellation_category\":\"mid_turn_abort\",\"cancellation_context\":{\"trigger\":\"send_now\"}}\n" +
-                        "{\"ts\":\"2026-07-30T08:00:04.004Z\",\"type\":\"turn_started\",\"redirect_kind\":\"queued_after_cancel\"}\n",
+                        "{\"ts\":\"" + sendNowBaseUtc.AddSeconds(4).ToString("o") + "\",\"type\":\"turn_ended\",\"outcome\":\"cancelled\",\"cancellation_category\":\"mid_turn_abort\",\"cancellation_context\":{\"trigger\":\"send_now\"}}\n" +
+                        "{\"ts\":\"" + sendNowBaseUtc.AddSeconds(4.004).ToString("o") + "\",\"type\":\"turn_started\",\"redirect_kind\":\"queued_after_cancel\"}\n",
                         Encoding.UTF8);
                     Assert(sendNowMonitor.Refresh(), "send_now refresh changes state");
                     SessionSnapshot afterSteer =
@@ -3006,6 +3392,67 @@ public static class Diagnostics
                 claudeEncoder.Save(stream);
             }
             claudePanel.Close();
+
+            List<SessionSnapshot> piSessions = new List<SessionSnapshot>();
+            piSessions.Add(new SessionSnapshot
+            {
+                ThreadId = "preview-pi",
+                ProjectName = "How do I monitor Pi sessions?",
+                WorkingDirectory = @"C:\work\AgentHalo",
+                State = HaloState.Thinking,
+                Action = "Thinking",
+                Active = true,
+                LastEventUtc = now,
+                Agent = AgentKind.Pi,
+                ModelProvider = "openai",
+                ModelName = "gpt-5.4",
+                TurnInputTokens = 24500,
+                TurnOutputTokens = 920,
+                ContextInputTokens = 64000,
+                ContextWindowTokens = 200000
+            });
+            AggregateSnapshot piAggregate = new AggregateSnapshot
+            {
+                State = HaloState.Thinking,
+                Label = "THINKING",
+                Detail = "AgentHalo · Thinking",
+                Sessions = piSessions,
+                FocusedAgent = AgentKind.Pi
+            };
+            DetailsWindow piPanel = new DetailsWindow();
+            piPanel.SetEnabledAgents(new[] { AgentKind.Codex, AgentKind.Pi });
+            piPanel.UpdateContent(piAggregate, piSessions);
+            FrameworkElement piContent = piPanel.Content as FrameworkElement;
+            piPanel.Content = null;
+            Grid piStage = new Grid();
+            piStage.Width = 380;
+            piStage.Background = new SolidColorBrush(MediaColor.FromRgb(7, 10, 15));
+            piContent.Width = 324;
+            piContent.Margin = new Thickness(28);
+            piStage.Children.Add(piContent);
+            piStage.Measure(new System.Windows.Size(380, 1000));
+            double piHeight = Math.Ceiling(piStage.DesiredSize.Height);
+            if (Math.Abs(height - piHeight) > 0.001)
+            {
+                throw new InvalidOperationException(
+                    "Panel preview height mismatch: Codex=" +
+                    height.ToString(CultureInfo.InvariantCulture) + ", Pi=" +
+                    piHeight.ToString(CultureInfo.InvariantCulture));
+            }
+            piStage.Height = piHeight;
+            piStage.Arrange(new Rect(0, 0, 380, piHeight));
+            piStage.UpdateLayout();
+            RenderTargetBitmap piBitmap = new RenderTargetBitmap(760,
+                (int)(piHeight * 2), 192, 192, PixelFormats.Pbgra32);
+            piBitmap.Render(piStage);
+            PngBitmapEncoder piEncoder = new PngBitmapEncoder();
+            piEncoder.Frames.Add(BitmapFrame.Create(piBitmap));
+            using (FileStream stream = File.Create(Path.Combine(outputDirectory,
+                "panel-pi.png")))
+            {
+                piEncoder.Save(stream);
+            }
+            piPanel.Close();
         }
 
         private static void RenderMenuPreview(string outputDirectory)
@@ -3527,8 +3974,16 @@ public static class Diagnostics
             window.Content = visual;
             window.Show();
 
+            double benchmarkSeconds = 4;
+            double configuredSeconds;
+            if (Double.TryParse(Environment.GetEnvironmentVariable(
+                    "AGENTHALO_BENCHMARK_SECONDS"), NumberStyles.Float,
+                    CultureInfo.InvariantCulture, out configuredSeconds))
+            {
+                benchmarkSeconds = Math.Max(1, Math.Min(60, configuredSeconds));
+            }
             DispatcherTimer measurement = new DispatcherTimer();
-            measurement.Interval = TimeSpan.FromSeconds(4);
+            measurement.Interval = TimeSpan.FromSeconds(benchmarkSeconds);
             measurement.Tick += delegate
             {
                 measurement.Stop();

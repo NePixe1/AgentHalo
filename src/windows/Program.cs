@@ -62,6 +62,10 @@ public static class Program
             {
                 return Diagnostics.WriteCodexUsageSnapshot(args[2]);
             }
+            if (args.Length >= 3 && args[1] == "--pi-runtime-probe")
+            {
+                return Diagnostics.WritePiRuntimeSnapshot(args[2]);
+            }
 
             if (args.Length < 2)
             {

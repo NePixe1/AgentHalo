@@ -23,7 +23,9 @@ let package = Package(
                 // Real JSON files (synced from src/shared/locales by
                 // scripts/build-macos.sh before each release build). Plain
                 // `.copy` keeps the bundle layout predictable.
-                .copy("locales")
+                .copy("locales"),
+                // Pi status extension (synced from src/shared/integrations/pi).
+                .copy("integrations")
             ],
             linkerSettings: [
                 .linkedLibrary("sqlite3"),

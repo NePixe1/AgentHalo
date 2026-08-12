@@ -86,6 +86,12 @@ public sealed class HaloVisual : FrameworkElement
         private bool steadyDone;
         private bool answerStreaming;
         private ErrorPresentation errorPresentation;
+        private readonly PathGeometry[] ringGeometry;
+        private readonly PathFigure[] ringFigures;
+        private readonly ArcSegment[] ringArcs;
+        private readonly SolidColorBrush[] ringBrushes;
+        private readonly MediaPen[] ringPens;
+        private readonly ScaleTransform renderScale;
 
         public HaloVisual()
         {
@@ -103,6 +109,37 @@ public sealed class HaloVisual : FrameworkElement
             gapSeparation = GeneratedHaloSpec.MaximumGapSeparation;
             innerPhase = outerPhase + gapSeparation;
             smallGapAnchor = innerPhase;
+            ringGeometry = new PathGeometry[2];
+            ringFigures = new PathFigure[2];
+            ringArcs = new ArcSegment[2];
+            for (int i = 0; i < ringGeometry.Length; i++)
+            {
+                ringArcs[i] = new ArcSegment
+                {
+                    SweepDirection = SweepDirection.Clockwise,
+                    IsStroked = true
+                };
+                ringFigures[i] = new PathFigure
+                {
+                    IsClosed = false,
+                    IsFilled = false
+                };
+                ringFigures[i].Segments.Add(ringArcs[i]);
+                ringGeometry[i] = new PathGeometry();
+                ringGeometry[i].Figures.Add(ringFigures[i]);
+            }
+            ringBrushes = new SolidColorBrush[8];
+            ringPens = new MediaPen[8];
+            for (int i = 0; i < ringPens.Length; i++)
+            {
+                ringBrushes[i] = new SolidColorBrush(Colors.Transparent);
+                ringPens[i] = new MediaPen(ringBrushes[i], 1)
+                {
+                    StartLineCap = PenLineCap.Round,
+                    EndLineCap = PenLineCap.Round
+                };
+            }
+            renderScale = new ScaleTransform(1, 1);
             SnapsToDevicePixels = false;
             Focusable = false;
             Loaded += OnLoaded;
@@ -394,7 +431,11 @@ public sealed class HaloVisual : FrameworkElement
             double transition = TransitionProgress(t);
             MediaPoint center = new MediaPoint(width / 2.0, height / 2.0);
             double scale = Math.Min(width, height) / 112.0;
-            dc.PushTransform(new ScaleTransform(scale, scale, center.X, center.Y));
+            renderScale.ScaleX = scale;
+            renderScale.ScaleY = scale;
+            renderScale.CenterX = center.X;
+            renderScale.CenterY = center.Y;
+            dc.PushTransform(renderScale);
 
             HaloState visualState = VisualState();
             MediaColor color = AnimatedColor(t);
@@ -448,19 +489,18 @@ public sealed class HaloVisual : FrameworkElement
             MediaColor glowColor = MixColor(emissionColor,
                 MediaColor.FromRgb(242, 248, 249), 0.18 + 0.08 * powered);
             double glowGain = visual.GlowGain;
-            StreamGeometry[] ringGeometry = CreateDynamicRingGeometry(center,
-                radius, gapA, gapB);
+            UpdateDynamicRingGeometry(center, radius, gapA, gapB);
             DrawDynamicRing(dc, ringGeometry,
-                NewPen(WithAlpha(emissionColor,
+                SetRingPen(0, WithAlpha(emissionColor,
                     Alpha((12 + 39 * powered) * intensity * glowGain)), 19.5));
             DrawDynamicRing(dc, ringGeometry,
-                NewPen(WithAlpha(emissionColor,
+                SetRingPen(1, WithAlpha(emissionColor,
                     Alpha((22 + 52 * powered) * intensity * glowGain)), 14.5));
             DrawDynamicRing(dc, ringGeometry,
-                NewPen(WithAlpha(emissionColor,
+                SetRingPen(2, WithAlpha(emissionColor,
                     Alpha((38 + 70 * powered) * intensity * glowGain)), 11.2));
             DrawDynamicRing(dc, ringGeometry,
-                NewPen(WithAlpha(glowColor,
+                SetRingPen(3, WithAlpha(glowColor,
                     Alpha(82 * powered * intensity * glowGain)), 9.8));
 
             MediaColor darkMaterial = MixColor(dimColor,
@@ -470,19 +510,19 @@ public sealed class HaloVisual : FrameworkElement
             MediaColor poweredMaterial = MixColor(darkMaterial, litMaterial,
                 0.24 + 0.76 * powered);
             DrawDynamicRing(dc, ringGeometry,
-                NewPen(WithAlpha(darkMaterial, Alpha(242 * intensity)),
+                SetRingPen(4, WithAlpha(darkMaterial, Alpha(242 * intensity)),
                     bodyWidth + 1.15));
             DrawDynamicRing(dc, ringGeometry,
-                NewPen(WithAlpha(poweredMaterial,
+                SetRingPen(5, WithAlpha(poweredMaterial,
                     Alpha((182 + 73 * powered) * intensity)), bodyWidth));
             MediaColor poweredCore = MixColor(emissionColor,
                 MediaColor.FromRgb(253, 255, 255), visual.CoreWhite);
             DrawDynamicRing(dc, ringGeometry,
-                NewPen(WithAlpha(poweredCore,
+                SetRingPen(6, WithAlpha(poweredCore,
                     Alpha((5 + 235 * powered) * intensity)),
                     bodyWidth - 2.25));
             DrawDynamicRing(dc, ringGeometry,
-                NewPen(WithAlpha(MediaColor.FromRgb(255, 255, 255),
+                SetRingPen(7, WithAlpha(MediaColor.FromRgb(255, 255, 255),
                     Alpha(205 * powered * intensity)), 1.65));
         }
 
@@ -560,7 +600,7 @@ public sealed class HaloVisual : FrameworkElement
             return GeneratedHaloSpec.State(value).GlowGain;
         }
 
-        private static StreamGeometry[] CreateDynamicRingGeometry(MediaPoint center,
+        private void UpdateDynamicRingGeometry(MediaPoint center,
             double radius, double gapA, double gapB)
         {
             // The visible clearances account for the thick rounded arc caps.
@@ -571,46 +611,33 @@ public sealed class HaloVisual : FrameworkElement
             double bStart = gapB - gapBSize / 2;
             double bEnd = gapB + gapBSize / 2;
             double aStart = gapA - gapASize / 2;
-            return new StreamGeometry[]
-            {
-                CreateArcGeometry(center, radius, aEnd,
-                    PositiveModulo(bStart - aEnd, 360)),
-                CreateArcGeometry(center, radius, bEnd,
-                    PositiveModulo(aStart - bEnd, 360))
-            };
+            UpdateArcGeometry(0, center, radius, aEnd,
+                PositiveModulo(bStart - aEnd, 360));
+            UpdateArcGeometry(1, center, radius, bEnd,
+                PositiveModulo(aStart - bEnd, 360));
         }
 
-        private static StreamGeometry CreateArcGeometry(MediaPoint center,
+        private void UpdateArcGeometry(int index, MediaPoint center,
             double radius, double startDegrees, double sweepDegrees)
         {
-            StreamGeometry geometry = new StreamGeometry();
-            using (StreamGeometryContext context = geometry.Open())
-            {
-                AddArcFigure(context, center, radius, startDegrees,
-                    sweepDegrees);
-            }
-            geometry.Freeze();
-            return geometry;
-        }
-
-        private static void AddArcFigure(StreamGeometryContext context,
-            MediaPoint center, double radius, double startDegrees,
-            double sweepDegrees)
-        {
-            if (sweepDegrees <= 0.001)
-            {
-                return;
-            }
             MediaPoint start = PointOnCircle(center, radius, startDegrees);
             MediaPoint end = PointOnCircle(center, radius,
                 startDegrees + sweepDegrees);
-            context.BeginFigure(start, false, false);
-            context.ArcTo(end, new System.Windows.Size(radius, radius), 0,
-                sweepDegrees > 180, SweepDirection.Clockwise, true, false);
+            ringFigures[index].StartPoint = start;
+            ringArcs[index].Point = end;
+            ringArcs[index].Size = new System.Windows.Size(radius, radius);
+            ringArcs[index].IsLargeArc = sweepDegrees > 180;
+        }
+
+        private MediaPen SetRingPen(int index, MediaColor color, double width)
+        {
+            ringBrushes[index].Color = color;
+            ringPens[index].Thickness = width;
+            return ringPens[index];
         }
 
         private static void DrawDynamicRing(DrawingContext dc,
-            StreamGeometry[] geometry, MediaPen pen)
+            PathGeometry[] geometry, MediaPen pen)
         {
             for (int i = 0; i < geometry.Length; i++)
             {

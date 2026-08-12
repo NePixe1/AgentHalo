@@ -32,7 +32,8 @@ public enum AgentKind
     {
         Codex,
         ClaudeCode,
-        Grok
+        Grok,
+        Pi
     }
 
 public enum AgentPresenceState
@@ -74,7 +75,8 @@ public enum AgentEvidenceSource
         SessionJsonl,
         DiagnosticSqlite,
         ClaudeHook,
-        GrokHook
+        GrokHook,
+        PiExtension
     }
 
 public enum AgentAttentionReason

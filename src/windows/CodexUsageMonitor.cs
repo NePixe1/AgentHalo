@@ -85,7 +85,7 @@ public sealed class CodexUsageMonitor : IDisposable
             refreshTimer = new Timer(delegate { RequestRefresh(); }, null,
                 Timeout.Infinite, Timeout.Infinite);
             localSnapshotTimer = new Timer(delegate { RequestLocalRefresh(); }, null,
-                TimeSpan.Zero, TimeSpan.FromSeconds(3));
+                Timeout.Infinite, Timeout.Infinite);
         }
 
         internal bool IsActiveForTest
@@ -113,11 +113,13 @@ public sealed class CodexUsageMonitor : IDisposable
                 {
                     int interval = (int)RefreshInterval.TotalMilliseconds;
                     refreshTimer.Change(interval, interval);
+                    localSnapshotTimer.Change(TimeSpan.Zero, TimeSpan.FromSeconds(3));
                     requestNow = true;
                 }
                 else
                 {
                     refreshTimer.Change(Timeout.Infinite, Timeout.Infinite);
+                    localSnapshotTimer.Change(Timeout.Infinite, Timeout.Infinite);
                 }
             }
             if (requestNow)

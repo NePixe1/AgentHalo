@@ -3,7 +3,7 @@
 ## Product promise
 
 Agent Halo is a quiet, always-visible desktop vital sign for coding agents. The
-current release monitors Codex, Claude Code, and Grok Build on Windows and
+current release monitors Codex, Claude Code, Grok Build, and Pi on Windows and
 macOS. It answers one question without making the user return to the agent
 window: "What needs me right now?"
 
@@ -30,9 +30,9 @@ window: "What needs me right now?"
 
 - Native Windows (WPF) and macOS (Swift) apps, transparent and always on top.
 - Smooth composition-clock animation.
-- Local lifecycle monitoring for Codex, Claude Code, and Grok Build on both platforms.
+- Local lifecycle monitoring for Codex, Claude Code, Grok Build, and Pi on both Windows and macOS.
 - Multiple-session aggregation with priority ordering.
-- Focus switching between available agents without stopping background monitoring.
+- Configurable agent visibility with focused polling on Windows to limit background overhead.
 - Hover-to-inspect usage, context, or session details.
 - Persistent completion acknowledgement.
 - Tray controls, pause, live/demo modes, startup toggle, and exit.
@@ -42,7 +42,7 @@ window: "What needs me right now?"
 
 ## Focused Agent
 
-Agent Halo monitors Codex, Claude Code, and Grok Build concurrently on both platforms, but renders one focused agent at a time. The focused agent defaults to Codex and can be changed from the hover details segmented switch or the menu item `监控对象`.
+Agent Halo renders one focused agent at a time. On Windows, users choose the visible agents from `监控的 Agent`; only the focused agent is actively polled, and it can be changed from the hover switch or `当前显示`. Existing settings default to all supported agents, and at least one agent remains enabled.
 
 The details panel exposes two modes selected from the focused session's endpoint and credentials: official OAuth mode shows usage, while API-key mode shows a session summary card (title, model, tokens; empty state when offline) and includes custom or third-party endpoints. Synthetic Codex failure surfacing and click-to-activate Codex remain scoped to Codex focus; Claude Code focus does not attempt to foreground a Claude Code app.
 

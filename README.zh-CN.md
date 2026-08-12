@@ -30,7 +30,7 @@
 ## 功能亮点
 
 - **一眼看懂状态。** 一枚常驻光环区分规划思考、工具执行、任务完成、等待输入与阻断故障。任务完成后会持续呼吸，直到你确认它。
-- **多个 Agent，一个焦点。** Agent Halo 并行监听已支持的 Agent，光环与详情面板只跟随当前选中的对象；切换焦点不会停止其它监听。
+- **多个 Agent，一个焦点。** 可在右键菜单勾选需要显示的 Agent，光环与详情面板只跟随当前对象；Windows 只主动轮询当前 Agent，减少后台占用。
 - **需要时再看详情。** 悬停可查看官方额度、上下文或会话信息。自定义 Codex / API Key 会话显示项目、模型与本轮输入/输出 Token，但不暴露 API Key、Base URL 或中转工具名称，也不伪造官方额度。
 - **真正的原生桌面体验。** Windows 与 macOS 应用无需浏览器或云端面板；支持置顶、拖动吸附、缩放、暂停、开机启动以及显示器变化后的位置恢复。
 - **从设计上保持本地。** 生命周期与会话内容留在本机。官方额度刷新复用已有登录；Agent Halo 不需要、也不会读取 OpenAI API Key。
@@ -39,8 +39,8 @@
 
 | 平台 | 支持的 Agent | 系统要求 |
 | --- | --- | --- |
-| Windows | Codex、Claude Code、Grok Build | Windows 10 或 11；.NET Framework 4.8（通常已自带） |
-| macOS | Codex、Claude Code、Grok Build | macOS 13 及以上 |
+| Windows | Codex、Claude Code、Grok Build、Pi | Windows 10 或 11；.NET Framework 4.8（通常已自带） |
+| macOS | Codex、Claude Code、Grok Build、Pi | macOS 13 及以上 |
 
 使用前请至少安装并登录一种受支持的 Agent。
 
@@ -65,9 +65,9 @@
 ## 快速使用
 
 - **拖动**光环调整位置，靠近屏幕边缘会轻微吸附。
-- **悬停**查看状态与额度 / 会话详情；两个平台均可切换 **Codex / CC / Grok**。
+- **悬停**查看状态与额度 / 会话详情；可切换 **Codex / CC / Grok / Pi**。
 - **单击**光环可将 Codex 窗口切到前台（在相关场景下）。
-- **右键**打开状态预览、临时暂停、开机启动、置顶、光环大小（`75% / 100% / 125%`）、**脱离卡死**与退出。暂停会在下次启动时自动取消。
+- **右键**勾选“监控的 Agent”、切换当前显示，并打开状态预览、临时暂停、开机启动、置顶、光环大小（`75% / 100% / 125%`）、**脱离卡死**与退出。至少保留一个 Agent；暂停会在下次启动时自动取消。
 - 显示器变化后，离屏光环会回到主屏。macOS 还会在原显示器重新连接后恢复记忆位置。
 
 ## 状态颜色
@@ -116,9 +116,55 @@ hooks = false
 
 这只关闭 Claude hooks 导入，不影响 skills / rules / MCP，也不影响 Claude Code 本身。修改后需重启 Grok 会话才会生效。若你还有**仅**写在 `~/.claude/settings.json` 中的其它 hooks，关闭后它们在 Grok 中也不会再运行。
 
+## 从源码构建
+
+日常使用建议直接下载 [GitHub 最新版本](https://github.com/NePixe1/AgentHalo/releases/latest)。若需要最新代码、本地修改，或自行验证打包流程，可按下列步骤从源码构建。
+
+先克隆仓库，再在**仓库根目录**执行对应平台命令。
+
+### macOS
+
+**环境要求：** macOS 13 及以上，并安装 Xcode 或 Command Line Tools（保证 `swift` 可用）。
+
+```bash
+# 构建、打包、运行检查并启动
+bash ./scripts/run-macos.sh --verify
+
+# 仅打包（不启动）
+bash ./scripts/build-macos.sh
+```
+
+- 应用包输出：`outputs/AgentHalo-macOS/AgentHalo.app`
+- 打包成功后如需制作 DMG：`bash ./scripts/create-dmg.sh`
+
+退出本机构建版本可通过菜单栏，或：
+
+```bash
+pkill -x AgentHaloMac
+```
+
+### Windows
+
+**环境要求：** Windows 10 或 11，以及 .NET Framework 4.8，并确保 C# 编译器位于：
+
+`%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe`
+
+```powershell
+.\scripts\build-windows.ps1
+```
+
+- 输出：`outputs\AgentHalo\AgentHalo.exe`
+- 构建后可选自检：
+
+```powershell
+.\outputs\AgentHalo\AgentHalo.exe --self-test $env:TEMP\agent-halo-self-test.txt
+```
+
+未签名的个人构建可能触发 SmartScreen；正式发布压缩包会附带 `SHA256.txt` 供校验。
+
 ## 开发与贡献
 
-README 有意只保留安装与使用信息。架构、源码构建、诊断、共享契约修改与贡献者检查见 **[AGENTS.md](AGENTS.md)**。
+架构、共享契约修改、诊断与贡献者检查见 **[AGENTS.md](AGENTS.md)**。
 
 ## 许可证
 

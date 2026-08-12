@@ -40,6 +40,7 @@ public sealed class HaloSettings
         public string AcknowledgedErrorAt { get; set; }
         public int HaloScalePercent { get; set; }
         public string FocusedAgent { get; set; }
+        public List<string> EnabledAgents { get; set; }
         public string Language { get; set; }  // null = follow system
 
         public HaloSettings()
@@ -47,6 +48,7 @@ public sealed class HaloSettings
             AlwaysOnTop = true;
             HaloScalePercent = 100;
             FocusedAgent = "codex";
+            EnabledAgents = SupportedAgents().Select(AgentKey).ToList();
             InstalledAt = DateTime.UtcNow.ToString("o");
             Acknowledged = new Dictionary<string, string>();
             Language = null;  // follow system by default
@@ -62,22 +64,146 @@ public sealed class HaloSettings
             {
                 return AgentKind.Grok;
             }
+            if (String.Equals(FocusedAgent, "pi", StringComparison.OrdinalIgnoreCase))
+            {
+                return AgentKind.Pi;
+            }
             return AgentKind.Codex;
+        }
+
+        public static AgentKind[] SupportedAgents()
+        {
+            return new[]
+            {
+                AgentKind.Codex,
+                AgentKind.ClaudeCode,
+                AgentKind.Grok,
+                AgentKind.Pi
+            };
+        }
+
+        public static string AgentKey(AgentKind agent)
+        {
+            if (agent == AgentKind.ClaudeCode)
+            {
+                return "claudeCode";
+            }
+            if (agent == AgentKind.Grok)
+            {
+                return "grok";
+            }
+            if (agent == AgentKind.Pi)
+            {
+                return "pi";
+            }
+            return "codex";
+        }
+
+        public static bool TryParseAgentKey(string value, out AgentKind agent)
+        {
+            if (String.Equals(value, "codex", StringComparison.OrdinalIgnoreCase))
+            {
+                agent = AgentKind.Codex;
+                return true;
+            }
+            if (String.Equals(value, "claudeCode", StringComparison.OrdinalIgnoreCase))
+            {
+                agent = AgentKind.ClaudeCode;
+                return true;
+            }
+            if (String.Equals(value, "grok", StringComparison.OrdinalIgnoreCase))
+            {
+                agent = AgentKind.Grok;
+                return true;
+            }
+            if (String.Equals(value, "pi", StringComparison.OrdinalIgnoreCase))
+            {
+                agent = AgentKind.Pi;
+                return true;
+            }
+            agent = AgentKind.Codex;
+            return false;
+        }
+
+        public List<AgentKind> GetEnabledAgents()
+        {
+            if (EnabledAgents == null)
+            {
+                return SupportedAgents().ToList();
+            }
+            List<AgentKind> result = new List<AgentKind>();
+            foreach (AgentKind candidate in SupportedAgents())
+            {
+                if (EnabledAgents.Any(delegate(string value)
+                    {
+                        AgentKind parsed;
+                        return TryParseAgentKey(value, out parsed) && parsed == candidate;
+                    }))
+                {
+                    result.Add(candidate);
+                }
+            }
+            if (result.Count == 0)
+            {
+                result.Add(AgentKind.Codex);
+            }
+            return result;
+        }
+
+        public bool IsAgentEnabled(AgentKind agent)
+        {
+            return GetEnabledAgents().Contains(agent);
+        }
+
+        public bool SetAgentEnabled(AgentKind agent, bool enabled)
+        {
+            List<AgentKind> agents = GetEnabledAgents();
+            bool currentlyEnabled = agents.Contains(agent);
+            if (currentlyEnabled == enabled)
+            {
+                return true;
+            }
+            if (!enabled && agents.Count == 1)
+            {
+                return false;
+            }
+            if (enabled)
+            {
+                agents.Add(agent);
+                agents = SupportedAgents().Where(agents.Contains).ToList();
+            }
+            else
+            {
+                agents.Remove(agent);
+            }
+            EnabledAgents = agents.Select(AgentKey).ToList();
+            if (!agents.Contains(GetFocusedAgent()))
+            {
+                FocusedAgent = AgentKey(agents[0]);
+            }
+            return true;
+        }
+
+        public bool NormalizeEnabledAgents()
+        {
+            List<AgentKind> agents = GetEnabledAgents();
+            List<string> canonical = agents.Select(AgentKey).ToList();
+            bool changed = EnabledAgents == null ||
+                !EnabledAgents.SequenceEqual(canonical, StringComparer.Ordinal);
+            EnabledAgents = canonical;
+            if (!agents.Contains(GetFocusedAgent()))
+            {
+                FocusedAgent = AgentKey(agents[0]);
+                changed = true;
+            }
+            return changed;
         }
 
         public void SetFocusedAgent(AgentKind agent)
         {
-            if (agent == AgentKind.ClaudeCode)
+            if (IsAgentEnabled(agent))
             {
-                FocusedAgent = "claudeCode";
-            }
-            else if (agent == AgentKind.Grok)
-            {
-                FocusedAgent = "grok";
-            }
-            else
-            {
-                FocusedAgent = "codex";
+                FocusedAgent = AgentKey(agent);
             }
         }
 
@@ -174,16 +300,14 @@ public static class SettingsStorage
                             result.HaloScalePercent = 100;
                             repaired = true;
                         }
-                        if (!String.Equals(result.FocusedAgent, "codex",
-                                StringComparison.OrdinalIgnoreCase) &&
-                            !String.Equals(result.FocusedAgent, "claudeCode",
-                                StringComparison.OrdinalIgnoreCase) &&
-                            !String.Equals(result.FocusedAgent, "grok",
-                                StringComparison.OrdinalIgnoreCase))
+                        AgentKind parsedFocusedAgent;
+                        if (!TryParseFocusedAgent(result.FocusedAgent,
+                                out parsedFocusedAgent))
                         {
                             result.FocusedAgent = "codex";
                             repaired = true;
                         }
+                        repaired = result.NormalizeEnabledAgents() || repaired;
                         if (repaired)
                         {
                             Save(result);
@@ -197,6 +321,11 @@ public static class SettingsStorage
                 Log("Settings load failed: " + ex.Message);
             }
             return new HaloSettings();
+        }
+
+        private static bool TryParseFocusedAgent(string value, out AgentKind agent)
+        {
+            return HaloSettings.TryParseAgentKey(value, out agent);
         }
 
         public static void Save(HaloSettings settings)

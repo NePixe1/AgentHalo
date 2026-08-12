@@ -126,6 +126,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var claudeActivitySnapshot = ClaudeActivitySnapshot.empty
     private let grokActivityMonitor = GrokActivityMonitor()
     private var grokActivitySnapshot = GrokActivitySnapshot.empty
+    private let piActivityMonitor = PiActivityMonitor()
+    private var piActivitySnapshot = PiActivitySnapshot.empty
     private var nextStatusLineReconciliationAt = Date.distantPast
     private let statusLineReconciliationInterval: TimeInterval = 2
     private var selectedPreview = PreviewPayload.live
@@ -221,11 +223,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.grokActivityDidChange(snapshot)
             }
         }
+        piActivitySnapshot = piActivityMonitor.snapshot()
+        piActivityMonitor.start { [weak self] snapshot in
+            Task { @MainActor in
+                self?.piActivityDidChange(snapshot)
+            }
+        }
         // Initialize L10n with user's saved preference
         L10n.shared.setLanguage(settings.language)
         currentLanguage = L10n.shared.currentLanguage
         startUsageRefreshLoop()
-        requestUsageRefresh(for: Self.usageProviderID(for: settings.focusedAgent))
+        if let providerID = Self.usageProviderID(for: settings.focusedAgent) {
+            requestUsageRefresh(for: providerID)
+        }
 
         // Observe language changes
         languageObserver = NotificationCenter.default.addObserver(
@@ -275,6 +285,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         codexActivityMonitor.stop()
         claudeActivityMonitor.stop()
         grokActivityMonitor.stop()
+        piActivityMonitor.stop()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         settingsSaveTimer?.invalidate()
         if placementState.shouldPersistCurrentFrame, let panel {
@@ -319,6 +330,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             focusedAgent: settings.focusedAgent,
             detailsPanelVisible: detailsPanel.isVisible
         )
+        piActivityMonitor.updatePollingContext(
+            focusedAgent: settings.focusedAgent,
+            detailsPanelVisible: detailsPanel.isVisible
+        )
         refreshAggregateAndUI(now: now, codexRunning: codexRunning)
     }
 
@@ -338,6 +353,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         grokActivitySnapshot = snapshot
+        let codexRunning = CodexAppDetector.isCodexRunning()
+        refreshAggregateAndUI(now: Date(), codexRunning: codexRunning)
+    }
+
+    private func piActivityDidChange(_ snapshot: PiActivitySnapshot) {
+        guard haloView?.isDragging != true else {
+            piActivitySnapshot = snapshot
+            return
+        }
+        piActivitySnapshot = snapshot
         let codexRunning = CodexAppDetector.isCodexRunning()
         refreshAggregateAndUI(now: Date(), codexRunning: codexRunning)
     }
@@ -364,6 +389,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return claudeActivitySnapshot.preferredStandbySession != nil
         case .grok:
             return grokActivitySnapshot.isPresent
+        case .pi:
+            return piActivitySnapshot.isPresent
         }
     }
 
@@ -599,6 +626,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         addFocusedAgentItem(.codex, to: focusMenu)
         addFocusedAgentItem(.claudeCode, to: focusMenu)
         addFocusedAgentItem(.grok, to: focusMenu)
+        addFocusedAgentItem(.pi, to: focusMenu)
         focus.submenu = focusMenu
         menu.addItem(focus)
 
@@ -709,7 +737,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard settings.focusedAgent != agent else {
             tick()
             refreshVisibleDetailsPanel()
-            requestUsageRefresh(for: Self.usageProviderID(for: agent))
+            if let providerID = Self.usageProviderID(for: agent) {
+                requestUsageRefresh(for: providerID)
+            }
             return
         }
         activateFocusedUsageProvider(agent)
@@ -720,12 +750,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             claudeActivityMonitor.requestRefresh()
         case .grok:
             grokActivityMonitor.requestRefresh()
+        case .pi:
+            piActivityMonitor.requestRefresh()
         case .codex:
             break
         }
         tick()
         refreshVisibleDetailsPanel()
-        requestUsageRefresh(for: Self.usageProviderID(for: agent))
+        if let providerID = Self.usageProviderID(for: agent) {
+            requestUsageRefresh(for: providerID)
+        }
     }
 
     @objc private func quit() {
@@ -850,6 +884,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         grokActivitySnapshot.sessions
     }
 
+    private func piSnapshots() -> [SessionSnapshot] {
+        piActivitySnapshot.sessions
+    }
+
     static func standbyAggregate(
         aggregate: AggregateSnapshot,
         hasLiveSession: Bool
@@ -905,35 +943,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         positionDetailsPanel()
         detailsPanel.orderFrontRegardless()
-        requestUsageRefresh(for: Self.usageProviderID(for: settings.focusedAgent))
+        if let providerID = Self.usageProviderID(for: settings.focusedAgent) {
+            requestUsageRefresh(for: providerID)
+        }
     }
 
     private func updateDetailsPanelContent(rawClaudeSnapshots: [SessionSnapshot]? = nil) {
         let rawClaudeSnapshots = rawClaudeSnapshots
             ?? (settings.focusedAgent == .claudeCode ? claudeSnapshots() : [])
         let displayedAggregate = displayAggregate()
-        let providerID = Self.usageProviderID(for: settings.focusedAgent)
-        let monitorState = usageStates[providerID]
-            ?? UsageMonitorState(providerID: providerID, accessMode: .apiKey)
-        let claudeMainSessionId = settings.focusedAgent == .claudeCode
-            ? Self.claudeMainSessionIdForDetails(
-                displayedAggregate: displayedAggregate,
-                rawClaudeSnapshots: rawClaudeSnapshots,
-                liveSession: claudeActivitySnapshot.preferredStandbySession
-            )
-            : nil
-        let claudeUsageFreshness = Self.claudeUsageFreshness(
-            mainSessionId: claudeMainSessionId,
-            liveSessions: claudeActivitySnapshot.liveSessions
-        )
-        let claudeUsage = claudeMainSessionId.flatMap { sessionId in
-            contextReaderQueue.sync {
-                claudeContextUsageReader.read(
-                    sessionId: sessionId,
-                    freshness: claudeUsageFreshness
-                )
-            }
-        }
+        let isOffline = displayedAggregate.state == .idle && displayedAggregate.label == "OFFLINE"
         let exactSessionDetails: SessionDetailsSnapshot
         let exactContextUsedPercent: Double?
         switch settings.focusedAgent {
@@ -948,6 +967,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             exactContextUsedPercent = session?.contextUsedPercent
         case .claudeCode:
+            let claudeMainSessionId = Self.claudeMainSessionIdForDetails(
+                displayedAggregate: displayedAggregate,
+                rawClaudeSnapshots: rawClaudeSnapshots,
+                liveSession: claudeActivitySnapshot.preferredStandbySession
+            )
+            let claudeUsageFreshness = Self.claudeUsageFreshness(
+                mainSessionId: claudeMainSessionId,
+                liveSessions: claudeActivitySnapshot.liveSessions
+            )
+            let claudeUsage = claudeMainSessionId.flatMap { sessionId in
+                contextReaderQueue.sync {
+                    claudeContextUsageReader.read(
+                        sessionId: sessionId,
+                        freshness: claudeUsageFreshness
+                    )
+                }
+            }
             let resolved = ClaudeMainSessionDetailsResolver.resolve(
                 mainSessionId: claudeMainSessionId,
                 mainSessions: claudeActivitySnapshot.transcriptSnapshots,
@@ -978,15 +1014,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 displayedSessions: displayedAggregate.sessions,
                 diskContextPercent: context?.contextUsedPercent
             )
+        case .pi:
+            // Extension records carry project/model/tokens/context. On STANDBY the
+            // aggregate sessions list is empty; fall back to the latest live record.
+            let session = displayedAggregate.sessions.first
+                ?? piActivitySnapshot.preferredStandbySession
+            exactSessionDetails = SessionDetailsSnapshot(
+                projectName: session?.projectName,
+                sessionTitle: session?.sessionTitle,
+                modelName: session?.modelName,
+                inputTokens: session?.inputTokens,
+                outputTokens: session?.outputTokens
+            )
+            exactContextUsedPercent = Self.contextUsedPercentForPiDetails(
+                displayedSessions: displayedAggregate.sessions,
+                standbySession: piActivitySnapshot.preferredStandbySession,
+                isStandby: displayedAggregate.label == "STANDBY"
+            )
         }
-        let model = DetailsContentResolver.resolve(
-            providerID: providerID,
-            monitorState: monitorState,
-            isOffline: displayedAggregate.state == .idle && displayedAggregate.label == "OFFLINE",
-            sessionDetails: exactSessionDetails,
-            contextUsedPercent: exactContextUsedPercent,
-            now: Date()
-        )
+
+        let model: DetailsPanelViewModel
+        if let providerID = Self.usageProviderID(for: settings.focusedAgent) {
+            let monitorState = usageStates[providerID]
+                ?? UsageMonitorState(providerID: providerID, accessMode: .apiKey)
+            model = DetailsContentResolver.resolve(
+                providerID: providerID,
+                monitorState: monitorState,
+                isOffline: isOffline,
+                sessionDetails: exactSessionDetails,
+                contextUsedPercent: exactContextUsedPercent,
+                now: Date()
+            )
+        } else {
+            // Pi (and any future session-only agent): fixed session body, no OAuth windows.
+            model = DetailsPanelViewModel(
+                providerName: settings.focusedAgent.menuTitle,
+                planName: nil,
+                usageWarning: nil,
+                contextUsedPercent: isOffline ? nil : exactContextUsedPercent,
+                body: .session(isOffline ? SessionDetailsSnapshot() : exactSessionDetails)
+            )
+        }
         detailsPanel.render(aggregate: displayedAggregate, model: model)
     }
 
@@ -1024,6 +1092,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return nil
         }
         return diskContextPercent
+    }
+
+    /// Pi context comes from the extension record. While a turn is displayed
+    /// (or STANDBY with a live PID), surface the latest known percent; OFFLINE
+    /// clears via the caller.
+    nonisolated static func contextUsedPercentForPiDetails(
+        displayedSessions: [SessionSnapshot],
+        standbySession: SessionSnapshot?,
+        isStandby: Bool
+    ) -> Double? {
+        if let visible = displayedSessions.first(where: {
+            $0.agent == .pi && !$0.threadId.isEmpty
+        }) {
+            return visible.contextUsedPercent
+        }
+        if isStandby {
+            return standbySession?.contextUsedPercent
+        }
+        return nil
     }
 
     /// Prefer the hook/aggregate thread id, then the first live active_sessions entry.
@@ -1080,7 +1167,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .whileSessionIsLive
     }
 
-    static func usageProviderID(for agent: AgentKind) -> UsageProviderID {
+    /// Official usage/quota providers only. Pi is session-detail only (nil).
+    static func usageProviderID(for agent: AgentKind) -> UsageProviderID? {
         switch agent {
         case .codex:
             return .codex
@@ -1088,6 +1176,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return .claude
         case .grok:
             return .grok
+        case .pi:
+            return nil
         }
     }
 
@@ -1104,7 +1194,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self, !Task.isCancelled else {
                     return
                 }
-                requestUsageRefresh(for: Self.usageProviderID(for: settings.focusedAgent))
+                if let providerID = Self.usageProviderID(for: self.settings.focusedAgent) {
+                    self.requestUsageRefresh(for: providerID)
+                }
             }
         }
     }
@@ -1140,7 +1232,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func activateFocusedUsageProvider(_ agent: AgentKind) {
-        let providerID = Self.usageProviderID(for: agent)
+        guard let providerID = Self.usageProviderID(for: agent) else {
+            usageCoordinator.focusController.deactivateAll()
+            for key in usageRequestTasks.keys {
+                usageRequestTasks[key]?.task.cancel()
+                usageRequestTasks[key] = nil
+            }
+            return
+        }
         usageCoordinator.focusController.activate(providerID)
         let inactiveProviderIDs = usageRequestTasks.keys.filter { $0 != providerID }
         for inactiveProviderID in inactiveProviderIDs {
@@ -1316,7 +1415,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func allSnapshots() -> [SessionSnapshot] {
-        codexActivitySnapshot.sessions + claudeSnapshots() + grokSnapshots()
+        codexActivitySnapshot.sessions + claudeSnapshots() + grokSnapshots() + piSnapshots()
     }
 
     private func addMenuItem(_ title: String, _ action: Selector, enabled: Bool, to menu: NSMenu) {
