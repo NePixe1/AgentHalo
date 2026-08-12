@@ -1169,8 +1169,6 @@ private func testDetailsPanelShowsSessionCardForAPIKey() {
         ))
     )
 
-    expect(!panel.apiKeyChipHiddenForTesting, "API Key body should show mode chip")
-    expect(panel.apiKeyChipTitleForTesting, L10n.shared["access.mode.api_key"], "mode chip title")
     expect(panel.sessionBodyModeForTesting, .sessionCard, "online API body is session card")
     expect(panel.sessionCardTitleForTesting, "Redesign details", "card title")
     expect(panel.sessionCardModelForTesting, "gpt-5.5", "card model")
@@ -1212,7 +1210,6 @@ private func testDetailsPanelBlankStandbyUsesSoftEmptyNotDashCard() {
         "○ " + L10n.shared["session.empty.api_key"],
         "STANDBY blank shows No session"
     )
-    expect(!panel.apiKeyChipHiddenForTesting, "STANDBY API Key still shows mode chip")
     expect(panel.sessionBodySlotHeightForTesting, 68, "blank empty keeps body slot height")
 }
 
@@ -1235,13 +1232,11 @@ private func testDetailsPanelKeepsUsageAndSessionBodiesMutuallyExclusive() {
     panel.render(aggregate: detailsAggregate(), model: usageDetailsModel())
     expect(!panel.usageGroupHiddenForTesting, "OAuth body should show usage")
     expect(panel.sessionGroupHiddenForTesting, "OAuth body should hide session rows")
-    expect(panel.apiKeyChipHiddenForTesting, "OAuth body should hide mode chip")
     expect(panel.sessionBodyModeForTesting, .unknown, "usage path must not leak session body mode")
 
     panel.render(aggregate: detailsAggregate(), model: sessionDetailsModel())
     expect(panel.usageGroupHiddenForTesting, "API body should hide usage")
     expect(!panel.sessionGroupHiddenForTesting, "API body should show session rows")
-    expect(!panel.apiKeyChipHiddenForTesting, "API body should show mode chip")
 }
 
 @MainActor
@@ -1279,7 +1274,6 @@ private func testDetailsPanelClearsContextAndSessionRowsOffline() {
     )
 
     expect(panel.contextPillHiddenForTesting, "offline should clear context")
-    expect(!panel.apiKeyChipHiddenForTesting, "offline API Key still shows mode chip")
     expect(panel.sessionBodyModeForTesting, .empty, "offline shows empty body")
     expect(
         panel.sessionEmptyTextForTesting,

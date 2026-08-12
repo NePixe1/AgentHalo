@@ -25,7 +25,6 @@ class DetailsPanel: NSPanel {
     /// Slightly under the original 72 so the card bottom sits higher and outer
     /// bottom padding matches the top chrome more closely (equalizer absorbs the delta).
     private static let sessionBodyHeight: CGFloat = 68
-    private static let apiKeyChipSpacing: CGFloat = 6
     /// After COMPLETE settles into STANDBY (empty sessions), keep the last live
     /// context percent for this long before hiding. OFFLINE still clears immediately.
     nonisolated static let standbyContextHoldDuration: TimeInterval = 12
@@ -38,7 +37,6 @@ class DetailsPanel: NSPanel {
     private let secondaryQuota = QuotaRowView(title: L10n.shared["quota.weekly"])
     private let agentToggle = AgentToggleView()
     private let contextPill = NSView()
-    private let apiKeyChip = ModeChipView(title: L10n.shared["access.mode.api_key"])
     private let quotaGroup = NSStackView()
     /// Hosts the fixed-height session body slot (empty | session card).
     /// Plain `NSView` (not `NSStackView`) so width is explicit and not ambiguous.
@@ -47,8 +45,6 @@ class DetailsPanel: NSPanel {
     private let emptyBody = EmptySessionBodyView()
     private let sessionCard = SessionCardView()
     private var topRow: NSView?
-    private var apiKeyChipWidthConstraint: NSLayoutConstraint?
-    private var apiKeyChipContextSpacingConstraint: NSLayoutConstraint?
     private var sessionBodyMode: DetailsPanelSessionBodyRole = .unknown
     /// Last live context percent used to soft-hold the pill after STANDBY.
     private var heldContextPercent: Double?
@@ -141,7 +137,6 @@ class DetailsPanel: NSPanel {
 
         emptyBody.isHidden = true
         sessionCard.isHidden = true
-        apiKeyChip.isHidden = true
 
         let rootView = TrackingDetailsContentView()
         rootView.owner = self
@@ -219,14 +214,12 @@ class DetailsPanel: NSPanel {
         case .usage(let usage):
             stack.setCustomSpacing(16, after: detailField)
             stack.edgeInsets.bottom = 4
-            setAPIKeyChipVisible(false)
             sessionBodyMode = .unknown
             renderUsage(usage)
             quotaGroup.isHidden = false
         case .session(let session):
             stack.setCustomSpacing(11, after: detailField)
             stack.edgeInsets.bottom = 4
-            setAPIKeyChipVisible(true)
             renderSession(session, isOffline: isOffline)
             metadataGroup.isHidden = false
         }
@@ -369,22 +362,6 @@ class DetailsPanel: NSPanel {
             return true
         }
         return session.inputTokens != nil || session.outputTokens != nil
-    }
-
-    private func setAPIKeyChipVisible(_ visible: Bool) {
-        apiKeyChip.isHidden = !visible
-        // Collapse width + spacing so the context pill can hug the trailing edge on OAuth.
-        apiKeyChipWidthConstraint?.isActive = false
-        if visible {
-            apiKeyChipWidthConstraint = apiKeyChip.widthAnchor.constraint(
-                equalToConstant: apiKeyChip.preferredWidth
-            )
-            apiKeyChipContextSpacingConstraint?.constant = Self.apiKeyChipSpacing
-        } else {
-            apiKeyChipWidthConstraint = apiKeyChip.widthAnchor.constraint(equalToConstant: 0)
-            apiKeyChipContextSpacingConstraint?.constant = 0
-        }
-        apiKeyChipWidthConstraint?.isActive = true
     }
 
     private func resizeToFitContent() {
@@ -581,22 +558,9 @@ class DetailsPanel: NSPanel {
         contextValue.lineBreakMode = .byTruncatingTail
         contextValue.translatesAutoresizingMaskIntoConstraints = false
 
-        apiKeyChip.translatesAutoresizingMaskIntoConstraints = false
-        apiKeyChip.isHidden = true
-
         row.addSubview(agentToggle)
         row.addSubview(contextPill)
-        row.addSubview(apiKeyChip)
         contextPill.addSubview(contextValue)
-
-        let chipWidth = apiKeyChip.widthAnchor.constraint(equalToConstant: 0)
-        apiKeyChipWidthConstraint = chipWidth
-        // Spacing between context pill trailing edge and chip leading edge.
-        let chipSpacing = apiKeyChip.leadingAnchor.constraint(
-            equalTo: contextPill.trailingAnchor,
-            constant: 0
-        )
-        apiKeyChipContextSpacingConstraint = chipSpacing
 
         NSLayoutConstraint.activate([
             row.heightAnchor.constraint(equalToConstant: 24),
@@ -604,13 +568,8 @@ class DetailsPanel: NSPanel {
             agentToggle.centerYAnchor.constraint(equalTo: row.centerYAnchor),
             agentToggle.widthAnchor.constraint(equalToConstant: 144),
             agentToggle.heightAnchor.constraint(equalToConstant: 24),
-            // Right-to-left: [context][gap][API Key chip]
-            apiKeyChip.trailingAnchor.constraint(equalTo: row.trailingAnchor),
-            apiKeyChip.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            apiKeyChip.heightAnchor.constraint(equalToConstant: 22),
-            chipWidth,
-            chipSpacing,
             contextPill.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            contextPill.trailingAnchor.constraint(equalTo: row.trailingAnchor),
             contextPill.widthAnchor.constraint(equalToConstant: Self.contextPillWidth),
             contextPill.leadingAnchor.constraint(greaterThanOrEqualTo: agentToggle.trailingAnchor, constant: 10),
             contextValue.leadingAnchor.constraint(equalTo: contextPill.leadingAnchor, constant: Self.contextPillHorizontalPadding),
@@ -690,11 +649,7 @@ class DetailsPanel: NSPanel {
         return [sessionBodySlotHeightForTesting]
     }
 
-    // MARK: - Scheme B session body / mode-chip accessors
-
-    var apiKeyChipHiddenForTesting: Bool { apiKeyChip.isHidden }
-
-    var apiKeyChipTitleForTesting: String { apiKeyChip.titleText }
+    // MARK: - Scheme B session body accessors
 
     var sessionBodyModeForTesting: DetailsPanelSessionBodyRole { sessionBodyMode }
 
@@ -824,61 +779,6 @@ class DetailsPanel: NSPanel {
     func selectAgentForTesting(_ agent: AgentKind) {
         agentToggle.setAgent(agent)
         onAgentSelected?(agent)
-    }
-}
-
-/// Top-row access-mode pill: light cyan fill + leading status dot.
-@MainActor
-private final class ModeChipView: NSView {
-    private let dot = NSView()
-    private let label: NSTextField
-
-    var titleText: String { label.stringValue }
-
-    var preferredWidth: CGFloat {
-        let textWidth = ceil(label.intrinsicContentSize.width)
-        // leading 8 + dot 6 + gap 5 + text + trailing 8
-        return 8 + 6 + 5 + textWidth + 8
-    }
-
-    init(title: String) {
-        label = NSTextField(labelWithString: title)
-        super.init(frame: .zero)
-        wantsLayer = true
-        layer?.cornerRadius = 11
-        layer?.backgroundColor = NSColor(calibratedRed: 52 / 255, green: 158 / 255, blue: 199 / 255, alpha: 0.10).cgColor
-        layer?.borderWidth = 1
-        layer?.borderColor = NSColor(calibratedRed: 52 / 255, green: 158 / 255, blue: 199 / 255, alpha: 0.22).cgColor
-
-        dot.wantsLayer = true
-        dot.layer?.cornerRadius = 3
-        dot.layer?.backgroundColor = NSColor(calibratedRed: 42 / 255, green: 111 / 255, blue: 143 / 255, alpha: 0.75).cgColor
-        dot.translatesAutoresizingMaskIntoConstraints = false
-
-        label.font = .systemFont(ofSize: 10.5, weight: .semibold)
-        label.textColor = NSColor(calibratedRed: 42 / 255, green: 111 / 255, blue: 143 / 255, alpha: 1)
-        label.lineBreakMode = .byClipping
-        label.setContentHuggingPriority(.required, for: .horizontal)
-        label.setContentCompressionResistancePriority(.required, for: .horizontal)
-        label.translatesAutoresizingMaskIntoConstraints = false
-
-        addSubview(dot)
-        addSubview(label)
-        NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 22),
-            dot.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            dot.centerYAnchor.constraint(equalTo: centerYAnchor),
-            dot.widthAnchor.constraint(equalToConstant: 6),
-            dot.heightAnchor.constraint(equalToConstant: 6),
-            label.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 5),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            label.centerYAnchor.constraint(equalTo: centerYAnchor)
-        ])
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
     }
 }
 

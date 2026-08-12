@@ -172,8 +172,6 @@ public sealed class DetailsWindow : Window
         private readonly TextBlock sessionCardTitle;
         private readonly TextBlock sessionCardModel;
         private readonly TextBlock sessionCardTokens;
-        private readonly Border apiKeyChip;
-        private readonly TextBlock apiKeyChipText;
         private readonly RoundedMeter fiveHourBar;
         private readonly RoundedMeter weekBar;
         /// <summary>Session body slot height; keep dataLayer (80) so OAuth/session heights match.</summary>
@@ -252,19 +250,11 @@ public sealed class DetailsWindow : Window
             {
                 Width = 46,
                 Height = 24,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            apiKeyChip = CreateAPIKeyChip(out apiKeyChipText);
-            StackPanel topRight = new StackPanel
-            {
-                Orientation = Orientation.Horizontal,
                 HorizontalAlignment = HorizontalAlignment.Right,
                 VerticalAlignment = VerticalAlignment.Center
             };
-            topRight.Children.Add(contextMeter);
-            topRight.Children.Add(apiKeyChip);
-            Grid.SetColumn(topRight, 2);
-            top.Children.Add(topRight);
+            Grid.SetColumn(contextMeter, 2);
+            top.Children.Add(contextMeter);
             top.Margin = new Thickness(0, 0, 0, 7);
             content.Children.Add(top);
 
@@ -492,20 +482,15 @@ public sealed class DetailsWindow : Window
             if (currentAgent == AgentKind.ClaudeCode)
             {
                 // Scheme B: offline empty rectangle — never three rows of "--".
-                bool showAPIKeyChip = previewClaudeMetrics != null
-                    ? ShouldShowClaudeAPIKeyChip(previewClaudeMetrics)
-                    : ClaudeCodeMetricsReader.IsCustomApi(
-                        Environment.GetFolderPath(
-                            Environment.SpecialFolder.UserProfile));
-                ShowSessionBody(showAPIKeyChip, true, null, null, null);
+                ShowSessionBody(true, null, null, null);
             }
             else if (currentAgent == AgentKind.Pi)
             {
-                ShowSessionBody(false, true, null, null, null);
+                ShowSessionBody(true, null, null, null);
             }
             else if (codexMetrics != null && codexMetrics.IsCustomApi)
             {
-                ShowSessionBody(true, true, null, null, null);
+                ShowSessionBody(true, null, null, null);
             }
             else if (currentAgent == AgentKind.Grok)
             {
@@ -534,8 +519,7 @@ public sealed class DetailsWindow : Window
             string model = metrics.HasModel ? metrics.Model : null;
             string tokens = FormatTokenPair(metrics.HasTokenUsage,
                 metrics.InputTokens, metrics.OutputTokens);
-            ShowSessionBody(ShouldShowClaudeAPIKeyChip(metrics),
-                false, title, model, tokens);
+            ShowSessionBody(false, title, model, tokens);
             SetContextPercent(metrics.HasContext, metrics.ContextUsedPercent);
         }
 
@@ -562,7 +546,7 @@ public sealed class DetailsWindow : Window
                 ? FormatTokenPair(true, primary.TurnInputTokens,
                     primary.TurnOutputTokens)
                 : null;
-            ShowSessionBody(false, false, title, model, tokens);
+            ShowSessionBody(false, title, model, tokens);
             bool hasContext = primary != null && primary.ContextInputTokens >= 0 &&
                 primary.ContextWindowTokens > 0;
             SetContextPercent(hasContext, hasContext
@@ -589,8 +573,8 @@ public sealed class DetailsWindow : Window
         /// </summary>
         private void RefreshGrokDetails()
         {
-            // Grok on Windows is OAuth weekly only — no API Key chip / session body.
-            HideAPIKeySessionChrome();
+            // Grok on Windows is OAuth weekly only — no session body.
+            HideSessionBody();
             quotaGroup.Visibility = Visibility.Visible;
             fiveHourRow.Visibility = Visibility.Collapsed;
             weekRow.Visibility = Visibility.Visible;
@@ -676,7 +660,7 @@ public sealed class DetailsWindow : Window
             string model = metrics.HasModel ? metrics.Model : null;
             string tokens = FormatTokenPair(metrics.HasTokenUsage,
                 metrics.InputTokens, metrics.OutputTokens);
-            ShowSessionBody(true, false, title, model, tokens);
+            ShowSessionBody(false, title, model, tokens);
             SetContextPercent(metrics.HasContext, metrics.ContextUsedPercent);
         }
 
@@ -694,7 +678,7 @@ public sealed class DetailsWindow : Window
 
         private void RefreshQuota()
         {
-            HideAPIKeySessionChrome();
+            HideSessionBody();
             quotaGroup.Visibility = Visibility.Visible;
             UsageMetrics metrics;
             if (previewMetrics != null)
@@ -1124,18 +1108,12 @@ public sealed class DetailsWindow : Window
         }
 
         /// <summary>
-        /// Scheme B session body: optional API Key chip + fixed-height empty XOR card.
+        /// Scheme B session body: fixed-height empty XOR card.
         /// </summary>
-        private void ShowSessionBody(bool showAPIKeyChip, bool offline,
-            string title, string model, string tokens)
+        private void ShowSessionBody(bool offline, string title, string model,
+            string tokens)
         {
             quotaGroup.Visibility = Visibility.Hidden;
-            apiKeyChip.Visibility = showAPIKeyChip
-                ? Visibility.Visible : Visibility.Collapsed;
-            if (showAPIKeyChip)
-            {
-                apiKeyChipText.Text = L10n.Instance["access.mode.api_key"];
-            }
             sessionBodySlot.Visibility = Visibility.Visible;
 
             // Soft empty for OFFLINE and online-with-no-fields — never a card of
@@ -1181,14 +1159,8 @@ public sealed class DetailsWindow : Window
             return !String.Equals(tokens, "↑ --  ·  ↓ --", StringComparison.Ordinal);
         }
 
-        internal static bool ShouldShowClaudeAPIKeyChip(ClaudeCodeMetrics metrics)
+        private void HideSessionBody()
         {
-            return metrics != null && metrics.IsCustomApi;
-        }
-
-        private void HideAPIKeySessionChrome()
-        {
-            apiKeyChip.Visibility = Visibility.Collapsed;
             sessionBodySlot.Visibility = Visibility.Collapsed;
         }
 
@@ -1201,43 +1173,6 @@ public sealed class DetailsWindow : Window
             }
             return "↑ " + FormatCompactNumber(inputTokens) +
                 "  ·  ↓ " + FormatCompactNumber(outputTokens);
-        }
-
-        private static Border CreateAPIKeyChip(out TextBlock label)
-        {
-            System.Windows.Shapes.Ellipse dot = new System.Windows.Shapes.Ellipse
-            {
-                Width = 6,
-                Height = 6,
-                Fill = new SolidColorBrush(MediaColor.FromArgb(191, 42, 111, 143)),
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, 5, 0)
-            };
-            label = NewText(L10n.Instance["access.mode.api_key"], 10.5,
-                MediaColor.FromRgb(42, 111, 143), FontWeights.SemiBold, true);
-            label.VerticalAlignment = VerticalAlignment.Center;
-            StackPanel content = new StackPanel
-            {
-                Orientation = Orientation.Horizontal,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            content.Children.Add(dot);
-            content.Children.Add(label);
-            return new Border
-            {
-                Height = 22,
-                CornerRadius = new CornerRadius(11),
-                Padding = new Thickness(8, 0, 8, 0),
-                Margin = new Thickness(6, 0, 0, 0),
-                VerticalAlignment = VerticalAlignment.Center,
-                Background = new SolidColorBrush(
-                    MediaColor.FromArgb(26, 52, 158, 199)),
-                BorderBrush = new SolidColorBrush(
-                    MediaColor.FromArgb(56, 52, 158, 199)),
-                BorderThickness = new Thickness(1),
-                Child = content,
-                Visibility = Visibility.Collapsed
-            };
         }
 
         private static Grid CreateSessionBodySlot(
@@ -1641,7 +1576,6 @@ public sealed class DetailsWindow : Window
         {
             fiveHourLabel.Text = L10n.Instance["quota.5h"];
             weekLabel.Text = L10n.Instance["quota.weekly"];
-            apiKeyChipText.Text = L10n.Instance["access.mode.api_key"];
             if (currentAggregate != null)
                 UpdateContent(currentAggregate, currentSessions);
         }
