@@ -54,6 +54,8 @@
   "metadata.model": "Model",
   "metadata.tokens": "Input/Output",
   "metadata.separator": "  ·  ",
+  "access.mode.api_key": "API Key",
+  "session.empty.api_key": "No session",
 
   "usage.warning.sign_in_codex": "Sign in to Codex again to refresh usage.",
   "usage.warning.sign_in_claude": "Sign in to Claude Code again to refresh usage.",

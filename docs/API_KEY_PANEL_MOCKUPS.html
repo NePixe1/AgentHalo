@@ -1,0 +1,1208 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Halo · API Key 面板优化方案预览</title>
+  <style>
+    :root {
+      --idle: #71848c;
+      --thinking: #e2aa1f;
+      --working: #349ec7;
+      --done: #26c66c;
+      --attention: #8e6cec;
+      --error: #da3256;
+      --ink: #17212b;
+      --muted: #667988;
+      --line: rgba(111, 132, 148, 0.18);
+      --panel-bg: rgba(248, 250, 252, 0.92);
+      --panel-border: rgba(178, 198, 209, 0.35);
+      --panel-w: 278px;
+      --in: #3f739f;
+      --out: #3f8c72;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      padding: 36px 28px 80px;
+      color: var(--ink);
+      font-family: "SF Pro Text", "Segoe UI Variable", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background:
+        radial-gradient(circle at 10% 0%, rgba(52, 158, 199, 0.10), transparent 32%),
+        radial-gradient(circle at 92% 8%, rgba(38, 198, 108, 0.09), transparent 28%),
+        linear-gradient(145deg, #f7fafc, #eef3f7 55%, #e8eef4);
+      min-height: 100vh;
+    }
+
+    .page { max-width: 1320px; margin: 0 auto; }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      gap: 28px;
+      align-items: flex-end;
+      margin-bottom: 22px;
+      flex-wrap: wrap;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 30px;
+      letter-spacing: -0.04em;
+      font-weight: 800;
+    }
+
+    .intro {
+      max-width: 780px;
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.7;
+      font-size: 14.5px;
+    }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .seg {
+      display: inline-flex;
+      padding: 4px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.72);
+      border: 1px solid var(--line);
+      box-shadow: 0 4px 16px rgba(32, 58, 76, 0.05);
+    }
+
+    .seg button {
+      appearance: none;
+      border: 0;
+      background: transparent;
+      color: #5a7080;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 650;
+      padding: 8px 14px;
+      border-radius: 999px;
+      cursor: pointer;
+      transition: 0.15s ease;
+    }
+
+    .seg button.active {
+      background: #1f2d38;
+      color: #fff;
+      box-shadow: 0 4px 12px rgba(31, 45, 56, 0.18);
+    }
+
+    .hint {
+      color: #7a8d9b;
+      font-size: 12.5px;
+    }
+
+    .compare-banner {
+      margin-bottom: 18px;
+      padding: 12px 16px;
+      border-radius: 14px;
+      background: rgba(232, 243, 251, 0.75);
+      border: 1px solid rgba(52, 158, 199, 0.20);
+      color: #2a5f78;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .legend-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      height: 22px;
+      padding: 0 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 750;
+      letter-spacing: 0.01em;
+      border: 1px solid transparent;
+    }
+
+    .badge.base { background: #eef2f5; color: #5a6d7b; border-color: #d9e2e8; }
+    .badge.p0 { background: #e8f7ee; color: #1f7a45; border-color: #bfe8cf; }
+    .badge.p1 { background: #e8f3fb; color: #1f6f9e; border-color: #bddff3; }
+    .badge.p2 { background: #f3ecfb; color: #6b46a0; border-color: #ddc8f3; }
+    .badge.p3 { background: #fff4e5; color: #9a6412; border-color: #f0d7a8; }
+
+    /* -------- scheme cards: full-width dual panels -------- */
+    .schemes {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .card {
+      border: 1px solid rgba(124, 144, 158, 0.20);
+      border-radius: 22px;
+      background: rgba(255, 255, 255, 0.68);
+      box-shadow: 0 16px 40px rgba(32, 58, 76, 0.07);
+      backdrop-filter: blur(14px);
+      overflow: hidden;
+    }
+
+    .card-head {
+      padding: 16px 20px 12px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(255,255,255,0.9), rgba(255,255,255,0.45));
+    }
+
+    .card-head h2 {
+      margin: 0 0 4px;
+      font-size: 17px;
+      letter-spacing: -0.02em;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .card-head p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .stage-pair {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0;
+      min-height: 320px;
+    }
+
+    .stage-col {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px 16px 22px;
+      background:
+        radial-gradient(circle at 50% 0%, rgba(120, 150, 170, 0.07), transparent 55%),
+        linear-gradient(180deg, rgba(240, 245, 248, 0.45), rgba(230, 236, 241, 0.30));
+    }
+
+    .stage-col + .stage-col {
+      border-left: 1px solid var(--line);
+      background:
+        radial-gradient(circle at 50% 0%, rgba(52, 158, 199, 0.09), transparent 50%),
+        linear-gradient(180deg, rgba(236, 246, 252, 0.55), rgba(228, 240, 248, 0.35));
+    }
+
+    .scene-label {
+      align-self: stretch;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 14px;
+      padding: 0 4px;
+    }
+
+    .scene-label .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 24px;
+      padding: 0 10px;
+      border-radius: 999px;
+      font-size: 11.5px;
+      font-weight: 750;
+      letter-spacing: 0.02em;
+    }
+
+    .scene-label .tag.offline {
+      background: rgba(113, 132, 140, 0.12);
+      color: #5a6d7a;
+      border: 1px solid rgba(113, 132, 140, 0.22);
+    }
+
+    .scene-label .tag.online {
+      background: rgba(52, 158, 199, 0.12);
+      color: #1f6f9e;
+      border: 1px solid rgba(52, 158, 199, 0.24);
+    }
+
+    .scene-label .tag .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    .scene-label .desc {
+      color: #8a9bab;
+      font-size: 11.5px;
+    }
+
+    .foot-note {
+      padding: 12px 20px 14px;
+      border-top: 1px solid var(--line);
+      color: #7a8d9b;
+      font-size: 12px;
+      line-height: 1.55;
+      background: rgba(255, 255, 255, 0.4);
+    }
+
+    /* -------- mock panel shell -------- */
+    .panel {
+      width: var(--panel-w);
+      border-radius: 18px;
+      border: 1px solid var(--panel-border);
+      background: var(--panel-bg);
+      box-shadow:
+        0 1px 0 rgba(255,255,255,0.7) inset,
+        0 18px 40px rgba(40, 60, 80, 0.14),
+        0 2px 8px rgba(40, 60, 80, 0.06);
+      backdrop-filter: blur(18px);
+      padding: 14px 17px 12px;
+      font-feature-settings: "tnum" 1;
+    }
+
+    /*
+     * Scheme B: Offline / Working panels share one fixed height so the
+     * details chrome does not jump when state changes. Body area flexes;
+     * empty-line and session-card are the same inner rectangle height.
+     */
+    .panel.scheme-b {
+      --scheme-b-body-h: 72px;
+      min-height: 192px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .panel.scheme-b .body-fill {
+      flex: 1 1 auto;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      margin-top: 12px;
+      min-height: var(--scheme-b-body-h);
+    }
+
+    .panel.scheme-b .body-fill .empty-line,
+    .panel.scheme-b .body-fill .session-card {
+      margin-top: 0;
+      width: 100%;
+      min-height: var(--scheme-b-body-h);
+      height: var(--scheme-b-body-h);
+      box-sizing: border-box;
+    }
+
+    .panel.scheme-b .body-fill .empty-line {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 12px 14px;
+    }
+
+    .panel.scheme-b .body-fill .session-card {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      padding: 10px 12px;
+    }
+
+    .panel.scheme-b .body-fill .session-card .title {
+      margin-bottom: 6px;
+      /* Keep single-line title so card height stays stable vs empty slot */
+      -webkit-line-clamp: 1;
+      white-space: nowrap;
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .card[data-scheme="b"] .stage-col {
+      justify-content: flex-start;
+    }
+
+    .top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+      min-height: 28px;
+      gap: 8px;
+    }
+
+    .switch {
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      padding: 3px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.75);
+      border: 1px solid rgba(160, 180, 195, 0.35);
+      box-shadow: 0 1px 2px rgba(40, 60, 80, 0.04);
+    }
+
+    .switch .ico {
+      width: 24px;
+      height: 24px;
+      border-radius: 999px;
+      display: grid;
+      place-items: center;
+      opacity: 0.42;
+      color: #5a6f7d;
+    }
+
+    .switch .ico.on {
+      opacity: 1;
+      background: rgba(255, 255, 255, 0.95);
+      box-shadow: 0 0 0 2px rgba(210, 120, 90, 0.35), 0 2px 6px rgba(40, 60, 80, 0.08);
+      color: #d06a45;
+    }
+
+    .switch svg { width: 14px; height: 14px; display: block; }
+
+    .ctx-pill {
+      min-width: 42px;
+      height: 22px;
+      padding: 0 8px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.85);
+      border: 1px solid rgba(160, 180, 195, 0.3);
+      color: #4a6270;
+      font-size: 11px;
+      font-weight: 700;
+      display: grid;
+      place-items: center;
+      letter-spacing: 0.01em;
+    }
+
+    .ctx-pill.hidden { visibility: hidden; }
+
+    .mode-chip {
+      height: 22px;
+      padding: 0 8px;
+      border-radius: 999px;
+      font-size: 10.5px;
+      font-weight: 750;
+      letter-spacing: 0.02em;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: rgba(52, 158, 199, 0.10);
+      color: #2a6f8f;
+      border: 1px solid rgba(52, 158, 199, 0.22);
+      white-space: nowrap;
+    }
+
+    .mode-chip.oauth {
+      background: rgba(38, 198, 108, 0.10);
+      color: #1d7a48;
+      border-color: rgba(38, 198, 108, 0.24);
+    }
+
+    .mode-chip .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: 0.75;
+    }
+
+    .status-title {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 800;
+      letter-spacing: 0.01em;
+      line-height: 1.1;
+      color: var(--idle);
+    }
+
+    .status-title.soft {
+      font-size: 20px;
+      font-weight: 750;
+      letter-spacing: -0.01em;
+      text-transform: none;
+    }
+
+    .status-title.working { color: var(--working); }
+    .status-title.thinking { color: var(--thinking); }
+    .status-title.done { color: var(--done); }
+    .status-title.attention { color: var(--attention); }
+    .status-title.error { color: var(--error); }
+
+    .status-detail {
+      margin: 3px 0 0;
+      font-size: 12px;
+      color: #616f78;
+      line-height: 1.35;
+    }
+
+    .meta {
+      margin-top: 11px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .meta-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 12px;
+      padding: 7px 0;
+      font-size: 12px;
+    }
+
+    .meta-row .k {
+      color: #5a6d7a;
+      font-weight: 550;
+      flex-shrink: 0;
+    }
+
+    .meta-row .v {
+      color: #2a3842;
+      font-weight: 600;
+      text-align: right;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 160px;
+    }
+
+    .meta-row .v.muted { color: #9aabb7; font-weight: 500; }
+
+    .sep {
+      height: 1px;
+      background: rgba(111, 132, 148, 0.14);
+    }
+
+    .empty-line {
+      margin-top: 14px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.45);
+      border: 1px dashed rgba(130, 150, 165, 0.28);
+      color: #6d8190;
+      font-size: 12px;
+      text-align: center;
+      line-height: 1.45;
+    }
+
+    .empty-line.soft {
+      border-style: solid;
+      background: rgba(255, 255, 255, 0.35);
+      border-color: rgba(130, 150, 165, 0.16);
+    }
+
+    .empty-line .sub {
+      display: block;
+      margin-top: 2px;
+      color: #8a9bab;
+      font-size: 11px;
+    }
+
+    .session-card {
+      margin-top: 12px;
+      padding: 11px 12px 10px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.62);
+      border: 1px solid rgba(140, 160, 175, 0.18);
+      box-shadow: 0 1px 0 rgba(255,255,255,0.6) inset;
+    }
+
+    .session-card .title {
+      margin: 0 0 6px;
+      font-size: 13px;
+      font-weight: 700;
+      color: #1e2c36;
+      line-height: 1.35;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .session-card .foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      height: 20px;
+      padding: 0 7px;
+      border-radius: 999px;
+      background: rgba(90, 120, 145, 0.08);
+      color: #4a6272;
+      font-size: 10.5px;
+      font-weight: 700;
+    }
+
+    .tokens {
+      font-size: 11.5px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      white-space: nowrap;
+    }
+
+    .tokens .up { color: var(--in); }
+    .tokens .dn { color: var(--out); }
+    .tokens .mid { color: #8a9bab; margin: 0 5px; }
+
+    .metrics {
+      margin-top: 12px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .metric-bar {
+      padding: 8px 10px 9px;
+      border-radius: 11px;
+      background: rgba(255, 255, 255, 0.55);
+      border: 1px solid rgba(140, 160, 175, 0.14);
+    }
+
+    .metric-bar .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 5px;
+      font-size: 11.5px;
+    }
+
+    .metric-bar .row .k { color: #5a6d7a; font-weight: 600; }
+    .metric-bar .row .v { color: #2a3842; font-weight: 750; }
+
+    .bar-track {
+      height: 5px;
+      border-radius: 999px;
+      background: rgba(120, 140, 155, 0.14);
+      overflow: hidden;
+    }
+
+    .bar-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #5aa8c9, #349ec7);
+      width: 38%;
+    }
+
+    .bar-fill.green {
+      background: linear-gradient(90deg, #4ecf88, #26c66c);
+      width: 62%;
+    }
+
+    .stat-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+    }
+
+    .stat {
+      padding: 8px 9px;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.55);
+      border: 1px solid rgba(140, 160, 175, 0.14);
+    }
+
+    .stat .lab {
+      display: block;
+      color: #6d8190;
+      font-size: 10.5px;
+      font-weight: 600;
+      margin-bottom: 2px;
+    }
+
+    .stat .val {
+      color: #1e2c36;
+      font-size: 12.5px;
+      font-weight: 750;
+      letter-spacing: -0.01em;
+    }
+
+    .quota {
+      margin-top: 14px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .quota-row .lab-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      margin-bottom: 4px;
+    }
+
+    .quota-row .lab-row .k { color: #4a5d6a; font-weight: 650; }
+    .quota-row .lab-row .v { color: #2a3842; font-weight: 750; }
+    .quota-row .reset {
+      margin-top: 3px;
+      font-size: 10.5px;
+      color: #8496a4;
+    }
+
+    .idle-art {
+      margin: 14px auto 4px;
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      border: 3px solid rgba(113, 132, 140, 0.28);
+      position: relative;
+      opacity: 0.85;
+    }
+
+    .idle-art::before,
+    .idle-art::after {
+      content: "";
+      position: absolute;
+      background: var(--panel-bg);
+    }
+
+    .idle-art::before {
+      width: 14px;
+      height: 8px;
+      top: -4px;
+      left: 8px;
+      transform: rotate(-18deg);
+    }
+
+    .idle-art::after {
+      width: 10px;
+      height: 8px;
+      bottom: 6px;
+      right: -2px;
+      transform: rotate(40deg);
+    }
+
+    .sub-strip {
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px dashed rgba(130, 150, 165, 0.25);
+    }
+
+    .sub-strip .label {
+      font-size: 10px;
+      color: #8a9bab;
+      font-weight: 700;
+      margin-bottom: 8px;
+      letter-spacing: 0.04em;
+    }
+
+    /* Working-state gallery (extra statuses) */
+    .work-gallery {
+      margin-top: 28px;
+      border: 1px solid rgba(124, 144, 158, 0.20);
+      border-radius: 22px;
+      background: rgba(255, 255, 255, 0.68);
+      box-shadow: 0 16px 40px rgba(32, 58, 76, 0.07);
+      overflow: hidden;
+    }
+
+    .work-gallery > .card-head {
+      border-bottom: 1px solid var(--line);
+    }
+
+    .work-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 0;
+    }
+
+    .work-cell {
+      padding: 18px 14px 20px;
+      border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      background: linear-gradient(180deg, rgba(236, 246, 252, 0.4), rgba(240, 245, 248, 0.25));
+    }
+
+    .work-cell .scene-label {
+      margin-bottom: 12px;
+    }
+
+    @media (max-width: 900px) {
+      .stage-pair { grid-template-columns: 1fr; }
+      .stage-col + .stage-col {
+        border-left: 0;
+        border-top: 1px solid var(--line);
+      }
+    }
+
+    @media (max-width: 720px) {
+      body { padding: 20px 14px 60px; }
+      h1 { font-size: 24px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header>
+      <div>
+        <h1>API Key 面板优化方案预览</h1>
+        <p class="intro">
+          每个方案<strong>同时展示 Offline 与 Working</strong> 两种状态，左右对照。
+          下方另有 Working 家族（Thinking / Done / Attention）扩展示意。
+          所有 mock 为前端静态稿，不接真实数据。
+        </p>
+        <div class="legend-row">
+          <span class="badge base">当前</span>
+          <span class="badge p0">P0 最小改动</span>
+          <span class="badge p1">P1 会话卡</span>
+          <span class="badge p2">P2 本地指标</span>
+          <span class="badge p3">P3 / 锦上添花</span>
+        </div>
+      </div>
+      <div class="controls">
+        <div class="seg" role="tablist" aria-label="在线状态变体">
+          <button type="button" class="active" data-work="working">Working</button>
+          <button type="button" data-work="thinking">Thinking</button>
+          <button type="button" data-work="done">Done</button>
+          <button type="button" data-work="attention">Attention</button>
+        </div>
+        <span class="hint">右侧在线列可切换工作子状态</span>
+      </div>
+    </header>
+
+    <div class="compare-banner" id="sceneBanner">
+      每个方案卡片左侧 = <strong>Offline 空闲</strong>，右侧 = <strong>在线工作态</strong>（当前：WORKING）。
+      直接并排对比，无需来回切换页面。
+    </div>
+
+    <div class="schemes" id="schemes"></div>
+
+    <section class="work-gallery" id="workGallery" aria-label="工作状态扩展">
+      <div class="card-head">
+        <h2>方案 B 工作态扩展 · 同一布局下的多状态</h2>
+        <p>选定「会话摘要卡」布局后，Thinking / Working / Done / Attention 只改标题色与文案，body 结构保持一致。</p>
+      </div>
+      <div class="work-grid" id="workGrid"></div>
+    </section>
+  </main>
+
+  <script>
+    const ICONS = {
+      codex: `<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="5.2" stroke="currentColor" stroke-width="1.4"/><path d="M5.2 8h5.6M8 5.2v5.6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>`,
+      claude: `<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 2.2c.5 0 .9.35 1.02.84l.9 3.55 3.55.9c.49.12.84.52.84 1.02s-.35.9-.84 1.02l-3.55.9-.9 3.55c-.12.49-.52.84-1.02.84s-.9-.35-1.02-.84l-.9-3.55-3.55-.9C2.55 9.91 2.2 9.51 2.2 9s.35-.9.84-1.02l3.55-.9.9-3.55C7.1 2.55 7.5 2.2 8 2.2z" opacity=".95"/></svg>`,
+      grok: `<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 11.5 8 3.5l4 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M5.6 9.2h4.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>`
+    };
+
+    const WORK = {
+      working:   { title: "WORKING",   cls: "working",   detail: "正在执行任务", soft: "执行中", softDetail: "正在编辑文件" },
+      thinking:  { title: "THINKING",  cls: "thinking",  detail: "正在思考与规划", soft: "思考中", softDetail: "正在规划下一步" },
+      done:      { title: "DONE",      cls: "done",      detail: "任务已完成", soft: "已完成", softDetail: "等待你查看结果" },
+      attention: { title: "ATTENTION", cls: "attention", detail: "等待你的授权或输入", soft: "需要你", softDetail: "请确认工具授权" }
+    };
+
+    const SAMPLE = {
+      title: "整理归档 2026q3 测试",
+      model: "glm-4.6",
+      in: "53.1k",
+      out: "2.1k",
+      ctx: 38,
+      duration: "24 分",
+      endpoint: "custom · api.example"
+    };
+
+    const SCHEMES = [
+      {
+        id: "current",
+        title: "当前实现",
+        badge: "base",
+        badgeText: "Baseline",
+        desc: "API key 模式固定三行 metadata；Offline 时强制填 --，空且碎。",
+        foot: "痛点：大标题 OFFLINE + 三行空表 = 像故障；在线时表格式也偏「调试面板」。"
+      },
+      {
+        id: "a",
+        title: "方案 A · 空状态收敛",
+        badge: "p0",
+        badgeText: "P0",
+        desc: "Offline / 无数据时隐藏 metadata；一行轻提示替代假数据。在线仍保留三行表。",
+        foot: "最小改动，立刻消灭空表噪音；在线布局与现状接近。"
+      },
+      {
+        id: "b",
+        title: "方案 B · 会话摘要卡",
+        badge: "p1",
+        badgeText: "P1",
+        desc: "API key 专属卡片：标题 + model chip + tokens 合并；带 mode chip。Offline / Working 面板同高（body 区对齐）。",
+        foot: "确立 API key 自己的视觉身份，避免「OAuth 降级版」观感。左右详情面板固定 min-height: 192px，empty 与会话卡共用 body 槽位。"
+      },
+      {
+        id: "c",
+        title: "方案 C · 本地有用指标",
+        badge: "p2",
+        badgeText: "P2",
+        desc: "Context 进度条 + 会话时长 / 端点 / tokens 网格，填补无 quota 的空白。",
+        foot: "只展示本地可得字段；Offline 不画假进度，保持诚实。"
+      },
+      {
+        id: "d",
+        title: "方案 D · 双模式统一骨架",
+        badge: "p3",
+        badgeText: "P3",
+        desc: "Header 统一（switch + context + mode）；body 按 OAuth / API Key 切换。",
+        foot: "在线右侧同时对照 API Key 会话卡与 OAuth 用量条，展示统一骨架。"
+      },
+      {
+        id: "e",
+        title: "方案 E · 柔和 offline",
+        badge: "p3",
+        badgeText: "可选",
+        desc: "标题去压迫感、友好文案 + 极简空环；在线沿用会话卡 + 软化状态文案。",
+        foot: "情绪从「系统错误」调成「安静待命」；可叠在 A/B 上。"
+      }
+    ];
+
+    function agentSwitch() {
+      return `
+        <div class="switch" title="Agent switch">
+          <span class="ico" title="Codex">${ICONS.codex}</span>
+          <span class="ico on" title="Claude Code">${ICONS.claude}</span>
+          <span class="ico" title="Grok">${ICONS.grok}</span>
+        </div>`;
+    }
+
+    function tokensHTML(up, dn) {
+      return `<span class="tokens"><span class="up">↑ ${up}</span><span class="mid">·</span><span class="dn">↓ ${dn}</span></span>`;
+    }
+
+    function modeChip(kind) {
+      if (kind === "oauth") {
+        return `<span class="mode-chip oauth"><span class="dot"></span>OAuth</span>`;
+      }
+      return `<span class="mode-chip"><span class="dot"></span>API Key</span>`;
+    }
+
+    const renderers = {
+      current: {
+        offline() {
+          return `
+            <div class="top">
+              ${agentSwitch()}
+              <span class="ctx-pill hidden">--</span>
+            </div>
+            <p class="status-title">OFFLINE</p>
+            <p class="status-detail">Claude Code Not Running</p>
+            <div class="meta">
+              <div class="meta-row"><span class="k">Session title</span><span class="v muted">--</span></div>
+              <div class="sep"></div>
+              <div class="meta-row"><span class="k">Model</span><span class="v muted">--</span></div>
+              <div class="sep"></div>
+              <div class="meta-row"><span class="k">Input/Output</span><span class="v muted">--</span></div>
+            </div>`;
+        },
+        online(w) {
+          return `
+            <div class="top">
+              ${agentSwitch()}
+              <span class="ctx-pill">${SAMPLE.ctx}%</span>
+            </div>
+            <p class="status-title ${w.cls}">${w.title}</p>
+            <p class="status-detail">${w.detail}</p>
+            <div class="meta">
+              <div class="meta-row"><span class="k">Session title</span><span class="v">${SAMPLE.title}</span></div>
+              <div class="sep"></div>
+              <div class="meta-row"><span class="k">Model</span><span class="v">${SAMPLE.model}</span></div>
+              <div class="sep"></div>
+              <div class="meta-row"><span class="k">Input/Output</span><span class="v">${tokensHTML(SAMPLE.in, SAMPLE.out)}</span></div>
+            </div>`;
+        }
+      },
+
+      a: {
+        offline() {
+          return `
+            <div class="top">${agentSwitch()}</div>
+            <p class="status-title">OFFLINE</p>
+            <p class="status-detail">Claude Code 未运行</p>
+            <div class="empty-line soft">API Key · 等待会话启动</div>`;
+        },
+        online(w) {
+          return `
+            <div class="top">
+              ${agentSwitch()}
+              <span class="ctx-pill">${SAMPLE.ctx}%</span>
+            </div>
+            <p class="status-title ${w.cls}">${w.title}</p>
+            <p class="status-detail">${w.detail}</p>
+            <div class="meta">
+              <div class="meta-row"><span class="k">会话标题</span><span class="v">${SAMPLE.title}</span></div>
+              <div class="sep"></div>
+              <div class="meta-row"><span class="k">模型</span><span class="v">${SAMPLE.model}</span></div>
+              <div class="sep"></div>
+              <div class="meta-row"><span class="k">输入输出</span><span class="v">${tokensHTML(SAMPLE.in, SAMPLE.out)}</span></div>
+            </div>`;
+        }
+      },
+
+      b: {
+        offline() {
+          return `
+            <div class="top">
+              ${agentSwitch()}
+              ${modeChip("api")}
+            </div>
+            <p class="status-title">OFFLINE</p>
+            <p class="status-detail">Claude Code 未运行</p>
+            <div class="body-fill">
+              <div class="empty-line"></div>
+            </div>`;
+        },
+        online(w) {
+          return `
+            <div class="top">
+              ${agentSwitch()}
+              <div style="display:flex;gap:6px;align-items:center">
+                <span class="ctx-pill">${SAMPLE.ctx}%</span>
+                ${modeChip("api")}
+              </div>
+            </div>
+            <p class="status-title ${w.cls}">${w.title}</p>
+            <p class="status-detail">${w.detail}</p>
+            <div class="body-fill">
+              <div class="session-card">
+                <p class="title">${SAMPLE.title}</p>
+                <div class="foot">
+                  <span class="chip">${SAMPLE.model}</span>
+                  ${tokensHTML(SAMPLE.in, SAMPLE.out)}
+                </div>
+              </div>
+            </div>`;
+        }
+      },
+
+      c: {
+        offline() {
+          return `
+            <div class="top">
+              ${agentSwitch()}
+              ${modeChip("api")}
+            </div>
+            <p class="status-title">OFFLINE</p>
+            <p class="status-detail">Claude Code 未运行</p>
+            <div class="empty-line soft">
+              无活跃会话
+              <span class="sub">上次 · ${SAMPLE.title.slice(0, 10)}… · 2 小时前</span>
+            </div>`;
+        },
+        online(w) {
+          return `
+            <div class="top">
+              ${agentSwitch()}
+              ${modeChip("api")}
+            </div>
+            <p class="status-title ${w.cls}">${w.title}</p>
+            <p class="status-detail">${w.detail}</p>
+            <div class="metrics">
+              <div class="metric-bar">
+                <div class="row"><span class="k">上下文</span><span class="v">${SAMPLE.ctx}%</span></div>
+                <div class="bar-track"><div class="bar-fill" style="width:${SAMPLE.ctx}%"></div></div>
+              </div>
+              <div class="stat-grid">
+                <div class="stat"><span class="lab">模型</span><span class="val">${SAMPLE.model}</span></div>
+                <div class="stat"><span class="lab">会话时长</span><span class="val">${SAMPLE.duration}</span></div>
+                <div class="stat"><span class="lab">Tokens</span><span class="val">${tokensHTML(SAMPLE.in, SAMPLE.out)}</span></div>
+                <div class="stat"><span class="lab">端点</span><span class="val">${SAMPLE.endpoint}</span></div>
+              </div>
+            </div>`;
+        }
+      },
+
+      d: {
+        offline() {
+          return `
+            <div class="top">
+              ${agentSwitch()}
+              <div style="display:flex;gap:6px;align-items:center">
+                <span class="ctx-pill hidden">--</span>
+                ${modeChip("api")}
+              </div>
+            </div>
+            <p class="status-title">OFFLINE</p>
+            <p class="status-detail">Claude Code 未运行</p>
+            <div class="empty-line soft">统一 empty · 两种模式共用</div>
+            <div class="sub-strip">
+              <div class="label">OAUTH 同骨架示意</div>
+              <div class="top" style="margin-bottom:6px">${modeChip("oauth")}</div>
+              <div class="empty-line soft" style="margin-top:0">统一 empty · 两种模式共用</div>
+            </div>`;
+        },
+        online(w) {
+          return `
+            <div class="top">
+              ${agentSwitch()}
+              <div style="display:flex;gap:6px;align-items:center">
+                <span class="ctx-pill">${SAMPLE.ctx}%</span>
+                ${modeChip("api")}
+              </div>
+            </div>
+            <p class="status-title ${w.cls}">${w.title}</p>
+            <p class="status-detail">${w.detail}</p>
+            <div class="session-card">
+              <p class="title">${SAMPLE.title}</p>
+              <div class="foot">
+                <span class="chip">${SAMPLE.model}</span>
+                ${tokensHTML(SAMPLE.in, SAMPLE.out)}
+              </div>
+            </div>
+            <div class="sub-strip">
+              <div class="label">OAUTH BODY（对照）</div>
+              <div class="top" style="margin-bottom:4px">${modeChip("oauth")}</div>
+              <div class="quota" style="margin-top:8px">
+                <div class="quota-row">
+                  <div class="lab-row"><span class="k">五小时</span><span class="v">剩余 42%</span></div>
+                  <div class="bar-track"><div class="bar-fill" style="width:58%"></div></div>
+                  <div class="reset">重置 14:20</div>
+                </div>
+                <div class="quota-row">
+                  <div class="lab-row"><span class="k">每周</span><span class="v">剩余 62%</span></div>
+                  <div class="bar-track"><div class="bar-fill green"></div></div>
+                  <div class="reset">重置 下周一</div>
+                </div>
+              </div>
+            </div>`;
+        }
+      },
+
+      e: {
+        offline() {
+          return `
+            <div class="top">
+              ${agentSwitch()}
+              ${modeChip("api")}
+            </div>
+            <div class="idle-art" aria-hidden="true"></div>
+            <p class="status-title soft" style="text-align:center;margin-top:8px">离线</p>
+            <p class="status-detail" style="text-align:center">Claude Code 未在运行</p>
+            <p class="status-detail" style="text-align:center;color:#8a9bab;margin-top:2px">准备好后会自动出现</p>`;
+        },
+        online(w) {
+          return `
+            <div class="top">
+              ${agentSwitch()}
+              <div style="display:flex;gap:6px;align-items:center">
+                <span class="ctx-pill">${SAMPLE.ctx}%</span>
+                ${modeChip("api")}
+              </div>
+            </div>
+            <p class="status-title soft ${w.cls}">${w.soft}</p>
+            <p class="status-detail">${w.softDetail}</p>
+            <div class="session-card">
+              <p class="title">${SAMPLE.title}</p>
+              <div class="foot">
+                <span class="chip">${SAMPLE.model}</span>
+                ${tokensHTML(SAMPLE.in, SAMPLE.out)}
+              </div>
+            </div>`;
+        }
+      }
+    };
+
+    let workKey = "working";
+
+    function workMeta() {
+      return WORK[workKey];
+    }
+
+    function sceneLabel(kind, work) {
+      if (kind === "offline") {
+        return `
+          <div class="scene-label">
+            <span class="tag offline"><span class="dot"></span>Offline</span>
+            <span class="desc">未运行 / 无会话</span>
+          </div>`;
+      }
+      return `
+        <div class="scene-label">
+          <span class="tag online"><span class="dot"></span>${work.title}</span>
+          <span class="desc">${work.detail}</span>
+        </div>`;
+    }
+
+    function panelClass(schemeId) {
+      return schemeId === "b" ? "panel scheme-b" : "panel";
+    }
+
+    function paintSchemes() {
+      const w = workMeta();
+      const root = document.getElementById("schemes");
+      root.innerHTML = SCHEMES.map((s) => {
+        const r = renderers[s.id];
+        const pc = panelClass(s.id);
+        return `
+          <article class="card" data-scheme="${s.id}">
+            <div class="card-head">
+              <h2>${s.title} <span class="badge ${s.badge}">${s.badgeText}</span></h2>
+              <p>${s.desc}</p>
+            </div>
+            <div class="stage-pair">
+              <div class="stage-col">
+                ${sceneLabel("offline", w)}
+                <div class="${pc}">${r.offline()}</div>
+              </div>
+              <div class="stage-col">
+                ${sceneLabel("online", w)}
+                <div class="${pc}">${r.online(w)}</div>
+              </div>
+            </div>
+            <p class="foot-note">${s.foot}</p>
+          </article>`;
+      }).join("");
+    }
+
+    function paintWorkGallery() {
+      const grid = document.getElementById("workGrid");
+      const keys = ["thinking", "working", "done", "attention"];
+      grid.innerHTML = keys.map((key) => {
+        const w = WORK[key];
+        return `
+          <div class="work-cell">
+            <div class="scene-label">
+              <span class="tag online"><span class="dot"></span>${w.title}</span>
+              <span class="desc">方案 B</span>
+            </div>
+            <div class="panel scheme-b">${renderers.b.online(w)}</div>
+          </div>`;
+      }).join("");
+    }
+
+    function paintBanner() {
+      const w = workMeta();
+      document.getElementById("sceneBanner").innerHTML =
+        `每个方案卡片左侧 = <strong>Offline 空闲</strong>，右侧 = <strong>在线工作态</strong>（当前：${w.title}）。` +
+        ` 直接并排对比，无需来回切换页面。`;
+    }
+
+    function paint() {
+      paintSchemes();
+      paintWorkGallery();
+      paintBanner();
+    }
+
+    document.querySelectorAll(".seg button").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".seg button").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        workKey = btn.dataset.work;
+        paint();
+      });
+    });
+
+    paint();
+  </script>
+</body>
+</html>

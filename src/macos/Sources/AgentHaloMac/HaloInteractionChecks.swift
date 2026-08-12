@@ -63,11 +63,14 @@ func runHaloInteractionChecks() {
     testQuotaMeterUsesApprovedSoftFadePalette()
     testQuotaMeterRendersApprovedSoftFadeOutput()
     testDetailsPanelShowsMissingAndExpiredUsageWindows()
-    testDetailsPanelShowsThreeIndependentSessionRows()
+    testDetailsPanelShowsSessionCardForAPIKey()
     testDetailsPanelLeavesMissingSessionTitleEmpty()
+    testDetailsPanelBlankStandbyUsesSoftEmptyNotDashCard()
+    testDetailsPanelPartialSessionStillUsesCard()
     testDetailsPanelKeepsUsageAndSessionBodiesMutuallyExclusive()
     testDetailsPanelKeepsContextIndependentFromUsageFailure()
     testDetailsPanelClearsContextAndSessionRowsOffline()
+    testDetailsPanelAPIKeyOfflineAndOnlineShareHeight()
     testDetailsPanelKeepsFixedWidthForLongProviderContent()
     testDetailsPanelResizesHeightWithoutAnimation()
     testDetailsPanelMovesTitleGapIntoBodySpacing()
@@ -1153,7 +1156,7 @@ private func testDetailsPanelShowsMissingAndExpiredUsageWindows() {
 }
 
 @MainActor
-private func testDetailsPanelShowsThreeIndependentSessionRows() {
+private func testDetailsPanelShowsSessionCardForAPIKey() {
     let panel = DetailsPanel()
     panel.render(
         aggregate: detailsAggregate(),
@@ -1166,39 +1169,64 @@ private func testDetailsPanelShowsThreeIndependentSessionRows() {
         ))
     )
 
-    expect(panel.sessionTitleValueForTesting, "Redesign details", "session title row")
-    expect(panel.modelValueForTesting, "gpt-5.5", "model row")
-    expect(panel.tokenValueForTesting, "↑ 38k  ·  ↓ 1.2k", "token row")
-    expect(panel.sessionTitleToolTipForTesting, "Redesign details", "session title tooltip")
-    expect(panel.modelToolTipForTesting, "gpt-5.5", "model tooltip")
-    expect(
-        panel.sessionBodyOrderForTesting,
-        [.sessionTitle, .separator, .model, .separator, .tokens],
-        "API rows should omit the project row"
-    )
-    expect(panel.sessionBodyOrderForTesting.count, 5, "API body should contain exactly five arranged subviews")
-    expect(!panel.sessionBodyOrderForTesting.contains(.unknown), "API body should reject unknown rows or titles")
-    expect(
-        panel.sessionBodyOrderForTesting.filter { $0 == .separator }.count,
-        2,
-        "API rows should contain two separators"
-    )
-    expect(
-        panel.sessionRowHeightsForTesting,
-        [24, 24, 24],
-        "all API metadata rows should use the same 24pt height"
-    )
+    expect(!panel.apiKeyChipHiddenForTesting, "API Key body should show mode chip")
+    expect(panel.apiKeyChipTitleForTesting, L10n.shared["access.mode.api_key"], "mode chip title")
+    expect(panel.sessionBodyModeForTesting, .sessionCard, "online API body is session card")
+    expect(panel.sessionCardTitleForTesting, "Redesign details", "card title")
+    expect(panel.sessionCardModelForTesting, "gpt-5.5", "card model")
+    expect(panel.sessionCardTokensForTesting, "↑ 38k  ·  ↓ 1.2k", "card tokens")
+    expect(panel.sessionCardTitleToolTipForTesting, "Redesign details", "title tooltip")
+    expect(panel.sessionBodySlotHeightForTesting, 68, "body slot height constant")
+    expect(panel.sessionCardHeightForTesting, 68, "card matches body slot height")
 }
 
 @MainActor
 private func testDetailsPanelLeavesMissingSessionTitleEmpty() {
     let panel = DetailsPanel()
+    // projectName alone is not painted on the card — treat as blank soft empty.
     panel.render(
         aggregate: detailsAggregate(),
         model: sessionDetailsModel(session: SessionDetailsSnapshot(projectName: "AgentHalo"))
     )
 
-    expect(panel.sessionTitleValueForTesting, "--", "missing title should not fall back to projectName")
+    expect(panel.sessionBodyModeForTesting, .empty, "project-only snapshot uses soft empty")
+    expect(
+        panel.sessionEmptyTextForTesting,
+        "○ " + L10n.shared["session.empty.api_key"],
+        "blank online uses No session"
+    )
+    expect(panel.sessionCardTitleForTesting, "--", "hidden card must not fall back to projectName")
+}
+
+@MainActor
+private func testDetailsPanelBlankStandbyUsesSoftEmptyNotDashCard() {
+    let panel = DetailsPanel()
+    panel.render(
+        aggregate: detailsAggregate(state: .done, label: "STANDBY"),
+        model: sessionDetailsModel(session: SessionDetailsSnapshot())
+    )
+
+    expect(panel.sessionBodyModeForTesting, .empty, "STANDBY blank shows soft empty")
+    expect(
+        panel.sessionEmptyTextForTesting,
+        "○ " + L10n.shared["session.empty.api_key"],
+        "STANDBY blank shows No session"
+    )
+    expect(!panel.apiKeyChipHiddenForTesting, "STANDBY API Key still shows mode chip")
+    expect(panel.sessionBodySlotHeightForTesting, 68, "blank empty keeps body slot height")
+}
+
+@MainActor
+private func testDetailsPanelPartialSessionStillUsesCard() {
+    let panel = DetailsPanel()
+    panel.render(
+        aggregate: detailsAggregate(state: .done, label: "STANDBY"),
+        model: sessionDetailsModel(session: SessionDetailsSnapshot(modelName: "claude-opus"))
+    )
+
+    expect(panel.sessionBodyModeForTesting, .sessionCard, "any card field keeps session card")
+    expect(panel.sessionCardModelForTesting, "claude-opus", "partial model on card")
+    expect(panel.sessionCardTitleForTesting, "--", "missing title still placeholders inside card")
 }
 
 @MainActor
@@ -1207,10 +1235,13 @@ private func testDetailsPanelKeepsUsageAndSessionBodiesMutuallyExclusive() {
     panel.render(aggregate: detailsAggregate(), model: usageDetailsModel())
     expect(!panel.usageGroupHiddenForTesting, "OAuth body should show usage")
     expect(panel.sessionGroupHiddenForTesting, "OAuth body should hide session rows")
+    expect(panel.apiKeyChipHiddenForTesting, "OAuth body should hide mode chip")
+    expect(panel.sessionBodyModeForTesting, .unknown, "usage path must not leak session body mode")
 
     panel.render(aggregate: detailsAggregate(), model: sessionDetailsModel())
     expect(panel.usageGroupHiddenForTesting, "API body should hide usage")
     expect(!panel.sessionGroupHiddenForTesting, "API body should show session rows")
+    expect(!panel.apiKeyChipHiddenForTesting, "API body should show mode chip")
 }
 
 @MainActor
@@ -1228,24 +1259,65 @@ private func testDetailsPanelKeepsContextIndependentFromUsageFailure() {
 @MainActor
 private func testDetailsPanelClearsContextAndSessionRowsOffline() {
     let panel = DetailsPanel()
+    let staleSession = SessionDetailsSnapshot(
+        projectName: "AgentHalo",
+        sessionTitle: "Stale title",
+        modelName: "gpt-5.5",
+        inputTokens: 100,
+        outputTokens: 20
+    )
+    // Seed online values first so offline must actively clear hidden card fields.
+    panel.render(
+        aggregate: detailsAggregate(),
+        model: sessionDetailsModel(context: 58, session: staleSession)
+    )
+    expect(panel.sessionCardTitleForTesting, "Stale title", "online seeds card title")
+
     panel.render(
         aggregate: detailsAggregate(state: .idle, label: "OFFLINE"),
-        model: sessionDetailsModel(
-            context: 58,
-            session: SessionDetailsSnapshot(
-                projectName: "AgentHalo",
-                sessionTitle: "Stale title",
-                modelName: "gpt-5.5",
-                inputTokens: 100,
-                outputTokens: 20
-            )
-        )
+        model: sessionDetailsModel(context: 58, session: staleSession)
     )
 
     expect(panel.contextPillHiddenForTesting, "offline should clear context")
-    expect(panel.sessionTitleValueForTesting, "--", "offline should clear session title")
-    expect(panel.modelValueForTesting, "--", "offline should clear model")
-    expect(panel.tokenValueForTesting, "--", "offline should clear tokens")
+    expect(!panel.apiKeyChipHiddenForTesting, "offline API Key still shows mode chip")
+    expect(panel.sessionBodyModeForTesting, .empty, "offline shows empty body")
+    expect(
+        panel.sessionEmptyTextForTesting,
+        "○ " + L10n.shared["session.empty.api_key"],
+        "offline empty matches STANDBY: No session"
+    )
+    expect(panel.sessionCardTitleForTesting, "--", "offline must clear card title")
+    expect(panel.sessionCardModelForTesting, "--", "offline must clear card model")
+    expect(panel.sessionCardTokensForTesting, "↑ --  ·  ↓ --", "offline must clear card tokens")
+    expect(panel.sessionCardTitleToolTipForTesting == nil, "offline must clear title tooltip")
+    expect(panel.sessionBodySlotHeightForTesting, 68, "empty slot height")
+    expect(panel.emptyBodyHeightForTesting, 68, "empty rect matches card height")
+}
+
+@MainActor
+private func testDetailsPanelAPIKeyOfflineAndOnlineShareHeight() {
+    let panel = DetailsPanel()
+    let online = sessionDetailsModel(session: SessionDetailsSnapshot(
+        sessionTitle: "Redesign details",
+        modelName: "gpt-5.5",
+        inputTokens: 38_000,
+        outputTokens: 1_200
+    ))
+    panel.render(aggregate: detailsAggregate(), model: online)
+    panel.contentView?.layoutSubtreeIfNeeded()
+    let onlineHeight = panel.frameHeightForTesting
+    let onlineSlot = panel.sessionBodySlotHeightForTesting
+
+    panel.render(
+        aggregate: detailsAggregate(state: .idle, label: "OFFLINE"),
+        model: sessionDetailsModel(context: nil, session: SessionDetailsSnapshot())
+    )
+    panel.contentView?.layoutSubtreeIfNeeded()
+    expect(panel.frameHeightForTesting, onlineHeight, "API Key offline/online panel height")
+    expect(panel.frameHeightForTesting, 172, "API Key panel must keep production fitted height 172")
+    expect(onlineHeight, 172, "online API Key panel height locked to 172")
+    expect(panel.sessionBodySlotHeightForTesting, onlineSlot, "body slot height stable")
+    expect(panel.sessionBodyModeForTesting, .empty, "offline mode")
 }
 
 @MainActor
@@ -1391,9 +1463,10 @@ private func testDetailsPanelMovesTitleGapIntoBodySpacing() {
     let sessionTopRowFrame = topRow.convert(topRow.bounds, to: contentView)
     let sessionTitleFrame = frame(of: "STANDBY")
     let sessionDetailFrame = frame(of: "Codex Standing By")
-    let sessionTitleRow = containingFrame(of: L10n.shared["metadata.session_title"])
+    // Scheme B: body is the session card (title lives inside the card).
+    let sessionBodyFrame = containingFrame(of: "Layout spacing")
     expect(sessionTopRowFrame.minY - sessionTitleFrame.maxY, 0, "session title should start immediately below the agent switcher")
-    expect(sessionDetailFrame.minY - sessionTitleRow.maxY, 11, "session body should receive the released title spacing")
+    expect(sessionDetailFrame.minY - sessionBodyFrame.maxY, 11, "session body should receive the released title spacing")
 }
 
 @MainActor

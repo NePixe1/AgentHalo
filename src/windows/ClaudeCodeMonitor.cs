@@ -2190,20 +2190,19 @@ public static class ClaudeCodeMetricsReader
             }
         }
 
-        // Claude Code writes type=ai-title records into the transcript with an
-        // aiTitle field — a short, AI-generated label for the session (e.g.
-        // "Build Claude code status monitor", "整理归档 2026q3 测试"). It is a
-        // far better "what is this session about" signal than the cwd leaf name,
-        // and it covers document-only sessions that have no project root. CC
-        // re-emits these records as the session evolves, so the newest one (the
-        // last in the file) is the current title — we scan the tail and keep the
-        // first ai-title seen, mirroring how usage is read from the same tail.
+        // Claude Code session titles come from two transcript record types:
+        //   1. custom-title / customTitle — user `/rename` (authoritative)
+        //   2. ai-title / aiTitle — AI-generated label (fallback)
+        // Both may sit anywhere in the file; usage lives near the tail, so we
+        // scan the same tail window newest-first. Prefer the newest custom
+        // title; only use ai-title when no custom-title is present.
         private static void ReadSessionTitle(string path,
             ClaudeCodeMetrics metrics)
         {
             try
             {
                 string[] lines = ReadTailLines(path);
+                string aiTitleFallback = null;
                 for (int i = lines.Length - 1; i >= 0; i--)
                 {
                     Dictionary<string, object> root =
@@ -2213,17 +2212,31 @@ public static class ClaudeCodeMetricsReader
                     {
                         continue;
                     }
-                    if (!String.Equals(StringValue(root, "type"), "ai-title",
+                    string type = StringValue(root, "type");
+                    if (String.Equals(type, "custom-title",
                         StringComparison.OrdinalIgnoreCase))
                     {
-                        continue;
+                        string title = StringValue(root, "customTitle");
+                        if (!String.IsNullOrWhiteSpace(title))
+                        {
+                            metrics.SessionTitle = title.Trim();
+                            return;
+                        }
                     }
-                    string title = StringValue(root, "aiTitle");
-                    if (!String.IsNullOrWhiteSpace(title))
+                    if (aiTitleFallback == null &&
+                        String.Equals(type, "ai-title",
+                            StringComparison.OrdinalIgnoreCase))
                     {
-                        metrics.SessionTitle = title.Trim();
-                        return;
+                        string title = StringValue(root, "aiTitle");
+                        if (!String.IsNullOrWhiteSpace(title))
+                        {
+                            aiTitleFallback = title.Trim();
+                        }
                     }
+                }
+                if (!String.IsNullOrWhiteSpace(aiTitleFallback))
+                {
+                    metrics.SessionTitle = aiTitleFallback;
                 }
             }
             catch

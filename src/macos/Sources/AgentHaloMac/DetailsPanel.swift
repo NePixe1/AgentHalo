@@ -11,10 +11,8 @@ enum DetailsPanelContentRole: Equatable {
 }
 
 enum DetailsPanelSessionBodyRole: Equatable {
-    case separator
-    case sessionTitle
-    case model
-    case tokens
+    case empty
+    case sessionCard
     case unknown
 }
 
@@ -23,6 +21,11 @@ class DetailsPanel: NSPanel {
     private static let panelWidth: CGFloat = 278
     private static let contextPillWidth: CGFloat = 42
     private static let contextPillHorizontalPadding: CGFloat = 3
+    /// Fixed session body slot height (Scheme B). Keep panel fitted height at 172.
+    /// Slightly under the original 72 so the card bottom sits higher and outer
+    /// bottom padding matches the top chrome more closely (equalizer absorbs the delta).
+    private static let sessionBodyHeight: CGFloat = 68
+    private static let apiKeyChipSpacing: CGFloat = 6
     /// After COMPLETE settles into STANDBY (empty sessions), keep the last live
     /// context percent for this long before hiding. OFFLINE still clears immediately.
     nonisolated static let standbyContextHoldDuration: TimeInterval = 12
@@ -35,21 +38,18 @@ class DetailsPanel: NSPanel {
     private let secondaryQuota = QuotaRowView(title: L10n.shared["quota.weekly"])
     private let agentToggle = AgentToggleView()
     private let contextPill = NSView()
+    private let apiKeyChip = ModeChipView(title: L10n.shared["access.mode.api_key"])
     private let quotaGroup = NSStackView()
-    private let metadataGroup = NSStackView()
-    private let sessionTitleRow = MetadataRowView(
-        title: L10n.shared["metadata.session_title"]
-    )
-    private let modelRow = MetadataRowView(
-        title: L10n.shared["metadata.model"]
-    )
-    private let titleModelSeparator = SeparatorView()
-    private let modelTokenSeparator = SeparatorView()
-    private let tokenRow = MetadataRowView(
-        title: L10n.shared["metadata.tokens"],
-        valueFont: .systemFont(ofSize: 11.5, weight: .medium)
-    )
+    /// Hosts the fixed-height session body slot (empty | session card).
+    /// Plain `NSView` (not `NSStackView`) so width is explicit and not ambiguous.
+    private let metadataGroup = NSView()
+    private let bodySlot = NSView()
+    private let emptyBody = EmptySessionBodyView()
+    private let sessionCard = SessionCardView()
     private var topRow: NSView?
+    private var apiKeyChipWidthConstraint: NSLayoutConstraint?
+    private var apiKeyChipContextSpacingConstraint: NSLayoutConstraint?
+    private var sessionBodyMode: DetailsPanelSessionBodyRole = .unknown
     /// Last live context percent used to soft-hold the pill after STANDBY.
     private var heldContextPercent: Double?
     /// When the standby hold started/should end; `nil` means not currently holding.
@@ -117,19 +117,31 @@ class DetailsPanel: NSPanel {
         quotaGroup.addArrangedSubview(secondaryQuota)
         stack.addArrangedSubview(quotaGroup)
 
-        metadataGroup.orientation = .vertical
-        metadataGroup.spacing = 0
-        metadataGroup.alignment = .width
+        // Plain container: explicit full-width pin avoids NSStackView width
+        // ambiguity that shrank empty/card to label-hugging size (right-biased).
         metadataGroup.translatesAutoresizingMaskIntoConstraints = false
-        
-        metadataGroup.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 2, right: 0)
-        metadataGroup.addArrangedSubview(sessionTitleRow)
-        metadataGroup.addArrangedSubview(titleModelSeparator)
-        metadataGroup.addArrangedSubview(modelRow)
-        metadataGroup.addArrangedSubview(modelTokenSeparator)
-        metadataGroup.addArrangedSubview(tokenRow)
+        // Bottom inset keeps session body contribution aligned with the 70pt
+        // usage group so fitted panel height stays 172 (11 + 68 + 7 == 16 + 70).
+        // Larger equalizer lifts the card bottom edge without moving title/detail.
+        let sessionBodyBottomEqualizer: CGFloat = 7
+
+        bodySlot.translatesAutoresizingMaskIntoConstraints = false
+        emptyBody.translatesAutoresizingMaskIntoConstraints = false
+        sessionCard.translatesAutoresizingMaskIntoConstraints = false
+        // Expand horizontally; never hug label intrinsic width.
+        for view in [bodySlot, emptyBody, sessionCard] as [NSView] {
+            view.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        }
+        bodySlot.addSubview(emptyBody)
+        bodySlot.addSubview(sessionCard)
+        metadataGroup.addSubview(bodySlot)
         metadataGroup.isHidden = true
         stack.addArrangedSubview(metadataGroup)
+
+        emptyBody.isHidden = true
+        sessionCard.isHidden = true
+        apiKeyChip.isHidden = true
 
         let rootView = TrackingDetailsContentView()
         rootView.owner = self
@@ -158,7 +170,24 @@ class DetailsPanel: NSPanel {
             secondaryQuota.leadingAnchor.constraint(equalTo: quotaGroup.leadingAnchor),
             secondaryQuota.trailingAnchor.constraint(equalTo: quotaGroup.trailingAnchor),
             metadataGroup.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 17),
-            metadataGroup.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17)
+            metadataGroup.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
+            // Full-bleed body slot inside metadata container (+ bottom equalizer).
+            bodySlot.leadingAnchor.constraint(equalTo: metadataGroup.leadingAnchor),
+            bodySlot.trailingAnchor.constraint(equalTo: metadataGroup.trailingAnchor),
+            bodySlot.topAnchor.constraint(equalTo: metadataGroup.topAnchor),
+            bodySlot.bottomAnchor.constraint(
+                equalTo: metadataGroup.bottomAnchor,
+                constant: -sessionBodyBottomEqualizer
+            ),
+            bodySlot.heightAnchor.constraint(equalToConstant: Self.sessionBodyHeight),
+            emptyBody.leadingAnchor.constraint(equalTo: bodySlot.leadingAnchor),
+            emptyBody.trailingAnchor.constraint(equalTo: bodySlot.trailingAnchor),
+            emptyBody.topAnchor.constraint(equalTo: bodySlot.topAnchor),
+            emptyBody.bottomAnchor.constraint(equalTo: bodySlot.bottomAnchor),
+            sessionCard.leadingAnchor.constraint(equalTo: bodySlot.leadingAnchor),
+            sessionCard.trailingAnchor.constraint(equalTo: bodySlot.trailingAnchor),
+            sessionCard.topAnchor.constraint(equalTo: bodySlot.topAnchor),
+            sessionCard.bottomAnchor.constraint(equalTo: bodySlot.bottomAnchor)
         ])
     }
 
@@ -190,11 +219,14 @@ class DetailsPanel: NSPanel {
         case .usage(let usage):
             stack.setCustomSpacing(16, after: detailField)
             stack.edgeInsets.bottom = 4
+            setAPIKeyChipVisible(false)
+            sessionBodyMode = .unknown
             renderUsage(usage)
             quotaGroup.isHidden = false
         case .session(let session):
             stack.setCustomSpacing(11, after: detailField)
             stack.edgeInsets.bottom = 4
+            setAPIKeyChipVisible(true)
             renderSession(session, isOffline: isOffline)
             metadataGroup.isHidden = false
         }
@@ -296,27 +328,63 @@ class DetailsPanel: NSPanel {
     }
 
     private func renderSession(_ session: SessionDetailsSnapshot, isOffline: Bool) {
-        sessionTitleRow.setTitle(L10n.shared["metadata.session_title"])
-        modelRow.setTitle(L10n.shared["metadata.model"])
-        tokenRow.setTitle(L10n.shared["metadata.tokens"])
-
-        if isOffline {
-            sessionTitleRow.setValue("--")
-            modelRow.setValue("--")
-            tokenRow.setValue("--")
+        // Soft empty rectangle for both OFFLINE and online-with-no-fields so we
+        // never show a card full of "--" (STANDBY often has empty snapshots).
+        // Same copy for offline and blank/standby: "○ No session".
+        if isOffline || !Self.hasSessionCardContent(session) {
+            emptyBody.isHidden = false
+            sessionCard.isHidden = true
+            emptyBody.setText("○ " + L10n.shared["session.empty.api_key"])
+            sessionBodyMode = .empty
+            // Clear hidden card fields so a11y / subsequent reads do not leak
+            // the previous session title, model, or tokens.
+            sessionCard.setTitle("--", toolTip: nil)
+            sessionCard.setModel("--")
+            sessionCard.setTokens(Self.formatTokenAttributedString(input: nil, output: nil))
             return
         }
 
-        sessionTitleRow.setValue(Self.displayValue(session.sessionTitle), toolTip: session.sessionTitle)
-        modelRow.setValue(Self.displayValue(session.modelName), toolTip: session.modelName)
+        emptyBody.isHidden = true
+        sessionCard.isHidden = false
+        sessionBodyMode = .sessionCard
+        sessionCard.setTitle(Self.displayValue(session.sessionTitle), toolTip: session.sessionTitle)
+        sessionCard.setModel(Self.displayValue(session.modelName))
         if session.inputTokens != nil || session.outputTokens != nil {
-            tokenRow.attributedStringValue = Self.formatTokenAttributedString(
+            sessionCard.setTokens(Self.formatTokenAttributedString(
                 input: session.inputTokens,
                 output: session.outputTokens
-            )
+            ))
         } else {
-            tokenRow.setValue("--")
+            sessionCard.setTokens(Self.formatTokenAttributedString(input: nil, output: nil))
         }
+    }
+
+    /// Card is only worth showing when at least one field the card paints has data.
+    /// `projectName` alone does not count — the card never surfaces it.
+    static func hasSessionCardContent(_ session: SessionDetailsSnapshot) -> Bool {
+        if let title = session.sessionTitle, !title.isEmpty {
+            return true
+        }
+        if let model = session.modelName, !model.isEmpty {
+            return true
+        }
+        return session.inputTokens != nil || session.outputTokens != nil
+    }
+
+    private func setAPIKeyChipVisible(_ visible: Bool) {
+        apiKeyChip.isHidden = !visible
+        // Collapse width + spacing so the context pill can hug the trailing edge on OAuth.
+        apiKeyChipWidthConstraint?.isActive = false
+        if visible {
+            apiKeyChipWidthConstraint = apiKeyChip.widthAnchor.constraint(
+                equalToConstant: apiKeyChip.preferredWidth
+            )
+            apiKeyChipContextSpacingConstraint?.constant = Self.apiKeyChipSpacing
+        } else {
+            apiKeyChipWidthConstraint = apiKeyChip.widthAnchor.constraint(equalToConstant: 0)
+            apiKeyChipContextSpacingConstraint?.constant = 0
+        }
+        apiKeyChipWidthConstraint?.isActive = true
     }
 
     private func resizeToFitContent() {
@@ -513,16 +581,35 @@ class DetailsPanel: NSPanel {
         contextValue.lineBreakMode = .byTruncatingTail
         contextValue.translatesAutoresizingMaskIntoConstraints = false
 
+        apiKeyChip.translatesAutoresizingMaskIntoConstraints = false
+        apiKeyChip.isHidden = true
+
         row.addSubview(agentToggle)
         row.addSubview(contextPill)
+        row.addSubview(apiKeyChip)
         contextPill.addSubview(contextValue)
+
+        let chipWidth = apiKeyChip.widthAnchor.constraint(equalToConstant: 0)
+        apiKeyChipWidthConstraint = chipWidth
+        // Spacing between context pill trailing edge and chip leading edge.
+        let chipSpacing = apiKeyChip.leadingAnchor.constraint(
+            equalTo: contextPill.trailingAnchor,
+            constant: 0
+        )
+        apiKeyChipContextSpacingConstraint = chipSpacing
+
         NSLayoutConstraint.activate([
             row.heightAnchor.constraint(equalToConstant: 24),
             agentToggle.leadingAnchor.constraint(equalTo: row.leadingAnchor),
             agentToggle.centerYAnchor.constraint(equalTo: row.centerYAnchor),
             agentToggle.widthAnchor.constraint(equalToConstant: 144),
             agentToggle.heightAnchor.constraint(equalToConstant: 24),
-            contextPill.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+            // Right-to-left: [context][gap][API Key chip]
+            apiKeyChip.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+            apiKeyChip.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            apiKeyChip.heightAnchor.constraint(equalToConstant: 22),
+            chipWidth,
+            chipSpacing,
             contextPill.centerYAnchor.constraint(equalTo: row.centerYAnchor),
             contextPill.widthAnchor.constraint(equalToConstant: Self.contextPillWidth),
             contextPill.leadingAnchor.constraint(greaterThanOrEqualTo: agentToggle.trailingAnchor, constant: 10),
@@ -594,18 +681,46 @@ class DetailsPanel: NSPanel {
     }
 
     var sessionBodyOrderForTesting: [DetailsPanelSessionBodyRole] {
-        metadataGroup.arrangedSubviews.map { view in
-            if view === sessionTitleRow { return .sessionTitle }
-            if view === modelRow { return .model }
-            if view === tokenRow { return .tokens }
-            if view is SeparatorView { return .separator }
-            return .unknown
-        }
+        // Legacy diagnostics only. Scheme B contract uses sessionBodyModeForTesting.
+        [sessionBodyModeForTesting]
     }
 
     var sessionRowHeightsForTesting: [CGFloat] {
         contentView?.layoutSubtreeIfNeeded()
-        return [sessionTitleRow, modelRow, tokenRow].map(\.frame.height)
+        return [sessionBodySlotHeightForTesting]
+    }
+
+    // MARK: - Scheme B session body / mode-chip accessors
+
+    var apiKeyChipHiddenForTesting: Bool { apiKeyChip.isHidden }
+
+    var apiKeyChipTitleForTesting: String { apiKeyChip.titleText }
+
+    var sessionBodyModeForTesting: DetailsPanelSessionBodyRole { sessionBodyMode }
+
+    var sessionCardTitleForTesting: String { sessionCard.titleText }
+
+    var sessionCardModelForTesting: String { sessionCard.modelText }
+
+    var sessionCardTokensForTesting: String { sessionCard.tokensText }
+
+    var sessionCardTitleToolTipForTesting: String? { sessionCard.titleToolTipText }
+
+    var sessionBodySlotHeightForTesting: CGFloat {
+        contentView?.layoutSubtreeIfNeeded()
+        return bodySlot.frame.height
+    }
+
+    var sessionCardHeightForTesting: CGFloat {
+        contentView?.layoutSubtreeIfNeeded()
+        return sessionCard.frame.height
+    }
+
+    var sessionEmptyTextForTesting: String { emptyBody.text }
+
+    var emptyBodyHeightForTesting: CGFloat {
+        contentView?.layoutSubtreeIfNeeded()
+        return emptyBody.frame.height
     }
 
     var primaryQuotaTitleForTesting: String {
@@ -665,23 +780,23 @@ class DetailsPanel: NSPanel {
     }
 
     var sessionTitleValueForTesting: String {
-        sessionTitleRow.value
+        sessionCard.titleText
     }
 
     var modelValueForTesting: String {
-        modelRow.value
+        sessionCard.modelText
     }
 
     var tokenValueForTesting: String {
-        tokenRow.value
+        sessionCard.tokensText
     }
 
     var sessionTitleToolTipForTesting: String? {
-        sessionTitleRow.valueToolTip
+        sessionCard.titleToolTipText
     }
 
     var modelToolTipForTesting: String? {
-        modelRow.valueToolTip
+        nil
     }
 
     var frameWidthForTesting: CGFloat {
@@ -697,7 +812,9 @@ class DetailsPanel: NSPanel {
     }
 
     var metadataTopInsetForTesting: CGFloat {
-        metadataGroup.edgeInsets.top
+        // Session body container is a plain NSView; top inset is always 0
+        // (bottom equalizer is applied via bodySlot bottom constraint).
+        0
     }
 
     var backingScaleForTesting: CGFloat {
@@ -710,25 +827,52 @@ class DetailsPanel: NSPanel {
     }
 }
 
+/// Top-row access-mode pill: light cyan fill + leading status dot.
 @MainActor
-private final class SeparatorView: NSView {
-    private let line = NSView()
+private final class ModeChipView: NSView {
+    private let dot = NSView()
+    private let label: NSTextField
 
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        translatesAutoresizingMaskIntoConstraints = false
-        heightAnchor.constraint(equalToConstant: 1).isActive = true
+    var titleText: String { label.stringValue }
 
-        line.wantsLayer = true
-        line.layer?.backgroundColor = NSColor.textColor.withAlphaComponent(0.06).cgColor
-        line.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(line)
+    var preferredWidth: CGFloat {
+        let textWidth = ceil(label.intrinsicContentSize.width)
+        // leading 8 + dot 6 + gap 5 + text + trailing 8
+        return 8 + 6 + 5 + textWidth + 8
+    }
 
+    init(title: String) {
+        label = NSTextField(labelWithString: title)
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 11
+        layer?.backgroundColor = NSColor(calibratedRed: 52 / 255, green: 158 / 255, blue: 199 / 255, alpha: 0.10).cgColor
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor(calibratedRed: 52 / 255, green: 158 / 255, blue: 199 / 255, alpha: 0.22).cgColor
+
+        dot.wantsLayer = true
+        dot.layer?.cornerRadius = 3
+        dot.layer?.backgroundColor = NSColor(calibratedRed: 42 / 255, green: 111 / 255, blue: 143 / 255, alpha: 0.75).cgColor
+        dot.translatesAutoresizingMaskIntoConstraints = false
+
+        label.font = .systemFont(ofSize: 10.5, weight: .semibold)
+        label.textColor = NSColor(calibratedRed: 42 / 255, green: 111 / 255, blue: 143 / 255, alpha: 1)
+        label.lineBreakMode = .byClipping
+        label.setContentHuggingPriority(.required, for: .horizontal)
+        label.setContentCompressionResistancePriority(.required, for: .horizontal)
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(dot)
+        addSubview(label)
         NSLayoutConstraint.activate([
-            line.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 0),
-            line.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 0),
-            line.topAnchor.constraint(equalTo: topAnchor),
-            line.bottomAnchor.constraint(equalTo: bottomAnchor)
+            heightAnchor.constraint(equalToConstant: 22),
+            dot.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            dot.centerYAnchor.constraint(equalTo: centerYAnchor),
+            dot.widthAnchor.constraint(equalToConstant: 6),
+            dot.heightAnchor.constraint(equalToConstant: 6),
+            label.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 5),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
     }
 
@@ -738,90 +882,189 @@ private final class SeparatorView: NSView {
     }
 }
 
+/// Offline empty rectangle: dashed border + centered copy.
 @MainActor
-private final class MetadataRowView: NSView {
-    private let nameField: NSTextField
-    private let valueField = NSTextField(labelWithString: "--")
-    private let valueBackground = NSView()
+private final class EmptySessionBodyView: NSView {
+    private let label = NSTextField(labelWithString: "")
+    private let dashLayer = CAShapeLayer()
 
-    var value: String {
-        get { valueField.stringValue }
-        set { setValue(newValue) }
+    var text: String {
+        get { label.stringValue }
+        set { label.stringValue = newValue }
     }
 
-    var attributedStringValue: NSAttributedString {
-        get { valueField.attributedStringValue }
-        set {
-            valueField.attributedStringValue = newValue
-            valueField.toolTip = nil
-        }
+    /// Prefer expanding to fill body slot; do not hug label width.
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
     }
 
-    var valueToolTip: String? { valueField.toolTip }
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
+        layer?.cornerRadius = 12
+        layer?.masksToBounds = true
+        layer?.backgroundColor = NSColor(calibratedWhite: 1, alpha: 0.45).cgColor
 
-    func setValue(_ value: String, toolTip: String? = nil) {
-        valueField.stringValue = value
-        valueField.toolTip = toolTip
-    }
+        dashLayer.fillColor = nil
+        dashLayer.strokeColor = NSColor(calibratedRed: 130 / 255, green: 150 / 255, blue: 165 / 255, alpha: 0.28).cgColor
+        dashLayer.lineWidth = 1
+        dashLayer.lineDashPattern = [4, 3]
+        dashLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
+        layer?.addSublayer(dashLayer)
 
-    func setTitle(_ title: String) {
-        nameField.stringValue = title
-    }
-
-    init(title: String, isTagStyle: Bool = false, valueFont: NSFont = .systemFont(ofSize: 12, weight: .semibold)) {
-        nameField = NSTextField(labelWithString: title)
-        super.init(frame: .zero)
-        translatesAutoresizingMaskIntoConstraints = false
-
-        nameField.font = .systemFont(ofSize: 11.5)
-        nameField.textColor = .secondaryLabelColor
-        nameField.setContentCompressionResistancePriority(.required, for: .horizontal)
-        nameField.setContentHuggingPriority(.required, for: .horizontal)
-        nameField.translatesAutoresizingMaskIntoConstraints = false
-
-        valueField.font = valueFont
-        valueField.textColor = .labelColor
-        valueField.alignment = .right
-        valueField.lineBreakMode = .byTruncatingTail
-        valueField.maximumNumberOfLines = 1
-        valueField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        valueField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        valueField.translatesAutoresizingMaskIntoConstraints = false
-
-        valueBackground.translatesAutoresizingMaskIntoConstraints = false
-        valueBackground.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        if isTagStyle {
-            valueBackground.wantsLayer = true
-            valueBackground.layer?.cornerRadius = 5
-            valueBackground.layer?.backgroundColor = NSColor.textColor.withAlphaComponent(0.06).cgColor
-            valueBackground.layer?.borderWidth = 0.5
-            valueBackground.layer?.borderColor = NSColor.textColor.withAlphaComponent(0.08).cgColor
-        }
-
-        addSubview(nameField)
-        addSubview(valueBackground)
-        valueBackground.addSubview(valueField)
+        label.font = .systemFont(ofSize: 12, weight: .regular)
+        label.textColor = NSColor(calibratedRed: 109 / 255, green: 129 / 255, blue: 144 / 255, alpha: 1)
+        label.alignment = .center
+        label.lineBreakMode = .byTruncatingTail
+        label.maximumNumberOfLines = 1
+        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
 
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 24),
-
-            nameField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 0),
-            nameField.centerYAnchor.constraint(equalTo: centerYAnchor),
-
-            valueBackground.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 0),
-            valueBackground.centerYAnchor.constraint(equalTo: centerYAnchor),
-            valueBackground.leadingAnchor.constraint(greaterThanOrEqualTo: nameField.trailingAnchor, constant: 10),
-
-            valueField.leadingAnchor.constraint(equalTo: valueBackground.leadingAnchor, constant: isTagStyle ? 6 : 0),
-            valueField.trailingAnchor.constraint(equalTo: valueBackground.trailingAnchor, constant: isTagStyle ? -6 : 0),
-            valueField.topAnchor.constraint(equalTo: valueBackground.topAnchor, constant: isTagStyle ? 2 : 0),
-            valueField.bottomAnchor.constraint(equalTo: valueBackground.bottomAnchor, constant: isTagStyle ? -2 : 0),
+            label.centerXAnchor.constraint(equalTo: centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            label.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 12),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12)
         ])
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    func setText(_ text: String) {
+        label.stringValue = text
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        // Keep dash stroke in view coordinates (frame = bounds origin 0).
+        dashLayer.frame = bounds
+        dashLayer.contentsScale = window?.backingScaleFactor
+            ?? NSScreen.main?.backingScaleFactor
+            ?? 2
+        let path = CGPath(
+            roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
+            cornerWidth: 12,
+            cornerHeight: 12,
+            transform: nil
+        )
+        dashLayer.path = path
+    }
+}
+
+/// Online session summary card: title + model chip + token counts.
+@MainActor
+private final class SessionCardView: NSView {
+    private let titleLabel = NSTextField(labelWithString: "--")
+    private let modelChip = NSView()
+    private let modelLabel = NSTextField(labelWithString: "--")
+    private let tokenLabel = NSTextField(labelWithString: "↑ --  ·  ↓ --")
+
+    var titleText: String { titleLabel.stringValue }
+    var modelText: String { modelLabel.stringValue }
+    var tokensText: String { tokenLabel.stringValue }
+    var titleToolTipText: String? { titleLabel.toolTip }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = 12
+        layer?.masksToBounds = true
+        layer?.backgroundColor = NSColor(calibratedWhite: 1, alpha: 0.62).cgColor
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor(calibratedRed: 140 / 255, green: 160 / 255, blue: 175 / 255, alpha: 0.18).cgColor
+        setContentHuggingPriority(.defaultLow, for: .horizontal)
+        setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.textColor = NSColor(calibratedRed: 30 / 255, green: 44 / 255, blue: 54 / 255, alpha: 1)
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.maximumNumberOfLines = 1
+        titleLabel.usesSingleLineMode = true
+        titleLabel.cell?.truncatesLastVisibleLine = true
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        modelChip.wantsLayer = true
+        modelChip.layer?.cornerRadius = 6
+        modelChip.layer?.backgroundColor = NSColor.textColor.withAlphaComponent(0.06).cgColor
+        modelChip.layer?.borderWidth = 0.5
+        modelChip.layer?.borderColor = NSColor.textColor.withAlphaComponent(0.08).cgColor
+        modelChip.translatesAutoresizingMaskIntoConstraints = false
+        modelChip.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        modelChip.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+
+        modelLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        modelLabel.textColor = NSColor(calibratedRed: 0.30, green: 0.38, blue: 0.44, alpha: 1)
+        modelLabel.lineBreakMode = .byTruncatingTail
+        modelLabel.maximumNumberOfLines = 1
+        modelLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        modelLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        tokenLabel.font = .systemFont(ofSize: 11.5, weight: .medium)
+        tokenLabel.alignment = .right
+        tokenLabel.lineBreakMode = .byTruncatingTail
+        tokenLabel.maximumNumberOfLines = 1
+        tokenLabel.setContentHuggingPriority(.required, for: .horizontal)
+        tokenLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        tokenLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(titleLabel)
+        addSubview(modelChip)
+        modelChip.addSubview(modelLabel)
+        addSubview(tokenLabel)
+
+        // Content vertically centered inside the fixed body slot.
+        NSLayoutConstraint.activate([
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -11),
+
+            modelChip.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            modelChip.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 8),
+            modelChip.heightAnchor.constraint(equalToConstant: 20),
+            modelChip.trailingAnchor.constraint(lessThanOrEqualTo: tokenLabel.leadingAnchor, constant: -8),
+
+            modelLabel.leadingAnchor.constraint(equalTo: modelChip.leadingAnchor, constant: 7),
+            modelLabel.trailingAnchor.constraint(equalTo: modelChip.trailingAnchor, constant: -7),
+            modelLabel.centerYAnchor.constraint(equalTo: modelChip.centerYAnchor),
+
+            tokenLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            tokenLabel.centerYAnchor.constraint(equalTo: modelChip.centerYAnchor)
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func setTitle(_ title: String, toolTip: String?) {
+        titleLabel.stringValue = title
+        // Only expose a tooltip when a real title exists.
+        if let toolTip, !toolTip.isEmpty {
+            titleLabel.toolTip = toolTip
+        } else {
+            titleLabel.toolTip = nil
+        }
+    }
+
+    func setModel(_ model: String) {
+        modelLabel.stringValue = model
+    }
+
+    func setTokens(_ tokens: NSAttributedString) {
+        tokenLabel.attributedStringValue = tokens
     }
 }
 

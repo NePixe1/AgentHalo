@@ -5,6 +5,8 @@ public struct ClaudeSessionReducer: Sendable {
     private var inFlightTools = 0
     private var workingVisibleUntil: Date?
     private var liveTracking: Bool
+    /// User `/rename` writes `custom-title`; once set, it must not be overwritten by later `ai-title`.
+    private var hasCustomSessionTitle = false
 
     public init(filePath: String, now: Date = Date(), liveTracking: Bool = true) {
         self.snapshot = SessionSnapshot(
@@ -38,8 +40,12 @@ public struct ClaudeSessionReducer: Sendable {
             reduceAssistant(root, now: now)
         case "system":
             reduceSystem(root, eventAt: eventAt)
+        case "custom-title":
+            // User rename (`/rename`): `{"type":"custom-title","customTitle":"…"}`
+            updateCustomSessionTitle(from: root)
         case "ai-title":
-            updateSessionTitle(from: root)
+            // AI-generated label; ignored once the user has set a custom title.
+            updateAISessionTitle(from: root)
         default:
             break
         }
@@ -74,7 +80,16 @@ public struct ClaudeSessionReducer: Sendable {
         }
     }
 
-    private mutating func updateSessionTitle(from root: [String: Any]) {
+    private mutating func updateCustomSessionTitle(from root: [String: Any]) {
+        let title = Self.string(root["customTitle"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if !title.isEmpty {
+            snapshot.sessionTitle = title
+            hasCustomSessionTitle = true
+        }
+    }
+
+    private mutating func updateAISessionTitle(from root: [String: Any]) {
+        guard !hasCustomSessionTitle else { return }
         let title = Self.string(root["aiTitle"]).trimmingCharacters(in: .whitespacesAndNewlines)
         if !title.isEmpty {
             snapshot.sessionTitle = title
