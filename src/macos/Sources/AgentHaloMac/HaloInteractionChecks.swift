@@ -89,6 +89,7 @@ func runHaloInteractionChecks() {
     testTickPassesEnabledFlagToActivityMonitors()
     testDisabledCodexMonitorPublishesEmptySnapshot()
     testSetFocusedAgentIgnoresDisabledAgent()
+    testApplyEnabledAgentsForTestingSyncsDetailsToggle()
     testApplySettingsFromWindowRemapsDisabledFocus()
     testApplySettingsFromWindowRestoresFocusBeforeSetFocusedAgent()
     testSettingsWindowRejectsClearingLastAgent()
@@ -2471,6 +2472,35 @@ private func testSetFocusedAgentIgnoresDisabledAgent() {
     let before = delegate.focusedAgentForTesting
     delegate.setFocusedAgent(.claudeCode)
     expect(delegate.focusedAgentForTesting, before, "disabled agent cannot become focused")
+}
+
+@MainActor
+private func testApplyEnabledAgentsForTestingSyncsDetailsToggle() {
+    let delegate = AppDelegate(settingsStore: SettingsStore(settingsURL: temporarySettingsURL()))
+    let panel = delegate.detailsPanelForTesting
+
+    expect(
+        panel.enabledAgentsForTesting,
+        AgentKind.allCases,
+        "default details toggle should list all agents"
+    )
+    expect(
+        panel.agentToggleWidthForTesting,
+        AgentToggleView.slotWidth * CGFloat(AgentKind.allCases.count),
+        "default details toggle should be 144pt (four 36pt slots)"
+    )
+
+    delegate.applyEnabledAgentsForTesting([.codex])
+    expect(
+        panel.enabledAgentsForTesting,
+        [.codex],
+        "applyEnabledAgentsForTesting should shrink the hover toggle to enabled agents only"
+    )
+    expect(
+        panel.agentToggleWidthForTesting,
+        AgentToggleView.slotWidth,
+        "one enabled agent should size the toggle to one 36pt slot without a live hover"
+    )
 }
 
 @MainActor

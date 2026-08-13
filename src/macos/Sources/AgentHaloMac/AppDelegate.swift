@@ -772,6 +772,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applyEnabledAgentsForTesting(_ agents: [AgentKind]) {
         settings.enabledAgents = agents
         settings = settings.normalized()
+        detailsPanel.setEnabledAgents(settings.enabledAgents, focused: settings.focusedAgent)
     }
 
     /// Test-only: apply a full settings update through the settings-window path.
@@ -781,6 +782,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Test-only: read current focus without exposing full settings.
     var focusedAgentForTesting: AgentKind { settings.focusedAgent }
+
+    /// Test-only: inspect the hover details panel (agent toggle width / enabled set).
+    var detailsPanelForTesting: DetailsPanel { detailsPanel }
 
     @objc private func quit() {
         NSApp.terminate(nil)
@@ -969,6 +973,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateDetailsPanelContent(rawClaudeSnapshots: [SessionSnapshot]? = nil) {
+        detailsPanel.setEnabledAgents(settings.enabledAgents, focused: settings.focusedAgent)
         let rawClaudeSnapshots = rawClaudeSnapshots
             ?? (settings.focusedAgent == .claudeCode ? claudeSnapshots() : [])
         let displayedAggregate = displayAggregate()

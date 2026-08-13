@@ -592,6 +592,14 @@ class DetailsPanel: NSPanel {
         agentToggleWidthConstraint?.constant = AgentToggleView.slotWidth * CGFloat(visibleCount)
     }
 
+    var enabledAgentsForTesting: [AgentKind] {
+        agentToggle.enabledAgentsForTesting
+    }
+
+    var agentToggleWidthForTesting: CGFloat {
+        agentToggle.toggleWidthForTesting
+    }
+
     var focusedAgentForTesting: AgentKind {
         agentToggle.selectedAgent
     }
