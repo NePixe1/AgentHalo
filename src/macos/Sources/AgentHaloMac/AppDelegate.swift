@@ -1,10 +1,6 @@
 import AppKit
 import AgentHaloCore
 
-private let haloSizeMenuWidth: CGFloat = 252
-private let haloSizeMenuHeight: CGFloat = 44
-private let haloSizeMenuTextInset: CGFloat = 21
-
 struct LiveErrorPresentationUpdate: Equatable {
     var presentation: ErrorPresentation
     var acknowledgeErrorAt: Date?
@@ -132,7 +128,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let statusLineReconciliationInterval: TimeInterval = 2
     private var selectedPreview = PreviewPayload.live
     private var aggregate: AggregateSnapshot
-    private var statusItem: NSStatusItem!
+    private var statusItem: NSStatusItem?
     private var panel: HaloPanel!
     private var haloView: HaloView!
     private var timer: Timer?
@@ -201,7 +197,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // → rewrite configs only when unhealthy. See AgentHaloRuntimeBootstrap.
         AgentHaloRuntimeBootstrap.bootstrap(enabledAgents: settings.enabledAgents)
         NSApp.setActivationPolicy(.accessory)
-        createStatusItem()
+        applyMenuBarIconVisibility()
         createHaloPanel()
         reconcileHaloPlacement()
         registerSystemOverlayObservers()
@@ -457,8 +453,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func createStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = StatusIcon.image()
-        statusItem.button?.toolTip = "Agent Halo"
+        statusItem?.button?.image = StatusIcon.image()
+        statusItem?.button?.toolTip = "Agent Halo"
+    }
+
+    private func applyMenuBarIconVisibility() {
+        if settings.showMenuBarIcon {
+            if statusItem == nil {
+                lastStatusMenuSignature = nil
+                createStatusItem()
+            }
+            updateStatusMenu()
+        } else if let item = statusItem {
+            NSStatusBar.system.removeStatusItem(item)
+            statusItem = nil
+            lastStatusMenuSignature = nil
+        }
     }
 
     private func reconcileClaudeStatusLineConfiguration(now: Date) {
@@ -634,26 +644,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func makeControlMenu() -> NSMenu {
         let menu = NSMenu()
         addCheckItem(L10n.shared["menu.always_on_top"], checked: settings.alwaysOnTop, action: #selector(toggleAlwaysOnTop), to: menu)
-        addCheckItem(L10n.shared["menu.launch_at_startup"], checked: currentStartupEnabled(), action: #selector(toggleStartup), to: menu)
         addCheckItem(L10n.shared["menu.pause_monitor"], checked: settings.paused, action: #selector(togglePause), to: menu)
-        addHaloSizeItem(to: menu)
         let focus = NSMenuItem(title: L10n.shared["menu.focus_target"], action: nil, keyEquivalent: "")
         let focusMenu = NSMenu()
-        addFocusedAgentItem(.codex, to: focusMenu)
-        addFocusedAgentItem(.claudeCode, to: focusMenu)
-        addFocusedAgentItem(.grok, to: focusMenu)
-        addFocusedAgentItem(.pi, to: focusMenu)
+        for agent in settings.enabledAgents {
+            addFocusedAgentItem(agent, to: focusMenu)
+        }
         focus.submenu = focusMenu
         menu.addItem(focus)
-
-        // Language submenu
-        let languageItem = NSMenuItem(title: L10n.shared["menu.language"], action: nil, keyEquivalent: "")
-        let languageMenu = NSMenu()
-        addLanguageItem(nil, to: languageMenu)           // Follow System
-        addLanguageItem("zh", to: languageMenu)           // 中文
-        addLanguageItem("en", to: languageMenu)           // English
-        languageItem.submenu = languageMenu
-        menu.addItem(languageItem)
 
         addMenuItem(L10n.shared["menu.escape_offscreen"], #selector(escapeOffscreen), enabled: true, to: menu)
         let preview = NSMenuItem(title: L10n.shared["menu.preview_status"], action: nil, keyEquivalent: "")
@@ -670,6 +668,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         preview.submenu = submenu
         menu.addItem(preview)
         menu.addItem(.separator())
+        addMenuItem(L10n.shared["menu.settings"], #selector(openSettings), enabled: true, to: menu)
         addMenuItem(L10n.shared["menu.quit"], #selector(quit), enabled: true, to: menu)
         return menu
     }
@@ -686,10 +685,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         tick()
     }
 
-    @objc private func toggleStartup() {
-        StartupManager.setEnabled(!StartupManager.isEnabled(), appBundleURL: Bundle.main.bundleURL)
-        cachedStartupExpiresAt = .distantPast
-        tick()
+    @objc private func openSettings() {
+        showSettings()
     }
 
     @objc private func escapeOffscreen() {
@@ -727,14 +724,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         panel.setFrameOrigin(defaultWindowOrigin(topOffset: 28))
         placementState.didUseTemporaryFallback()
-    }
-
-    @objc private func haloSizeSliderChanged(_ sender: NSSlider) {
-        let value = Int(CGFloat(sender.doubleValue).rounded())
-        if let valueLabel = sender.superview?.subviews.first(where: { $0.identifier?.rawValue == "halo-size-value" }) as? NSTextField {
-            valueLabel.stringValue = "\(value)"
-        }
-        applyHaloSize(CGFloat(sender.doubleValue))
     }
 
     @objc private func bringCodexForward() {
@@ -1458,49 +1447,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item)
     }
 
-    private func addHaloSizeItem(to menu: NSMenu) {
-        let item = NSMenuItem(title: L10n.shared["halo.size"], action: nil, keyEquivalent: "")
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: haloSizeMenuWidth, height: haloSizeMenuHeight))
-        let label = NSTextField(labelWithString: L10n.shared["halo.size"])
-        label.font = .systemFont(ofSize: 12, weight: .medium)
-        label.textColor = .labelColor
-        label.translatesAutoresizingMaskIntoConstraints = false
-
-        let slider = NSSlider(
-            value: settings.haloSize,
-            minValue: HaloSettings.minimumHaloSize,
-            maxValue: HaloSettings.maximumHaloSize,
-            target: self,
-            action: #selector(haloSizeSliderChanged(_:))
-        )
-        slider.isContinuous = true
-        slider.translatesAutoresizingMaskIntoConstraints = false
-
-        let valueLabel = NSTextField(labelWithString: "\(Int(settings.haloSize.rounded()))")
-        valueLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        valueLabel.textColor = .secondaryLabelColor
-        valueLabel.alignment = .right
-        valueLabel.identifier = NSUserInterfaceItemIdentifier("halo-size-value")
-        valueLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        container.addSubview(label)
-        container.addSubview(slider)
-        container.addSubview(valueLabel)
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: haloSizeMenuTextInset),
-            label.centerYAnchor.constraint(equalTo: slider.centerYAnchor),
-            label.widthAnchor.constraint(equalToConstant: 58),
-            slider.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 10),
-            slider.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            valueLabel.leadingAnchor.constraint(equalTo: slider.trailingAnchor, constant: 8),
-            valueLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-            valueLabel.centerYAnchor.constraint(equalTo: slider.centerYAnchor),
-            valueLabel.widthAnchor.constraint(equalToConstant: 32)
-        ])
-        item.view = container
-        menu.addItem(item)
-    }
-
     private func addPreviewItem(_ title: String, state: HaloState?, presentation: ErrorPresentation?, to menu: NSMenu) {
         let payload = PreviewPayload(state: state, presentation: presentation)
         let item = NSMenuItem(title: title, action: #selector(previewState(_:)), keyEquivalent: "")
@@ -1526,24 +1472,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setFocusedAgent(agent)
     }
 
-    private func addLanguageItem(_ lang: String?, to menu: NSMenu) {
-        let title: String
-        if let lang {
-            // lang is a language code like "zh" or "en"
-            title = L10n.shared["menu.language.\(lang)"]
-        } else {
-            title = L10n.shared["menu.language.auto"]
-        }
-        let item = NSMenuItem(title: title, action: #selector(selectLanguage(_:)), keyEquivalent: "")
-        item.target = self
-        item.representedObject = lang as NSString?
-        item.state = Self.languageMenuItemState(
-            itemLanguage: lang,
-            savedLanguage: settings.language
-        )
-        menu.addItem(item)
-    }
-
     nonisolated static func languageMenuItemState(
         itemLanguage: String?,
         savedLanguage: String?
@@ -1557,13 +1485,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         systemLanguage: String
     ) -> String? {
         savedLanguage
-    }
-
-    @objc private func selectLanguage(_ sender: NSMenuItem) {
-        let lang = sender.representedObject as? String  // nil = follow system
-        settings.language = lang
-        settingsStore.save(settings)
-        L10n.shared.setLanguage(lang)
     }
 
     @objc private func previewState(_ sender: NSMenuItem) {
@@ -1619,22 +1540,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func applySettingsFromWindow(_ next: HaloSettings) {
-        let normalized = next.normalized()
         let previous = settings
-        settings = normalized
+        settings = next.normalized()
         settingsStore.save(settings)
-        // Full side effects (toggle width, monitors, status item, levels) land in Task 5.
-        // This task at least: applyHaloSize, applyWindowLevels, language, DetailsPanel.setEnabledAgents.
         if previous.haloSize != settings.haloSize {
             applyHaloSize(CGFloat(settings.haloSize))
+        } else {
+            settingsStore.save(settings)
         }
         if previous.language != settings.language {
             L10n.shared.setLanguage(settings.language)
         }
-        if previous.alwaysOnTop != settings.alwaysOnTop {
-            applyWindowLevels()
-        }
+        applyWindowLevels()
+        applyMenuBarIconVisibility()
         detailsPanel.setEnabledAgents(settings.enabledAgents, focused: settings.focusedAgent)
+        if previous.focusedAgent != settings.focusedAgent {
+            setFocusedAgent(settings.focusedAgent)
+        }
+        for agent in AgentKind.allCases {
+            let nowOn = settings.isAgentEnabled(agent)
+            let wasOn = previous.isAgentEnabled(agent)
+            if nowOn && !wasOn {
+                switch agent {
+                case .claudeCode: claudeActivityMonitor.requestRefresh()
+                case .grok: grokActivityMonitor.requestRefresh()
+                case .pi: piActivityMonitor.requestRefresh()
+                case .codex: break
+                }
+            }
+        }
+        lastStatusMenuSignature = nil
+        tick()
+        settingsWindowController?.refresh(settings: settings, launchAtLogin: StartupManager.isEnabled())
     }
 
     static func haloWindowLevel(alwaysOnTop: Bool) -> NSWindow.Level {

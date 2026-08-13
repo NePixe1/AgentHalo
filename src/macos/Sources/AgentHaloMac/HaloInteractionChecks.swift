@@ -26,6 +26,8 @@ func runHaloInteractionChecks() {
     testRightClickInvokesContextMenuCallback()
     testSingleClickDoesNotActivateCodex()
     testHaloContextMenuContainsCurrentControls()
+    testFocusSubmenuListsOnlyEnabledAgents()
+    testSettingsMenuItemOpensSettingsWindow()
     testHaloClickWaitsForMouseUpAndDragCancelsClick()
     testHaloHoverUsesFilledCircularSurface()
     testDraggingHaloSuppressesHoverDetails()
@@ -339,24 +341,35 @@ private func testHaloContextMenuContainsCurrentControls() {
     expect(!titles.contains(L10n.shared["status.error"]), "halo context menu should not include error acknowledgement")
     expect(titles.contains(L10n.shared["menu.always_on_top"]), "halo context menu should include always-on-top")
     expect(titles.contains(L10n.shared["menu.pause_monitor"]), "halo context menu should include pause")
-    expect(titles.contains(L10n.shared["halo.size"]), "halo context menu should include size slider")
-    guard let sizeItem = menu.items.first(where: { $0.title == L10n.shared["halo.size"] }) else {
-        fatalError("halo context menu should expose size slider item")
-    }
-    let sliders = sizeItem.view?.subviews.compactMap { $0 as? NSSlider } ?? []
-    expect(sliders.count == 1, "halo size menu item should contain one slider")
-    expect(sliders[0].minValue <= 72, "halo size slider should allow smaller halo")
-    expect(sliders[0].maxValue >= 180, "halo size slider should allow larger halo")
-    sizeItem.view?.layoutSubtreeIfNeeded()
-    let sizeLabels = sizeItem.view?.subviews.compactMap { $0 as? NSTextField }
-        .filter { $0.stringValue == L10n.shared["halo.size"] } ?? []
-    expect(sizeLabels.count == 1, "halo size menu item should contain one title label")
-    expect(sizeLabels[0].frame.minX >= 19, "halo size row label should align with regular menu text")
-    expect(sizeLabels[0].frame.minX <= 23, "halo size row label should not drift past regular menu text")
+    expect(titles.contains(L10n.shared["menu.escape_offscreen"]), "halo context menu should include escape")
     expect(titles.contains(L10n.shared["menu.preview_status"]), "halo context menu should include preview submenu")
+    expect(titles.contains(L10n.shared["menu.settings"]), "halo context menu should include Settings…")
+    expect(titles.contains(L10n.shared["menu.quit"]), "halo context menu should include quit")
+    expect(!titles.contains(L10n.shared["menu.launch_at_startup"]), "halo context menu should not include launch-at-login")
+    expect(!titles.contains(L10n.shared["menu.language"]), "halo context menu should not include language submenu")
+    expect(!titles.contains(L10n.shared["halo.size"]), "halo context menu should not include size slider")
     expect(!titles.contains("Switch to Codex"), "halo context menu should not include Codex activation")
     expect(!titles.contains("Quit Agent Halo"), "halo context menu should not include old quit title")
-    expect(titles.contains(L10n.shared["menu.quit"]), "halo context menu should include quit")
+}
+
+@MainActor
+private func testFocusSubmenuListsOnlyEnabledAgents() {
+    let delegate = AppDelegate()
+    delegate.applyEnabledAgentsForTesting([.codex, .pi])
+    let menu = delegate.makeHaloContextMenu()
+    let focus = menu.items.first { $0.title == L10n.shared["menu.focus_target"] }
+    let titles = focus?.submenu?.items.map(\.title) ?? []
+    expect(titles, ["Codex", "Pi"], "focus submenu follows enabledAgents")
+}
+
+@MainActor
+private func testSettingsMenuItemOpensSettingsWindow() {
+    let delegate = AppDelegate()
+    let menu = delegate.makeHaloContextMenu()
+    expect(
+        menu.items.contains { $0.title == L10n.shared["menu.settings"] },
+        "control menu includes Settings…"
+    )
 }
 
 @MainActor
