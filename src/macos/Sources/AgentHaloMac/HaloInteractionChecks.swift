@@ -90,6 +90,7 @@ func runHaloInteractionChecks() {
     testDisabledCodexMonitorPublishesEmptySnapshot()
     testSetFocusedAgentIgnoresDisabledAgent()
     testApplySettingsFromWindowRemapsDisabledFocus()
+    testApplySettingsFromWindowRestoresFocusBeforeSetFocusedAgent()
     testSettingsWindowRejectsClearingLastAgent()
     testSettingsWindowUsesKeyPanelAboveHalo()
     testCodexPollingWorkIsNotPerformedOnMainTick()
@@ -2496,6 +2497,28 @@ private func testApplySettingsFromWindowRemapsDisabledFocus() {
     expect(
         delegate.focusedAgentForTesting != .claudeCode,
         "focused agent must not remain a disabled Claude Code"
+    )
+}
+
+/// Locks the restore-then-switch path so focus remap cannot regress to a no-op
+/// that only mutates `settings.focusedAgent` via `normalized()`.
+private func testApplySettingsFromWindowRestoresFocusBeforeSetFocusedAgent() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let appDelegateURL = sourceDirectory.appendingPathComponent("AppDelegate.swift")
+    guard let source = try? String(contentsOf: appDelegateURL, encoding: .utf8),
+          let rangeStart = source.range(of: "    private func applySettingsFromWindow(_ next: HaloSettings) {")?.lowerBound,
+          let rangeEnd = source.range(of: "    static func haloWindowLevel(alwaysOnTop:", range: rangeStart..<source.endIndex)?.lowerBound else {
+        fatalError("AppDelegate applySettingsFromWindow source should be readable")
+    }
+
+    let applySource = source[rangeStart..<rangeEnd]
+    expect(
+        applySource.contains("settings.focusedAgent = previous.focusedAgent"),
+        "applySettingsFromWindow should restore previous focus before setFocusedAgent"
+    )
+    expect(
+        applySource.contains("setFocusedAgent(target)") || applySource.contains("setFocusedAgent("),
+        "applySettingsFromWindow should call setFocusedAgent after restoring previous focus"
     )
 }
 
