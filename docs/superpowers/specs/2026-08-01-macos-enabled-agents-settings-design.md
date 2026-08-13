@@ -3,7 +3,7 @@
 ## 文档状态
 
 - 日期：2026-08-01
-- 状态：设计已确认；待写实施计划
+- 状态：设计已确认；实施计划见 [2026-08-01-macos-enabled-agents-settings-implementation.md](../plans/2026-08-01-macos-enabled-agents-settings-implementation.md)（**仅 macOS**）
 - 实现范围：**仅 macOS**。不改 Windows 代码、测试、文档或 UI。
 - 产品原则：见 [PRODUCT.md](../../PRODUCT.md)
 - 相关先例：
