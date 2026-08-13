@@ -3288,6 +3288,9 @@ private func testAgentToggleUsesSharedSVGAssets() {
     expect(FileManager.default.fileExists(atPath: claudeURL.path), "Claude SVG should live in shared assets")
     expect(FileManager.default.fileExists(atPath: grokURL.path), "Grok SVG should live in shared assets")
     expect(FileManager.default.fileExists(atPath: piURL.path), "Pi SVG should live in shared assets")
+    let piImage = (try? Data(contentsOf: piURL)).flatMap(NSImage.init(data:))
+    expect(piImage?.size.width ?? 0, 24, "Pi SVG should use the shared 24pt intrinsic width")
+    expect(piImage?.size.height ?? 0, 24, "Pi SVG should use the shared 24pt intrinsic height")
 
     let detailsSource = try? String(contentsOf: detailsSourceURL, encoding: .utf8)
     expect(detailsSource?.contains("<svg") == false, "DetailsPanel should not embed SVG markup")
@@ -3369,6 +3372,10 @@ private func testAgentToggleDimsInactiveIconMoreStrongly() {
 @MainActor
 private func testAgentToggleSelectionPillFitsItsIconWidth() {
     let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 144, height: 24))
+    NSLayoutConstraint.activate([
+        toggle.widthAnchor.constraint(equalToConstant: 144),
+        toggle.heightAnchor.constraint(equalToConstant: 24),
+    ])
     toggle.layoutSubtreeIfNeeded()
 
     let selectionPill = toggle.subviews.first?.subviews.first

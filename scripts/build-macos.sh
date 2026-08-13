@@ -32,6 +32,7 @@ cd "$mac_root"
 swift build --product ClaudeCodeStatusHook
 swift build --product ClaudeCodeStatusLineProxy
 swift run AgentHaloCoreChecks
+swift run AgentHaloMac --self-check
 swift run AgentHaloDiagnostics --self-test "$output_root/diagnostics-self-test.txt"
 swift build -c release --product AgentHaloDiagnostics
 swift build -c release --product AgentHaloMac
