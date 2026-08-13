@@ -28,6 +28,7 @@ func runHaloInteractionChecks() {
     testHaloContextMenuContainsCurrentControls()
     testFocusSubmenuListsOnlyEnabledAgents()
     testSettingsMenuItemOpensSettingsWindow()
+    testControlMenuDoesNotAttachAutomaticIcons()
     testHaloClickWaitsForMouseUpAndDragCancelsClick()
     testHaloHoverUsesFilledCircularSurface()
     testDraggingHaloSuppressesHoverDetails()
@@ -373,6 +374,23 @@ private func testSettingsMenuItemOpensSettingsWindow() {
         menu.items.contains { $0.title == L10n.shared["menu.settings"] },
         "control menu includes Settings…"
     )
+}
+
+@MainActor
+private func testControlMenuDoesNotAttachAutomaticIcons() {
+    let delegate = AppDelegate(settingsStore: SettingsStore(settingsURL: temporarySettingsURL()))
+    let menu = delegate.makeHaloContextMenu()
+    let settings = menu.items.first { $0.title == L10n.shared["menu.settings"] }
+    let quit = menu.items.first { $0.title == L10n.shared["menu.quit"] }
+    expect(settings != nil, "control menu should include Settings…")
+    expect(quit != nil, "control menu should include Quit")
+    expect(
+        settings?.image == nil,
+        "Settings must not use an automatic gear that adds an image column"
+    )
+    expect(quit?.image == nil, "Quit must not use an automatic icon")
+    expect(settings?.indentationLevel, 0, "Settings should not be indented")
+    expect(quit?.indentationLevel, 0, "Quit should not be indented")
 }
 
 @MainActor

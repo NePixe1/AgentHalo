@@ -668,7 +668,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         preview.submenu = submenu
         menu.addItem(preview)
         menu.addItem(.separator())
-        addMenuItem(L10n.shared["menu.settings"], #selector(openSettings), enabled: true, to: menu)
+        addMenuItem(L10n.shared["menu.settings"], #selector(showSettings), enabled: true, to: menu)
         addMenuItem(L10n.shared["menu.quit"], #selector(quit), enabled: true, to: menu)
         return menu
     }
@@ -683,10 +683,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         applyWindowLevels()
         settingsStore.save(settings)
         tick()
-    }
-
-    @objc private func openSettings() {
-        showSettings()
     }
 
     @objc private func escapeOffscreen() {
@@ -1529,7 +1525,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func showSettings() {
+    @objc func showSettings() {
         if settingsWindowController == nil {
             let controller = SettingsWindowController()
             controller.onSettingsChanged = { [weak self] next in
