@@ -169,6 +169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let startupCheckInterval: TimeInterval = 2
     private var currentLanguage: String = "zh"
     private var languageObserver: NSObjectProtocol?
+    private var settingsWindowController: SettingsWindowController?
     private var currentHaloSize: CGFloat {
         CGFloat(settings.haloSize)
     }
@@ -255,6 +256,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.lastStatusMenuSignature = nil
                 self.tick()
                 self.refreshVisibleDetailsPanel()
+                if let controller = self.settingsWindowController,
+                   controller.window?.isVisible == true {
+                    controller.refresh(
+                        settings: self.settings,
+                        launchAtLogin: StartupManager.isEnabled()
+                    )
+                }
             }
         }
         tick()
@@ -1584,9 +1592,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let level = Self.haloWindowLevel(alwaysOnTop: settings.alwaysOnTop)
         panel?.level = level
         detailsPanel.level = level
+        settingsWindowController?.window?.level = NSWindow.Level(rawValue: level.rawValue + 1)
         if !systemOverlaySuspended {
             panel?.orderFrontRegardless()
         }
+    }
+
+    func showSettings() {
+        if settingsWindowController == nil {
+            let controller = SettingsWindowController()
+            controller.onSettingsChanged = { [weak self] next in
+                self?.applySettingsFromWindow(next)
+            }
+            controller.onLaunchAtLoginChanged = { enabled in
+                StartupManager.setEnabled(enabled, appBundleURL: Bundle.main.bundleURL)
+            }
+            controller.onResetPosition = { [weak self] in
+                self?.escapeOffscreen()
+            }
+            settingsWindowController = controller
+        }
+        settingsWindowController?.present(
+            settings: settings,
+            launchAtLogin: StartupManager.isEnabled()
+        )
+    }
+
+    private func applySettingsFromWindow(_ next: HaloSettings) {
+        let normalized = next.normalized()
+        let previous = settings
+        settings = normalized
+        settingsStore.save(settings)
+        // Full side effects (toggle width, monitors, status item, levels) land in Task 5.
+        // This task at least: applyHaloSize, applyWindowLevels, language, DetailsPanel.setEnabledAgents.
+        if previous.haloSize != settings.haloSize {
+            applyHaloSize(CGFloat(settings.haloSize))
+        }
+        if previous.language != settings.language {
+            L10n.shared.setLanguage(settings.language)
+        }
+        if previous.alwaysOnTop != settings.alwaysOnTop {
+            applyWindowLevels()
+        }
+        detailsPanel.setEnabledAgents(settings.enabledAgents, focused: settings.focusedAgent)
     }
 
     static func haloWindowLevel(alwaysOnTop: Bool) -> NSWindow.Level {

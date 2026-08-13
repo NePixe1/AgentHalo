@@ -1417,7 +1417,7 @@ private final class AgentToggleContentView: NSView {
     }
 }
 
-private enum AgentIconAssets {
+enum AgentIconAssets {
     static func image(named name: String) -> NSImage? {
         guard let url = url(named: name),
               let data = try? Data(contentsOf: url) else {

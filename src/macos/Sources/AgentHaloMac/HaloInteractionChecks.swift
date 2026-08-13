@@ -87,6 +87,8 @@ func runHaloInteractionChecks() {
     testTickPassesEnabledFlagToActivityMonitors()
     testDisabledCodexMonitorPublishesEmptySnapshot()
     testSetFocusedAgentIgnoresDisabledAgent()
+    testSettingsWindowRejectsClearingLastAgent()
+    testSettingsWindowUsesKeyPanelAboveHalo()
     testCodexPollingWorkIsNotPerformedOnMainTick()
     testCodexActivityDispatchIsThrottled()
     testCodexSQLiteReadersUseInProcessSQLite()
@@ -2454,6 +2456,35 @@ private func testSetFocusedAgentIgnoresDisabledAgent() {
     let before = delegate.focusedAgentForTesting
     delegate.setFocusedAgent(.claudeCode)
     expect(delegate.focusedAgentForTesting, before, "disabled agent cannot become focused")
+}
+
+@MainActor
+private func testSettingsWindowRejectsClearingLastAgent() {
+    let controller = SettingsWindowController()
+    let settings = HaloSettings(focusedAgent: .codex, enabledAgents: [.codex])
+    var emitted: HaloSettings?
+    controller.onSettingsChanged = { emitted = $0 }
+    controller.present(settings: settings, launchAtLogin: false)
+    controller.toggleAgentForTesting(.codex)
+    expect(emitted == nil, "the last enabled agent cannot be turned off")
+    expect(
+        controller.enabledAgentsForTesting,
+        [.codex],
+        "UI still shows Codex enabled"
+    )
+}
+
+@MainActor
+private func testSettingsWindowUsesKeyPanelAboveHalo() {
+    let controller = SettingsWindowController()
+    controller.present(settings: HaloSettings(), launchAtLogin: false)
+    guard let panel = controller.window else {
+        fatalError("settings window should exist")
+    }
+    expect(panel.styleMask.contains(.titled), "settings is a titled panel")
+    expect(panel.styleMask.contains(.closable), "settings can close")
+    expect(!panel.styleMask.contains(.nonactivatingPanel), "settings must be able to become key")
+    expect(panel.level.rawValue > NSWindow.Level.floating.rawValue, "settings sits above the halo")
 }
 
 private func testCodexPollingWorkIsNotPerformedOnMainTick() {
