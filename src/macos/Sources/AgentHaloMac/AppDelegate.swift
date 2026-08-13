@@ -198,7 +198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // Single upgrade path: migrate data → stage all hook binaries (no gap)
         // → rewrite configs only when unhealthy. See AgentHaloRuntimeBootstrap.
-        AgentHaloRuntimeBootstrap.bootstrap()
+        AgentHaloRuntimeBootstrap.bootstrap(enabledAgents: settings.enabledAgents)
         NSApp.setActivationPolicy(.accessory)
         createStatusItem()
         createHaloPanel()
@@ -315,24 +315,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let now = Date()
-        reconcileClaudeStatusLineConfiguration(now: now)
+        if settings.isAgentEnabled(.claudeCode) {
+            reconcileClaudeStatusLineConfiguration(now: now)
+        }
         acknowledgeCompletedIfCodexIsForeground()
         let codexRunning = CodexAppDetector.isCodexRunning()
         codexActivityMonitor.updatePollingContext(
             focusedAgent: settings.focusedAgent,
-            codexRunning: codexRunning
+            codexRunning: codexRunning,
+            enabled: settings.isAgentEnabled(.codex)
         )
         claudeActivityMonitor.updatePollingContext(
             focusedAgent: settings.focusedAgent,
-            detailsPanelVisible: detailsPanel.isVisible
+            detailsPanelVisible: detailsPanel.isVisible,
+            enabled: settings.isAgentEnabled(.claudeCode)
         )
         grokActivityMonitor.updatePollingContext(
             focusedAgent: settings.focusedAgent,
-            detailsPanelVisible: detailsPanel.isVisible
+            detailsPanelVisible: detailsPanel.isVisible,
+            enabled: settings.isAgentEnabled(.grok)
         )
         piActivityMonitor.updatePollingContext(
             focusedAgent: settings.focusedAgent,
-            detailsPanelVisible: detailsPanel.isVisible
+            detailsPanelVisible: detailsPanel.isVisible,
+            enabled: settings.isAgentEnabled(.pi)
         )
         refreshAggregateAndUI(now: now, codexRunning: codexRunning)
     }
@@ -376,7 +382,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let codexRunning = CodexAppDetector.isCodexRunning()
         codexActivityMonitor.updatePollingContext(
             focusedAgent: settings.focusedAgent,
-            codexRunning: codexRunning
+            codexRunning: codexRunning,
+            enabled: settings.isAgentEnabled(.codex)
         )
         refreshAggregateAndUI(now: Date(), codexRunning: codexRunning)
     }
@@ -447,6 +454,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func reconcileClaudeStatusLineConfiguration(now: Date) {
+        guard settings.isAgentEnabled(.claudeCode) else { return }
         guard now >= nextStatusLineReconciliationAt else { return }
         nextStatusLineReconciliationAt = now.addingTimeInterval(statusLineReconciliationInterval)
         guard !ClaudeStatusLineConfigurator.isConfigured() else { return }
@@ -734,6 +742,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func setFocusedAgent(_ agent: AgentKind) {
+        guard settings.isAgentEnabled(agent) else { return }
         guard settings.focusedAgent != agent else {
             tick()
             refreshVisibleDetailsPanel()
@@ -761,6 +770,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             requestUsageRefresh(for: providerID)
         }
     }
+
+    /// Test-only: replace enabledAgents and normalize (may re-focus).
+    func applyEnabledAgentsForTesting(_ agents: [AgentKind]) {
+        settings.enabledAgents = agents
+        settings = settings.normalized()
+    }
+
+    /// Test-only: read current focus without exposing full settings.
+    var focusedAgentForTesting: AgentKind { settings.focusedAgent }
 
     @objc private func quit() {
         NSApp.terminate(nil)

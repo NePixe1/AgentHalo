@@ -84,6 +84,9 @@ func runHaloInteractionChecks() {
     testUsageMonitoringLifecycleWiring()
     testPackagedVerificationRuntimeSelectionIsExplicit()
     testStatusLineConfigurationReconciliationIsWiredToTick()
+    testTickPassesEnabledFlagToActivityMonitors()
+    testDisabledCodexMonitorPublishesEmptySnapshot()
+    testSetFocusedAgentIgnoresDisabledAgent()
     testCodexPollingWorkIsNotPerformedOnMainTick()
     testCodexActivityDispatchIsThrottled()
     testCodexSQLiteReadersUseInProcessSQLite()
@@ -2415,6 +2418,42 @@ private func testStatusLineConfigurationReconciliationIsWiredToTick() {
         tickSource.contains("reconcileClaudeStatusLineConfiguration(now:"),
         "AppDelegate tick should reconcile status-line drift"
     )
+}
+
+private func testTickPassesEnabledFlagToActivityMonitors() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let appDelegateURL = sourceDirectory.appendingPathComponent("AppDelegate.swift")
+    guard let source = try? String(contentsOf: appDelegateURL, encoding: .utf8),
+          let tickStart = source.range(of: "    private func tick() {")?.lowerBound,
+          let tickEnd = source.range(of: "    private func createStatusItem()", range: tickStart..<source.endIndex)?.lowerBound else {
+        fatalError("AppDelegate tick source should be readable")
+    }
+
+    let tickSource = source[tickStart..<tickEnd]
+    expect(
+        tickSource.contains("enabled:") && tickSource.contains("isAgentEnabled"),
+        "AppDelegate tick should pass enabled: settings.isAgentEnabled(...) to monitors"
+    )
+}
+
+@MainActor
+private func testDisabledCodexMonitorPublishesEmptySnapshot() {
+    let monitor = CodexActivityMonitor()
+    monitor.start { _ in }
+    monitor.updatePollingContext(focusedAgent: .codex, codexRunning: true, enabled: false)
+    // allow the monitor queue to apply context
+    let snapshot = monitor.snapshot()
+    expect(snapshot, .empty, "disabled Codex monitor must not keep a stale snapshot")
+    monitor.stop()
+}
+
+@MainActor
+private func testSetFocusedAgentIgnoresDisabledAgent() {
+    let delegate = AppDelegate()
+    delegate.applyEnabledAgentsForTesting(AgentKind.allCases.filter { $0 != .claudeCode })
+    let before = delegate.focusedAgentForTesting
+    delegate.setFocusedAgent(.claudeCode)
+    expect(delegate.focusedAgentForTesting, before, "disabled agent cannot become focused")
 }
 
 private func testCodexPollingWorkIsNotPerformedOnMainTick() {

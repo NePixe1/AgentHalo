@@ -1331,6 +1331,49 @@ func testRuntimeBootstrapUpgradesLayoutV1WithoutStrandingHookPaths() throws {
     expect(after, before, "second bootstrap must not thrash healthy grok hooks")
 }
 
+/// Disabled agents must not receive user-config rewrites; staging still runs.
+func testRuntimeBootstrapSkipsDisabledAgentUserConfig() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent(
+        "agent-halo-bootstrap-skip-\(UUID().uuidString)", isDirectory: true
+    )
+    defer { try? fm.removeItem(at: home) }
+
+    let claudeSettings = home.appendingPathComponent(".claude/settings.json")
+    try fm.createDirectory(at: claudeSettings.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data("{}".utf8).write(to: claudeSettings)
+    let beforeClaude = try Data(contentsOf: claudeSettings)
+
+    let grokFile = home.appendingPathComponent(".grok/hooks/agent-halo-status.json")
+    try fm.createDirectory(at: grokFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data("{\"hooks\":{}}".utf8).write(to: grokFile)
+    let beforeGrok = try Data(contentsOf: grokFile)
+
+    let piFile = home.appendingPathComponent(".pi/agent/extensions/agent-halo-status.ts")
+    try fm.createDirectory(at: piFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data("// keep-me\n".utf8).write(to: piFile)
+    let beforePi = try Data(contentsOf: piFile)
+
+    let bundledHook = home.appendingPathComponent("bundled-hook")
+    let bundledProxy = home.appendingPathComponent("bundled-proxy")
+    try Data("hook".utf8).write(to: bundledHook)
+    try Data("proxy".utf8).write(to: bundledProxy)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundledHook.path)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundledProxy.path)
+
+    AgentHaloRuntimeBootstrap.bootstrap(
+        homeDirectory: home,
+        bundledHookBinary: bundledHook,
+        bundledStatuslineProxy: bundledProxy,
+        fileManager: fm,
+        enabledAgents: [.codex]
+    )
+
+    expect(try Data(contentsOf: claudeSettings), beforeClaude, "disabled Claude config is not rewritten")
+    expect(try Data(contentsOf: grokFile), beforeGrok, "disabled Grok hooks are not rewritten")
+    expect(try Data(contentsOf: piFile), beforePi, "disabled Pi extension is not rewritten")
+}
+
 /// Preferred-path Grok config must not be rewritten on routine launches.
 func testGrokHookConfiguratorLeavesPreferredPathConfigAlone() throws {
     let fm = FileManager.default
@@ -4696,6 +4739,7 @@ do {
 do {
     try testGrokHookConfiguratorWritesHooksJSON()
     try testRuntimeBootstrapUpgradesLayoutV1WithoutStrandingHookPaths()
+    try testRuntimeBootstrapSkipsDisabledAgentUserConfig()
     try testGrokHookConfiguratorLeavesPreferredPathConfigAlone()
     try testGrokHookConfiguratorRewritesLegacyRootPath()
     try testGrokHookConfiguratorRepairsDeadExecutableCommand()

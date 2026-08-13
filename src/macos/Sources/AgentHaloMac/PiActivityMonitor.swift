@@ -35,6 +35,7 @@ final class PiActivityMonitor: @unchecked Sendable {
     private struct PollingContext: Equatable {
         var focusedAgent: AgentKind = .codex
         var detailsPanelVisible = false
+        var enabled = true
     }
 
     private static let activeIntervalMilliseconds = 300
@@ -68,6 +69,9 @@ final class PiActivityMonitor: @unchecked Sendable {
             guard self.timer == nil else {
                 return
             }
+            guard self.context.enabled else {
+                return
+            }
             self.scheduleTimer(intervalMilliseconds: Self.activeIntervalMilliseconds)
         }
     }
@@ -83,17 +87,28 @@ final class PiActivityMonitor: @unchecked Sendable {
         }
     }
 
-    func updatePollingContext(focusedAgent: AgentKind, detailsPanelVisible: Bool) {
-        queue.async { [weak self] in
+    func updatePollingContext(focusedAgent: AgentKind, detailsPanelVisible: Bool, enabled: Bool) {
+        // Apply disable (timer cancel + empty snapshot) synchronously so callers
+        // can read snapshot() immediately without waiting for the monitor queue.
+        queue.sync { [weak self] in
             guard let self else { return }
+            let wasEnabled = self.context.enabled
             self.context = PollingContext(
                 focusedAgent: focusedAgent,
-                detailsPanelVisible: detailsPanelVisible
+                detailsPanelVisible: detailsPanelVisible,
+                enabled: enabled
             )
+            if !enabled {
+                self.publishDisabledEmptySnapshot(wasEnabled: wasEnabled)
+                return
+            }
             let desired = (focusedAgent == .pi || detailsPanelVisible)
                 ? Self.activeIntervalMilliseconds
                 : Self.idleIntervalMilliseconds
-            if self.timer != nil, desired != self.currentIntervalMilliseconds {
+            if !wasEnabled {
+                self.scheduleTimer(intervalMilliseconds: desired)
+                self.poll()
+            } else if self.timer != nil, desired != self.currentIntervalMilliseconds {
                 self.scheduleTimer(intervalMilliseconds: desired)
             }
         }
@@ -108,6 +123,21 @@ final class PiActivityMonitor: @unchecked Sendable {
     func snapshot() -> PiActivitySnapshot {
         queue.sync {
             latestSnapshot
+        }
+    }
+
+    private func publishDisabledEmptySnapshot(wasEnabled: Bool) {
+        timer?.cancel()
+        timer = nil
+        pendingDispatchWorkItem?.cancel()
+        pendingDispatchWorkItem = nil
+        pendingSnapshot = nil
+        let shouldPublish = wasEnabled || latestSnapshot != .empty
+        latestSnapshot = .empty
+        guard shouldPublish, let onChange else { return }
+        lastDispatchAt = Date()
+        DispatchQueue.main.async {
+            onChange(.empty)
         }
     }
 
@@ -129,6 +159,7 @@ final class PiActivityMonitor: @unchecked Sendable {
     }
 
     private func poll() {
+        guard context.enabled else { return }
         _ = statusMonitor.refresh()
         _ = runtimeMonitor.refresh()
         let liveIds = statusMonitor.liveSessionIds()
