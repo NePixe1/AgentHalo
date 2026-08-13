@@ -28,7 +28,7 @@ func runHaloInteractionChecks() {
     testHaloContextMenuContainsCurrentControls()
     testFocusSubmenuListsOnlyEnabledAgents()
     testSettingsMenuItemOpensSettingsWindow()
-    testControlMenuDoesNotAttachAutomaticIcons()
+    testControlMenuAlignsSettingsAndQuitIcons()
     testHaloClickWaitsForMouseUpAndDragCancelsClick()
     testHaloHoverUsesFilledCircularSurface()
     testDraggingHaloSuppressesHoverDetails()
@@ -377,20 +377,25 @@ private func testSettingsMenuItemOpensSettingsWindow() {
 }
 
 @MainActor
-private func testControlMenuDoesNotAttachAutomaticIcons() {
+private func testControlMenuAlignsSettingsAndQuitIcons() {
     let delegate = AppDelegate(settingsStore: SettingsStore(settingsURL: temporarySettingsURL()))
     let menu = delegate.makeHaloContextMenu()
     let settings = menu.items.first { $0.title == L10n.shared["menu.settings"] }
     let quit = menu.items.first { $0.title == L10n.shared["menu.quit"] }
     expect(settings != nil, "control menu should include Settings…")
     expect(quit != nil, "control menu should include Quit")
-    expect(
-        settings?.image == nil,
-        "Settings must not use an automatic gear that adds an image column"
-    )
-    expect(quit?.image == nil, "Quit must not use an automatic icon")
+    expect(settings?.image != nil, "Settings should show a gear icon")
+    expect(quit?.image != nil, "Quit should show a power icon")
     expect(settings?.indentationLevel, 0, "Settings should not be indented")
     expect(quit?.indentationLevel, 0, "Quit should not be indented")
+    let settingsSize = settings?.image?.size ?? .zero
+    let quitSize = quit?.image?.size ?? .zero
+    expect(settingsSize.width > 0, "Settings icon should have a layout size")
+    expect(quitSize.width > 0, "Quit icon should have a layout size")
+    expect(
+        abs(settingsSize.width - quitSize.width) < 4,
+        "Settings and Quit icons should share a comparable column width"
+    )
 }
 
 @MainActor

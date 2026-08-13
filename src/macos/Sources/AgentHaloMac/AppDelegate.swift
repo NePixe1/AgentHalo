@@ -668,8 +668,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         preview.submenu = submenu
         menu.addItem(preview)
         menu.addItem(.separator())
-        addMenuItem(L10n.shared["menu.settings"], #selector(showSettings), enabled: true, to: menu)
-        addMenuItem(L10n.shared["menu.quit"], #selector(quit), enabled: true, to: menu)
+        addMenuItem(
+            L10n.shared["menu.settings"],
+            #selector(showSettings),
+            enabled: true,
+            to: menu,
+            image: Self.menuSymbolImage(named: "gear")
+        )
+        addMenuItem(
+            L10n.shared["menu.quit"],
+            #selector(quit),
+            enabled: true,
+            to: menu,
+            image: Self.menuSymbolImage(named: "power")
+        )
         return menu
     }
 
@@ -1439,11 +1451,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         codexActivitySnapshot.sessions + claudeSnapshots() + grokSnapshots() + piSnapshots()
     }
 
-    private func addMenuItem(_ title: String, _ action: Selector, enabled: Bool, to menu: NSMenu) {
+    private func addMenuItem(
+        _ title: String,
+        _ action: Selector,
+        enabled: Bool,
+        to menu: NSMenu,
+        image: NSImage? = nil
+    ) {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = self
         item.isEnabled = enabled
+        item.image = image
         menu.addItem(item)
+    }
+
+    private static func menuSymbolImage(named name: String) -> NSImage? {
+        let configuration = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(configuration)
+        image?.isTemplate = true
+        return image
     }
 
     private func addCheckItem(_ title: String, checked: Bool, action: Selector, to menu: NSMenu) {
