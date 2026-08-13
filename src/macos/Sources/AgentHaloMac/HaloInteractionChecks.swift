@@ -94,6 +94,7 @@ func runHaloInteractionChecks() {
     testDisabledPiMonitorPublishesEmptySnapshot()
     testActivityMonitorEnableUpdateDoesNotWaitForInFlightPoll()
     testActivityMonitorDisableDuringPollReturnsEmptyImmediately()
+    testDisabledMonitorDropsCommittedSnapshotCallback()
     testSetFocusedAgentIgnoresDisabledAgent()
     testApplyEnabledAgentsForTestingSyncsDetailsToggle()
     testApplySettingsFromWindowRemapsDisabledFocus()
@@ -2522,14 +2523,47 @@ private func testDisabledPiMonitorPublishesEmptySnapshot() {
 
 private final class ActivityPollStall: @unchecked Sendable {
     let entered = DispatchSemaphore(value: 0)
+    private let released = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var shouldBlock = true
 
     func stall() {
+        lock.lock()
+        let block = shouldBlock
+        shouldBlock = false
+        lock.unlock()
         entered.signal()
-        Thread.sleep(forTimeInterval: 0.25)
+        if block {
+            expect(
+                released.wait(timeout: .now() + 2) == .success,
+                "stalled poll should be released"
+            )
+        }
     }
 
     func waitUntilPollStarts() {
         expect(entered.wait(timeout: .now() + 2) == .success, "poll should reach the test barrier")
+    }
+
+    func releaseFirstPoll() {
+        released.signal()
+    }
+}
+
+private final class ActivitySnapshotRecorder<Snapshot: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [Snapshot] = []
+
+    func append(_ snapshot: Snapshot) {
+        lock.lock()
+        recorded.append(snapshot)
+        lock.unlock()
+    }
+
+    func snapshots() -> [Snapshot] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
     }
 }
 
@@ -2557,13 +2591,21 @@ private func testActivityMonitorEnableUpdateDoesNotWaitForInFlightPoll() {
         elapsed < 0.1,
         "enable updatePollingContext must not wait for an in-flight poll (took \(elapsed)s)"
     )
-    Thread.sleep(forTimeInterval: 0.3)
+    stall.releaseFirstPoll()
     monitor.stop()
 }
 
 @MainActor
 private func testActivityMonitorDisableDuringPollReturnsEmptyImmediately() {
-    let cases: [(String, () -> (wait: () -> Void, disable: () -> Void, snapshotEmpty: () -> Bool, stop: () -> Void))] = [
+    typealias MonitorRaceCase = (
+        wait: () -> Void,
+        enable: () -> Void,
+        disable: () -> Void,
+        release: () -> Void,
+        snapshotEmpty: () -> Bool,
+        stop: () -> Void
+    )
+    let cases: [(String, () -> MonitorRaceCase)] = [
         ("Codex", {
             let stall = ActivityPollStall()
             let root = isolatedSessionsRoot()
@@ -2574,14 +2616,15 @@ private func testActivityMonitorDisableDuringPollReturnsEmptyImmediately() {
             monitor.start { _ in }
             return (
                 wait: { stall.waitUntilPollStarts() },
+                enable: {
+                    monitor.updatePollingContext(focusedAgent: .codex, codexRunning: true, enabled: true)
+                },
                 disable: {
                     monitor.updatePollingContext(focusedAgent: .codex, codexRunning: true, enabled: false)
                 },
+                release: { stall.releaseFirstPoll() },
                 snapshotEmpty: { monitor.snapshot() == .empty },
-                stop: {
-                    Thread.sleep(forTimeInterval: 0.3)
-                    monitor.stop()
-                }
+                stop: { monitor.stop() }
             )
         }),
         ("Claude", {
@@ -2596,6 +2639,13 @@ private func testActivityMonitorDisableDuringPollReturnsEmptyImmediately() {
             monitor.start { _ in }
             return (
                 wait: { stall.waitUntilPollStarts() },
+                enable: {
+                    monitor.updatePollingContext(
+                        focusedAgent: .claudeCode,
+                        detailsPanelVisible: false,
+                        enabled: true
+                    )
+                },
                 disable: {
                     monitor.updatePollingContext(
                         focusedAgent: .claudeCode,
@@ -2603,11 +2653,9 @@ private func testActivityMonitorDisableDuringPollReturnsEmptyImmediately() {
                         enabled: false
                     )
                 },
+                release: { stall.releaseFirstPoll() },
                 snapshotEmpty: { monitor.snapshot() == .empty },
-                stop: {
-                    Thread.sleep(forTimeInterval: 0.3)
-                    monitor.stop()
-                }
+                stop: { monitor.stop() }
             )
         }),
         ("Grok", {
@@ -2622,6 +2670,13 @@ private func testActivityMonitorDisableDuringPollReturnsEmptyImmediately() {
             monitor.start { _ in }
             return (
                 wait: { stall.waitUntilPollStarts() },
+                enable: {
+                    monitor.updatePollingContext(
+                        focusedAgent: .grok,
+                        detailsPanelVisible: false,
+                        enabled: true
+                    )
+                },
                 disable: {
                     monitor.updatePollingContext(
                         focusedAgent: .grok,
@@ -2629,11 +2684,9 @@ private func testActivityMonitorDisableDuringPollReturnsEmptyImmediately() {
                         enabled: false
                     )
                 },
+                release: { stall.releaseFirstPoll() },
                 snapshotEmpty: { monitor.snapshot() == .empty },
-                stop: {
-                    Thread.sleep(forTimeInterval: 0.3)
-                    monitor.stop()
-                }
+                stop: { monitor.stop() }
             )
         }),
         ("Pi", {
@@ -2647,6 +2700,13 @@ private func testActivityMonitorDisableDuringPollReturnsEmptyImmediately() {
             monitor.start { _ in }
             return (
                 wait: { stall.waitUntilPollStarts() },
+                enable: {
+                    monitor.updatePollingContext(
+                        focusedAgent: .pi,
+                        detailsPanelVisible: false,
+                        enabled: true
+                    )
+                },
                 disable: {
                     monitor.updatePollingContext(
                         focusedAgent: .pi,
@@ -2654,11 +2714,9 @@ private func testActivityMonitorDisableDuringPollReturnsEmptyImmediately() {
                         enabled: false
                     )
                 },
+                release: { stall.releaseFirstPoll() },
                 snapshotEmpty: { monitor.snapshot() == .empty },
-                stop: {
-                    Thread.sleep(forTimeInterval: 0.3)
-                    monitor.stop()
-                }
+                stop: { monitor.stop() }
             )
         }),
     ]
@@ -2666,6 +2724,9 @@ private func testActivityMonitorDisableDuringPollReturnsEmptyImmediately() {
     for (name, makeCase) in cases {
         let item = makeCase()
         item.wait()
+        // Queue an enable update behind the in-flight poll. A later disable must
+        // make this queued operation stale instead of letting it restore enabled.
+        item.enable()
         let started = Date()
         item.disable()
         let elapsed = Date().timeIntervalSince(started)
@@ -2674,8 +2735,62 @@ private func testActivityMonitorDisableDuringPollReturnsEmptyImmediately() {
             "\(name) disable must not wait for an in-flight poll (took \(elapsed)s)"
         )
         expect(item.snapshotEmpty(), "\(name) snapshot must be empty immediately after disable")
+        item.release()
+        // A fresh enable must always restart polling. Without generation checks,
+        // the stale queued enable leaves enabled=true with timer=nil and this wait
+        // times out.
+        item.enable()
+        item.wait()
         item.stop()
     }
+}
+
+@MainActor
+private func testDisabledMonitorDropsCommittedSnapshotCallback() {
+    let stall = ActivityPollStall()
+    let recorder = ActivitySnapshotRecorder<GrokActivitySnapshot>()
+    let callbackDispatched = DispatchSemaphore(value: 0)
+    let root = isolatedSessionsRoot()
+    let monitor = GrokActivityMonitor(
+        hookMonitor: GrokHookStatusMonitor(
+            statusURL: root.appendingPathComponent("grok-status.jsonl"),
+            sessionsRoot: root
+        ),
+        homeDirectory: root,
+        processPresenceProbe: { true },
+        preDispatchBarrier: stall.stall,
+        callbackDispatch: {
+            $0()
+            callbackDispatched.signal()
+        }
+    )
+    monitor.start { recorder.append($0) }
+    stall.waitUntilPollStarts()
+
+    monitor.updatePollingContext(
+        focusedAgent: .grok,
+        detailsPanelVisible: false,
+        enabled: false
+    )
+    expect(monitor.snapshot(), .empty, "disable should clear the committed snapshot immediately")
+    expect(
+        callbackDispatched.wait(timeout: .now() + 2) == .success,
+        "disable should dispatch its empty snapshot"
+    )
+    stall.releaseFirstPoll()
+
+    // Wait until the previously committed snapshot attempts delivery. The
+    // generation check must reject it while retaining the disable notification.
+    expect(
+        callbackDispatched.wait(timeout: .now() + 2) == .success,
+        "the committed snapshot should reach the injected dispatcher"
+    )
+    expect(
+        recorder.snapshots(),
+        [.empty],
+        "disable must prevent an already-committed nonempty snapshot from being delivered afterward"
+    )
+    monitor.stop()
 }
 
 @MainActor

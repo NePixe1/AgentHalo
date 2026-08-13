@@ -50,8 +50,10 @@ final class PiActivityMonitor: @unchecked Sendable {
     private var currentIntervalMilliseconds = PiActivityMonitor.activeIntervalMilliseconds
     private var latestSnapshot = PiActivitySnapshot.empty
     private var context = PollingContext()
+    private var contextGeneration: UInt64 = 0
     private var onChange: (@Sendable (PiActivitySnapshot) -> Void)?
     private var pendingSnapshot: PiActivitySnapshot?
+    private var pendingSnapshotGeneration: UInt64?
     private var pendingDispatchWorkItem: DispatchWorkItem?
     private var lastDispatchAt = Date.distantPast
     private let pollBarrier: (@Sendable () -> Void)?
@@ -67,13 +69,14 @@ final class PiActivityMonitor: @unchecked Sendable {
     }
 
     func start(onChange: @escaping @Sendable (PiActivitySnapshot) -> Void) {
+        stateLock.lock()
         self.onChange = onChange
+        let generation = contextGeneration
+        stateLock.unlock()
         queue.async { [weak self] in
             guard let self else { return }
+            guard self.isCurrent(generation: generation, enabled: true) else { return }
             guard self.timer == nil else {
-                return
-            }
-            guard self.isEnabled() else {
                 return
             }
             self.scheduleTimer(intervalMilliseconds: Self.activeIntervalMilliseconds)
@@ -81,45 +84,62 @@ final class PiActivityMonitor: @unchecked Sendable {
     }
 
     func stop() {
+        stateLock.lock()
+        contextGeneration &+= 1
+        context.enabled = false
+        onChange = nil
+        stateLock.unlock()
         queue.sync {
             timer?.cancel()
             timer = nil
-            onChange = nil
             pendingDispatchWorkItem?.cancel()
             pendingDispatchWorkItem = nil
             pendingSnapshot = nil
+            pendingSnapshotGeneration = nil
         }
     }
 
     func updatePollingContext(focusedAgent: AgentKind, detailsPanelVisible: Bool, enabled: Bool) {
+        let nextContext = PollingContext(
+            focusedAgent: focusedAgent,
+            detailsPanelVisible: detailsPanelVisible,
+            enabled: enabled
+        )
+        stateLock.lock()
+        let wasEnabled = context.enabled
+        if context != nextContext {
+            context = nextContext
+            contextGeneration &+= 1
+        }
+        let generation = contextGeneration
+        let shouldPublishEmpty = !enabled && (wasEnabled || latestSnapshot != .empty)
         if !enabled {
-            let shouldPublish = applyDisabledSnapshot()
+            latestSnapshot = .empty
+        }
+        stateLock.unlock()
+
+        if !enabled {
             queue.async { [weak self] in
-                self?.cancelTimerAndPending()
+                guard let self,
+                      self.isCurrent(generation: generation, enabled: false) else { return }
+                self.cancelTimerAndPending()
             }
-            if shouldPublish {
-                publishEmptyOnMain()
+            if shouldPublishEmpty {
+                publishOnMain(.empty, generation: generation, enabled: false)
             }
             return
         }
 
         queue.async { [weak self] in
             guard let self else { return }
-            self.stateLock.lock()
-            let wasEnabled = self.context.enabled
-            self.context = PollingContext(
-                focusedAgent: focusedAgent,
-                detailsPanelVisible: detailsPanelVisible,
-                enabled: true
-            )
-            self.stateLock.unlock()
+            guard self.isCurrent(generation: generation, enabled: true) else { return }
             let desired = (focusedAgent == .pi || detailsPanelVisible)
                 ? Self.activeIntervalMilliseconds
                 : Self.idleIntervalMilliseconds
-            if !wasEnabled {
+            if self.timer == nil {
                 self.scheduleTimer(intervalMilliseconds: desired)
                 self.poll()
-            } else if self.timer != nil, desired != self.currentIntervalMilliseconds {
+            } else if desired != self.currentIntervalMilliseconds {
                 self.scheduleTimer(intervalMilliseconds: desired)
             }
         }
@@ -137,20 +157,10 @@ final class PiActivityMonitor: @unchecked Sendable {
         return latestSnapshot
     }
 
-    private func isEnabled() -> Bool {
+    private func isCurrent(generation: UInt64, enabled: Bool) -> Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
-        return context.enabled
-    }
-
-    private func applyDisabledSnapshot() -> Bool {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        let wasEnabled = context.enabled
-        context.enabled = false
-        let shouldPublish = wasEnabled || latestSnapshot != .empty
-        latestSnapshot = .empty
-        return shouldPublish
+        return contextGeneration == generation && context.enabled == enabled
     }
 
     private func cancelTimerAndPending() {
@@ -159,13 +169,26 @@ final class PiActivityMonitor: @unchecked Sendable {
         pendingDispatchWorkItem?.cancel()
         pendingDispatchWorkItem = nil
         pendingSnapshot = nil
+        pendingSnapshotGeneration = nil
         lastDispatchAt = Date()
     }
 
-    private func publishEmptyOnMain() {
-        guard let onChange else { return }
-        DispatchQueue.main.async {
-            onChange(.empty)
+    private func publishOnMain(
+        _ snapshot: PiActivitySnapshot,
+        generation: UInt64,
+        enabled: Bool
+    ) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.stateLock.lock()
+            guard self.contextGeneration == generation,
+                  self.context.enabled == enabled,
+                  let onChange = self.onChange else {
+                self.stateLock.unlock()
+                return
+            }
+            self.stateLock.unlock()
+            onChange(snapshot)
         }
     }
 
@@ -192,9 +215,10 @@ final class PiActivityMonitor: @unchecked Sendable {
             stateLock.unlock()
             return
         }
+        let generation = contextGeneration
         stateLock.unlock()
         pollBarrier?()
-        guard isEnabled() else { return }
+        guard isCurrent(generation: generation, enabled: true) else { return }
         _ = statusMonitor.refresh()
         _ = runtimeMonitor.refresh()
         let liveIds = statusMonitor.liveSessionIds()
@@ -209,7 +233,7 @@ final class PiActivityMonitor: @unchecked Sendable {
             isPresent: !liveIds.isEmpty || runtimeMonitor.isRunning
         )
         stateLock.lock()
-        guard context.enabled else {
+        guard context.enabled, contextGeneration == generation else {
             stateLock.unlock()
             return
         }
@@ -219,7 +243,7 @@ final class PiActivityMonitor: @unchecked Sendable {
         }
         latestSnapshot = nextSnapshot
         stateLock.unlock()
-        scheduleDispatch(of: nextSnapshot, now: Date())
+        scheduleDispatch(of: nextSnapshot, now: Date(), generation: generation)
     }
 
     /// Active/idle hook records are valid only while their originating Pi PID
@@ -246,37 +270,35 @@ final class PiActivityMonitor: @unchecked Sendable {
         return result
     }
 
-    private func scheduleDispatch(of snapshot: PiActivitySnapshot, now: Date) {
+    private func scheduleDispatch(
+        of snapshot: PiActivitySnapshot,
+        now: Date,
+        generation: UInt64
+    ) {
         let elapsed = now.timeIntervalSince(lastDispatchAt)
         if elapsed >= Self.dispatchThrottleSeconds {
             lastDispatchAt = now
             pendingSnapshot = nil
+            pendingSnapshotGeneration = nil
             pendingDispatchWorkItem?.cancel()
             pendingDispatchWorkItem = nil
-            if let onChange {
-                let snapshot = snapshot
-                DispatchQueue.main.async {
-                    onChange(snapshot)
-                }
-            }
+            publishOnMain(snapshot, generation: generation, enabled: true)
             return
         }
         pendingSnapshot = snapshot
+        pendingSnapshotGeneration = generation
         guard pendingDispatchWorkItem == nil else { return }
         let remaining = max(0, Self.dispatchThrottleSeconds - elapsed)
         let deadline = DispatchTime.now() + .milliseconds(Int(remaining * 1000))
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.pendingDispatchWorkItem = nil
-            guard let pending = self.pendingSnapshot else { return }
+            guard let pending = self.pendingSnapshot,
+                  let generation = self.pendingSnapshotGeneration else { return }
             self.pendingSnapshot = nil
+            self.pendingSnapshotGeneration = nil
             self.lastDispatchAt = Date()
-            if let onChange = self.onChange {
-                let snapshot = pending
-                DispatchQueue.main.async {
-                    onChange(snapshot)
-                }
-            }
+            self.publishOnMain(pending, generation: generation, enabled: true)
         }
         pendingDispatchWorkItem = work
         queue.asyncAfter(deadline: deadline, execute: work)
