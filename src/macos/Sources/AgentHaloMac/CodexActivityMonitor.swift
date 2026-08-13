@@ -30,6 +30,7 @@ final class CodexActivityMonitor: @unchecked Sendable {
     private static let dispatchThrottleSeconds: TimeInterval = 0.3
 
     private let queue = DispatchQueue(label: "com.agenthalo.codex-activity", qos: .utility)
+    private let stateLock = NSLock()
     private let sessionMonitor: CodexSessionMonitor
     private let failureReader: CodexFailureReader
     private let realtimeActivityReader: CodexRealtimeActivityReader
@@ -43,25 +44,28 @@ final class CodexActivityMonitor: @unchecked Sendable {
     private var pendingSnapshot: CodexActivitySnapshot?
     private var pendingDispatchWorkItem: DispatchWorkItem?
     private var lastDispatchAt = Date.distantPast
+    private let pollBarrier: (@Sendable () -> Void)?
 
     init(
         sessionMonitor: CodexSessionMonitor = CodexSessionMonitor(),
         failureReader: CodexFailureReader = CodexFailureReader(),
-        realtimeActivityReader: CodexRealtimeActivityReader = CodexRealtimeActivityReader()
+        realtimeActivityReader: CodexRealtimeActivityReader = CodexRealtimeActivityReader(),
+        pollBarrier: (@Sendable () -> Void)? = nil
     ) {
         self.sessionMonitor = sessionMonitor
         self.failureReader = failureReader
         self.realtimeActivityReader = realtimeActivityReader
+        self.pollBarrier = pollBarrier
     }
 
     func start(onChange: @escaping @Sendable (CodexActivitySnapshot) -> Void) {
+        self.onChange = onChange
         queue.async { [weak self] in
             guard let self else { return }
-            self.onChange = onChange
             guard self.timer == nil else {
                 return
             }
-            guard self.context.enabled else {
+            guard self.isEnabled() else {
                 return
             }
             self.scheduleTimer(intervalMilliseconds: Self.activeIntervalMilliseconds)
@@ -80,20 +84,27 @@ final class CodexActivityMonitor: @unchecked Sendable {
     }
 
     func updatePollingContext(focusedAgent: AgentKind, codexRunning: Bool, enabled: Bool) {
-        // Apply disable (timer cancel + empty snapshot) synchronously so callers
-        // can read snapshot() immediately without waiting for the monitor queue.
-        queue.sync { [weak self] in
+        if !enabled {
+            let shouldPublish = applyDisabledSnapshot()
+            queue.async { [weak self] in
+                self?.cancelTimerAndPending()
+            }
+            if shouldPublish {
+                publishEmptyOnMain()
+            }
+            return
+        }
+
+        queue.async { [weak self] in
             guard let self else { return }
+            self.stateLock.lock()
             let wasEnabled = self.context.enabled
             self.context = PollingContext(
                 focusedAgent: focusedAgent,
                 codexRunning: codexRunning,
-                enabled: enabled
+                enabled: true
             )
-            if !enabled {
-                self.publishDisabledEmptySnapshot(wasEnabled: wasEnabled)
-                return
-            }
+            self.stateLock.unlock()
             let desired = codexRunning
                 ? Self.activeIntervalMilliseconds
                 : Self.idleIntervalMilliseconds
@@ -113,21 +124,38 @@ final class CodexActivityMonitor: @unchecked Sendable {
     }
 
     func snapshot() -> CodexActivitySnapshot {
-        queue.sync {
-            latestSnapshot
-        }
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return latestSnapshot
     }
 
-    private func publishDisabledEmptySnapshot(wasEnabled: Bool) {
+    private func isEnabled() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return context.enabled
+    }
+
+    private func applyDisabledSnapshot() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        let wasEnabled = context.enabled
+        context.enabled = false
+        let shouldPublish = wasEnabled || latestSnapshot != .empty
+        latestSnapshot = .empty
+        return shouldPublish
+    }
+
+    private func cancelTimerAndPending() {
         timer?.cancel()
         timer = nil
         pendingDispatchWorkItem?.cancel()
         pendingDispatchWorkItem = nil
         pendingSnapshot = nil
-        let shouldPublish = wasEnabled || latestSnapshot != .empty
-        latestSnapshot = .empty
-        guard shouldPublish, let onChange else { return }
         lastDispatchAt = Date()
+    }
+
+    private func publishEmptyOnMain() {
+        guard let onChange else { return }
         DispatchQueue.main.async {
             onChange(.empty)
         }
@@ -151,11 +179,19 @@ final class CodexActivityMonitor: @unchecked Sendable {
     }
 
     private func poll(forceFailure: Bool, forceRealtime: Bool) {
-        guard context.enabled else { return }
+        stateLock.lock()
+        guard context.enabled else {
+            stateLock.unlock()
+            return
+        }
+        let polling = context
+        var nextSnapshot = latestSnapshot
+        stateLock.unlock()
+        pollBarrier?()
+        guard isEnabled() else { return }
         let now = Date()
         _ = sessionMonitor.refresh(now: now)
 
-        var nextSnapshot = latestSnapshot
         nextSnapshot.sessions = sessionMonitor.snapshots()
 
         if forceFailure || now.timeIntervalSince(lastFailurePollAt) >= 2 {
@@ -163,7 +199,7 @@ final class CodexActivityMonitor: @unchecked Sendable {
             nextSnapshot.recentFailure = failureReader.readRecent(now: now)
         }
 
-        if context.focusedAgent == .codex, context.codexRunning {
+        if polling.focusedAgent == .codex, polling.codexRunning {
             if forceRealtime || now.timeIntervalSince(lastRealtimePollAt) >= 0.3 {
                 lastRealtimePollAt = now
                 nextSnapshot.realtimeActivity = realtimeActivityReader.readActive(now: now)
@@ -172,10 +208,17 @@ final class CodexActivityMonitor: @unchecked Sendable {
             nextSnapshot.realtimeActivity = nil
         }
 
+        stateLock.lock()
+        guard context.enabled else {
+            stateLock.unlock()
+            return
+        }
         guard nextSnapshot != latestSnapshot else {
+            stateLock.unlock()
             return
         }
         latestSnapshot = nextSnapshot
+        stateLock.unlock()
         scheduleDispatch(of: nextSnapshot, now: now)
     }
 

@@ -89,6 +89,11 @@ func runHaloInteractionChecks() {
     testStatusLineConfigurationReconciliationIsWiredToTick()
     testTickPassesEnabledFlagToActivityMonitors()
     testDisabledCodexMonitorPublishesEmptySnapshot()
+    testDisabledClaudeMonitorPublishesEmptySnapshot()
+    testDisabledGrokMonitorPublishesEmptySnapshot()
+    testDisabledPiMonitorPublishesEmptySnapshot()
+    testActivityMonitorEnableUpdateDoesNotWaitForInFlightPoll()
+    testActivityMonitorDisableDuringPollReturnsEmptyImmediately()
     testSetFocusedAgentIgnoresDisabledAgent()
     testApplyEnabledAgentsForTestingSyncsDetailsToggle()
     testApplySettingsFromWindowRemapsDisabledFocus()
@@ -2486,6 +2491,191 @@ private func testDisabledCodexMonitorPublishesEmptySnapshot() {
     let snapshot = monitor.snapshot()
     expect(snapshot, .empty, "disabled Codex monitor must not keep a stale snapshot")
     monitor.stop()
+}
+
+@MainActor
+private func testDisabledClaudeMonitorPublishesEmptySnapshot() {
+    let monitor = ClaudeActivityMonitor()
+    monitor.start { _ in }
+    monitor.updatePollingContext(focusedAgent: .claudeCode, detailsPanelVisible: false, enabled: false)
+    expect(monitor.snapshot(), .empty, "disabled Claude monitor must not keep a stale snapshot")
+    monitor.stop()
+}
+
+@MainActor
+private func testDisabledGrokMonitorPublishesEmptySnapshot() {
+    let monitor = GrokActivityMonitor()
+    monitor.start { _ in }
+    monitor.updatePollingContext(focusedAgent: .grok, detailsPanelVisible: false, enabled: false)
+    expect(monitor.snapshot(), .empty, "disabled Grok monitor must not keep a stale snapshot")
+    monitor.stop()
+}
+
+@MainActor
+private func testDisabledPiMonitorPublishesEmptySnapshot() {
+    let monitor = PiActivityMonitor()
+    monitor.start { _ in }
+    monitor.updatePollingContext(focusedAgent: .pi, detailsPanelVisible: false, enabled: false)
+    expect(monitor.snapshot(), .empty, "disabled Pi monitor must not keep a stale snapshot")
+    monitor.stop()
+}
+
+private final class ActivityPollStall: @unchecked Sendable {
+    let entered = DispatchSemaphore(value: 0)
+
+    func stall() {
+        entered.signal()
+        Thread.sleep(forTimeInterval: 0.25)
+    }
+
+    func waitUntilPollStarts() {
+        expect(entered.wait(timeout: .now() + 2) == .success, "poll should reach the test barrier")
+    }
+}
+
+private func isolatedSessionsRoot() -> URL {
+    FileManager.default.temporaryDirectory.appendingPathComponent(
+        "agent-halo-monitor-\(UUID().uuidString)",
+        isDirectory: true
+    )
+}
+
+@MainActor
+private func testActivityMonitorEnableUpdateDoesNotWaitForInFlightPoll() {
+    let stall = ActivityPollStall()
+    let root = isolatedSessionsRoot()
+    let monitor = CodexActivityMonitor(
+        sessionMonitor: CodexSessionMonitor(sessionsRoot: root),
+        pollBarrier: stall.stall
+    )
+    monitor.start { _ in }
+    stall.waitUntilPollStarts()
+    let started = Date()
+    monitor.updatePollingContext(focusedAgent: .codex, codexRunning: true, enabled: true)
+    let elapsed = Date().timeIntervalSince(started)
+    expect(
+        elapsed < 0.1,
+        "enable updatePollingContext must not wait for an in-flight poll (took \(elapsed)s)"
+    )
+    Thread.sleep(forTimeInterval: 0.3)
+    monitor.stop()
+}
+
+@MainActor
+private func testActivityMonitorDisableDuringPollReturnsEmptyImmediately() {
+    let cases: [(String, () -> (wait: () -> Void, disable: () -> Void, snapshotEmpty: () -> Bool, stop: () -> Void))] = [
+        ("Codex", {
+            let stall = ActivityPollStall()
+            let root = isolatedSessionsRoot()
+            let monitor = CodexActivityMonitor(
+                sessionMonitor: CodexSessionMonitor(sessionsRoot: root),
+                pollBarrier: stall.stall
+            )
+            monitor.start { _ in }
+            return (
+                wait: { stall.waitUntilPollStarts() },
+                disable: {
+                    monitor.updatePollingContext(focusedAgent: .codex, codexRunning: true, enabled: false)
+                },
+                snapshotEmpty: { monitor.snapshot() == .empty },
+                stop: {
+                    Thread.sleep(forTimeInterval: 0.3)
+                    monitor.stop()
+                }
+            )
+        }),
+        ("Claude", {
+            let stall = ActivityPollStall()
+            let root = isolatedSessionsRoot()
+            let log = root.appendingPathComponent("claude-status.jsonl")
+            let monitor = ClaudeActivityMonitor(
+                hookMonitor: ClaudeHookStatusMonitor(statusURL: log),
+                sessionMonitor: ClaudeSessionMonitor(projectsRoot: root),
+                pollBarrier: stall.stall
+            )
+            monitor.start { _ in }
+            return (
+                wait: { stall.waitUntilPollStarts() },
+                disable: {
+                    monitor.updatePollingContext(
+                        focusedAgent: .claudeCode,
+                        detailsPanelVisible: false,
+                        enabled: false
+                    )
+                },
+                snapshotEmpty: { monitor.snapshot() == .empty },
+                stop: {
+                    Thread.sleep(forTimeInterval: 0.3)
+                    monitor.stop()
+                }
+            )
+        }),
+        ("Grok", {
+            let stall = ActivityPollStall()
+            let root = isolatedSessionsRoot()
+            let log = root.appendingPathComponent("grok-status.jsonl")
+            let monitor = GrokActivityMonitor(
+                hookMonitor: GrokHookStatusMonitor(statusURL: log, sessionsRoot: root),
+                homeDirectory: root,
+                pollBarrier: stall.stall
+            )
+            monitor.start { _ in }
+            return (
+                wait: { stall.waitUntilPollStarts() },
+                disable: {
+                    monitor.updatePollingContext(
+                        focusedAgent: .grok,
+                        detailsPanelVisible: false,
+                        enabled: false
+                    )
+                },
+                snapshotEmpty: { monitor.snapshot() == .empty },
+                stop: {
+                    Thread.sleep(forTimeInterval: 0.3)
+                    monitor.stop()
+                }
+            )
+        }),
+        ("Pi", {
+            let stall = ActivityPollStall()
+            let root = isolatedSessionsRoot()
+            let log = root.appendingPathComponent("pi-status.jsonl")
+            let monitor = PiActivityMonitor(
+                statusMonitor: PiStatusMonitor(statusURL: log),
+                pollBarrier: stall.stall
+            )
+            monitor.start { _ in }
+            return (
+                wait: { stall.waitUntilPollStarts() },
+                disable: {
+                    monitor.updatePollingContext(
+                        focusedAgent: .pi,
+                        detailsPanelVisible: false,
+                        enabled: false
+                    )
+                },
+                snapshotEmpty: { monitor.snapshot() == .empty },
+                stop: {
+                    Thread.sleep(forTimeInterval: 0.3)
+                    monitor.stop()
+                }
+            )
+        }),
+    ]
+
+    for (name, makeCase) in cases {
+        let item = makeCase()
+        item.wait()
+        let started = Date()
+        item.disable()
+        let elapsed = Date().timeIntervalSince(started)
+        expect(
+            elapsed < 0.1,
+            "\(name) disable must not wait for an in-flight poll (took \(elapsed)s)"
+        )
+        expect(item.snapshotEmpty(), "\(name) snapshot must be empty immediately after disable")
+        item.stop()
+    }
 }
 
 @MainActor

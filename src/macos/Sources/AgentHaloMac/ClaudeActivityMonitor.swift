@@ -49,6 +49,7 @@ final class ClaudeActivityMonitor: @unchecked Sendable {
     private static let liveSessionsPollIntervalSeconds: TimeInterval = 2
 
     private let queue = DispatchQueue(label: "com.agenthalo.claude-activity", qos: .utility)
+    private let stateLock = NSLock()
     private let hookMonitor: ClaudeHookStatusMonitor
     private let sessionMonitor: ClaudeSessionMonitor
     private var timer: DispatchSourceTimer?
@@ -61,23 +62,26 @@ final class ClaudeActivityMonitor: @unchecked Sendable {
     private var lastDispatchAt = Date.distantPast
     private var cachedLiveSessions: [ClaudeLiveSessionSnapshot] = []
     private var lastLiveSessionsPollAt = Date.distantPast
+    private let pollBarrier: (@Sendable () -> Void)?
 
     init(
         hookMonitor: ClaudeHookStatusMonitor = ClaudeHookStatusMonitor(),
-        sessionMonitor: ClaudeSessionMonitor = ClaudeSessionMonitor()
+        sessionMonitor: ClaudeSessionMonitor = ClaudeSessionMonitor(),
+        pollBarrier: (@Sendable () -> Void)? = nil
     ) {
         self.hookMonitor = hookMonitor
         self.sessionMonitor = sessionMonitor
+        self.pollBarrier = pollBarrier
     }
 
     func start(onChange: @escaping @Sendable (ClaudeActivitySnapshot) -> Void) {
+        self.onChange = onChange
         queue.async { [weak self] in
             guard let self else { return }
-            self.onChange = onChange
             guard self.timer == nil else {
                 return
             }
-            guard self.context.enabled else {
+            guard self.isEnabled() else {
                 return
             }
             self.scheduleTimer(intervalMilliseconds: Self.activeIntervalMilliseconds)
@@ -96,20 +100,27 @@ final class ClaudeActivityMonitor: @unchecked Sendable {
     }
 
     func updatePollingContext(focusedAgent: AgentKind, detailsPanelVisible: Bool, enabled: Bool) {
-        // Apply disable (timer cancel + empty snapshot) synchronously so callers
-        // can read snapshot() immediately without waiting for the monitor queue.
-        queue.sync { [weak self] in
+        if !enabled {
+            let shouldPublish = applyDisabledSnapshot()
+            queue.async { [weak self] in
+                self?.cancelTimerAndPending()
+            }
+            if shouldPublish {
+                publishEmptyOnMain()
+            }
+            return
+        }
+
+        queue.async { [weak self] in
             guard let self else { return }
+            self.stateLock.lock()
             let wasEnabled = self.context.enabled
             self.context = PollingContext(
                 focusedAgent: focusedAgent,
                 detailsPanelVisible: detailsPanelVisible,
-                enabled: enabled
+                enabled: true
             )
-            if !enabled {
-                self.publishDisabledEmptySnapshot(wasEnabled: wasEnabled)
-                return
-            }
+            self.stateLock.unlock()
             let desired = (focusedAgent == .claudeCode || detailsPanelVisible)
                 ? Self.activeIntervalMilliseconds
                 : Self.idleIntervalMilliseconds
@@ -129,21 +140,38 @@ final class ClaudeActivityMonitor: @unchecked Sendable {
     }
 
     func snapshot() -> ClaudeActivitySnapshot {
-        queue.sync {
-            latestSnapshot
-        }
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return latestSnapshot
     }
 
-    private func publishDisabledEmptySnapshot(wasEnabled: Bool) {
+    private func isEnabled() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return context.enabled
+    }
+
+    private func applyDisabledSnapshot() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        let wasEnabled = context.enabled
+        context.enabled = false
+        let shouldPublish = wasEnabled || latestSnapshot != .empty
+        latestSnapshot = .empty
+        return shouldPublish
+    }
+
+    private func cancelTimerAndPending() {
         timer?.cancel()
         timer = nil
         pendingDispatchWorkItem?.cancel()
         pendingDispatchWorkItem = nil
         pendingSnapshot = nil
-        let shouldPublish = wasEnabled || latestSnapshot != .empty
-        latestSnapshot = .empty
-        guard shouldPublish, let onChange else { return }
         lastDispatchAt = Date()
+    }
+
+    private func publishEmptyOnMain() {
+        guard let onChange else { return }
         DispatchQueue.main.async {
             onChange(.empty)
         }
@@ -167,7 +195,14 @@ final class ClaudeActivityMonitor: @unchecked Sendable {
     }
 
     private func poll(forceLiveSessions: Bool = false) {
-        guard context.enabled else { return }
+        stateLock.lock()
+        guard context.enabled else {
+            stateLock.unlock()
+            return
+        }
+        stateLock.unlock()
+        pollBarrier?()
+        guard isEnabled() else { return }
         let now = Date()
         let hookChanged = hookMonitor.refresh(now: now)
         let transcriptChanged = sessionMonitor.refresh(now: now)
@@ -216,10 +251,17 @@ final class ClaudeActivityMonitor: @unchecked Sendable {
             liveSessions: cachedLiveSessions,
             preferredStandbySession: preferred
         )
+        stateLock.lock()
+        guard context.enabled else {
+            stateLock.unlock()
+            return
+        }
         guard nextSnapshot != latestSnapshot else {
+            stateLock.unlock()
             return
         }
         latestSnapshot = nextSnapshot
+        stateLock.unlock()
         scheduleDispatch(of: nextSnapshot, now: now)
     }
 

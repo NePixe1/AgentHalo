@@ -37,6 +37,7 @@ final class GrokActivityMonitor: @unchecked Sendable {
     private static let presencePollIntervalSeconds: TimeInterval = 2
 
     private let queue = DispatchQueue(label: "com.agenthalo.grok-activity", qos: .utility)
+    private let stateLock = NSLock()
     private let hookMonitor: GrokHookStatusMonitor
     private let homeDirectory: URL
     private let fileManager: FileManager
@@ -55,27 +56,30 @@ final class GrokActivityMonitor: @unchecked Sendable {
     private var cachedLiveSessionIds: Set<String> = []
     private var cachedHasUnscopedPresence = false
     private var lastPresencePollAt = Date.distantPast
+    private let pollBarrier: (@Sendable () -> Void)?
 
     init(
         hookMonitor: GrokHookStatusMonitor = GrokHookStatusMonitor(),
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         fileManager: FileManager = .default,
-        processPresenceProbe: @escaping () -> Bool = { false }
+        processPresenceProbe: @escaping () -> Bool = { false },
+        pollBarrier: (@Sendable () -> Void)? = nil
     ) {
         self.hookMonitor = hookMonitor
         self.homeDirectory = homeDirectory
         self.fileManager = fileManager
         self.processPresenceProbe = processPresenceProbe
+        self.pollBarrier = pollBarrier
     }
 
     func start(onChange: @escaping @Sendable (GrokActivitySnapshot) -> Void) {
+        self.onChange = onChange
         queue.async { [weak self] in
             guard let self else { return }
-            self.onChange = onChange
             guard self.timer == nil else {
                 return
             }
-            guard self.context.enabled else {
+            guard self.isEnabled() else {
                 return
             }
             self.scheduleTimer(intervalMilliseconds: Self.activeIntervalMilliseconds)
@@ -94,20 +98,27 @@ final class GrokActivityMonitor: @unchecked Sendable {
     }
 
     func updatePollingContext(focusedAgent: AgentKind, detailsPanelVisible: Bool, enabled: Bool) {
-        // Apply disable (timer cancel + empty snapshot) synchronously so callers
-        // can read snapshot() immediately without waiting for the monitor queue.
-        queue.sync { [weak self] in
+        if !enabled {
+            let shouldPublish = applyDisabledSnapshot()
+            queue.async { [weak self] in
+                self?.cancelTimerAndPending()
+            }
+            if shouldPublish {
+                publishEmptyOnMain()
+            }
+            return
+        }
+
+        queue.async { [weak self] in
             guard let self else { return }
+            self.stateLock.lock()
             let wasEnabled = self.context.enabled
             self.context = PollingContext(
                 focusedAgent: focusedAgent,
                 detailsPanelVisible: detailsPanelVisible,
-                enabled: enabled
+                enabled: true
             )
-            if !enabled {
-                self.publishDisabledEmptySnapshot(wasEnabled: wasEnabled)
-                return
-            }
+            self.stateLock.unlock()
             let desired = (focusedAgent == .grok || detailsPanelVisible)
                 ? Self.activeIntervalMilliseconds
                 : Self.idleIntervalMilliseconds
@@ -127,21 +138,38 @@ final class GrokActivityMonitor: @unchecked Sendable {
     }
 
     func snapshot() -> GrokActivitySnapshot {
-        queue.sync {
-            latestSnapshot
-        }
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return latestSnapshot
     }
 
-    private func publishDisabledEmptySnapshot(wasEnabled: Bool) {
+    private func isEnabled() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return context.enabled
+    }
+
+    private func applyDisabledSnapshot() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        let wasEnabled = context.enabled
+        context.enabled = false
+        let shouldPublish = wasEnabled || latestSnapshot != .empty
+        latestSnapshot = .empty
+        return shouldPublish
+    }
+
+    private func cancelTimerAndPending() {
         timer?.cancel()
         timer = nil
         pendingDispatchWorkItem?.cancel()
         pendingDispatchWorkItem = nil
         pendingSnapshot = nil
-        let shouldPublish = wasEnabled || latestSnapshot != .empty
-        latestSnapshot = .empty
-        guard shouldPublish, let onChange else { return }
         lastDispatchAt = Date()
+    }
+
+    private func publishEmptyOnMain() {
+        guard let onChange else { return }
         DispatchQueue.main.async {
             onChange(.empty)
         }
@@ -193,7 +221,14 @@ final class GrokActivityMonitor: @unchecked Sendable {
     }
 
     private func poll(forcePresence: Bool = false) {
-        guard context.enabled else { return }
+        stateLock.lock()
+        guard context.enabled else {
+            stateLock.unlock()
+            return
+        }
+        stateLock.unlock()
+        pollBarrier?()
+        guard isEnabled() else { return }
         let now = Date()
         let hookChanged = hookMonitor.refresh(now: now)
         let sessions = hookMonitor.snapshots()
@@ -219,10 +254,17 @@ final class GrokActivityMonitor: @unchecked Sendable {
             sessions: verifiedSessions,
             isPresent: cachedIsPresent
         )
+        stateLock.lock()
+        guard context.enabled else {
+            stateLock.unlock()
+            return
+        }
         guard nextSnapshot != latestSnapshot else {
+            stateLock.unlock()
             return
         }
         latestSnapshot = nextSnapshot
+        stateLock.unlock()
         scheduleDispatch(of: nextSnapshot, now: now)
     }
 
