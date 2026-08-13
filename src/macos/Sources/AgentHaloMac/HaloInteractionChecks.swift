@@ -2809,12 +2809,17 @@ private func testApplyEnabledAgentsForTestingSyncsDetailsToggle() {
 
     expect(
         panel.enabledAgentsForTesting,
-        AgentKind.allCases,
-        "default details toggle should list all agents"
+        HaloSettings.defaultEnabledAgents,
+        "default details toggle should list the frozen default-on agents"
+    )
+    expect(
+        AgentToggleView.slotWidth,
+        36,
+        "agent toggle slot width stays 36pt when more AgentKinds are added"
     )
     expect(
         panel.agentToggleWidthForTesting,
-        AgentToggleView.slotWidth * CGFloat(AgentKind.allCases.count),
+        AgentToggleView.slotWidth * CGFloat(HaloSettings.defaultEnabledAgents.count),
         "default details toggle should be 144pt (four 36pt slots)"
     )
 
@@ -3794,9 +3799,17 @@ private func testAgentToggleUsesSharedSVGAssets() {
         "details panel agent toggle should size by enabled agent count via setEnabledAgents/slotWidth"
     )
     let fullToggle = AgentToggleView(frame: .zero)
-    fullToggle.setEnabledAgents(AgentKind.allCases, focused: .codex)
+    fullToggle.setEnabledAgents(HaloSettings.defaultEnabledAgents, focused: .codex)
     fullToggle.layoutSubtreeIfNeeded()
-    expect(fullToggle.bounds.width, 144, "all enabled agents keep the current 144pt control")
+    expect(fullToggle.bounds.width, 144, "four default-on agents keep the current 144pt control")
+    expect(
+        detailsSource?.contains("static let slotWidth: CGFloat = 36") == true,
+        "agent toggle slot width is a fixed 36pt, not 144 / allCases.count"
+    )
+    expect(
+        detailsSource?.contains("144 / CGFloat(AgentKind.allCases.count)") == false,
+        "adding a new AgentKind must not shrink every enabled slot"
+    )
     expect(
         detailsSource?.contains("assetName: \"pi\"") == true
             || detailsSource?.contains("assetName: \"pi\"") == true,

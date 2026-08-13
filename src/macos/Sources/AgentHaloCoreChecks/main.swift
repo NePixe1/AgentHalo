@@ -703,15 +703,55 @@ func testSettingsDefaultsEnabledAgentsAndMenuBarIconWhenMissing() throws {
     """.data(using: .utf8)!.write(to: url)
 
     let loaded = SettingsStore(settingsURL: url).load()
-    expect(loaded.enabledAgents, AgentKind.allCases, "legacy settings enable every AgentKind")
+    expect(loaded.enabledAgents, HaloSettings.defaultEnabledAgents, "legacy settings enable the frozen default set")
     expect(loaded.showMenuBarIcon, true, "legacy settings show the menu bar icon")
     expect(loaded.focusedAgent, .claudeCode, "legacy focused agent is preserved when still enabled")
 }
 
-func testSettingsNormalizesEmptyEnabledAgentsToAllCases() {
+func testSettingsDefaultEnabledAgentsIsFrozenAllowlist() throws {
+    expect(
+        HaloSettings.defaultEnabledAgents,
+        [.codex, .claudeCode, .grok, .pi],
+        "current four agents stay default-on"
+    )
+    expect(
+        HaloSettings().enabledAgents,
+        HaloSettings.defaultEnabledAgents,
+        "new settings use the frozen default-on list"
+    )
+    expect(
+        Set(HaloSettings.defaultEnabledAgents).isSubset(of: Set(AgentKind.allCases)),
+        true,
+        "default-on agents must be known AgentKinds"
+    )
+
+    let settingsURL = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("AgentHaloCore/HaloSettings.swift")
+    let source = try String(contentsOf: settingsURL, encoding: .utf8)
+    expect(
+        source.contains("enabledAgents: [AgentKind] = AgentKind.allCases") == false,
+        "init must not default enabledAgents to allCases (new kinds would auto-enable)"
+    )
+    expect(
+        source.contains("?? AgentKind.allCases") == false,
+        "decode must not fill missing enabledAgents from allCases"
+    )
+    expect(
+        source.contains("ordered = AgentKind.allCases") == false,
+        "empty enabledAgents must not fall back to allCases"
+    )
+}
+
+func testSettingsNormalizesEmptyEnabledAgentsToDefaultEnabledAgents() {
     var settings = HaloSettings(focusedAgent: .codex, enabledAgents: [])
     settings = settings.normalized()
-    expect(settings.enabledAgents, AgentKind.allCases, "empty enabledAgents falls back to allCases")
+    expect(
+        settings.enabledAgents,
+        HaloSettings.defaultEnabledAgents,
+        "empty enabledAgents falls back to the frozen default-on list"
+    )
 }
 
 func testSettingsNormalizesDuplicateAndUnknownOrder() {
@@ -725,6 +765,30 @@ func testSettingsNormalizesDuplicateAndUnknownOrder() {
         "enabledAgents is unique and ordered by allCases"
     )
     expect(settings.focusedAgent, .grok, "focused grok stays when still enabled")
+}
+
+func testSettingsLoadFiltersUnknownEnabledAgentsWithoutResettingOtherFields() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-enabled-unknown-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let url = root.appendingPathComponent("settings.json")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    try """
+    {
+      "enabledAgents" : ["futureAgent", "pi", "codex", "futureAgent"],
+      "focusedAgent" : "pi",
+      "haloSize" : 125,
+      "language" : "en",
+      "showMenuBarIcon" : false
+    }
+    """.data(using: .utf8)!.write(to: url)
+
+    let loaded = SettingsStore(settingsURL: url).load()
+    expect(loaded.enabledAgents, [.codex, .pi], "unknown agents are filtered while known agents are retained")
+    expect(loaded.focusedAgent, .pi, "valid focus survives an unknown enabled agent")
+    expect(loaded.haloSize, 125, "unknown enabled agent does not reset halo size")
+    expect(loaded.language, "en", "unknown enabled agent does not reset language")
+    expect(loaded.showMenuBarIcon, false, "unknown enabled agent does not reset menu bar preference")
 }
 
 func testSettingsMovesFocusWhenDisabled() {
@@ -4702,8 +4766,10 @@ testGrokFocusedAgentPersistence()
 testPiFocusedAgentPersistence()
 do {
     try testSettingsDefaultsEnabledAgentsAndMenuBarIconWhenMissing()
-    testSettingsNormalizesEmptyEnabledAgentsToAllCases()
+    try testSettingsDefaultEnabledAgentsIsFrozenAllowlist()
+    testSettingsNormalizesEmptyEnabledAgentsToDefaultEnabledAgents()
     testSettingsNormalizesDuplicateAndUnknownOrder()
+    try testSettingsLoadFiltersUnknownEnabledAgentsWithoutResettingOtherFields()
     testSettingsMovesFocusWhenDisabled()
     testSettingsCannotDisableTheLastAgent()
     testSettingsPersistsEnabledAgentsAndMenuBarIcon()

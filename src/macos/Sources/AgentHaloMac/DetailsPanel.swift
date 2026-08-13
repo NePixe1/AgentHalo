@@ -564,7 +564,7 @@ class DetailsPanel: NSPanel {
         contextPill.addSubview(contextValue)
 
         let toggleWidth = agentToggle.widthAnchor.constraint(
-            equalToConstant: AgentToggleView.slotWidth * CGFloat(AgentKind.allCases.count)
+            equalToConstant: AgentToggleView.slotWidth * CGFloat(HaloSettings.defaultEnabledAgents.count)
         )
         agentToggleWidthConstraint = toggleWidth
 
@@ -1204,8 +1204,9 @@ final class RoundedMeterView: NSView {
 
 @MainActor
 final class AgentToggleView: NSView {
-    /// Fixed slot width so full `AgentKind.allCases` still occupies the historical 144pt control.
-    static let slotWidth: CGFloat = 144 / CGFloat(AgentKind.allCases.count)
+    /// Historical 144pt / 4 default-on agents. Do not divide by `allCases.count`
+    /// or adding a fifth kind shrinks every existing slot.
+    static let slotWidth: CGFloat = 36
 
     var onAgentSelected: ((AgentKind) -> Void)?
 
@@ -1215,7 +1216,7 @@ final class AgentToggleView: NSView {
         }
     }
 
-    private var enabledAgents: [AgentKind] = AgentKind.allCases
+    private var enabledAgents: [AgentKind] = HaloSettings.defaultEnabledAgents
     var enabledAgentsForTesting: [AgentKind] { enabledAgents }
     var toggleWidthForTesting: CGFloat { widthConstraint.constant }
 
@@ -1272,7 +1273,7 @@ final class AgentToggleView: NSView {
         bgView.addSubview(piIcon)
 
         widthConstraint = widthAnchor.constraint(
-            equalToConstant: Self.slotWidth * CGFloat(AgentKind.allCases.count)
+            equalToConstant: Self.slotWidth * CGFloat(HaloSettings.defaultEnabledAgents.count)
         )
 
         NSLayoutConstraint.activate([
@@ -1283,7 +1284,7 @@ final class AgentToggleView: NSView {
             bgView.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
 
-        applyEnabledAgents(AgentKind.allCases, focused: .codex, animated: false)
+        applyEnabledAgents(HaloSettings.defaultEnabledAgents, focused: .codex, animated: false)
     }
 
     func setEnabledAgents(_ agents: [AgentKind], focused: AgentKind) {
@@ -1302,7 +1303,7 @@ final class AgentToggleView: NSView {
     private func applyEnabledAgents(_ agents: [AgentKind], focused: AgentKind, animated: Bool) {
         var visible = AgentKind.allCases.filter { agents.contains($0) }
         if visible.isEmpty {
-            visible = AgentKind.allCases
+            visible = HaloSettings.defaultEnabledAgents
         }
         enabledAgents = visible
 

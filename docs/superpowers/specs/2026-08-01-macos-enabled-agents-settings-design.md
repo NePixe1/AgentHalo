@@ -22,7 +22,7 @@
    - 始终置顶、显示菜单栏图标、开机自动启动（通用）
    - 重置光环位置（恢复动作按钮）
    - 关于 / 版本号（页脚）
-4. 默认行为与现网 macOS 一致：`AgentKind.allCases` 全部启用、切换条总宽仍为 144pt、菜单栏图标显示、置顶默认不变，升级无感。
+4. 默认行为与现网 macOS 一致：当前四个 Agent（Codex / Claude Code / Grok / Pi）全部启用、切换条总宽仍为 144pt、菜单栏图标显示、置顶默认不变，升级无感。**以后新加的 `AgentKind` 默认关闭**，必须在设置里勾选。
 
 ## 非目标
 
@@ -42,7 +42,7 @@
 2. **语义**：勾选 Agent = **启用 + 显示**，不是「仅控制 UI 可见性」。
 3. **Agent 全集**：始终以 `AgentKind.allCases` 为准（当前：`codex`、`claudeCode`、`grok`、`pi`）。设置胶囊、切换条、监控、hooks 过滤都按此枚举，不写死「三个」。
 4. **持久化新字段**：`enabledAgents: [AgentKind]` + `showMenuBarIcon: Bool`；`alwaysOnTop` / `haloSize` / `language` / 位置字段沿用现有路径；开机启动仍走 `StartupManager`。
-5. **默认**：`enabledAgents = AgentKind.allCases`；`showMenuBarIcon = true`。
+5. **默认**：`enabledAgents = HaloSettings.defaultEnabledAgents`（冻结为当前四个；**不是** `allCases`）；`showMenuBarIcon = true`。新 `AgentKind` 默认不进入该列表。
 6. **至少 1 个 Agent**：不能清空；关掉当前 `focusedAgent` 时自动切到 `enabledAgents.first`。
 7. **显示顺序**：v1 写入时始终按 `AgentKind.allCases` 过滤排序，不记录用户勾选先后。
 8. **设置即时生效**，无「保存 / 取消」按钮。
@@ -53,7 +53,7 @@
 13. **关于**：页脚只读版本字符串，不链到外部（v1 无需检查更新）。
 14. **设置窗口**：可成为 key 的 `NSPanel`，层级高于光环；**不**为开设置改 `NSApp` 的 `.accessory` activation policy。
 15. **禁用监控**：立刻停采、清空该 agent 快照；未启用期间不 repair / 写入该 agent 的用户配置（含启动 `bootstrap`）。
-16. **切换条宽度**：`slotWidth × enabledCount`，其中 `slotWidth = 当前全量固定宽度 / allCases.count`（现网 144 / 4 = 36）。全开时总宽保持 144，升级观感不变。
+16. **切换条宽度**：`slotWidth × enabledCount`，其中 `slotWidth` **锁死 36pt**（现网 144 / 4）。不要写成 `144 / allCases.count`，否则加第 5 个会把已启用槽位全部挤窄。当前四个默认全开时总宽仍是 144。
 
 ## 背景与问题
 
@@ -88,7 +88,7 @@ public var showMenuBarIcon: Bool
 
 | 字段 | 含义 | 默认 | 缺失字段迁移 |
 |------|------|------|----------------|
-| `enabledAgents` | 已启用 Agent 的有序列表（显示顺序） | `AgentKind.allCases` | 同默认 |
+| `enabledAgents` | 已启用 Agent 的有序列表（显示顺序） | `HaloSettings.defaultEnabledAgents`（当前四开） | 同默认；**不**把后来新加的 kind 自动并入 |
 | `showMenuBarIcon` | 是否显示菜单栏 `NSStatusItem` | `true` | 同默认 |
 
 现有字段继续使用、**不改 schema 语义**：`focusedAgent`、`haloSize`、`language`、`alwaysOnTop`、`paused`、位置相关字段等。
@@ -100,7 +100,7 @@ public var showMenuBarIcon: Bool
 加载或任意写路径之后，设置必须满足：
 
 1. `enabledAgents` 去重，仅保留合法 `AgentKind`，顺序规范为 `allCases.filter { enabledSet.contains($0) }`。
-2. 若规范化后为空（含空数组、全非法）→ 回退 `allCases`。
+2. 若规范化后为空（含空数组、全非法）→ 回退 `HaloSettings.defaultEnabledAgents`。
 3. 若 `focusedAgent ∉ enabledAgents` → `focusedAgent = enabledAgents.first!`。
 4. `showMenuBarIcon` 为 Bool，缺省 `true`。
 
@@ -244,10 +244,9 @@ Settings UI 变更
 **宽度公式**（保持现网全开观感）：
 
 ```text
-fullToggleWidth = 144          // 现 DetailsPanel 固定宽度
-slotWidth       = fullToggleWidth / CGFloat(AgentKind.allCases.count)
-                // 当前 144 / 4 = 36
+slotWidth       = 36           // 锁死；不要写成 144 / allCases.count
 toggleWidth     = slotWidth × CGFloat(enabledAgents.count)
+                // 当前四个默认全开 → 144
 ```
 
 `DetailsPanel` 去掉写死的「永远 144」作为唯一宽度；改为随 `setEnabledAgents` 更新。全开时结果仍是 144。
@@ -365,9 +364,9 @@ v1 **不卸载**已写入的 `~/.claude` / `~/.grok` / `~/.pi` 文件。默认�
 
 ### Core（`AgentHaloCoreChecks`）
 
-- 缺省 / 旧 JSON 无 `enabledAgents` → `allCases`（含 `pi`）  
+- 缺省 / 旧 JSON 无 `enabledAgents` → `defaultEnabledAgents`（当前四开；以后新 kind 不自动加入）
 - 缺省 / 旧 JSON 无 `showMenuBarIcon` → `true`  
-- 空数组、非法值 → 回退 `allCases`  
+- 空数组、非法值 → 回退 `defaultEnabledAgents`
 - 去重 + `allCases` 稳定顺序（Codex → Claude → Grok → Pi）  
 - `focusedAgent ∉ enabledAgents` → 改为 `first`  
 - `setAgent(enabled: false)` 不能关掉最后一个  
@@ -376,7 +375,7 @@ v1 **不卸载**已写入的 `~/.claude` / `~/.grok` / `~/.pi` 文件。默认�
 
 ### App / UI（现有 testing hooks 风格）
 
-- `AgentToggleView`：1…`allCases.count` 个 enabled 时宽度为 `36 × n`（公式：`144 / allCases.count × n`），点击按槽位映射  
+- `AgentToggleView`：1…n 个 enabled 时宽度为 `36 × n`（槽宽锁死 36pt），点击按槽位映射
 - 设置胶囊列出全部 `allCases`（含 Pi）；唯一已选项不可取消  
 - 禁用 agent（含 Pi）：对应 monitor 快照立刻 empty，且不再 refresh  
 - 再启用：触发 refresh  
@@ -395,7 +394,7 @@ v1 **不卸载**已写入的 `~/.claude` / `~/.grok` / `~/.pi` 文件。默认�
 
 1. 只勾 Codex → 切换条宽约 36、仅 Codex；Claude / Grok / Pi 无轮询、启动不 repair 其用户配置  
 2. 再勾 Claude 与 Pi → 对应项出现且可切换  
-3. 默认 / 升级：四 Agent 全开，切换条总宽仍 144  
+3. 默认 / 升级：当前四 Agent 全开，切换条总宽仍 144；第 5 个及以后默认关
 4. 关菜单栏图标 → 托盘消失；设置窗仍可打开开关；或右键再开设置  
 5. 设置窗不被光环挡住；Esc / ⌘W / 红点可关  
 6. 改尺寸 / 语言 / 开机启动 / 置顶，效果与旧菜单一致；语言切换时开着的设置窗文案更新  
@@ -418,7 +417,7 @@ v1 **不卸载**已写入的 `~/.claude` / `~/.grok` / `~/.pi` 文件。默认�
 | 风险 | 缓解 |
 |------|------|
 | spec 再与 `allCases` 脱节 | 正文不写死「三个」；胶囊与宽度用 `allCases` |
-| 全开变宽导致升级观感变化 | `slotWidth = 144 / allCases.count` |
+| 全开变宽导致升级观感变化 | 当前四开仍 144；槽宽锁 36pt，不随 allCases 缩小 |
 | 关掉菜单栏后找不到设置 | 右键保留「设置…」；默认显示图标 |
 | 设置窗被光环挡住或无法 key | level = halo + 1；非 nonactivating；`becomesKeyOnlyIfNeeded = false` |
 | 禁用后仍 idle 轮询 / 残留快照 | 停 timer + 立刻 empty + 再启用 refresh |

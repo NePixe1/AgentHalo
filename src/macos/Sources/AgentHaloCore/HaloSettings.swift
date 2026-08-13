@@ -5,6 +5,12 @@ public struct HaloSettings: Codable, Equatable, Sendable {
     public static let defaultHaloSize = 112.0
     public static let minimumHaloSize = 72.0
     public static let maximumHaloSize = 180.0
+    /// Agents enabled on a fresh install or missing `enabledAgents` key.
+    /// Frozen on purpose: new `AgentKind` cases stay opt-in so the details
+    /// toggle does not grow (or shrink) just because the catalog grew.
+    public static let defaultEnabledAgents: [AgentKind] = [
+        .codex, .claudeCode, .grok, .pi
+    ]
 
     public var hasPosition: Bool
     public var left: Double
@@ -56,7 +62,7 @@ public struct HaloSettings: Codable, Equatable, Sendable {
         alwaysOnTopBehaviorVersion: Int = HaloSettings.currentAlwaysOnTopBehaviorVersion,
         paused: Bool = false,
         focusedAgent: AgentKind = .codex,
-        enabledAgents: [AgentKind] = AgentKind.allCases,
+        enabledAgents: [AgentKind] = HaloSettings.defaultEnabledAgents,
         showMenuBarIcon: Bool = true,
         installedAt: Date = Date(),
         acknowledged: [String: Date] = [:],
@@ -100,8 +106,10 @@ public struct HaloSettings: Codable, Equatable, Sendable {
         ) ?? 0
         self.paused = try container.decodeIfPresent(Bool.self, forKey: .paused) ?? false
         self.focusedAgent = try container.decodeIfPresent(AgentKind.self, forKey: .focusedAgent) ?? .codex
-        self.enabledAgents = try container.decodeIfPresent([AgentKind].self, forKey: .enabledAgents)
-            ?? AgentKind.allCases
+        let rawEnabledAgents = try container.decodeIfPresent([String].self, forKey: .enabledAgents)
+        self.enabledAgents = rawEnabledAgents?
+            .compactMap(AgentKind.init(rawValue:))
+            ?? Self.defaultEnabledAgents
         self.showMenuBarIcon = try container.decodeIfPresent(Bool.self, forKey: .showMenuBarIcon) ?? true
         self.installedAt = try container.decodeIfPresent(Date.self, forKey: .installedAt) ?? Date()
         self.acknowledged = try container.decodeIfPresent([String: Date].self, forKey: .acknowledged) ?? [:]
@@ -135,7 +143,7 @@ public struct HaloSettings: Codable, Equatable, Sendable {
         for agent in AgentKind.allCases where next.enabledAgents.contains(agent) && seen.insert(agent).inserted {
             ordered.append(agent)
         }
-        if ordered.isEmpty { ordered = AgentKind.allCases }
+        if ordered.isEmpty { ordered = Self.defaultEnabledAgents }
         next.enabledAgents = ordered
         if !ordered.contains(next.focusedAgent), let first = ordered.first {
             next.focusedAgent = first

@@ -16,7 +16,7 @@ public enum AgentHaloRuntimeBootstrap {
         bundledHookBinary: URL? = nil,
         bundledStatuslineProxy: URL? = nil,
         fileManager: FileManager = .default,
-        enabledAgents: [AgentKind] = AgentKind.allCases
+        enabledAgents: [AgentKind] = HaloSettings.defaultEnabledAgents
     ) {
         let paths = AgentHaloPaths(homeDirectory: homeDirectory)
         AgentHaloLayoutMigrator.migrateIfNeeded(paths: paths, fileManager: fileManager)
