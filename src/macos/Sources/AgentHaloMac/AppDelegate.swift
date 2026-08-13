@@ -1,10 +1,6 @@
 import AppKit
 import AgentHaloCore
 
-private let haloSizeMenuWidth: CGFloat = 252
-private let haloSizeMenuHeight: CGFloat = 44
-private let haloSizeMenuTextInset: CGFloat = 21
-
 struct LiveErrorPresentationUpdate: Equatable {
     var presentation: ErrorPresentation
     var acknowledgeErrorAt: Date?
@@ -132,7 +128,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let statusLineReconciliationInterval: TimeInterval = 2
     private var selectedPreview = PreviewPayload.live
     private var aggregate: AggregateSnapshot
-    private var statusItem: NSStatusItem!
+    private var statusItem: NSStatusItem?
     private var panel: HaloPanel!
     private var haloView: HaloView!
     private var timer: Timer?
@@ -169,6 +165,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let startupCheckInterval: TimeInterval = 2
     private var currentLanguage: String = "zh"
     private var languageObserver: NSObjectProtocol?
+    private var settingsWindowController: SettingsWindowController?
     private var currentHaloSize: CGFloat {
         CGFloat(settings.haloSize)
     }
@@ -198,9 +195,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // Single upgrade path: migrate data → stage all hook binaries (no gap)
         // → rewrite configs only when unhealthy. See AgentHaloRuntimeBootstrap.
-        AgentHaloRuntimeBootstrap.bootstrap()
+        AgentHaloRuntimeBootstrap.bootstrap(enabledAgents: settings.enabledAgents)
         NSApp.setActivationPolicy(.accessory)
-        createStatusItem()
+        applyMenuBarIconVisibility()
         createHaloPanel()
         reconcileHaloPlacement()
         registerSystemOverlayObservers()
@@ -255,6 +252,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.lastStatusMenuSignature = nil
                 self.tick()
                 self.refreshVisibleDetailsPanel()
+                if let controller = self.settingsWindowController,
+                   controller.window?.isVisible == true {
+                    controller.refresh(
+                        settings: self.settings,
+                        launchAtLogin: StartupManager.isEnabled()
+                    )
+                }
             }
         }
         tick()
@@ -315,24 +319,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let now = Date()
-        reconcileClaudeStatusLineConfiguration(now: now)
+        if settings.isAgentEnabled(.claudeCode) {
+            reconcileClaudeStatusLineConfiguration(now: now)
+        }
         acknowledgeCompletedIfCodexIsForeground()
         let codexRunning = CodexAppDetector.isCodexRunning()
         codexActivityMonitor.updatePollingContext(
             focusedAgent: settings.focusedAgent,
-            codexRunning: codexRunning
+            codexRunning: codexRunning,
+            enabled: settings.isAgentEnabled(.codex)
         )
         claudeActivityMonitor.updatePollingContext(
             focusedAgent: settings.focusedAgent,
-            detailsPanelVisible: detailsPanel.isVisible
+            detailsPanelVisible: detailsPanel.isVisible,
+            enabled: settings.isAgentEnabled(.claudeCode)
         )
         grokActivityMonitor.updatePollingContext(
             focusedAgent: settings.focusedAgent,
-            detailsPanelVisible: detailsPanel.isVisible
+            detailsPanelVisible: detailsPanel.isVisible,
+            enabled: settings.isAgentEnabled(.grok)
         )
         piActivityMonitor.updatePollingContext(
             focusedAgent: settings.focusedAgent,
-            detailsPanelVisible: detailsPanel.isVisible
+            detailsPanelVisible: detailsPanel.isVisible,
+            enabled: settings.isAgentEnabled(.pi)
         )
         refreshAggregateAndUI(now: now, codexRunning: codexRunning)
     }
@@ -376,7 +386,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let codexRunning = CodexAppDetector.isCodexRunning()
         codexActivityMonitor.updatePollingContext(
             focusedAgent: settings.focusedAgent,
-            codexRunning: codexRunning
+            codexRunning: codexRunning,
+            enabled: settings.isAgentEnabled(.codex)
         )
         refreshAggregateAndUI(now: Date(), codexRunning: codexRunning)
     }
@@ -442,11 +453,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func createStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = StatusIcon.image()
-        statusItem.button?.toolTip = "Agent Halo"
+        statusItem?.button?.image = StatusIcon.image()
+        statusItem?.button?.toolTip = "Agent Halo"
+    }
+
+    private func applyMenuBarIconVisibility() {
+        if settings.showMenuBarIcon {
+            if statusItem == nil {
+                lastStatusMenuSignature = nil
+                createStatusItem()
+            }
+            updateStatusMenu()
+        } else if let item = statusItem {
+            NSStatusBar.system.removeStatusItem(item)
+            statusItem = nil
+            lastStatusMenuSignature = nil
+        }
     }
 
     private func reconcileClaudeStatusLineConfiguration(now: Date) {
+        guard settings.isAgentEnabled(.claudeCode) else { return }
         guard now >= nextStatusLineReconciliationAt else { return }
         nextStatusLineReconciliationAt = now.addingTimeInterval(statusLineReconciliationInterval)
         guard !ClaudeStatusLineConfigurator.isConfigured() else { return }
@@ -618,26 +644,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func makeControlMenu() -> NSMenu {
         let menu = NSMenu()
         addCheckItem(L10n.shared["menu.always_on_top"], checked: settings.alwaysOnTop, action: #selector(toggleAlwaysOnTop), to: menu)
-        addCheckItem(L10n.shared["menu.launch_at_startup"], checked: currentStartupEnabled(), action: #selector(toggleStartup), to: menu)
         addCheckItem(L10n.shared["menu.pause_monitor"], checked: settings.paused, action: #selector(togglePause), to: menu)
-        addHaloSizeItem(to: menu)
         let focus = NSMenuItem(title: L10n.shared["menu.focus_target"], action: nil, keyEquivalent: "")
         let focusMenu = NSMenu()
-        addFocusedAgentItem(.codex, to: focusMenu)
-        addFocusedAgentItem(.claudeCode, to: focusMenu)
-        addFocusedAgentItem(.grok, to: focusMenu)
-        addFocusedAgentItem(.pi, to: focusMenu)
+        for agent in settings.enabledAgents {
+            addFocusedAgentItem(agent, to: focusMenu)
+        }
         focus.submenu = focusMenu
         menu.addItem(focus)
-
-        // Language submenu
-        let languageItem = NSMenuItem(title: L10n.shared["menu.language"], action: nil, keyEquivalent: "")
-        let languageMenu = NSMenu()
-        addLanguageItem(nil, to: languageMenu)           // Follow System
-        addLanguageItem("zh", to: languageMenu)           // 中文
-        addLanguageItem("en", to: languageMenu)           // English
-        languageItem.submenu = languageMenu
-        menu.addItem(languageItem)
 
         addMenuItem(L10n.shared["menu.escape_offscreen"], #selector(escapeOffscreen), enabled: true, to: menu)
         let preview = NSMenuItem(title: L10n.shared["menu.preview_status"], action: nil, keyEquivalent: "")
@@ -654,7 +668,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         preview.submenu = submenu
         menu.addItem(preview)
         menu.addItem(.separator())
-        addMenuItem(L10n.shared["menu.quit"], #selector(quit), enabled: true, to: menu)
+        addMenuItem(
+            L10n.shared["menu.settings"],
+            #selector(showSettings),
+            enabled: true,
+            to: menu,
+            image: Self.menuSymbolImage(named: "gear")
+        )
+        addMenuItem(
+            L10n.shared["menu.quit"],
+            #selector(quit),
+            enabled: true,
+            to: menu,
+            image: Self.menuSymbolImage(named: "power")
+        )
         return menu
     }
 
@@ -667,12 +694,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settings.alwaysOnTop.toggle()
         applyWindowLevels()
         settingsStore.save(settings)
-        tick()
-    }
-
-    @objc private func toggleStartup() {
-        StartupManager.setEnabled(!StartupManager.isEnabled(), appBundleURL: Bundle.main.bundleURL)
-        cachedStartupExpiresAt = .distantPast
         tick()
     }
 
@@ -713,14 +734,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         placementState.didUseTemporaryFallback()
     }
 
-    @objc private func haloSizeSliderChanged(_ sender: NSSlider) {
-        let value = Int(CGFloat(sender.doubleValue).rounded())
-        if let valueLabel = sender.superview?.subviews.first(where: { $0.identifier?.rawValue == "halo-size-value" }) as? NSTextField {
-            valueLabel.stringValue = "\(value)"
-        }
-        applyHaloSize(CGFloat(sender.doubleValue))
-    }
-
     @objc private func bringCodexForward() {
         guard settings.focusedAgent == .codex else {
             return
@@ -734,6 +747,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func setFocusedAgent(_ agent: AgentKind) {
+        guard settings.isAgentEnabled(agent) else { return }
         guard settings.focusedAgent != agent else {
             tick()
             refreshVisibleDetailsPanel()
@@ -761,6 +775,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             requestUsageRefresh(for: providerID)
         }
     }
+
+    /// Test-only: replace enabledAgents and normalize (may re-focus).
+    func applyEnabledAgentsForTesting(_ agents: [AgentKind]) {
+        settings.enabledAgents = agents
+        settings = settings.normalized()
+        detailsPanel.setEnabledAgents(settings.enabledAgents, focused: settings.focusedAgent)
+    }
+
+    /// Test-only: apply a full settings update through the settings-window path.
+    func applySettingsFromWindowForTesting(_ next: HaloSettings) {
+        applySettingsFromWindow(next)
+    }
+
+    /// Test-only: read current focus without exposing full settings.
+    var focusedAgentForTesting: AgentKind { settings.focusedAgent }
+
+    /// Test-only: inspect the hover details panel (agent toggle width / enabled set).
+    var detailsPanelForTesting: DetailsPanel { detailsPanel }
 
     @objc private func quit() {
         NSApp.terminate(nil)
@@ -949,6 +981,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateDetailsPanelContent(rawClaudeSnapshots: [SessionSnapshot]? = nil) {
+        detailsPanel.setEnabledAgents(settings.enabledAgents, focused: settings.focusedAgent)
         let rawClaudeSnapshots = rawClaudeSnapshots
             ?? (settings.focusedAgent == .claudeCode ? claudeSnapshots() : [])
         let displayedAggregate = displayAggregate()
@@ -1418,60 +1451,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         codexActivitySnapshot.sessions + claudeSnapshots() + grokSnapshots() + piSnapshots()
     }
 
-    private func addMenuItem(_ title: String, _ action: Selector, enabled: Bool, to menu: NSMenu) {
+    private func addMenuItem(
+        _ title: String,
+        _ action: Selector,
+        enabled: Bool,
+        to menu: NSMenu,
+        image: NSImage? = nil
+    ) {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = self
         item.isEnabled = enabled
+        item.image = image
         menu.addItem(item)
+    }
+
+    private static func menuSymbolImage(named name: String) -> NSImage? {
+        let configuration = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(configuration)
+        image?.isTemplate = true
+        return image
     }
 
     private func addCheckItem(_ title: String, checked: Bool, action: Selector, to menu: NSMenu) {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = self
         item.state = checked ? .on : .off
-        menu.addItem(item)
-    }
-
-    private func addHaloSizeItem(to menu: NSMenu) {
-        let item = NSMenuItem(title: L10n.shared["halo.size"], action: nil, keyEquivalent: "")
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: haloSizeMenuWidth, height: haloSizeMenuHeight))
-        let label = NSTextField(labelWithString: L10n.shared["halo.size"])
-        label.font = .systemFont(ofSize: 12, weight: .medium)
-        label.textColor = .labelColor
-        label.translatesAutoresizingMaskIntoConstraints = false
-
-        let slider = NSSlider(
-            value: settings.haloSize,
-            minValue: HaloSettings.minimumHaloSize,
-            maxValue: HaloSettings.maximumHaloSize,
-            target: self,
-            action: #selector(haloSizeSliderChanged(_:))
-        )
-        slider.isContinuous = true
-        slider.translatesAutoresizingMaskIntoConstraints = false
-
-        let valueLabel = NSTextField(labelWithString: "\(Int(settings.haloSize.rounded()))")
-        valueLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        valueLabel.textColor = .secondaryLabelColor
-        valueLabel.alignment = .right
-        valueLabel.identifier = NSUserInterfaceItemIdentifier("halo-size-value")
-        valueLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        container.addSubview(label)
-        container.addSubview(slider)
-        container.addSubview(valueLabel)
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: haloSizeMenuTextInset),
-            label.centerYAnchor.constraint(equalTo: slider.centerYAnchor),
-            label.widthAnchor.constraint(equalToConstant: 58),
-            slider.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 10),
-            slider.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            valueLabel.leadingAnchor.constraint(equalTo: slider.trailingAnchor, constant: 8),
-            valueLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-            valueLabel.centerYAnchor.constraint(equalTo: slider.centerYAnchor),
-            valueLabel.widthAnchor.constraint(equalToConstant: 32)
-        ])
-        item.view = container
         menu.addItem(item)
     }
 
@@ -1500,24 +1505,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setFocusedAgent(agent)
     }
 
-    private func addLanguageItem(_ lang: String?, to menu: NSMenu) {
-        let title: String
-        if let lang {
-            // lang is a language code like "zh" or "en"
-            title = L10n.shared["menu.language.\(lang)"]
-        } else {
-            title = L10n.shared["menu.language.auto"]
-        }
-        let item = NSMenuItem(title: title, action: #selector(selectLanguage(_:)), keyEquivalent: "")
-        item.target = self
-        item.representedObject = lang as NSString?
-        item.state = Self.languageMenuItemState(
-            itemLanguage: lang,
-            savedLanguage: settings.language
-        )
-        menu.addItem(item)
-    }
-
     nonisolated static func languageMenuItemState(
         itemLanguage: String?,
         savedLanguage: String?
@@ -1531,13 +1518,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         systemLanguage: String
     ) -> String? {
         savedLanguage
-    }
-
-    @objc private func selectLanguage(_ sender: NSMenuItem) {
-        let lang = sender.representedObject as? String  // nil = follow system
-        settings.language = lang
-        settingsStore.save(settings)
-        L10n.shared.setLanguage(lang)
     }
 
     @objc private func previewState(_ sender: NSMenuItem) {
@@ -1566,9 +1546,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let level = Self.haloWindowLevel(alwaysOnTop: settings.alwaysOnTop)
         panel?.level = level
         detailsPanel.level = level
+        settingsWindowController?.window?.level = NSWindow.Level(rawValue: level.rawValue + 1)
         if !systemOverlaySuspended {
             panel?.orderFrontRegardless()
         }
+    }
+
+    @objc func showSettings() {
+        if settingsWindowController == nil {
+            let controller = SettingsWindowController()
+            controller.onSettingsChanged = { [weak self] next in
+                self?.applySettingsFromWindow(next)
+            }
+            controller.onLaunchAtLoginChanged = { enabled in
+                StartupManager.setEnabled(enabled, appBundleURL: Bundle.main.bundleURL)
+            }
+            controller.onResetPosition = { [weak self] in
+                self?.escapeOffscreen()
+            }
+            settingsWindowController = controller
+        }
+        settingsWindowController?.present(
+            settings: settings,
+            launchAtLogin: StartupManager.isEnabled()
+        )
+    }
+
+    private func applySettingsFromWindow(_ next: HaloSettings) {
+        let previous = settings
+        settings = next.normalized()
+        settingsStore.save(settings)
+        if previous.haloSize != settings.haloSize {
+            applyHaloSize(CGFloat(settings.haloSize))
+        } else {
+            settingsStore.save(settings)
+        }
+        if previous.language != settings.language {
+            L10n.shared.setLanguage(settings.language)
+        }
+        applyWindowLevels()
+        applyMenuBarIconVisibility()
+        detailsPanel.setEnabledAgents(settings.enabledAgents, focused: settings.focusedAgent)
+        if previous.focusedAgent != settings.focusedAgent {
+            // settings already holds the remapped focus; restore previous so
+            // setFocusedAgent sees a real change and activates usage providers.
+            let target = settings.focusedAgent
+            settings.focusedAgent = previous.focusedAgent
+            setFocusedAgent(target)
+        }
+        for agent in AgentKind.allCases {
+            let nowOn = settings.isAgentEnabled(agent)
+            let wasOn = previous.isAgentEnabled(agent)
+            if nowOn && !wasOn {
+                switch agent {
+                case .claudeCode: claudeActivityMonitor.requestRefresh()
+                case .grok: grokActivityMonitor.requestRefresh()
+                case .pi: piActivityMonitor.requestRefresh()
+                case .codex: break
+                }
+            }
+        }
+        lastStatusMenuSignature = nil
+        tick()
+        settingsWindowController?.refresh(settings: settings, launchAtLogin: StartupManager.isEnabled())
     }
 
     static func haloWindowLevel(alwaysOnTop: Bool) -> NSWindow.Level {

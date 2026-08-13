@@ -682,6 +682,104 @@ func testPiFocusedAgentPersistence() {
     expect(loaded.focusedAgent, .pi, "focused agent pi should persist")
 }
 
+func testSettingsDefaultsEnabledAgentsAndMenuBarIconWhenMissing() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-enabled-legacy-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let url = root.appendingPathComponent("settings.json")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    try """
+    {
+      "acknowledged" : {},
+      "alwaysOnTop" : true,
+      "alwaysOnTopBehaviorVersion" : 1,
+      "focusedAgent" : "claudeCode",
+      "hasPosition" : false,
+      "installedAt" : "2026-06-13T02:00:00Z",
+      "left" : 0,
+      "paused" : false,
+      "top" : 0
+    }
+    """.data(using: .utf8)!.write(to: url)
+
+    let loaded = SettingsStore(settingsURL: url).load()
+    expect(loaded.enabledAgents, AgentKind.allCases, "legacy settings enable every AgentKind")
+    expect(loaded.showMenuBarIcon, true, "legacy settings show the menu bar icon")
+    expect(loaded.focusedAgent, .claudeCode, "legacy focused agent is preserved when still enabled")
+}
+
+func testSettingsNormalizesEmptyEnabledAgentsToAllCases() {
+    var settings = HaloSettings(focusedAgent: .codex, enabledAgents: [])
+    settings = settings.normalized()
+    expect(settings.enabledAgents, AgentKind.allCases, "empty enabledAgents falls back to allCases")
+}
+
+func testSettingsNormalizesDuplicateAndUnknownOrder() {
+    let settings = HaloSettings(
+        focusedAgent: .grok,
+        enabledAgents: [.grok, .codex, .grok, .pi]
+    ).normalized()
+    expect(
+        settings.enabledAgents,
+        [.codex, .grok, .pi],
+        "enabledAgents is unique and ordered by allCases"
+    )
+    expect(settings.focusedAgent, .grok, "focused grok stays when still enabled")
+}
+
+func testSettingsMovesFocusWhenDisabled() {
+    var settings = HaloSettings(
+        focusedAgent: .claudeCode,
+        enabledAgents: AgentKind.allCases
+    )
+    settings.setAgent(.claudeCode, enabled: false)
+    expect(settings.isAgentEnabled(.claudeCode), false, "claude becomes disabled")
+    expect(settings.focusedAgent, .codex, "focus moves to first remaining (codex)")
+    expect(settings.enabledAgents.contains(.claudeCode), false, "claude removed from list")
+}
+
+func testSettingsCannotDisableTheLastAgent() {
+    var settings = HaloSettings(focusedAgent: .pi, enabledAgents: [.pi])
+    settings.setAgent(.pi, enabled: false)
+    expect(settings.enabledAgents, [.pi], "last agent cannot be disabled")
+    expect(settings.focusedAgent, .pi, "focus stays on the last agent")
+}
+
+func testSettingsPersistsEnabledAgentsAndMenuBarIcon() {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-enabled-persist-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let url = root.appendingPathComponent("settings.json")
+    let store = SettingsStore(settingsURL: url)
+    let settings = HaloSettings(focusedAgent: .codex, enabledAgents: [.codex, .pi], showMenuBarIcon: false)
+    store.save(settings)
+    let loaded = store.load()
+    expect(loaded.enabledAgents, [.codex, .pi], "enabledAgents round-trips")
+    expect(loaded.showMenuBarIcon, false, "showMenuBarIcon round-trips")
+    expect(loaded.focusedAgent, .codex, "focused agent still round-trips")
+}
+
+func testSettingsLoadRepairsFocusOutsideEnabledAgents() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-enabled-focus-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let url = root.appendingPathComponent("settings.json")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    try """
+    {
+      "enabledAgents" : ["pi"],
+      "focusedAgent" : "grok",
+      "hasPosition" : false,
+      "installedAt" : "2026-06-13T02:00:00Z",
+      "left" : 0,
+      "top" : 0
+    }
+    """.data(using: .utf8)!.write(to: url)
+    let loaded = SettingsStore(settingsURL: url).load()
+    expect(loaded.enabledAgents, [.pi], "pi remains the only enabled agent")
+    expect(loaded.focusedAgent, .pi, "load moves focus onto the enabled set")
+}
+
 func testPiStatusParseContextSentinelAndMapping() {
     let now = ISO8601DateFormatter().string(from: Date())
     let pid = Int(ProcessInfo.processInfo.processIdentifier)
@@ -1231,6 +1329,49 @@ func testRuntimeBootstrapUpgradesLayoutV1WithoutStrandingHookPaths() throws {
     )
     let after = try Data(contentsOf: grokFile)
     expect(after, before, "second bootstrap must not thrash healthy grok hooks")
+}
+
+/// Disabled agents must not receive user-config rewrites; staging still runs.
+func testRuntimeBootstrapSkipsDisabledAgentUserConfig() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent(
+        "agent-halo-bootstrap-skip-\(UUID().uuidString)", isDirectory: true
+    )
+    defer { try? fm.removeItem(at: home) }
+
+    let claudeSettings = home.appendingPathComponent(".claude/settings.json")
+    try fm.createDirectory(at: claudeSettings.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data("{}".utf8).write(to: claudeSettings)
+    let beforeClaude = try Data(contentsOf: claudeSettings)
+
+    let grokFile = home.appendingPathComponent(".grok/hooks/agent-halo-status.json")
+    try fm.createDirectory(at: grokFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data("{\"hooks\":{}}".utf8).write(to: grokFile)
+    let beforeGrok = try Data(contentsOf: grokFile)
+
+    let piFile = home.appendingPathComponent(".pi/agent/extensions/agent-halo-status.ts")
+    try fm.createDirectory(at: piFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data("// keep-me\n".utf8).write(to: piFile)
+    let beforePi = try Data(contentsOf: piFile)
+
+    let bundledHook = home.appendingPathComponent("bundled-hook")
+    let bundledProxy = home.appendingPathComponent("bundled-proxy")
+    try Data("hook".utf8).write(to: bundledHook)
+    try Data("proxy".utf8).write(to: bundledProxy)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundledHook.path)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundledProxy.path)
+
+    AgentHaloRuntimeBootstrap.bootstrap(
+        homeDirectory: home,
+        bundledHookBinary: bundledHook,
+        bundledStatuslineProxy: bundledProxy,
+        fileManager: fm,
+        enabledAgents: [.codex]
+    )
+
+    expect(try Data(contentsOf: claudeSettings), beforeClaude, "disabled Claude config is not rewritten")
+    expect(try Data(contentsOf: grokFile), beforeGrok, "disabled Grok hooks are not rewritten")
+    expect(try Data(contentsOf: piFile), beforePi, "disabled Pi extension is not rewritten")
 }
 
 /// Preferred-path Grok config must not be rewritten on routine launches.
@@ -4559,6 +4700,17 @@ do {
 testSettingsPersistsFocusedAgent()
 testGrokFocusedAgentPersistence()
 testPiFocusedAgentPersistence()
+do {
+    try testSettingsDefaultsEnabledAgentsAndMenuBarIconWhenMissing()
+    testSettingsNormalizesEmptyEnabledAgentsToAllCases()
+    testSettingsNormalizesDuplicateAndUnknownOrder()
+    testSettingsMovesFocusWhenDisabled()
+    testSettingsCannotDisableTheLastAgent()
+    testSettingsPersistsEnabledAgentsAndMenuBarIcon()
+    try testSettingsLoadRepairsFocusOutsideEnabledAgents()
+} catch {
+    fatalError("enabledAgents settings checks failed: \(error)")
+}
 testPiStatusParseContextSentinelAndMapping()
 do {
     try testPiStatusMonitorRefreshAndRotationRetention()
@@ -4587,6 +4739,7 @@ do {
 do {
     try testGrokHookConfiguratorWritesHooksJSON()
     try testRuntimeBootstrapUpgradesLayoutV1WithoutStrandingHookPaths()
+    try testRuntimeBootstrapSkipsDisabledAgentUserConfig()
     try testGrokHookConfiguratorLeavesPreferredPathConfigAlone()
     try testGrokHookConfiguratorRewritesLegacyRootPath()
     try testGrokHookConfiguratorRepairsDeadExecutableCommand()

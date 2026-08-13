@@ -17,6 +17,8 @@ public struct HaloSettings: Codable, Equatable, Sendable {
     public var alwaysOnTopBehaviorVersion: Int
     public var paused: Bool
     public var focusedAgent: AgentKind
+    public var enabledAgents: [AgentKind]
+    public var showMenuBarIcon: Bool
     public var installedAt: Date
     public var acknowledged: [String: Date]
     public var acknowledgedErrorAt: Date?
@@ -34,6 +36,8 @@ public struct HaloSettings: Codable, Equatable, Sendable {
         case alwaysOnTopBehaviorVersion
         case paused
         case focusedAgent
+        case enabledAgents
+        case showMenuBarIcon
         case installedAt
         case acknowledged
         case acknowledgedErrorAt
@@ -52,6 +56,8 @@ public struct HaloSettings: Codable, Equatable, Sendable {
         alwaysOnTopBehaviorVersion: Int = HaloSettings.currentAlwaysOnTopBehaviorVersion,
         paused: Bool = false,
         focusedAgent: AgentKind = .codex,
+        enabledAgents: [AgentKind] = AgentKind.allCases,
+        showMenuBarIcon: Bool = true,
         installedAt: Date = Date(),
         acknowledged: [String: Date] = [:],
         acknowledgedErrorAt: Date? = nil,
@@ -68,6 +74,8 @@ public struct HaloSettings: Codable, Equatable, Sendable {
         self.alwaysOnTopBehaviorVersion = alwaysOnTopBehaviorVersion
         self.paused = paused
         self.focusedAgent = focusedAgent
+        self.enabledAgents = enabledAgents
+        self.showMenuBarIcon = showMenuBarIcon
         self.installedAt = installedAt
         self.acknowledged = acknowledged
         self.acknowledgedErrorAt = acknowledgedErrorAt
@@ -92,10 +100,47 @@ public struct HaloSettings: Codable, Equatable, Sendable {
         ) ?? 0
         self.paused = try container.decodeIfPresent(Bool.self, forKey: .paused) ?? false
         self.focusedAgent = try container.decodeIfPresent(AgentKind.self, forKey: .focusedAgent) ?? .codex
+        self.enabledAgents = try container.decodeIfPresent([AgentKind].self, forKey: .enabledAgents)
+            ?? AgentKind.allCases
+        self.showMenuBarIcon = try container.decodeIfPresent(Bool.self, forKey: .showMenuBarIcon) ?? true
         self.installedAt = try container.decodeIfPresent(Date.self, forKey: .installedAt) ?? Date()
         self.acknowledged = try container.decodeIfPresent([String: Date].self, forKey: .acknowledged) ?? [:]
         self.acknowledgedErrorAt = try container.decodeIfPresent(Date.self, forKey: .acknowledgedErrorAt)
         self.language = try container.decodeIfPresent(String.self, forKey: .language)
+        self = self.normalized()
+    }
+
+    public func isAgentEnabled(_ agent: AgentKind) -> Bool {
+        enabledAgents.contains(agent)
+    }
+
+    public mutating func setAgent(_ agent: AgentKind, enabled: Bool) {
+        var next = Set(enabledAgents)
+        if enabled {
+            next.insert(agent)
+        } else {
+            next.remove(agent)
+        }
+        if next.isEmpty { return }
+        enabledAgents = AgentKind.allCases.filter { next.contains($0) }
+        if !enabledAgents.contains(focusedAgent), let first = enabledAgents.first {
+            focusedAgent = first
+        }
+    }
+
+    public func normalized() -> HaloSettings {
+        var next = self
+        var seen = Set<AgentKind>()
+        var ordered: [AgentKind] = []
+        for agent in AgentKind.allCases where next.enabledAgents.contains(agent) && seen.insert(agent).inserted {
+            ordered.append(agent)
+        }
+        if ordered.isEmpty { ordered = AgentKind.allCases }
+        next.enabledAgents = ordered
+        if !ordered.contains(next.focusedAgent), let first = ordered.first {
+            next.focusedAgent = first
+        }
+        return next
     }
 
     public func acknowledgingCompletedSessions(_ sessions: [SessionSnapshot]) -> HaloSettings {
@@ -149,7 +194,7 @@ public struct SettingsStore: Sendable {
                 save(settings)
             }
             settings.paused = false
-            return settings
+            return settings.normalized()
         }
         AgentHaloLogger.log("Settings load failed: could not decode \(settingsURL.path)")
         return HaloSettings(installedAt: now)

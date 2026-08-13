@@ -26,6 +26,9 @@ func runHaloInteractionChecks() {
     testRightClickInvokesContextMenuCallback()
     testSingleClickDoesNotActivateCodex()
     testHaloContextMenuContainsCurrentControls()
+    testFocusSubmenuListsOnlyEnabledAgents()
+    testSettingsMenuItemOpensSettingsWindow()
+    testControlMenuAlignsSettingsAndQuitIcons()
     testHaloClickWaitsForMouseUpAndDragCancelsClick()
     testHaloHoverUsesFilledCircularSurface()
     testDraggingHaloSuppressesHoverDetails()
@@ -84,6 +87,14 @@ func runHaloInteractionChecks() {
     testUsageMonitoringLifecycleWiring()
     testPackagedVerificationRuntimeSelectionIsExplicit()
     testStatusLineConfigurationReconciliationIsWiredToTick()
+    testTickPassesEnabledFlagToActivityMonitors()
+    testDisabledCodexMonitorPublishesEmptySnapshot()
+    testSetFocusedAgentIgnoresDisabledAgent()
+    testApplyEnabledAgentsForTestingSyncsDetailsToggle()
+    testApplySettingsFromWindowRemapsDisabledFocus()
+    testApplySettingsFromWindowRestoresFocusBeforeSetFocusedAgent()
+    testSettingsWindowRejectsClearingLastAgent()
+    testSettingsWindowUsesKeyPanelAboveHalo()
     testCodexPollingWorkIsNotPerformedOnMainTick()
     testCodexActivityDispatchIsThrottled()
     testCodexSQLiteReadersUseInProcessSQLite()
@@ -122,6 +133,8 @@ func runHaloInteractionChecks() {
     testAgentToggleSelectionPillFitsItsIconWidth()
     testAgentToggleKeepsWholeControlClickable()
     testAgentToggleSupportsThreeAgentsIncludingGrok()
+    testAgentToggleWidthScalesWithEnabledCount()
+    testAgentToggleClickMapsEnabledSlotsOnly()
     testFocusSubmenuIncludesGrok()
     testDetailsPanelSwitchCallbackSelectsClaudeCode()
 }
@@ -332,24 +345,57 @@ private func testHaloContextMenuContainsCurrentControls() {
     expect(!titles.contains(L10n.shared["status.error"]), "halo context menu should not include error acknowledgement")
     expect(titles.contains(L10n.shared["menu.always_on_top"]), "halo context menu should include always-on-top")
     expect(titles.contains(L10n.shared["menu.pause_monitor"]), "halo context menu should include pause")
-    expect(titles.contains(L10n.shared["halo.size"]), "halo context menu should include size slider")
-    guard let sizeItem = menu.items.first(where: { $0.title == L10n.shared["halo.size"] }) else {
-        fatalError("halo context menu should expose size slider item")
-    }
-    let sliders = sizeItem.view?.subviews.compactMap { $0 as? NSSlider } ?? []
-    expect(sliders.count == 1, "halo size menu item should contain one slider")
-    expect(sliders[0].minValue <= 72, "halo size slider should allow smaller halo")
-    expect(sliders[0].maxValue >= 180, "halo size slider should allow larger halo")
-    sizeItem.view?.layoutSubtreeIfNeeded()
-    let sizeLabels = sizeItem.view?.subviews.compactMap { $0 as? NSTextField }
-        .filter { $0.stringValue == L10n.shared["halo.size"] } ?? []
-    expect(sizeLabels.count == 1, "halo size menu item should contain one title label")
-    expect(sizeLabels[0].frame.minX >= 19, "halo size row label should align with regular menu text")
-    expect(sizeLabels[0].frame.minX <= 23, "halo size row label should not drift past regular menu text")
+    expect(titles.contains(L10n.shared["menu.escape_offscreen"]), "halo context menu should include escape")
     expect(titles.contains(L10n.shared["menu.preview_status"]), "halo context menu should include preview submenu")
+    expect(titles.contains(L10n.shared["menu.settings"]), "halo context menu should include Settings…")
+    expect(titles.contains(L10n.shared["menu.quit"]), "halo context menu should include quit")
+    expect(!titles.contains(L10n.shared["menu.launch_at_startup"]), "halo context menu should not include launch-at-login")
+    expect(!titles.contains(L10n.shared["menu.language"]), "halo context menu should not include language submenu")
+    expect(!titles.contains(L10n.shared["halo.size"]), "halo context menu should not include size slider")
     expect(!titles.contains("Switch to Codex"), "halo context menu should not include Codex activation")
     expect(!titles.contains("Quit Agent Halo"), "halo context menu should not include old quit title")
-    expect(titles.contains(L10n.shared["menu.quit"]), "halo context menu should include quit")
+}
+
+@MainActor
+private func testFocusSubmenuListsOnlyEnabledAgents() {
+    let delegate = AppDelegate()
+    delegate.applyEnabledAgentsForTesting([.codex, .pi])
+    let menu = delegate.makeHaloContextMenu()
+    let focus = menu.items.first { $0.title == L10n.shared["menu.focus_target"] }
+    let titles = focus?.submenu?.items.map(\.title) ?? []
+    expect(titles, ["Codex", "Pi"], "focus submenu follows enabledAgents")
+}
+
+@MainActor
+private func testSettingsMenuItemOpensSettingsWindow() {
+    let delegate = AppDelegate()
+    let menu = delegate.makeHaloContextMenu()
+    expect(
+        menu.items.contains { $0.title == L10n.shared["menu.settings"] },
+        "control menu includes Settings…"
+    )
+}
+
+@MainActor
+private func testControlMenuAlignsSettingsAndQuitIcons() {
+    let delegate = AppDelegate(settingsStore: SettingsStore(settingsURL: temporarySettingsURL()))
+    let menu = delegate.makeHaloContextMenu()
+    let settings = menu.items.first { $0.title == L10n.shared["menu.settings"] }
+    let quit = menu.items.first { $0.title == L10n.shared["menu.quit"] }
+    expect(settings != nil, "control menu should include Settings…")
+    expect(quit != nil, "control menu should include Quit")
+    expect(settings?.image != nil, "Settings should show a gear icon")
+    expect(quit?.image != nil, "Quit should show a power icon")
+    expect(settings?.indentationLevel, 0, "Settings should not be indented")
+    expect(quit?.indentationLevel, 0, "Quit should not be indented")
+    let settingsSize = settings?.image?.size ?? .zero
+    let quitSize = quit?.image?.size ?? .zero
+    expect(settingsSize.width > 0, "Settings icon should have a layout size")
+    expect(quitSize.width > 0, "Quit icon should have a layout size")
+    expect(
+        abs(settingsSize.width - quitSize.width) < 4,
+        "Settings and Quit icons should share a comparable column width"
+    )
 }
 
 @MainActor
@@ -2415,6 +2461,149 @@ private func testStatusLineConfigurationReconciliationIsWiredToTick() {
     )
 }
 
+private func testTickPassesEnabledFlagToActivityMonitors() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let appDelegateURL = sourceDirectory.appendingPathComponent("AppDelegate.swift")
+    guard let source = try? String(contentsOf: appDelegateURL, encoding: .utf8),
+          let tickStart = source.range(of: "    private func tick() {")?.lowerBound,
+          let tickEnd = source.range(of: "    private func createStatusItem()", range: tickStart..<source.endIndex)?.lowerBound else {
+        fatalError("AppDelegate tick source should be readable")
+    }
+
+    let tickSource = source[tickStart..<tickEnd]
+    expect(
+        tickSource.contains("enabled:") && tickSource.contains("isAgentEnabled"),
+        "AppDelegate tick should pass enabled: settings.isAgentEnabled(...) to monitors"
+    )
+}
+
+@MainActor
+private func testDisabledCodexMonitorPublishesEmptySnapshot() {
+    let monitor = CodexActivityMonitor()
+    monitor.start { _ in }
+    monitor.updatePollingContext(focusedAgent: .codex, codexRunning: true, enabled: false)
+    // allow the monitor queue to apply context
+    let snapshot = monitor.snapshot()
+    expect(snapshot, .empty, "disabled Codex monitor must not keep a stale snapshot")
+    monitor.stop()
+}
+
+@MainActor
+private func testSetFocusedAgentIgnoresDisabledAgent() {
+    let delegate = AppDelegate()
+    delegate.applyEnabledAgentsForTesting(AgentKind.allCases.filter { $0 != .claudeCode })
+    let before = delegate.focusedAgentForTesting
+    delegate.setFocusedAgent(.claudeCode)
+    expect(delegate.focusedAgentForTesting, before, "disabled agent cannot become focused")
+}
+
+@MainActor
+private func testApplyEnabledAgentsForTestingSyncsDetailsToggle() {
+    let delegate = AppDelegate(settingsStore: SettingsStore(settingsURL: temporarySettingsURL()))
+    let panel = delegate.detailsPanelForTesting
+
+    expect(
+        panel.enabledAgentsForTesting,
+        AgentKind.allCases,
+        "default details toggle should list all agents"
+    )
+    expect(
+        panel.agentToggleWidthForTesting,
+        AgentToggleView.slotWidth * CGFloat(AgentKind.allCases.count),
+        "default details toggle should be 144pt (four 36pt slots)"
+    )
+
+    delegate.applyEnabledAgentsForTesting([.codex])
+    expect(
+        panel.enabledAgentsForTesting,
+        [.codex],
+        "applyEnabledAgentsForTesting should shrink the hover toggle to enabled agents only"
+    )
+    expect(
+        panel.agentToggleWidthForTesting,
+        AgentToggleView.slotWidth,
+        "one enabled agent should size the toggle to one 36pt slot without a live hover"
+    )
+}
+
+@MainActor
+private func testApplySettingsFromWindowRemapsDisabledFocus() {
+    let delegate = AppDelegate()
+    delegate.applySettingsFromWindowForTesting(
+        HaloSettings(focusedAgent: .claudeCode, enabledAgents: AgentKind.allCases)
+    )
+    expect(delegate.focusedAgentForTesting, .claudeCode, "start focused on Claude Code")
+
+    // Settings window may still pass the old focused agent; normalize remaps
+    // focus to the first remaining enabled agent (codex).
+    delegate.applySettingsFromWindowForTesting(
+        HaloSettings(
+            focusedAgent: .claudeCode,
+            enabledAgents: AgentKind.allCases.filter { $0 != .claudeCode }
+        )
+    )
+    expect(
+        delegate.focusedAgentForTesting,
+        .codex,
+        "disabling focused Claude remaps focus to the first remaining agent"
+    )
+    expect(
+        delegate.focusedAgentForTesting != .claudeCode,
+        "focused agent must not remain a disabled Claude Code"
+    )
+}
+
+/// Locks the restore-then-switch path so focus remap cannot regress to a no-op
+/// that only mutates `settings.focusedAgent` via `normalized()`.
+private func testApplySettingsFromWindowRestoresFocusBeforeSetFocusedAgent() {
+    let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let appDelegateURL = sourceDirectory.appendingPathComponent("AppDelegate.swift")
+    guard let source = try? String(contentsOf: appDelegateURL, encoding: .utf8),
+          let rangeStart = source.range(of: "    private func applySettingsFromWindow(_ next: HaloSettings) {")?.lowerBound,
+          let rangeEnd = source.range(of: "    static func haloWindowLevel(alwaysOnTop:", range: rangeStart..<source.endIndex)?.lowerBound else {
+        fatalError("AppDelegate applySettingsFromWindow source should be readable")
+    }
+
+    let applySource = source[rangeStart..<rangeEnd]
+    expect(
+        applySource.contains("settings.focusedAgent = previous.focusedAgent"),
+        "applySettingsFromWindow should restore previous focus before setFocusedAgent"
+    )
+    expect(
+        applySource.contains("setFocusedAgent(target)") || applySource.contains("setFocusedAgent("),
+        "applySettingsFromWindow should call setFocusedAgent after restoring previous focus"
+    )
+}
+
+@MainActor
+private func testSettingsWindowRejectsClearingLastAgent() {
+    let controller = SettingsWindowController()
+    let settings = HaloSettings(focusedAgent: .codex, enabledAgents: [.codex])
+    var emitted: HaloSettings?
+    controller.onSettingsChanged = { emitted = $0 }
+    controller.present(settings: settings, launchAtLogin: false)
+    controller.toggleAgentForTesting(.codex)
+    expect(emitted == nil, "the last enabled agent cannot be turned off")
+    expect(
+        controller.enabledAgentsForTesting,
+        [.codex],
+        "UI still shows Codex enabled"
+    )
+}
+
+@MainActor
+private func testSettingsWindowUsesKeyPanelAboveHalo() {
+    let controller = SettingsWindowController()
+    controller.present(settings: HaloSettings(), launchAtLogin: false)
+    guard let panel = controller.window else {
+        fatalError("settings window should exist")
+    }
+    expect(panel.styleMask.contains(.titled), "settings is a titled panel")
+    expect(panel.styleMask.contains(.closable), "settings can close")
+    expect(!panel.styleMask.contains(.nonactivatingPanel), "settings must be able to become key")
+    expect(panel.level.rawValue > NSWindow.Level.floating.rawValue, "settings sits above the halo")
+}
+
 private func testCodexPollingWorkIsNotPerformedOnMainTick() {
     let sourceDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
     let appDelegateURL = sourceDirectory.appendingPathComponent("AppDelegate.swift")
@@ -3295,9 +3484,14 @@ private func testAgentToggleUsesSharedSVGAssets() {
     let detailsSource = try? String(contentsOf: detailsSourceURL, encoding: .utf8)
     expect(detailsSource?.contains("<svg") == false, "DetailsPanel should not embed SVG markup")
     expect(
-        detailsSource?.contains("agentToggle.widthAnchor.constraint(equalToConstant: 144)") == true,
-        "details panel agent toggle should be wide enough for four icons"
+        detailsSource?.contains("setEnabledAgents") == true
+            && detailsSource?.contains("slotWidth") == true,
+        "details panel agent toggle should size by enabled agent count via setEnabledAgents/slotWidth"
     )
+    let fullToggle = AgentToggleView(frame: .zero)
+    fullToggle.setEnabledAgents(AgentKind.allCases, focused: .codex)
+    fullToggle.layoutSubtreeIfNeeded()
+    expect(fullToggle.bounds.width, 144, "all enabled agents keep the current 144pt control")
     expect(
         detailsSource?.contains("assetName: \"pi\"") == true
             || detailsSource?.contains("assetName: \"pi\"") == true,
@@ -3400,6 +3594,7 @@ private func testAgentToggleKeepsWholeControlClickable() {
 @MainActor
 private func testAgentToggleSupportsThreeAgentsIncludingGrok() {
     let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 144, height: 24))
+    toggle.setEnabledAgents(AgentKind.allCases, focused: .codex)
     toggle.layoutSubtreeIfNeeded()
 
     expect(toggle.bounds.width, 144, "four-way agent toggle should use a wider control")
@@ -3431,6 +3626,35 @@ private func testAgentToggleSupportsThreeAgentsIncludingGrok() {
     toggle.selectAgentAtXForTesting(54)
     expect(toggle.selectedAgent, .claudeCode, "clicking the Claude slot should select Claude Code")
     expect(selected, .claudeCode, "Claude-slot click should emit Claude Code")
+}
+
+@MainActor
+private func testAgentToggleWidthScalesWithEnabledCount() {
+    let toggle = AgentToggleView(frame: .zero)
+    toggle.setEnabledAgents([.codex], focused: .codex)
+    toggle.layoutSubtreeIfNeeded()
+    expect(toggle.bounds.width, 36, "one enabled agent is one 36pt slot")
+
+    toggle.setEnabledAgents([.codex, .pi], focused: .pi)
+    toggle.layoutSubtreeIfNeeded()
+    expect(toggle.bounds.width, 72, "two enabled agents are two slots")
+    expect(toggle.selectedAgent, .pi, "focused agent stays selected")
+
+    toggle.setEnabledAgents(AgentKind.allCases, focused: .codex)
+    toggle.layoutSubtreeIfNeeded()
+    expect(toggle.bounds.width, 144, "all agents keep the current 144pt control")
+}
+
+@MainActor
+private func testAgentToggleClickMapsEnabledSlotsOnly() {
+    let toggle = AgentToggleView(frame: .zero)
+    toggle.setEnabledAgents([.codex, .pi], focused: .codex)
+    toggle.layoutSubtreeIfNeeded()
+    var selected: AgentKind?
+    toggle.onAgentSelected = { selected = $0 }
+    toggle.selectAgentAtXForTesting(54) // second of two 36pt slots
+    expect(toggle.selectedAgent, .pi, "second visible slot is Pi, not Claude")
+    expect(selected, .pi, "click emits Pi")
 }
 
 @MainActor

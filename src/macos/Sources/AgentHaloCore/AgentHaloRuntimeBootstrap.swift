@@ -15,7 +15,8 @@ public enum AgentHaloRuntimeBootstrap {
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         bundledHookBinary: URL? = nil,
         bundledStatuslineProxy: URL? = nil,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        enabledAgents: [AgentKind] = AgentKind.allCases
     ) {
         let paths = AgentHaloPaths(homeDirectory: homeDirectory)
         AgentHaloLayoutMigrator.migrateIfNeeded(paths: paths, fileManager: fileManager)
@@ -54,21 +55,29 @@ public enum AgentHaloRuntimeBootstrap {
             }
         }
 
-        ClaudeHookConfigurator.configure(
-            homeDirectory: homeDirectory,
-            bundledHookBinary: hook
-        )
-        GrokHookConfigurator.configure(
-            homeDirectory: homeDirectory,
-            bundledHookBinary: hook
-        )
-        ClaudeStatusLineConfigurator.configure(
-            homeDirectory: homeDirectory,
-            bundledProxyBinary: proxy
-        )
+        // Only repair user configs for agents the user has enabled. Binary
+        // staging above always runs so re-enabling later finds hooks ready.
+        if enabledAgents.contains(.claudeCode) {
+            ClaudeHookConfigurator.configure(
+                homeDirectory: homeDirectory,
+                bundledHookBinary: hook
+            )
+            ClaudeStatusLineConfigurator.configure(
+                homeDirectory: homeDirectory,
+                bundledProxyBinary: proxy
+            )
+        }
+        if enabledAgents.contains(.grok) {
+            GrokHookConfigurator.configure(
+                homeDirectory: homeDirectory,
+                bundledHookBinary: hook
+            )
+        }
         // Shared TS extension (no separate binary). Install/overwrite when the
         // embedded source differs from ~/.pi/agent/extensions/agent-halo-status.ts.
-        PiExtensionConfigurator.configure(homeDirectory: homeDirectory)
+        if enabledAgents.contains(.pi) {
+            PiExtensionConfigurator.configure(homeDirectory: homeDirectory)
+        }
 
         // Settings now point at bin/* — drop root-level legacy binaries that
         // nothing references anymore (claude-code-status-hook, etc.).
