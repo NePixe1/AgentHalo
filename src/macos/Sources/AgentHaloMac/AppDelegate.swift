@@ -774,6 +774,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settings = settings.normalized()
     }
 
+    /// Test-only: apply a full settings update through the settings-window path.
+    func applySettingsFromWindowForTesting(_ next: HaloSettings) {
+        applySettingsFromWindow(next)
+    }
+
     /// Test-only: read current focus without exposing full settings.
     var focusedAgentForTesting: AgentKind { settings.focusedAgent }
 
@@ -1555,7 +1560,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         applyMenuBarIconVisibility()
         detailsPanel.setEnabledAgents(settings.enabledAgents, focused: settings.focusedAgent)
         if previous.focusedAgent != settings.focusedAgent {
-            setFocusedAgent(settings.focusedAgent)
+            // settings already holds the remapped focus; restore previous so
+            // setFocusedAgent sees a real change and activates usage providers.
+            let target = settings.focusedAgent
+            settings.focusedAgent = previous.focusedAgent
+            setFocusedAgent(target)
         }
         for agent in AgentKind.allCases {
             let nowOn = settings.isAgentEnabled(agent)

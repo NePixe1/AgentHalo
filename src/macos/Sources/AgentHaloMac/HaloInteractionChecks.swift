@@ -89,6 +89,7 @@ func runHaloInteractionChecks() {
     testTickPassesEnabledFlagToActivityMonitors()
     testDisabledCodexMonitorPublishesEmptySnapshot()
     testSetFocusedAgentIgnoresDisabledAgent()
+    testApplySettingsFromWindowRemapsDisabledFocus()
     testSettingsWindowRejectsClearingLastAgent()
     testSettingsWindowUsesKeyPanelAboveHalo()
     testCodexPollingWorkIsNotPerformedOnMainTick()
@@ -2469,6 +2470,33 @@ private func testSetFocusedAgentIgnoresDisabledAgent() {
     let before = delegate.focusedAgentForTesting
     delegate.setFocusedAgent(.claudeCode)
     expect(delegate.focusedAgentForTesting, before, "disabled agent cannot become focused")
+}
+
+@MainActor
+private func testApplySettingsFromWindowRemapsDisabledFocus() {
+    let delegate = AppDelegate()
+    delegate.applySettingsFromWindowForTesting(
+        HaloSettings(focusedAgent: .claudeCode, enabledAgents: AgentKind.allCases)
+    )
+    expect(delegate.focusedAgentForTesting, .claudeCode, "start focused on Claude Code")
+
+    // Settings window may still pass the old focused agent; normalize remaps
+    // focus to the first remaining enabled agent (codex).
+    delegate.applySettingsFromWindowForTesting(
+        HaloSettings(
+            focusedAgent: .claudeCode,
+            enabledAgents: AgentKind.allCases.filter { $0 != .claudeCode }
+        )
+    )
+    expect(
+        delegate.focusedAgentForTesting,
+        .codex,
+        "disabling focused Claude remaps focus to the first remaining agent"
+    )
+    expect(
+        delegate.focusedAgentForTesting != .claudeCode,
+        "focused agent must not remain a disabled Claude Code"
+    )
 }
 
 @MainActor
