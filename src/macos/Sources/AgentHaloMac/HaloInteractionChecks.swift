@@ -122,6 +122,8 @@ func runHaloInteractionChecks() {
     testAgentToggleSelectionPillFitsItsIconWidth()
     testAgentToggleKeepsWholeControlClickable()
     testAgentToggleSupportsThreeAgentsIncludingGrok()
+    testAgentToggleWidthScalesWithEnabledCount()
+    testAgentToggleClickMapsEnabledSlotsOnly()
     testFocusSubmenuIncludesGrok()
     testDetailsPanelSwitchCallbackSelectsClaudeCode()
 }
@@ -3295,9 +3297,14 @@ private func testAgentToggleUsesSharedSVGAssets() {
     let detailsSource = try? String(contentsOf: detailsSourceURL, encoding: .utf8)
     expect(detailsSource?.contains("<svg") == false, "DetailsPanel should not embed SVG markup")
     expect(
-        detailsSource?.contains("agentToggle.widthAnchor.constraint(equalToConstant: 144)") == true,
-        "details panel agent toggle should be wide enough for four icons"
+        detailsSource?.contains("setEnabledAgents") == true
+            && detailsSource?.contains("slotWidth") == true,
+        "details panel agent toggle should size by enabled agent count via setEnabledAgents/slotWidth"
     )
+    let fullToggle = AgentToggleView(frame: .zero)
+    fullToggle.setEnabledAgents(AgentKind.allCases, focused: .codex)
+    fullToggle.layoutSubtreeIfNeeded()
+    expect(fullToggle.bounds.width, 144, "all enabled agents keep the current 144pt control")
     expect(
         detailsSource?.contains("assetName: \"pi\"") == true
             || detailsSource?.contains("assetName: \"pi\"") == true,
@@ -3400,6 +3407,7 @@ private func testAgentToggleKeepsWholeControlClickable() {
 @MainActor
 private func testAgentToggleSupportsThreeAgentsIncludingGrok() {
     let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 144, height: 24))
+    toggle.setEnabledAgents(AgentKind.allCases, focused: .codex)
     toggle.layoutSubtreeIfNeeded()
 
     expect(toggle.bounds.width, 144, "four-way agent toggle should use a wider control")
@@ -3431,6 +3439,35 @@ private func testAgentToggleSupportsThreeAgentsIncludingGrok() {
     toggle.selectAgentAtXForTesting(54)
     expect(toggle.selectedAgent, .claudeCode, "clicking the Claude slot should select Claude Code")
     expect(selected, .claudeCode, "Claude-slot click should emit Claude Code")
+}
+
+@MainActor
+private func testAgentToggleWidthScalesWithEnabledCount() {
+    let toggle = AgentToggleView(frame: .zero)
+    toggle.setEnabledAgents([.codex], focused: .codex)
+    toggle.layoutSubtreeIfNeeded()
+    expect(toggle.bounds.width, 36, "one enabled agent is one 36pt slot")
+
+    toggle.setEnabledAgents([.codex, .pi], focused: .pi)
+    toggle.layoutSubtreeIfNeeded()
+    expect(toggle.bounds.width, 72, "two enabled agents are two slots")
+    expect(toggle.selectedAgent, .pi, "focused agent stays selected")
+
+    toggle.setEnabledAgents(AgentKind.allCases, focused: .codex)
+    toggle.layoutSubtreeIfNeeded()
+    expect(toggle.bounds.width, 144, "all agents keep the current 144pt control")
+}
+
+@MainActor
+private func testAgentToggleClickMapsEnabledSlotsOnly() {
+    let toggle = AgentToggleView(frame: .zero)
+    toggle.setEnabledAgents([.codex, .pi], focused: .codex)
+    toggle.layoutSubtreeIfNeeded()
+    var selected: AgentKind?
+    toggle.onAgentSelected = { selected = $0 }
+    toggle.selectAgentAtXForTesting(54) // second of two 36pt slots
+    expect(toggle.selectedAgent, .pi, "second visible slot is Pi, not Claude")
+    expect(selected, .pi, "click emits Pi")
 }
 
 @MainActor

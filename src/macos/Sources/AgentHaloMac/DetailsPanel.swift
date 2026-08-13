@@ -45,6 +45,7 @@ class DetailsPanel: NSPanel {
     private let emptyBody = EmptySessionBodyView()
     private let sessionCard = SessionCardView()
     private var topRow: NSView?
+    private var agentToggleWidthConstraint: NSLayoutConstraint?
     private var sessionBodyMode: DetailsPanelSessionBodyRole = .unknown
     /// Last live context percent used to soft-hold the pill after STANDBY.
     private var heldContextPercent: Double?
@@ -562,11 +563,16 @@ class DetailsPanel: NSPanel {
         row.addSubview(contextPill)
         contextPill.addSubview(contextValue)
 
+        let toggleWidth = agentToggle.widthAnchor.constraint(
+            equalToConstant: AgentToggleView.slotWidth * CGFloat(AgentKind.allCases.count)
+        )
+        agentToggleWidthConstraint = toggleWidth
+
         NSLayoutConstraint.activate([
             row.heightAnchor.constraint(equalToConstant: 24),
             agentToggle.leadingAnchor.constraint(equalTo: row.leadingAnchor),
             agentToggle.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            agentToggle.widthAnchor.constraint(equalToConstant: 144),
+            toggleWidth,
             agentToggle.heightAnchor.constraint(equalToConstant: 24),
             contextPill.centerYAnchor.constraint(equalTo: row.centerYAnchor),
             contextPill.trailingAnchor.constraint(equalTo: row.trailingAnchor),
@@ -578,6 +584,12 @@ class DetailsPanel: NSPanel {
             contextValue.bottomAnchor.constraint(equalTo: contextPill.bottomAnchor, constant: -3)
         ])
         return row
+    }
+
+    func setEnabledAgents(_ agents: [AgentKind], focused: AgentKind) {
+        agentToggle.setEnabledAgents(agents, focused: focused)
+        let visibleCount = max(agentToggle.enabledAgentsForTesting.count, 1)
+        agentToggleWidthConstraint?.constant = AgentToggleView.slotWidth * CGFloat(visibleCount)
     }
 
     var focusedAgentForTesting: AgentKind {
@@ -1184,6 +1196,9 @@ final class RoundedMeterView: NSView {
 
 @MainActor
 final class AgentToggleView: NSView {
+    /// Fixed slot width so full `AgentKind.allCases` still occupies the historical 144pt control.
+    static let slotWidth: CGFloat = 144 / CGFloat(AgentKind.allCases.count)
+
     var onAgentSelected: ((AgentKind) -> Void)?
 
     private(set) var selectedAgent: AgentKind = .codex {
@@ -1192,6 +1207,10 @@ final class AgentToggleView: NSView {
         }
     }
 
+    private var enabledAgents: [AgentKind] = AgentKind.allCases
+    var enabledAgentsForTesting: [AgentKind] { enabledAgents }
+    var toggleWidthForTesting: CGFloat { widthConstraint.constant }
+
     private let bgView = AgentToggleContentView()
     private let activeBg = NSView()
     private let codexIcon = NSImageView()
@@ -1199,7 +1218,8 @@ final class AgentToggleView: NSView {
     private let grokIcon = NSImageView()
     private let piIcon = NSImageView()
     private var activeBgConstraints: [NSLayoutConstraint] = []
-    private static let agentCount: CGFloat = 4
+    private var iconLayoutConstraints: [NSLayoutConstraint] = []
+    private var widthConstraint: NSLayoutConstraint!
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -1243,36 +1263,23 @@ final class AgentToggleView: NSView {
         bgView.addSubview(grokIcon)
         bgView.addSubview(piIcon)
 
-        let slot = 1.0 / Self.agentCount
+        widthConstraint = widthAnchor.constraint(
+            equalToConstant: Self.slotWidth * CGFloat(AgentKind.allCases.count)
+        )
+
         NSLayoutConstraint.activate([
+            widthConstraint,
             bgView.leadingAnchor.constraint(equalTo: leadingAnchor),
             bgView.trailingAnchor.constraint(equalTo: trailingAnchor),
             bgView.topAnchor.constraint(equalTo: topAnchor),
             bgView.bottomAnchor.constraint(equalTo: bottomAnchor),
-
-            codexIcon.leadingAnchor.constraint(equalTo: bgView.leadingAnchor, constant: 2),
-            codexIcon.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
-            codexIcon.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: slot, constant: -2),
-            codexIcon.heightAnchor.constraint(equalToConstant: 18),
-
-            claudeIcon.leadingAnchor.constraint(equalTo: codexIcon.trailingAnchor),
-            claudeIcon.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
-            claudeIcon.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: slot, constant: -2),
-            claudeIcon.heightAnchor.constraint(equalToConstant: 18),
-
-            grokIcon.leadingAnchor.constraint(equalTo: claudeIcon.trailingAnchor),
-            grokIcon.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
-            grokIcon.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: slot, constant: -2),
-            grokIcon.heightAnchor.constraint(equalToConstant: 18),
-
-            piIcon.leadingAnchor.constraint(equalTo: grokIcon.trailingAnchor),
-            piIcon.trailingAnchor.constraint(equalTo: bgView.trailingAnchor, constant: -2),
-            piIcon.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
-            piIcon.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: slot, constant: -2),
-            piIcon.heightAnchor.constraint(equalToConstant: 18),
         ])
 
-        updateSelectedState(animated: false)
+        applyEnabledAgents(AgentKind.allCases, focused: .codex, animated: false)
+    }
+
+    func setEnabledAgents(_ agents: [AgentKind], focused: AgentKind) {
+        applyEnabledAgents(agents, focused: focused, animated: true)
     }
 
     func setAgent(_ agent: AgentKind) {
@@ -1282,6 +1289,63 @@ final class AgentToggleView: NSView {
 
     func selectAgentAtXForTesting(_ x: CGFloat) {
         selectAgent(atX: x)
+    }
+
+    private func applyEnabledAgents(_ agents: [AgentKind], focused: AgentKind, animated: Bool) {
+        var visible = AgentKind.allCases.filter { agents.contains($0) }
+        if visible.isEmpty {
+            visible = AgentKind.allCases
+        }
+        enabledAgents = visible
+
+        for agent in AgentKind.allCases {
+            icon(for: agent).isHidden = !visible.contains(agent)
+        }
+
+        rebuildIconLayout(visible: visible)
+        widthConstraint.constant = Self.slotWidth * CGFloat(visible.count)
+
+        let nextSelected = visible.contains(focused) ? focused : visible[0]
+        if selectedAgent != nextSelected {
+            selectedAgent = nextSelected
+        } else {
+            updateSelectedState(animated: animated)
+        }
+    }
+
+    private func rebuildIconLayout(visible: [AgentKind]) {
+        NSLayoutConstraint.deactivate(iconLayoutConstraints)
+        iconLayoutConstraints = []
+
+        guard !visible.isEmpty else { return }
+
+        let fraction = 1.0 / CGFloat(visible.count)
+        var previous: NSImageView?
+        for (index, agent) in visible.enumerated() {
+            let imageView = icon(for: agent)
+            let leading: NSLayoutConstraint
+            if let previous {
+                leading = imageView.leadingAnchor.constraint(equalTo: previous.trailingAnchor)
+            } else {
+                leading = imageView.leadingAnchor.constraint(equalTo: bgView.leadingAnchor, constant: 2)
+            }
+
+            var constraints: [NSLayoutConstraint] = [
+                leading,
+                imageView.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
+                imageView.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: fraction, constant: -2),
+                imageView.heightAnchor.constraint(equalToConstant: 18),
+            ]
+            if index == visible.count - 1 {
+                constraints.append(
+                    imageView.trailingAnchor.constraint(equalTo: bgView.trailingAnchor, constant: -2)
+                )
+            }
+            iconLayoutConstraints.append(contentsOf: constraints)
+            previous = imageView
+        }
+
+        NSLayoutConstraint.activate(iconLayoutConstraints)
     }
 
     private func updateSelectedState(animated: Bool) {
@@ -1336,10 +1400,9 @@ final class AgentToggleView: NSView {
     }
 
     private func selectAgent(atX x: CGFloat) {
-        let slot = max(bounds.width / Self.agentCount, 1)
-        let index = min(Int(Self.agentCount) - 1, max(0, Int(x / slot)))
-        let agents: [AgentKind] = [.codex, .claudeCode, .grok, .pi]
-        let newAgent = agents[index]
+        guard !enabledAgents.isEmpty else { return }
+        let index = min(enabledAgents.count - 1, max(0, Int(x / Self.slotWidth)))
+        let newAgent = enabledAgents[index]
         if newAgent != selectedAgent {
             selectedAgent = newAgent
             onAgentSelected?(newAgent)
