@@ -22,16 +22,16 @@
    - 始终置顶、显示菜单栏图标、开机自动启动（通用）
    - 重置光环位置（恢复动作按钮）
    - 关于 / 版本号（页脚）
-4. 默认行为与现网 macOS 一致：全部 Agent 启用、菜单栏图标显示、置顶默认不变，升级无感。
+4. 默认行为与现网 macOS 一致：`AgentKind.allCases` 全部启用、切换条总宽仍为 144pt、菜单栏图标显示、置顶默认不变，升级无感。
 
 ## 非目标
 
 - 任何 Windows 改动或跨端 schema 对齐
-- 新增 Agent 类型（Gemini、OpenCode、Claude Desktop 等）
+- 在本需求中新增 Agent 类型（全集以当时 `AgentKind.allCases` 为准；当前为 Codex / Claude Code / Grok / Pi）
 - 用户自定义 Agent 显示顺序（拖拽排序）
 - 将「暂停监控」「预览状态」「退出」迁入设置（仍为菜单临时/系统操作）
 - 在设置中再放一份「监控对象 / focusedAgent」切换（详情条与菜单已覆盖）
-- 禁用 Agent 时**卸载**已有 `~/.claude` / `~/.grok` hooks（v1 不删用户文件）
+- 禁用 Agent 时**卸载**已有 `~/.claude` / `~/.grok` / `~/.pi` 配置（v1 不删用户文件）
 - 云同步、远程配置、账号体系
 - 全局快捷键、通知/声音、用量刷新间隔、悬停延迟等未产品化能力
 - 高级：打开数据目录、重装 hooks、诊断导出
@@ -40,28 +40,30 @@
 
 1. **平台**：只做 macOS。
 2. **语义**：勾选 Agent = **启用 + 显示**，不是「仅控制 UI 可见性」。
-3. **持久化新字段**：`enabledAgents: [AgentKind]` + `showMenuBarIcon: Bool`；`alwaysOnTop` / `haloSize` / `language` / 位置字段沿用现有路径；开机启动仍走 `StartupManager`。
-4. **默认**：`enabledAgents = AgentKind.allCases`；`showMenuBarIcon = true`。
-5. **至少 1 个 Agent**：不能清空；关掉当前 `focusedAgent` 时自动切到 `enabledAgents.first`。
-6. **显示顺序**：v1 写入时始终按 `AgentKind.allCases` 过滤排序，不记录用户勾选先后。
-7. **设置即时生效**，无「保存 / 取消」按钮。
-8. **菜单栏图标关闭后**：托盘消失，仍可通过**光环右键菜单**打开设置与退出。
-9. **托盘菜单与右键菜单共用**精简后的控制菜单；仅当 `showMenuBarIcon == true` 时存在 `NSStatusItem`。
-10. **始终置顶**：设置与菜单**双入口**，状态双向一致。
-11. **重置位置**：设置内按钮 + 菜单项并存，均调用现有 `escapeOffscreen` 等价逻辑。
-12. **关于**：页脚只读版本字符串，不链到外部（v1 无需检查更新）。
-13. **设置窗口**：可成为 key 的 `NSPanel`，层级高于光环；**不**为开设置改 `NSApp` 的 `.accessory` activation policy。
-14. **禁用监控**：立刻停采、清空该 agent 快照；未启用期间不 repair / 写入该 agent 的用户配置。
-15. **切换条宽度**：随 enabled 数量变化，不再写死 144pt / 三等分。
+3. **Agent 全集**：始终以 `AgentKind.allCases` 为准（当前：`codex`、`claudeCode`、`grok`、`pi`）。设置胶囊、切换条、监控、hooks 过滤都按此枚举，不写死「三个」。
+4. **持久化新字段**：`enabledAgents: [AgentKind]` + `showMenuBarIcon: Bool`；`alwaysOnTop` / `haloSize` / `language` / 位置字段沿用现有路径；开机启动仍走 `StartupManager`。
+5. **默认**：`enabledAgents = AgentKind.allCases`；`showMenuBarIcon = true`。
+6. **至少 1 个 Agent**：不能清空；关掉当前 `focusedAgent` 时自动切到 `enabledAgents.first`。
+7. **显示顺序**：v1 写入时始终按 `AgentKind.allCases` 过滤排序，不记录用户勾选先后。
+8. **设置即时生效**，无「保存 / 取消」按钮。
+9. **菜单栏图标关闭后**：托盘消失，仍可通过**光环右键菜单**打开设置与退出。
+10. **托盘菜单与右键菜单共用**精简后的控制菜单；仅当 `showMenuBarIcon == true` 时存在 `NSStatusItem`。
+11. **始终置顶**：设置与菜单**双入口**，状态双向一致。
+12. **重置位置**：设置内按钮 + 菜单项并存，均调用现有 `escapeOffscreen` 等价逻辑。
+13. **关于**：页脚只读版本字符串，不链到外部（v1 无需检查更新）。
+14. **设置窗口**：可成为 key 的 `NSPanel`，层级高于光环；**不**为开设置改 `NSApp` 的 `.accessory` activation policy。
+15. **禁用监控**：立刻停采、清空该 agent 快照；未启用期间不 repair / 写入该 agent 的用户配置（含启动 `bootstrap`）。
+16. **切换条宽度**：`slotWidth × enabledCount`，其中 `slotWidth = 当前全量固定宽度 / allCases.count`（现网 144 / 4 = 36）。全开时总宽保持 144，升级观感不变。
 
 ## 背景与问题
 
 ### 现状
 
-- `AgentKind`：`codex` / `claudeCode` / `grok`。
-- 焦点由 `HaloSettings.focusedAgent` 持久化；详情面板左上角 `AgentToggleView` **固定三等分**、宽度写死 144pt。
-- 监控侧（`CodexActivityMonitor` / `ClaudeActivityMonitor` / `GrokActivityMonitor`）主要按 `focusedAgent` 决定轮询节奏；未 focus 时仍以 idle 间隔采集。
-- 状态栏菜单与光环右键菜单共用 `makeControlMenu()`，内含：置顶、开机启动、暂停、光环尺寸滑块、监控对象、语言、逃离屏幕外、预览状态、退出。
+- `AgentKind`：`codex` / `claudeCode` / `grok` / `pi`。
+- 焦点由 `HaloSettings.focusedAgent` 持久化；详情面板左上角 `AgentToggleView` **固定四等分**、外框宽度写死 144pt。
+- 监控侧：`CodexActivityMonitor` / `ClaudeActivityMonitor` / `GrokActivityMonitor` / `PiActivityMonitor`。未 focus 时仍以 idle 间隔采集。
+- 启动 `AgentHaloRuntimeBootstrap.bootstrap()` 无条件 configure Claude / Grok / statusline / **Pi extension**。
+- 状态栏菜单与光环右键菜单共用 `makeControlMenu()`，内含：置顶、开机启动、暂停、光环尺寸滑块、监控对象（四项）、语言、逃离屏幕外、预览状态、退出。
 - App 为 `NSApp.setActivationPolicy(.accessory)`；光环 / 详情在置顶时使用 `.floating`。
 - 无独立设置窗口；用户无法声明「我只用 Codex」。
 
@@ -69,8 +71,8 @@
 
 | 问题 | 影响 |
 |------|------|
-| 切换条永远三个 | 单 Agent 用户噪音大 |
-| 无法关闭不需要的 Agent 监控 | 多余 IO / 轮询；仍可能 repair hooks |
+| 切换条永远全量 Agent | 单 Agent 用户噪音大 |
+| 无法关闭不需要的 Agent 监控 | 多余 IO / 轮询；启动仍 repair 全部 hooks |
 | 偏好设置散落在深层子菜单 | 语言、尺寸、开机启动、置顶难发现 |
 | 菜单栏图标无法隐藏 | 菜单栏拥挤时无退路 |
 | 无版本信息入口 | 反馈问题时不便对齐构建 |
@@ -116,7 +118,7 @@ public var showMenuBarIcon: Bool
 
 ### 兼容性
 
-- 旧 macOS `settings.json` 无新字段 → 三 Agent 全开、菜单栏图标显示。
+- 旧 macOS `settings.json` 无新字段 → `allCases` 全开（当前四 Agent）、菜单栏图标显示。
 - 本设计**不**要求、也**不**实现与其他平台配置文件互通。
 
 ## 设置窗口
@@ -132,14 +134,18 @@ public var showMenuBarIcon: Bool
 
 | 项 | 约定 |
 |----|------|
-| 类型 | 可成为 key 的 `NSPanel`（`NSWindow.StyleMask` 含 `.titled` / `.closable`） |
-| 层级 | **高于光环与详情面板**，避免被 `.floating` 光环挡住。建议 `haloLevel + 1`（置顶时约为 `NSWindow.Level.floating.rawValue + 1`） |
+| 类型 | 可成为 key 的 `NSPanel`；styleMask 含 `.titled` / `.closable`；**不要**用光环那种 `.nonactivatingPanel` |
+| Key | `becomesKeyOnlyIfNeeded = false`，否则 Esc / ⌘W 可能无效 |
+| 层级 | **高于光环与详情面板**。`settingsLevel = haloLevel + 1`（置顶时约为 `floating.rawValue + 1`） |
 | activation | **禁止**为开设置把 app 改成 `.regular` |
 | 位置 | 不记忆；每次打开相对主屏可见区域居中 |
 | 关闭 | 红点、`Esc`、`⌘W` 均可关闭 |
 | 尺寸 | 内容自适应，不可缩放 |
 
-打开时用当前 `settings` + `StartupManager.isEnabled()` **刷新全部控件**（含置顶、尺寸、语言、启动项、菜单栏图标、启用胶囊），避免与菜单分叉。
+`applyWindowLevels()` 必须同时更新 halo、details **和设置窗**（若已创建），保证置顶开关切换后设置窗仍在光环之上。
+
+打开时用当前 `settings` + `StartupManager.isEnabled()` **刷新全部控件**。  
+`L10n.languageDidChange` 时若设置窗开着，重绘其全部文案。
 
 ### 布局（v1）
 
@@ -147,7 +153,8 @@ public var showMenuBarIcon: Bool
 ┌─ 设置 ────────────────────────────────────┐
 │  主页面显示                                │
 │  选择要显示并启用的 Agent                   │
-│  [● Codex] [● Claude Code] [○ Grok]       │
+│  [● Codex] [● Claude Code] [○ Grok] [○ Pi]│
+│  （一行放不下则换行）                      │
 │                                           │
 │  外观                                      │
 │  光环大小                      112        │
@@ -165,6 +172,8 @@ public var showMenuBarIcon: Bool
 └───────────────────────────────────────────┘
 ```
 
+胶囊按 `AgentKind.allCases` 列出（当前四个）。允许自动换行，不要水平裁切。
+
 ### 各区块行为
 
 | 区块 | 行为 |
@@ -172,11 +181,11 @@ public var showMenuBarIcon: Bool
 | 主页面显示 | 胶囊多选；选中 = 实心强调色 + 图标/标题；未选中 = 浅底。点击切换启用。只剩 1 个已选时不可点灭（忽略点击或视觉 dim）。即时写盘并通知 `AppDelegate`。 |
 | 光环大小 | 滑块 + 数值；范围与现有菜单滑块一致（`HaloSettings.minimumHaloSize`…`maximumHaloSize`）。调用现有 `applyHaloSize`（clamp、面板 resize、防抖写盘、详情面板重定位）。 |
 | 语言 | 三段：跟随系统 (`nil`) / `zh` / `en`。改后 `L10n.shared.setLanguage`、写 `settings.language`、刷新菜单与设置窗文案。 |
-| 始终置顶 | Toggle ↔ `settings.alwaysOnTop` + `applyWindowLevels()` + 写盘；与菜单勾选同步。设置窗自身层级仍保持「高于光环」，不随该开关掉到光环下面。 |
+| 始终置顶 | Toggle ↔ `settings.alwaysOnTop` + `applyWindowLevels()` + 写盘；与菜单勾选同步。设置窗自身层级仍保持「高于光环」。 |
 | 显示菜单栏图标 | 见下文「菜单栏图标」。设置开着时关掉托盘，本窗仍可把开关再打开。 |
 | 开机自动启动 | Toggle ↔ `StartupManager.setEnabled`；打开设置时读 `StartupManager.isEnabled()` 反映真实状态。 |
 | 重置光环位置 | 按钮；调用与菜单「脱离卡死」相同的逻辑（主屏右上角 + 提交首选位置）。不关设置窗。 |
-| 关于 | 页脚只读：`Agent Halo {version}`。版本优先 `Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString")`，为空再用 `CFBundleVersion`；再空则省略号段。不可点击或仅可选中复制。 |
+| 关于 | 页脚只读：`Agent Halo {version}`。版本优先 `CFBundleShortVersionString`，为空再用 `CFBundleVersion`；再空则省略号段。不可点击或仅可选中复制。 |
 
 ### 变更传播
 
@@ -187,12 +196,13 @@ Settings UI 变更
   → AppDelegate 应用：
        · self.settings = normalized
        · 刷新 AgentToggleView 宽度与槽位
+       · applyMenuBarIconVisibility()（重建 status item 时清空 lastStatusMenuSignature）
        · 重建控制菜单（若 status item 存在）
-       · applyMenuBarIconVisibility()
-       · applyWindowLevels()（置顶变更时；设置窗 level 仍高于光环）
+       · applyWindowLevels()（含设置窗 level）
        · 立刻清空刚禁用 agent 的 activity 快照
-       · 若 focused 变化 → requestUsageRefresh
-       · 刚重新启用的 agent → requestRefresh()
+       · 若 focused 变化且 usageProviderID != nil → requestUsageRefresh
+       · focused 变为 Pi（无官方额度）→ 不发起 usage 请求
+       · 刚重新启用的 agent → requestRefresh() + 允许其 configure 路径
        · tick() 立即应用监控启停
 ```
 
@@ -225,20 +235,31 @@ Settings UI 变更
 
 建议顺序：置顶 → 暂停 → 监控对象 → 重置位置 → 预览 → 分隔线 → 设置… → 退出。
 
+右键菜单每次 `makeControlMenu()` 现做即可。Status item 菜单有签名缓存：隐藏后再显示时必须 `lastStatusMenuSignature = nil` 再重建。
+
 ## 左上角 Agent 切换条
 
 `AgentToggleView` 改为按 `enabledAgents` **动态渲染**。
 
-**宽度**：`slotWidth × enabledAgents.count`。`slotWidth = 48`（现 144 / 3）。`DetailsPanel` 去掉写死的 `widthAnchor = 144`，改为随 `setEnabledAgents` 更新。
+**宽度公式**（保持现网全开观感）：
 
-| 已启用数量 | 行为 |
+```text
+fullToggleWidth = 144          // 现 DetailsPanel 固定宽度
+slotWidth       = fullToggleWidth / CGFloat(AgentKind.allCases.count)
+                // 当前 144 / 4 = 36
+toggleWidth     = slotWidth × CGFloat(enabledAgents.count)
+```
+
+`DetailsPanel` 去掉写死的「永远 144」作为唯一宽度；改为随 `setEnabledAgents` 更新。全开时结果仍是 144。
+
+| 已启用数量 | 行为（按当前 4 个 allCases） |
 |-----------|------|
-| 1 | 单图标、宽 48；保持选中样式；点击不切换 |
-| 2+ | 按 `enabledAgents` 顺序均分；高亮 `focusedAgent` |
+| 1 | 单图标、宽 36；保持选中样式；点击不切换 |
+| 2–n | 按 `enabledAgents` 顺序均分；高亮 `focusedAgent` |
 | 列表变更 | `setEnabledAgents(_:focused:)` 更新子视图、宽度约束与选中滑块 |
 
 点击命中：按可见槽位索引映射到 `enabledAgents[i]`，再 `onAgentSelected`。  
-**禁止**再使用写死的 `width / 3`、固定三图标或固定 144pt。Testing hook（`selectAgentAtXForTesting`）按当前槽位数计算。
+**禁止**写死 `/ 3`、`/ 4`、固定四图标或「永远 144」。Testing hook 按当前 `enabledAgents.count` 与 `slotWidth` 计算。
 
 详情面板在 settings 变更后立即刷新切换条，无需关闭重开。
 
@@ -248,46 +269,55 @@ Settings UI 变更
 
 `agent ∈ enabledAgents` 才对该 agent：
 
-- 运行 activity monitor 的 timer / poll  
+- 运行对应 activity monitor 的 timer / poll（含 Pi）  
 - 将非空快照送入 `SessionAggregator`  
-- 在 focused 时请求 usage  
+- 在 focused **且** `usageProviderID(for:) != nil` 时请求 usage  
 
 `agent ∉ enabledAgents`：
 
-- **立刻**将该 monitor 的对外快照置为 empty（禁止残留上一轮 working/error）  
-- **停止**该 monitor 的 timer，或 poll 空操作且**不再**调用 hook / transcript / failure / realtime `refresh`  
+- **立刻**将该 monitor 的对外快照置为 empty  
+- **停止**该 monitor 的 timer，或 poll 空操作且**不再**调用 hook / transcript / failure / realtime / Pi extension reader  
 - 不发起该 provider 的 usage 刷新  
 - **不** repair / 写入该 agent 的用户侧配置  
 
 ### 实现要点
 
-- `updatePollingContext` 增加 `enabled: Bool`。`enabled == false` 时：取消 timer（或等价停采）、跳过所有 reader、缓存快照改 empty，并回调一次 empty 以便 UI 收敛。  
+- 各 monitor 的 `updatePollingContext` 增加 `enabled: Bool`。`false` 时：取消 timer、跳过 reader、缓存改 empty，并回调一次 empty。  
 - 从 false → true：恢复 timer，并 `requestRefresh()`。  
-- `tick()` 按 `settings.isAgentEnabled` 传入各 monitor。  
+- `tick()` 按 `settings.isAgentEnabled` 传入 Codex / Claude / Grok / Pi。  
 - `setFocusedAgent`：目标未启用则 no-op。  
-- Usage：只刷新当前 focused（focused 已是 enabled 子集）。
+- Usage：`usageProviderID` 现为 `UsageProviderID?`；Pi 为 `nil`，focus 到 Pi 不请求官方额度。
 
-### 用户配置（hooks / statusline）
+### 用户配置（hooks / statusline / Pi extension）
+
+现网 `AgentHaloRuntimeBootstrap.bootstrap()` 在 `applicationDidFinishLaunching` 里**无条件**调用：
+
+- `ClaudeHookConfigurator` / `ClaudeStatusLineConfigurator`
+- `GrokHookConfigurator`
+- `PiExtensionConfigurator`（`~/.pi/agent/extensions/…`）
+
+设置在 `AppDelegate.init` 已 `load()`，因此 bootstrap **必须**能按 `enabledAgents` 跳过用户配置写入。
 
 | 情况 | 行为 |
 |------|------|
-| Agent 启用 | 保持现有启动 / tick 侧 configure / reconcile（如 `ClaudeStatusLineConfigurator`、`GrokHookConfigurator`） |
-| Agent 未启用 | **跳过**对该 agent 的 configure / reconcile / repair；**不删除**已有文件 |
-| 从禁用再启用 | 允许下一次正常 configure / reconcile 路径跑起来 |
+| 二进制 stage（`bin/*`） | 可仍全部 stage（不改用户 settings） |
+| Agent 启用 | 保持现有 configure / reconcile |
+| Agent 未启用 | **跳过**该 agent 的 configure / reconcile / repair（含启动 bootstrap 与 tick 侧 `reconcileClaudeStatusLineConfiguration`）；**不删除**已有文件 |
+| 从禁用再启用 | 走一次正常 configure / reconcile |
 
-v1 **不卸载**已写入的 `~/.claude` / `~/.grok` hooks。默认全开时首次启动行为与现网相同。
+v1 **不卸载**已写入的 `~/.claude` / `~/.grok` / `~/.pi` 文件。默认全开时首次启动与现网相同。
 
 ### 其他边界
 
 - 全局 `paused` 仍优先于 enabled 调度。  
-- 预览状态（demo thinking/working 等）与 focused 预览行为不变。  
+- 预览状态与 focused 预览行为不变。  
 - 只剩 1 个 enabled 时，监控对象子菜单可仅一项且已勾选。
 
 ## 菜单栏图标
 
 | `showMenuBarIcon` | 行为 |
 |-------------------|------|
-| `true` | 若尚无 item 则 `createStatusItem()`；图标随聚合状态变色（现有 `updateStatusIcon`） |
+| `true` | 若尚无 item 则 `createStatusItem()`；清空 menu 签名缓存后挂菜单；图标随聚合状态变色 |
 | `false` | `NSStatusBar.system.removeStatusItem` 并清空引用，停止 menu/icon 更新；**不**占菜单栏 |
 
 关闭菜单栏图标后：
@@ -297,14 +327,15 @@ v1 **不卸载**已写入的 `~/.claude` / `~/.grok` hooks。默认全开时首�
 
 实现注意：
 
-- v1 采用 **remove + 再 create**，不用长期 `isVisible = false` 占位，避免泄漏多个 status item。  
-- `statusItem` 类型改为可选；`updateStatusIcon` / `updateStatusMenu` 在 item 为 `nil` 时 no-op。
+- v1 采用 **remove + 再 create**，不用长期 `isVisible = false` 占位。  
+- `statusItem` 改为可选；更新路径在 `nil` 时 no-op。  
+- 再 create 时重置 `lastStatusMenuSignature`。
 
 ## i18n
 
 **唯一源文件**：`src/shared/locales/zh.json` 与 `src/shared/locales/en.json`。  
-构建脚本（`scripts/build-macos.sh` / `run-macos.sh`）会拷到 `src/macos/Sources/AgentHaloCore/locales`。  
-**不要**只改 macOS 副本，否则 `--verify` 会失败。
+构建脚本会拷到 `src/macos/Sources/AgentHaloCore/locales`。  
+**不要**只改 macOS 副本。
 
 新增 key：
 
@@ -326,78 +357,83 @@ v1 **不卸载**已写入的 `~/.claude` / `~/.grok` hooks。默认全开时首�
 
 说明：
 
-- Agent 显示名继续使用 `AgentKind.menuTitle`（产品名不翻译）。  
-- 语言选项文案复用现有 `menu.language.*`。  
-- 菜单「始终置顶 / 逃离屏幕外」继续用 `menu.always_on_top` / `menu.escape_offscreen`；设置按钮用更短的 `settings.general.reset_position`。
+- Agent 显示名用 `AgentKind.menuTitle`（含 Pi；产品名不翻译）。  
+- 语言选项复用 `menu.language.*`。  
+- 菜单置顶 / 逃离继续用 `menu.always_on_top` / `menu.escape_offscreen`。
 
 ## 测试计划
 
 ### Core（`AgentHaloCoreChecks`）
 
-- 缺省 / 旧 JSON 无 `enabledAgents` → `allCases`  
+- 缺省 / 旧 JSON 无 `enabledAgents` → `allCases`（含 `pi`）  
 - 缺省 / 旧 JSON 无 `showMenuBarIcon` → `true`  
-- 空数组、非法值 → 规范化回退 `allCases`  
-- 去重 + `allCases` 稳定顺序  
+- 空数组、非法值 → 回退 `allCases`  
+- 去重 + `allCases` 稳定顺序（Codex → Claude → Grok → Pi）  
 - `focusedAgent ∉ enabledAgents` → 改为 `first`  
 - `setAgent(enabled: false)` 不能关掉最后一个  
 - 关掉 focused → focused 变为剩余 first  
-- round-trip 持久化：`enabledAgents` + `showMenuBarIcon` + `focusedAgent` + 既有 `alwaysOnTop`
+- round-trip：`enabledAgents` + `showMenuBarIcon` + `focusedAgent` + `alwaysOnTop`
 
 ### App / UI（现有 testing hooks 风格）
 
-- `AgentToggleView`：1/2/3 个 enabled 时宽度为 `48 × n`，点击按槽位映射  
-- 设置胶囊：唯一已选项不可取消  
-- 禁用 agent：对应 monitor 快照立刻 empty，且不再 refresh hook/reader  
-- 再启用：触发 refresh，可出现新快照  
-- 未启用 Claude 时 tick **不**调用 `ClaudeStatusLineConfigurator.configure` / reconcile 写入  
-- `showMenuBarIcon` false → 无 status item；true → 恢复  
-- 设置改置顶 ↔ 菜单勾选一致；设置窗 level 仍高于光环  
-- 设置「重置位置」与菜单逃离逻辑等价  
+- `AgentToggleView`：1…`allCases.count` 个 enabled 时宽度为 `36 × n`（公式：`144 / allCases.count × n`），点击按槽位映射  
+- 设置胶囊列出全部 `allCases`（含 Pi）；唯一已选项不可取消  
+- 禁用 agent（含 Pi）：对应 monitor 快照立刻 empty，且不再 refresh  
+- 再启用：触发 refresh  
+- 未启用 Claude：tick **与 bootstrap** 都不调用 Claude configure / reconcile 写入  
+- 未启用 Grok / Pi：bootstrap 不写 `~/.grok` hooks / `~/.pi` extension  
+- `showMenuBarIcon` false → 无 status item；true → 恢复且菜单非陈旧签名  
+- 设置改置顶 ↔ 菜单一致；设置窗 level 仍高于光环  
+- 设置「重置位置」与菜单逃离等价  
 - 页脚版本来自 short version（或 fallback）  
-- 控制菜单不再包含语言 / 尺寸 / 开机启动，且含「设置…」  
-- 监控对象子菜单仅含 enabled agents  
-- `setFocusedAgent` 对未启用 agent no-op  
+- 控制菜单不再含语言 / 尺寸 / 开机启动，且含「设置…」  
+- 监控对象子菜单仅含 enabled（可只剩 Pi）  
+- `setFocusedAgent` 对未启用 no-op  
+- focus 到 Pi 不调用官方 usage refresh  
 
 ### 手动验收
 
-1. 只勾 Codex → 切换条宽约 48、仅 Codex；Claude/Grok 无轮询、不 repair 其 hooks  
-2. 再勾 Claude → 两项可切换，Claude 恢复监控  
-3. 关菜单栏图标 → 托盘消失；设置窗仍在且可重新打开图标；或右键再开设置  
-4. 设置窗不被光环挡住；Esc / ⌘W / 红点可关  
-5. 设置内改尺寸 / 语言 / 开机启动 / 置顶，效果与旧菜单一致  
-6. 设置与菜单均可重置位置到主屏右上角  
-7. 页脚显示正确版本  
-8. 升级老用户：三 Agent 全开、菜单栏图标仍在  
+1. 只勾 Codex → 切换条宽约 36、仅 Codex；Claude / Grok / Pi 无轮询、启动不 repair 其用户配置  
+2. 再勾 Claude 与 Pi → 对应项出现且可切换  
+3. 默认 / 升级：四 Agent 全开，切换条总宽仍 144  
+4. 关菜单栏图标 → 托盘消失；设置窗仍可打开开关；或右键再开设置  
+5. 设置窗不被光环挡住；Esc / ⌘W / 红点可关  
+6. 改尺寸 / 语言 / 开机启动 / 置顶，效果与旧菜单一致；语言切换时开着的设置窗文案更新  
+7. 设置与菜单均可重置位置  
+8. 页脚显示正确版本  
 
 ## 成功标准
 
-1. 用户可通过设置选择任意非空 Agent 子集；切换条、监控、hooks repair 与之一致。  
-2. 外观与通用偏好（尺寸、语言、置顶、菜单栏图标、开机启动）均可在设置中改且即时生效。  
-3. 设置窗在 accessory + 置顶光环下可点、可关、不被挡住。  
-4. 重置位置在设置与菜单双入口可用。  
-5. 菜单精简后仍可通过托盘（若显示）与光环右键完成置顶、暂停、切换 focus、重置位置、设置、退出。  
-6. 旧 macOS 配置升级零回归；关于信息可见。  
-7. 中英文走 shared locales，verify 通过。  
+1. 用户可通过设置选择任意非空 `AgentKind` 子集（含 Pi）；切换条、监控、hooks/extension repair 与之一致。  
+2. 全开时切换条总宽与现网相同（144）。  
+3. 外观与通用偏好均可在设置中改且即时生效。  
+4. 设置窗在 accessory + 置顶光环下可点、可关、不被挡住。  
+5. 重置位置双入口可用。  
+6. 菜单精简后仍可通过托盘（若显示）与光环右键完成置顶、暂停、切换 focus、重置位置、设置、退出。  
+7. 旧 macOS 配置升级为零回归（四 Agent 全开）；关于信息可见。  
+8. 中英文走 shared locales，verify 通过。  
 
 ## 风险与缓解
 
 | 风险 | 缓解 |
 |------|------|
-| 关掉菜单栏后用户找不到设置 | 右键菜单保留「设置…」；默认 `showMenuBarIcon = true`；设置开着时可直接再打开图标 |
-| 设置窗被 floating 光环挡住 | 设置窗 level = halo + 1；不为开设置改 activation policy |
+| spec 再与 `allCases` 脱节 | 正文不写死「三个」；胶囊与宽度用 `allCases` |
+| 全开变宽导致升级观感变化 | `slotWidth = 144 / allCases.count` |
+| 关掉菜单栏后找不到设置 | 右键保留「设置…」；默认显示图标 |
+| 设置窗被光环挡住或无法 key | level = halo + 1；非 nonactivating；`becomesKeyOnlyIfNeeded = false` |
 | 禁用后仍 idle 轮询 / 残留快照 | 停 timer + 立刻 empty + 再启用 refresh |
-| 禁用后仍写入 `~/.claude` | 未启用跳过 reconcile / configure |
-| 设置窗与菜单状态分叉 | 打开时全量刷新；状态走单一 `onSettingsChanged` |
-| 置顶双入口不同步 | 共用同一 `applyWindowLevels` 路径 |
-| `AgentToggleView` 动态布局回归 | testing hooks 覆盖 1–3 槽与 48×n 宽度 |
+| 启动仍写入未启用 agent 配置 | bootstrap 按 `enabledAgents` 跳过 configure |
+| 置顶后设置窗掉到光环下 | `applyWindowLevels` 含设置窗 |
+| 托盘重建菜单陈旧 | 清空 `lastStatusMenuSignature` |
+| `AgentToggleView` 布局回归 | hooks 覆盖 1–`allCases.count` 槽 |
 
 ## 实施切片建议（供 plan 使用）
 
-1. **Settings schema + 规范化 + Core 测试**  
-2. **AgentToggleView 动态列表与 48×n 宽度**  
-3. **Monitor 启停 + 立刻清空快照 + 未启用跳过 hook repair + focus 菜单过滤**  
-4. **Settings 窗口 UI**（层级 / Esc / ⌘W / Agent + 外观 + 通用 + 重置 + 关于）  
-5. **菜单精简 + 设置入口 + 菜单栏图标显隐 + 置顶/重置双入口接线**  
+1. **Settings schema + 规范化 + Core 测试**（`allCases` 含 Pi）  
+2. **AgentToggleView 动态列表与 `144/allCases.count` 槽宽**  
+3. **Monitor 启停（含 Pi）+ 立刻清空快照 + bootstrap/tick 跳过未启用 configure + focus 菜单过滤**  
+4. **Settings 窗口 UI**（key panel / 层级 / Esc / ⌘W / 四胶囊可换行 + 外观 + 通用 + 重置 + 关于）  
+5. **菜单精简 + 设置入口 + 菜单栏图标显隐（重置 menu 签名）+ 置顶/重置双入口**  
 6. **shared locales + 手动验收清单**  
 
 切片可并行处：1∥2 起步；3 依赖 1；4–5 依赖 1 与 AppDelegate 回调约定。
