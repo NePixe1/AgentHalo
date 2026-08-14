@@ -91,11 +91,35 @@ public enum GrokActiveSessionsReader {
         fileManager: FileManager = .default,
         isProcessAlive: (Int32) -> Bool = defaultIsProcessAlive
     ) -> Bool {
-        !liveSessionIds(
+        !liveSessions(
             homeDirectory: homeDirectory,
             fileManager: fileManager,
             isProcessAlive: isProcessAlive
         ).isEmpty
+    }
+
+    /// Complete registry entries backed by a live Grok process.
+    ///
+    /// Keep cwd + pid instead of collapsing immediately to ids: Grok Build can
+    /// omit one live conversation id while still listing another conversation
+    /// from the same process/workspace.
+    public static func liveSessions(
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        fileManager: FileManager = .default,
+        isProcessAlive: (Int32) -> Bool = defaultIsProcessAlive
+    ) -> [GrokActiveSessionRef] {
+        let sessions = read(homeDirectory: homeDirectory, fileManager: fileManager)
+        guard !sessions.isEmpty else {
+            return []
+        }
+        let withPid = sessions.filter { $0.processId != nil }
+        if withPid.isEmpty {
+            return sessions
+        }
+        return withPid.filter { session in
+            guard let processId = session.processId else { return false }
+            return isProcessAlive(processId)
+        }
     }
 
     /// Session ids that are still backed by a live Grok process.
@@ -109,20 +133,11 @@ public enum GrokActiveSessionsReader {
         fileManager: FileManager = .default,
         isProcessAlive: (Int32) -> Bool = defaultIsProcessAlive
     ) -> Set<String> {
-        let sessions = read(homeDirectory: homeDirectory, fileManager: fileManager)
-        guard !sessions.isEmpty else {
-            return []
-        }
-        let withPid = sessions.filter { $0.processId != nil }
-        if withPid.isEmpty {
-            return Set(sessions.map(\.sessionId))
-        }
-        return Set(withPid.compactMap { session in
-            guard let processId = session.processId, isProcessAlive(processId) else {
-                return nil
-            }
-            return session.sessionId
-        })
+        Set(liveSessions(
+            homeDirectory: homeDirectory,
+            fileManager: fileManager,
+            isProcessAlive: isProcessAlive
+        ).map(\.sessionId))
     }
 
     public static func defaultIsProcessAlive(_ pid: Int32) -> Bool {

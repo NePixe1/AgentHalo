@@ -9,6 +9,7 @@ public final class GrokHookStatusMonitor {
     private var lastModified: Date?
     private let fileManager: FileManager
     private let turnEventsReader: GrokSessionTurnEventsReader
+    private var turnStates: [String: GrokSessionTurnState] = [:]
 
     public init(
         statusURL: URL = AgentHaloPaths().grokStatusLog,
@@ -43,6 +44,10 @@ public final class GrokHookStatusMonitor {
         return reducers.values.map(\.snapshot)
     }
 
+    public func sessionTurnStates() -> [String: GrokSessionTurnState] {
+        turnStates
+    }
+
     private func refreshHooks(now: Date) -> Bool {
         let previous = offset
         let meta = FastFileMetadata.read(statusURL)
@@ -56,6 +61,7 @@ public final class GrokHookStatusMonitor {
             pending = ""
             lastModified = mtime
             reducers.removeAll()
+            turnStates.removeAll()
             turnEventsReader.reset()
             return false
         }
@@ -124,6 +130,7 @@ public final class GrokHookStatusMonitor {
                 continue
             }
             let delta = turnEventsReader.poll(eventsURL: eventsURL)
+            turnStates[sessionId] = turnEventsReader.turnState(eventsURL: eventsURL)
             guard !delta.isEmpty else {
                 continue
             }
@@ -244,6 +251,7 @@ public final class GrokHookStatusMonitor {
         reducers = reducers.filter { _, reducer in
             Self.shouldRetainSnapshot(reducer.snapshot, now: now)
         }
+        turnStates = turnStates.filter { reducers[$0.key] != nil }
     }
 
     /// Whether a Grok hook snapshot should survive age-based pruning.

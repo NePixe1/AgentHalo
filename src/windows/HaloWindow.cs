@@ -427,12 +427,12 @@ public sealed class HaloWindow : Window
             {
                 GrokUsageMonitor.Instance.RequestRefresh();
                 grokMonitor.Refresh();
-                HashSet<string> liveGrokSessionIds =
-                    GrokActiveSessionsReader.LiveSessionIds(
+                List<GrokActiveSessionRef> liveGrokSessions =
+                    GrokActiveSessionsReader.LiveSessions(
                         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
-                bool grokPresent = liveGrokSessionIds.Count > 0;
+                bool grokPresent = liveGrokSessions.Count > 0;
                 lastGrokPresent = grokPresent;
-                aggregate = GetGrokAggregate(liveGrokSessionIds);
+                aggregate = GetGrokAggregate(liveGrokSessions);
                 if (demoState.HasValue)
                 {
                     aggregate.State = demoState.Value;
@@ -1035,12 +1035,14 @@ public sealed class HaloWindow : Window
             return result;
         }
 
-        private AggregateSnapshot GetGrokAggregate(ISet<string> liveSessionIds)
+        private AggregateSnapshot GetGrokAggregate(
+            IList<GrokActiveSessionRef> liveSessions)
         {
             return BuildGrokAggregateForTest(
                 grokMonitor.Snapshots(),
                 settings.Paused,
-                liveSessionIds,
+                liveSessions,
+                grokMonitor.TurnStates(),
                 DateTime.UtcNow);
         }
 
@@ -1234,6 +1236,81 @@ public sealed class HaloWindow : Window
                         StringComparison.OrdinalIgnoreCase));
         }
 
+        internal static bool IsGrokHookSessionLive(
+            SessionSnapshot snapshot,
+            IList<GrokActiveSessionRef> liveSessions,
+            IDictionary<string, GrokSessionTurnState> turnStates,
+            DateTime now)
+        {
+            if (snapshot == null || liveSessions == null || liveSessions.Count == 0)
+            {
+                return false;
+            }
+
+            GrokSessionTurnState turnState = null;
+            if (turnStates != null && !String.IsNullOrEmpty(snapshot.ThreadId))
+            {
+                turnStates.TryGetValue(snapshot.ThreadId, out turnState);
+            }
+            // A newer durable turn end wins over a stale registry entry.
+            if (turnState != null && !turnState.IsOpen &&
+                turnState.LastEndedAtUtc != DateTime.MinValue &&
+                turnState.LastEndedAtUtc >= snapshot.LastEventUtc)
+            {
+                return false;
+            }
+
+            if (liveSessions.Any(delegate(GrokActiveSessionRef session)
+                {
+                    return session != null && String.Equals(session.SessionId,
+                        snapshot.ThreadId, StringComparison.OrdinalIgnoreCase);
+                }) || (String.Equals(snapshot.ThreadId, "grok",
+                    StringComparison.OrdinalIgnoreCase) && liveSessions.Count > 0))
+            {
+                return true;
+            }
+
+            string snapshotDirectory = NormalizeDirectory(snapshot.WorkingDirectory);
+            if (String.IsNullOrEmpty(snapshotDirectory))
+            {
+                return false;
+            }
+            bool sameWorkspace = liveSessions.Any(delegate(
+                GrokActiveSessionRef session)
+            {
+                return session != null && String.Equals(
+                    NormalizeDirectory(session.WorkingDirectory), snapshotDirectory,
+                    StringComparison.OrdinalIgnoreCase);
+            });
+            if (!sameWorkspace)
+            {
+                return false;
+            }
+
+            // Grok may replace one conversation id while multiple terminals share
+            // one process. Open turn evidence is authoritative; recent hooks are
+            // only a bounded bridge while active_sessions.json catches up.
+            return (turnState != null && turnState.IsOpen) ||
+                snapshot.LastEventUtc >= now.AddMinutes(-10);
+        }
+
+        private static string NormalizeDirectory(string path)
+        {
+            if (String.IsNullOrWhiteSpace(path))
+            {
+                return String.Empty;
+            }
+            try
+            {
+                return Path.GetFullPath(path.Trim()).TrimEnd(
+                    Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            }
+            catch
+            {
+                return path.Trim().TrimEnd('/', '\\');
+            }
+        }
+
         /// <summary>
         /// Testable Grok focus aggregate: filters Agent==Grok, Done ~8s, Error ~1h.
         /// Empty sessions → Idle (standby is applied in RefreshState via HasLiveSession).
@@ -1244,7 +1321,25 @@ public sealed class HaloWindow : Window
             ISet<string> liveSessionIds,
             DateTime now)
         {
-            bool present = liveSessionIds != null && liveSessionIds.Count > 0;
+            List<GrokActiveSessionRef> liveSessions = liveSessionIds == null
+                ? new List<GrokActiveSessionRef>()
+                : liveSessionIds.Select(delegate(string sessionId)
+                {
+                    return new GrokActiveSessionRef { SessionId = sessionId };
+                }).ToList();
+            return BuildGrokAggregateForTest(allSessions, paused, liveSessions,
+                new Dictionary<string, GrokSessionTurnState>(
+                    StringComparer.OrdinalIgnoreCase), now);
+        }
+
+        internal static AggregateSnapshot BuildGrokAggregateForTest(
+            IList<SessionSnapshot> allSessions,
+            bool paused,
+            IList<GrokActiveSessionRef> liveSessions,
+            IDictionary<string, GrokSessionTurnState> turnStates,
+            DateTime now)
+        {
+            bool present = liveSessions != null && liveSessions.Count > 0;
             List<SessionSnapshot> source = allSessions == null
                 ? new List<SessionSnapshot>()
                 : allSessions.Where(delegate(SessionSnapshot snapshot)
@@ -1258,7 +1353,8 @@ public sealed class HaloWindow : Window
                     return IsHookActivitySessionVisible(
                         snapshot,
                         now,
-                        IsHookSessionLive(snapshot, liveSessionIds));
+                        IsGrokHookSessionLive(snapshot, liveSessions,
+                            turnStates, now));
                 })
                 .OrderBy(delegate(SessionSnapshot snapshot)
                 {

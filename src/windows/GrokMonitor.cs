@@ -1121,6 +1121,7 @@ namespace CodexHalo
         private readonly string sessionsRoot;
         private readonly Dictionary<string, GrokHookStatusReducer> reducers;
         private readonly GrokSessionTurnEventsReader turnEventsReader;
+        private readonly Dictionary<string, GrokSessionTurnState> turnStates;
         private long offset;
         private string pending;
         private DateTime lastModifiedUtc;
@@ -1145,6 +1146,8 @@ namespace CodexHalo
             reducers = new Dictionary<string, GrokHookStatusReducer>(
                 StringComparer.OrdinalIgnoreCase);
             turnEventsReader = new GrokSessionTurnEventsReader();
+            turnStates = new Dictionary<string, GrokSessionTurnState>(
+                StringComparer.OrdinalIgnoreCase);
             pending = String.Empty;
         }
 
@@ -1172,6 +1175,7 @@ namespace CodexHalo
                 pending = String.Empty;
                 reducers.Clear();
                 turnEventsReader.Reset();
+                turnStates.Clear();
                 changed = true;
             }
             if (info.Length > offset)
@@ -1245,6 +1249,16 @@ namespace CodexHalo
                     continue;
                 }
                 GrokSessionEventsDelta delta = turnEventsReader.Poll(eventsPath);
+                GrokSessionTurnState previousTurn;
+                bool hadPrevious = turnStates.TryGetValue(pair.Key, out previousTurn);
+                GrokSessionTurnState nextTurn = turnEventsReader.TurnState(eventsPath);
+                turnStates[pair.Key] = nextTurn;
+                if (!hadPrevious || previousTurn == null ||
+                    previousTurn.LastStartedAtUtc != nextTurn.LastStartedAtUtc ||
+                    previousTurn.LastEndedAtUtc != nextTurn.LastEndedAtUtc)
+                {
+                    changed = true;
+                }
                 if (delta == null || delta.IsEmpty)
                 {
                     continue;
@@ -1405,6 +1419,24 @@ namespace CodexHalo
             .ToList();
         }
 
+        public Dictionary<string, GrokSessionTurnState> TurnStates()
+        {
+            Dictionary<string, GrokSessionTurnState> result =
+                new Dictionary<string, GrokSessionTurnState>(
+                    StringComparer.OrdinalIgnoreCase);
+            foreach (KeyValuePair<string, GrokSessionTurnState> pair in turnStates)
+            {
+                result[pair.Key] = pair.Value == null
+                    ? new GrokSessionTurnState()
+                    : new GrokSessionTurnState
+                    {
+                        LastStartedAtUtc = pair.Value.LastStartedAtUtc,
+                        LastEndedAtUtc = pair.Value.LastEndedAtUtc
+                    };
+            }
+            return result;
+        }
+
         private bool ApplyAndPrune(DateTime now)
         {
             bool changed = false;
@@ -1431,6 +1463,7 @@ namespace CodexHalo
             foreach (string key in stale)
             {
                 reducers.Remove(key);
+                turnStates.Remove(key);
                 changed = true;
             }
             return changed;
@@ -1554,6 +1587,26 @@ namespace CodexHalo
         }
     }
 
+    /// <summary>
+    /// Latest durable turn boundaries for one Grok session. active_sessions.json
+    /// can omit a still-running conversation when one process owns several tabs.
+    /// </summary>
+    public sealed class GrokSessionTurnState
+    {
+        public DateTime LastStartedAtUtc = DateTime.MinValue;
+        public DateTime LastEndedAtUtc = DateTime.MinValue;
+
+        public bool IsOpen
+        {
+            get
+            {
+                return LastStartedAtUtc != DateTime.MinValue &&
+                    (LastEndedAtUtc == DateTime.MinValue ||
+                     LastStartedAtUtc >= LastEndedAtUtc);
+            }
+        }
+    }
+
     public enum GrokPermissionUpdateKind
     {
         Requested,
@@ -1597,12 +1650,13 @@ namespace CodexHalo
     /// <summary>
     /// Incrementally tails events.jsonl for turn ends and permission lifecycle.
     /// Stateful per session path so the (often multi-hundred-KB) phase stream is
-    /// not fully re-read every poll. First open seeks near EOF and only catch-up
-    /// scans a short tail for an already-active turn cancelled mid-poll.
+    /// not fully re-read every poll. First attach walks backward from EOF until
+    /// the latest turn_started so a long phase_changed burst cannot hide the
+    /// current turn boundary.
     /// </summary>
     public sealed class GrokSessionTurnEventsReader
     {
-        private const long FirstAttachTailByteLimit = 256 * 1024;
+        private const int FirstAttachChunkBytes = 64 * 1024;
 
         private sealed class TailState
         {
@@ -1610,6 +1664,8 @@ namespace CodexHalo
             public string Pending = String.Empty;
             public DateTime LastModifiedUtc = DateTime.MinValue;
             public bool SawFile;
+            public DateTime LastStartedAtUtc = DateTime.MinValue;
+            public DateTime LastEndedAtUtc = DateTime.MinValue;
         }
 
         private readonly Dictionary<string, TailState> tails =
@@ -1670,22 +1726,17 @@ namespace CodexHalo
             state.SawFile = true;
             state.LastModifiedUtc = mtime;
 
-            long readFrom;
             if (isFirstAttach)
             {
-                readFrom = size > FirstAttachTailByteLimit
-                    ? size - FirstAttachTailByteLimit
-                    : 0;
-                state.Offset = readFrom;
+                List<string> firstLines =
+                    CollectFirstAttachRelevantLines(eventsPath, size);
+                state.Offset = size;
                 state.Pending = String.Empty;
+                return ParseTurnEventLines(firstLines, 0, firstLines.Count, state);
             }
-            else if (size <= state.Offset)
+            if (size <= state.Offset)
             {
                 return new GrokSessionEventsDelta();
-            }
-            else
-            {
-                readFrom = state.Offset;
             }
 
             try
@@ -1693,7 +1744,7 @@ namespace CodexHalo
                 using (FileStream stream = new FileStream(eventsPath, FileMode.Open,
                     FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
                 {
-                    stream.Seek(readFrom, SeekOrigin.Begin);
+                    stream.Seek(state.Offset, SeekOrigin.Begin);
                     byte[] bytes = new byte[(int)(stream.Length - stream.Position)];
                     int read = stream.Read(bytes, 0, bytes.Length);
                     state.Offset = size;
@@ -1710,129 +1761,244 @@ namespace CodexHalo
                     {
                         state.Pending = String.Empty;
                     }
-
-                    int startIndex = 0;
-                    if (isFirstAttach && readFrom > 0 && complete > 0)
-                    {
-                        startIndex = 1;
-                    }
-
-                    GrokSessionTurnEnd latest = null;
-                    GrokSessionTurnStart latestStart = null;
-                    DateTime lastStartedAt = DateTime.MinValue;
-                    List<GrokPermissionUpdate> permissions =
-                        new List<GrokPermissionUpdate>();
-                    for (int i = startIndex; i < complete; i++)
-                    {
-                        string line = lines[i].TrimEnd('\r').TrimStart('\ufeff');
-                        if (String.IsNullOrWhiteSpace(line))
-                        {
-                            continue;
-                        }
-                        Dictionary<string, object> root = null;
-                        try
-                        {
-                            root = serializer.DeserializeObject(line)
-                                as Dictionary<string, object>;
-                        }
-                        catch
-                        {
-                            continue;
-                        }
-                        if (root == null)
-                        {
-                            continue;
-                        }
-                        string type = StringValue(root, "type");
-                        DateTime at = ParseDate(StringValue(root, "ts"));
-                        if (at == DateTime.MinValue)
-                        {
-                            at = ParseDate(StringValue(root, "timestamp"));
-                        }
-                        if (at == DateTime.MinValue)
-                        {
-                            at = DateTime.UtcNow;
-                        }
-                        if (String.Equals(type, "turn_started",
-                            StringComparison.OrdinalIgnoreCase))
-                        {
-                            lastStartedAt = at;
-                            string redirectKind = StringValue(root, "redirect_kind");
-                            // Only surface starts with a steer redirect_kind —
-                            // ordinary starts would make IsEmpty false every turn.
-                            if (!String.IsNullOrEmpty(redirectKind))
-                            {
-                                latestStart = new GrokSessionTurnStart
-                                {
-                                    StartedAtUtc = at,
-                                    RedirectKind = redirectKind
-                                };
-                            }
-                            // Steer writes turn_ended cancelled then turn_started
-                            // in the same tail chunk — newer start supersedes end.
-                            if (latest != null && at >= latest.EndedAtUtc)
-                            {
-                                latest = null;
-                            }
-                            continue;
-                        }
-                        if (String.Equals(type, "permission_requested",
-                            StringComparison.OrdinalIgnoreCase))
-                        {
-                            permissions.Add(new GrokPermissionUpdate
-                            {
-                                AtUtc = at,
-                                Kind = GrokPermissionUpdateKind.Requested,
-                                ToolName = StringValue(root, "tool_name")
-                            });
-                            continue;
-                        }
-                        if (String.Equals(type, "permission_resolved",
-                            StringComparison.OrdinalIgnoreCase))
-                        {
-                            permissions.Add(new GrokPermissionUpdate
-                            {
-                                AtUtc = at,
-                                Kind = GrokPermissionUpdateKind.Resolved,
-                                ToolName = StringValue(root, "tool_name"),
-                                Decision = StringValue(root, "decision"),
-                                WaitMs = IntValue(root, "wait_ms")
-                            });
-                            continue;
-                        }
-                        if (!String.Equals(type, "turn_ended",
-                            StringComparison.OrdinalIgnoreCase))
-                        {
-                            continue;
-                        }
-                        GrokSessionTurnEndOutcome outcome =
-                            ParseOutcome(StringValue(root, "outcome"));
-                        if (lastStartedAt != DateTime.MinValue && lastStartedAt > at)
-                        {
-                            continue;
-                        }
-                        latest = new GrokSessionTurnEnd
-                        {
-                            EndedAtUtc = at,
-                            Outcome = outcome,
-                            CancellationCategory =
-                                StringValue(root, "cancellation_category"),
-                            CancellationTrigger =
-                                NestedStringValue(root, "cancellation_context", "trigger")
-                        };
-                    }
-                    return new GrokSessionEventsDelta
-                    {
-                        TurnEnd = latest,
-                        TurnStart = latestStart,
-                        PermissionUpdates = permissions
-                    };
+                    return ParseTurnEventLines(lines, 0, complete, state);
                 }
             }
             catch
             {
                 return new GrokSessionEventsDelta();
             }
+        }
+
+        private List<string> CollectFirstAttachRelevantLines(string eventsPath, long size)
+        {
+            List<string> collected = new List<string>();
+            if (size <= 0 || String.IsNullOrEmpty(eventsPath) || !File.Exists(eventsPath))
+            {
+                return collected;
+            }
+            try
+            {
+                using (FileStream stream = new FileStream(eventsPath, FileMode.Open,
+                    FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                {
+                    long pos = size;
+                    string suffix = String.Empty;
+                    bool foundStart = false;
+                    byte[] buffer = new byte[FirstAttachChunkBytes];
+                    while (pos > 0 && !foundStart)
+                    {
+                        long chunkStart = pos > FirstAttachChunkBytes
+                            ? pos - FirstAttachChunkBytes
+                            : 0;
+                        int toRead = (int)(pos - chunkStart);
+                        stream.Seek(chunkStart, SeekOrigin.Begin);
+                        int read = stream.Read(buffer, 0, toRead);
+                        string chunk = Encoding.UTF8.GetString(buffer, 0, read);
+                        string text = chunk + suffix;
+                        string completeText;
+                        if (chunkStart > 0)
+                        {
+                            int newline = text.IndexOf('\n');
+                            if (newline >= 0)
+                            {
+                                suffix = text.Substring(0, newline + 1);
+                                completeText = text.Substring(newline + 1);
+                            }
+                            else
+                            {
+                                suffix = text;
+                                completeText = String.Empty;
+                            }
+                        }
+                        else
+                        {
+                            suffix = String.Empty;
+                            completeText = text;
+                        }
+                        string[] lines = completeText.Split('\n');
+                        int complete = lines.Length;
+                        if (pos == size &&
+                            !text.EndsWith("\n", StringComparison.Ordinal) &&
+                            complete > 0)
+                        {
+                            complete--;
+                        }
+                        List<string> kept = new List<string>();
+                        bool chunkHasStart = false;
+                        for (int i = 0; i < complete; i++)
+                        {
+                            string trimmed = lines[i].TrimEnd('\r').TrimStart('\ufeff');
+                            if (String.IsNullOrWhiteSpace(trimmed) ||
+                                !IsRelevantTurnEventLine(trimmed))
+                            {
+                                continue;
+                            }
+                            kept.Add(trimmed);
+                            if (trimmed.IndexOf("turn_started",
+                                StringComparison.Ordinal) >= 0)
+                            {
+                                chunkHasStart = true;
+                            }
+                        }
+                        collected.InsertRange(0, kept);
+                        foundStart = chunkHasStart;
+                        pos = chunkStart;
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return collected;
+        }
+
+        private static bool IsRelevantTurnEventLine(string line)
+        {
+            return line.IndexOf("turn_started", StringComparison.Ordinal) >= 0 ||
+                line.IndexOf("turn_ended", StringComparison.Ordinal) >= 0 ||
+                line.IndexOf("permission_requested", StringComparison.Ordinal) >= 0 ||
+                line.IndexOf("permission_resolved", StringComparison.Ordinal) >= 0;
+        }
+
+        private GrokSessionEventsDelta ParseTurnEventLines(
+            IList<string> lines, int startIndex, int complete, TailState state)
+        {
+            GrokSessionTurnEnd latest = null;
+            GrokSessionTurnStart latestStart = null;
+            DateTime lastStartedAt = DateTime.MinValue;
+            List<GrokPermissionUpdate> permissions =
+                new List<GrokPermissionUpdate>();
+            for (int i = startIndex; i < complete; i++)
+            {
+                string line = lines[i].TrimEnd('\r').TrimStart('\ufeff');
+                if (String.IsNullOrWhiteSpace(line))
+                {
+                    continue;
+                }
+                Dictionary<string, object> root = null;
+                try
+                {
+                    root = serializer.DeserializeObject(line)
+                        as Dictionary<string, object>;
+                }
+                catch
+                {
+                    continue;
+                }
+                if (root == null)
+                {
+                    continue;
+                }
+                string type = StringValue(root, "type");
+                DateTime at = ParseDate(StringValue(root, "ts"));
+                if (at == DateTime.MinValue)
+                {
+                    at = ParseDate(StringValue(root, "timestamp"));
+                }
+                if (at == DateTime.MinValue)
+                {
+                    at = DateTime.UtcNow;
+                }
+                if (String.Equals(type, "turn_started",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    lastStartedAt = at;
+                    if (state.LastStartedAtUtc == DateTime.MinValue ||
+                        at > state.LastStartedAtUtc)
+                    {
+                        state.LastStartedAtUtc = at;
+                    }
+                    string redirectKind = StringValue(root, "redirect_kind");
+                    // Only surface starts with a steer redirect_kind —
+                    // ordinary starts would make IsEmpty false every turn.
+                    if (!String.IsNullOrEmpty(redirectKind))
+                    {
+                        latestStart = new GrokSessionTurnStart
+                        {
+                            StartedAtUtc = at,
+                            RedirectKind = redirectKind
+                        };
+                    }
+                    // Steer writes turn_ended cancelled then turn_started
+                    // in the same tail chunk — newer start supersedes end.
+                    if (latest != null && at >= latest.EndedAtUtc)
+                    {
+                        latest = null;
+                    }
+                    continue;
+                }
+                if (String.Equals(type, "permission_requested",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    permissions.Add(new GrokPermissionUpdate
+                    {
+                        AtUtc = at,
+                        Kind = GrokPermissionUpdateKind.Requested,
+                        ToolName = StringValue(root, "tool_name")
+                    });
+                    continue;
+                }
+                if (String.Equals(type, "permission_resolved",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    permissions.Add(new GrokPermissionUpdate
+                    {
+                        AtUtc = at,
+                        Kind = GrokPermissionUpdateKind.Resolved,
+                        ToolName = StringValue(root, "tool_name"),
+                        Decision = StringValue(root, "decision"),
+                        WaitMs = IntValue(root, "wait_ms")
+                    });
+                    continue;
+                }
+                if (!String.Equals(type, "turn_ended",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                GrokSessionTurnEndOutcome outcome =
+                    ParseOutcome(StringValue(root, "outcome"));
+                if (state.LastEndedAtUtc == DateTime.MinValue ||
+                    at > state.LastEndedAtUtc)
+                {
+                    state.LastEndedAtUtc = at;
+                }
+                if (lastStartedAt != DateTime.MinValue && lastStartedAt > at)
+                {
+                    continue;
+                }
+                latest = new GrokSessionTurnEnd
+                {
+                    EndedAtUtc = at,
+                    Outcome = outcome,
+                    CancellationCategory =
+                        StringValue(root, "cancellation_category"),
+                    CancellationTrigger =
+                        NestedStringValue(root, "cancellation_context", "trigger")
+                };
+            }
+            return new GrokSessionEventsDelta
+            {
+                TurnEnd = latest,
+                TurnStart = latestStart,
+                PermissionUpdates = permissions
+            };
+        }
+
+        public GrokSessionTurnState TurnState(string eventsPath)
+        {
+            TailState state;
+            if (String.IsNullOrEmpty(eventsPath) ||
+                !tails.TryGetValue(eventsPath, out state) || state == null)
+            {
+                return new GrokSessionTurnState();
+            }
+            return new GrokSessionTurnState
+            {
+                LastStartedAtUtc = state.LastStartedAtUtc,
+                LastEndedAtUtc = state.LastEndedAtUtc
+            };
         }
 
         private static int IntValue(Dictionary<string, object> dictionary, string key)
@@ -1954,6 +2120,13 @@ namespace CodexHalo
         }
     }
 
+    public sealed class GrokActiveSessionRef
+    {
+        public string SessionId;
+        public string WorkingDirectory;
+        public int ProcessId;
+    }
+
     /// <summary>
     /// Parses ~/.grok/active_sessions.json. Presence only — never spawn subprocess
     /// (no Process.Start / tasklist / wmic). Optional PID liveness via OpenProcess.
@@ -1968,49 +2141,53 @@ namespace CodexHalo
 
         public static bool HasLiveSession(string home)
         {
-            return LiveSessionIds(home).Count > 0;
+            return LiveSessions(home).Count > 0;
         }
 
         public static HashSet<string> LiveSessionIds(string home)
         {
             HashSet<string> result = new HashSet<string>(
                 StringComparer.OrdinalIgnoreCase);
-            try
+            foreach (GrokActiveSessionRef session in LiveSessions(home))
             {
-                List<ActiveSessionRef> sessions = Read(home);
-                if (sessions.Count == 0)
-                {
-                    return result;
-                }
-                List<ActiveSessionRef> withPid = sessions
-                    .Where(delegate(ActiveSessionRef s) { return s.ProcessId > 0; })
-                    .ToList();
-                // No pids present → any entry counts as present (older file shapes).
-                if (withPid.Count == 0)
-                {
-                    foreach (ActiveSessionRef session in sessions)
-                    {
-                        result.Add(session.SessionId);
-                    }
-                    return result;
-                }
-                foreach (ActiveSessionRef session in withPid)
-                {
-                    if (IsProcessAlive(session.ProcessId))
-                    {
-                        result.Add(session.SessionId);
-                    }
-                }
-            }
-            catch
-            {
+                result.Add(session.SessionId);
             }
             return result;
         }
 
-        private static List<ActiveSessionRef> Read(string home)
+        public static List<GrokActiveSessionRef> LiveSessions(string home)
         {
-            List<ActiveSessionRef> result = new List<ActiveSessionRef>();
+            try
+            {
+                List<GrokActiveSessionRef> sessions = Read(home);
+                if (sessions.Count == 0)
+                {
+                    return sessions;
+                }
+                List<GrokActiveSessionRef> withPid = sessions
+                    .Where(delegate(GrokActiveSessionRef s)
+                    {
+                        return s.ProcessId > 0;
+                    }).ToList();
+                // No pids present → every entry counts (older file shapes).
+                if (withPid.Count == 0)
+                {
+                    return sessions;
+                }
+                return withPid.Where(delegate(GrokActiveSessionRef session)
+                {
+                    return IsProcessAlive(session.ProcessId);
+                }).ToList();
+            }
+            catch
+            {
+                return new List<GrokActiveSessionRef>();
+            }
+        }
+
+        private static List<GrokActiveSessionRef> Read(string home)
+        {
+            List<GrokActiveSessionRef> result = new List<GrokActiveSessionRef>();
             if (String.IsNullOrEmpty(home))
             {
                 return result;
@@ -2031,7 +2208,8 @@ namespace CodexHalo
             {
                 foreach (object item in array)
                 {
-                    ActiveSessionRef entry = ParseEntry(item as Dictionary<string, object>);
+                    GrokActiveSessionRef entry = ParseEntry(
+                        item as Dictionary<string, object>);
                     if (entry != null)
                     {
                         result.Add(entry);
@@ -2056,7 +2234,7 @@ namespace CodexHalo
                     }
                     foreach (object item in nested)
                     {
-                        ActiveSessionRef entry =
+                        GrokActiveSessionRef entry =
                             ParseEntry(item as Dictionary<string, object>);
                         if (entry != null)
                         {
@@ -2072,7 +2250,8 @@ namespace CodexHalo
             return result;
         }
 
-        private static ActiveSessionRef ParseEntry(Dictionary<string, object> entry)
+        private static GrokActiveSessionRef ParseEntry(
+            Dictionary<string, object> entry)
         {
             if (entry == null)
             {
@@ -2095,9 +2274,11 @@ namespace CodexHalo
                     pid = parsed;
                 }
             }
-            return new ActiveSessionRef
+            return new GrokActiveSessionRef
             {
                 SessionId = sessionId,
+                WorkingDirectory = FirstString(entry, "cwd",
+                    "working_directory", "workingDirectory"),
                 ProcessId = pid
             };
         }
@@ -2162,11 +2343,6 @@ namespace CodexHalo
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool CloseHandle(IntPtr hObject);
 
-        private sealed class ActiveSessionRef
-        {
-            public string SessionId;
-            public int ProcessId;
-        }
     }
 
     /// <summary>

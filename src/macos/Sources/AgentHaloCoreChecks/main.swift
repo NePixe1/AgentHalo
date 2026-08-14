@@ -2219,6 +2219,13 @@ func testGrokActiveSessionsReaderParsesArrayEntries() throws {
         ) == Set(["live-1"]),
         "only the pid-backed live Grok session id should survive"
     )
+    let liveSessions = GrokActiveSessionsReader.liveSessions(
+        homeDirectory: home,
+        isProcessAlive: { $0 == 123 }
+    )
+    expect(liveSessions.count, 1, "only one live registry entry")
+    expect(liveSessions.first?.cwd, "/Users/me/proj", "live session keeps workspace evidence")
+    expect(liveSessions.first?.processId, Int32(123), "live session keeps process evidence")
 
     try Data(#"[{"session_id":"legacy"}]"#.utf8)
         .write(to: grokDir.appendingPathComponent("active_sessions.json"))
@@ -3354,6 +3361,7 @@ func testGrokSessionTurnEventsReaderDetectsCancelledTurnEnded() throws {
 
     let reader = GrokSessionTurnEventsReader()
     expect(reader.poll(eventsURL: eventsURL).isEmpty, "no turn_ended yet")
+    expect(reader.turnState(eventsURL: eventsURL).isOpen, "seed turn_started records an open turn")
 
     // Append without rewriting: mirrors Grok's live jsonl growth.
     let cancelLine = #"{"ts":"2026-07-30T08:00:05.000Z","type":"turn_ended","outcome":"cancelled","cancellation_category":"mid_turn_abort","cancellation_context":{"trigger":"esc"}}"# + "\n"
@@ -3366,8 +3374,104 @@ func testGrokSessionTurnEventsReaderDetectsCancelledTurnEnded() throws {
     let ended = reader.poll(eventsURL: eventsURL)
     expect(ended.turnEnd != nil, "cancelled turn_ended is not nil")
     expect(ended.turnEnd?.outcome, Optional.some(GrokSessionTurnEndOutcome.cancelled), "poll surfaces cancelled turn_ended")
+    expect(!reader.turnState(eventsURL: eventsURL).isOpen, "turn_ended closes durable turn state")
 
     expect(reader.poll(eventsURL: eventsURL).isEmpty, "second poll with no growth is empty")
+}
+
+func testGrokSessionTurnStateEqualTimestampsStayOpen() {
+    let at = Date(timeIntervalSince1970: 1_778_000_000)
+    let same = GrokSessionTurnState(lastStartedAt: at, lastEndedAt: at)
+    expect(same.isOpen, "equal start/end timestamps stay open like steer supersede")
+    let closed = GrokSessionTurnState(
+        lastStartedAt: at,
+        lastEndedAt: at.addingTimeInterval(0.001)
+    )
+    expect(!closed.isOpen, "a later end still closes the turn")
+}
+
+func testGrokSessionTurnEventsReaderFirstAttachFindsBuriedTurnBoundaries() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent(
+            "agent-halo-grok-turn-tail-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+    let paddingLine = Data(
+        #"{"ts":"2026-07-30T08:00:03.000Z","type":"phase_changed","phase":"thinking"}"#.utf8
+            + Data([0x0A])
+    )
+    let paddingBytes = 1024 * 1024 + 8192
+
+    let openURL = root.appendingPathComponent("open-events.jsonl")
+    try writeGrokEventsWithBuriedBoundary(
+        to: openURL,
+        prefix: """
+        {"ts":"2026-07-30T08:00:00.000Z","type":"turn_started"}
+        {"ts":"2026-07-30T08:00:01.000Z","type":"turn_ended","outcome":"completed"}
+        {"ts":"2026-07-30T08:00:02.000Z","type":"turn_started"}
+
+        """,
+        paddingLine: paddingLine,
+        paddingBytes: paddingBytes
+    )
+    let openReader = GrokSessionTurnEventsReader()
+    _ = openReader.poll(eventsURL: openURL)
+    let openState = openReader.turnState(eventsURL: openURL)
+    expect(openState.isOpen, "first attach must find a turn_started buried before a 1MB phase tail")
+    expect(
+        openState.lastStartedAt != nil,
+        "buried open turn records lastStartedAt"
+    )
+
+    let closedURL = root.appendingPathComponent("closed-events.jsonl")
+    try writeGrokEventsWithBuriedBoundary(
+        to: closedURL,
+        prefix: """
+        {"ts":"2026-07-30T08:00:00.000Z","type":"turn_started"}
+        {"ts":"2026-07-30T08:00:01.000Z","type":"turn_ended","outcome":"completed"}
+
+        """,
+        paddingLine: paddingLine,
+        paddingBytes: paddingBytes
+    )
+    let closedReader = GrokSessionTurnEventsReader()
+    _ = closedReader.poll(eventsURL: closedURL)
+    let closedState = closedReader.turnState(eventsURL: closedURL)
+    expect(!closedState.isOpen, "first attach must see a completed turn buried before a 1MB phase tail")
+    expect(
+        closedState.lastEndedAt != nil,
+        "buried completed turn records lastEndedAt for terminal-wins"
+    )
+
+    let laterEnd = #"{"ts":"2026-07-30T08:00:10.000Z","type":"turn_ended","outcome":"completed"}"# + "\n"
+    let handle = try FileHandle(forWritingTo: openURL)
+    defer { try? handle.close() }
+    _ = try handle.seekToEnd()
+    try handle.write(contentsOf: Data(laterEnd.utf8))
+    try handle.synchronize()
+    let appended = openReader.poll(eventsURL: openURL)
+    expect(appended.turnEnd?.outcome, Optional.some(GrokSessionTurnEndOutcome.completed), "incremental poll after first attach still sees a new end")
+    expect(!openReader.turnState(eventsURL: openURL).isOpen, "appended end closes the previously buried open turn")
+}
+
+private func writeGrokEventsWithBuriedBoundary(
+    to url: URL,
+    prefix: String,
+    paddingLine: Data,
+    paddingBytes: Int
+) throws {
+    FileManager.default.createFile(atPath: url.path, contents: nil)
+    let handle = try FileHandle(forWritingTo: url)
+    defer { try? handle.close() }
+    try handle.write(contentsOf: Data(prefix.utf8))
+    var written = 0
+    while written < paddingBytes {
+        try handle.write(contentsOf: paddingLine)
+        written += paddingLine.count
+    }
 }
 
 func testGrokSessionTurnEventsReaderParsesPermissionLifecycle() throws {
@@ -4862,6 +4966,8 @@ do {
     try testGrokSessionContextReaderLiveTokensWithoutSignals()
     try testGrokActiveSessionsReaderParsesArrayEntries()
     try testGrokSessionTurnEventsReaderDetectsCancelledTurnEnded()
+    testGrokSessionTurnStateEqualTimestampsStayOpen()
+    try testGrokSessionTurnEventsReaderFirstAttachFindsBuriedTurnBoundaries()
     try testGrokSessionTurnEventsReaderParsesPermissionLifecycle()
     try testGrokSessionTurnEventsReaderSupersedesCancelWithSteerStart()
     try testGrokSessionTurnEventsReaderParsesSendNowTrigger()

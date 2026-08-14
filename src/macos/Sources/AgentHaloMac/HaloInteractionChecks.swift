@@ -3277,23 +3277,99 @@ private func testGrokActivityDropsEndedAttention() {
     )
     let live = GrokActivityMonitor.sessionsWithVerifiedLiveness(
         [attention],
-        liveSessionIds: Set(["waiting-grok"])
+        liveSessions: [GrokActiveSessionRef(
+            sessionId: "waiting-grok",
+            cwd: "/tmp/AgentHalo",
+            processId: 101
+        )],
+        now: now
     )
     expect(live.first?.active == true, "live Grok attention should survive long waits")
 
     let ended = GrokActivityMonitor.sessionsWithVerifiedLiveness(
         [attention],
-        liveSessionIds: []
+        liveSessions: [],
+        now: now
     )
     expect(ended.first?.active == false, "ended Grok attention must not remain actionable")
 
     let otherSession = GrokActivityMonitor.sessionsWithVerifiedLiveness(
         [attention],
-        liveSessionIds: Set(["new-working-session"])
+        liveSessions: [GrokActiveSessionRef(
+            sessionId: "new-working-session",
+            cwd: "/tmp/OtherProject",
+            processId: 101
+        )],
+        now: now
     )
     expect(
         otherSession.first?.active == false,
         "another live Grok session must not keep an old attention snapshot active"
+    )
+
+    let openTurn = GrokActivityMonitor.sessionsWithVerifiedLiveness(
+        [attention],
+        liveSessions: [GrokActiveSessionRef(
+            sessionId: "replacement-session-id",
+            cwd: "/tmp/AgentHalo/.",
+            processId: 101
+        )],
+        turnStates: [
+            "waiting-grok": GrokSessionTurnState(
+                lastStartedAt: now.addingTimeInterval(-1900),
+                lastEndedAt: nil
+            )
+        ],
+        now: now
+    )
+    expect(
+        openTurn.first?.active == true,
+        "same-process workspace plus an open turn should survive a replaced session id"
+    )
+
+    let recentWorking = SessionSnapshot(
+        threadId: "still-working-grok",
+        projectName: "AgentHalo",
+        workingDirectory: "/tmp/AgentHalo",
+        state: .working,
+        action: "Running tool",
+        lastEventAt: now.addingTimeInterval(-30),
+        completedAt: nil,
+        active: true,
+        agent: .grok
+    )
+    let recentFallback = GrokActivityMonitor.sessionsWithVerifiedLiveness(
+        [recentWorking],
+        liveSessions: [GrokActiveSessionRef(
+            sessionId: "replacement-session-id",
+            cwd: "/tmp/AgentHalo",
+            processId: 101
+        )],
+        now: now
+    )
+    expect(
+        recentFallback.first?.active == true,
+        "recent same-workspace hook activity should bridge an active-session id mismatch"
+    )
+
+    let terminalWins = GrokActivityMonitor.sessionsWithVerifiedLiveness(
+        [attention],
+        liveSessions: [GrokActiveSessionRef(
+            sessionId: "waiting-grok",
+            cwd: "/tmp/AgentHalo",
+            processId: 101
+        )],
+        turnStates: [
+            "waiting-grok": GrokSessionTurnState(
+                lastStartedAt: now.addingTimeInterval(-1900),
+                lastEndedAt: now.addingTimeInterval(-1700)
+            )
+        ],
+        now: now
+    )
+    expect(
+        terminalWins.first?.active == false,
+        "a newer terminal turn boundary must override even an exact live registry id"
     )
 }
 

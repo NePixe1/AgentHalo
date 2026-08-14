@@ -2220,6 +2220,8 @@ public static class Diagnostics
                     GrokSessionEventsDelta seedDelta = turnReader.Poll(seedPath);
                     Assert(seedDelta != null && seedDelta.IsEmpty,
                         "no turn_ended yet");
+                    Assert(turnReader.TurnState(seedPath).IsOpen,
+                        "turn_started records an open durable turn");
                     File.AppendAllText(seedPath,
                         "{\"ts\":\"2026-07-30T08:00:05.000Z\",\"type\":\"turn_ended\",\"outcome\":\"cancelled\"}\n",
                         Encoding.UTF8);
@@ -2229,6 +2231,8 @@ public static class Diagnostics
                         endedDelta.TurnEnd.Outcome ==
                             GrokSessionTurnEndOutcome.Cancelled,
                         "poll surfaces cancelled turn_ended");
+                    Assert(!turnReader.TurnState(seedPath).IsOpen,
+                        "turn_ended closes durable turn state");
                     GrokSessionEventsDelta secondPoll = turnReader.Poll(seedPath);
                     Assert(secondPoll != null && secondPoll.IsEmpty,
                         "second poll with no growth is empty");
@@ -2264,6 +2268,58 @@ public static class Diagnostics
                     Assert(sendNowDelta != null && sendNowDelta.TurnEnd != null &&
                         sendNowDelta.TurnEnd.IsSteerLikeCancel,
                         "send_now trigger is steer-like cancel");
+
+                    DateTime sameTs = DateTime.Parse(
+                        "2026-07-30T08:00:04.000Z", CultureInfo.InvariantCulture,
+                        DateTimeStyles.RoundtripKind).ToUniversalTime();
+                    GrokSessionTurnState equalBounds = new GrokSessionTurnState
+                    {
+                        LastStartedAtUtc = sameTs,
+                        LastEndedAtUtc = sameTs
+                    };
+                    Assert(equalBounds.IsOpen,
+                        "equal start/end timestamps stay open like steer supersede");
+                    GrokSessionTurnState laterEnd = new GrokSessionTurnState
+                    {
+                        LastStartedAtUtc = sameTs,
+                        LastEndedAtUtc = sameTs.AddMilliseconds(1)
+                    };
+                    Assert(!laterEnd.IsOpen,
+                        "a later end still closes the turn");
+
+                    byte[] paddingLine = Encoding.UTF8.GetBytes(
+                        "{\"ts\":\"2026-07-30T08:00:03.000Z\",\"type\":\"phase_changed\",\"phase\":\"thinking\"}\n");
+                    int paddingBytes = 1024 * 1024 + 8192;
+                    string openBuriedPath = Path.Combine(cancelHome,
+                        "buried-open.jsonl");
+                    WriteGrokEventsWithBuriedBoundary(
+                        openBuriedPath,
+                        "{\"ts\":\"2026-07-30T08:00:00.000Z\",\"type\":\"turn_started\"}\n" +
+                        "{\"ts\":\"2026-07-30T08:00:01.000Z\",\"type\":\"turn_ended\",\"outcome\":\"completed\"}\n" +
+                        "{\"ts\":\"2026-07-30T08:00:02.000Z\",\"type\":\"turn_started\"}\n",
+                        paddingLine, paddingBytes);
+                    GrokSessionTurnEventsReader openBuriedReader =
+                        new GrokSessionTurnEventsReader();
+                    openBuriedReader.Poll(openBuriedPath);
+                    Assert(openBuriedReader.TurnState(openBuriedPath).IsOpen,
+                        "first attach must find a turn_started buried before a 1MB phase tail");
+
+                    string closedBuriedPath = Path.Combine(cancelHome,
+                        "buried-closed.jsonl");
+                    WriteGrokEventsWithBuriedBoundary(
+                        closedBuriedPath,
+                        "{\"ts\":\"2026-07-30T08:00:00.000Z\",\"type\":\"turn_started\"}\n" +
+                        "{\"ts\":\"2026-07-30T08:00:01.000Z\",\"type\":\"turn_ended\",\"outcome\":\"completed\"}\n",
+                        paddingLine, paddingBytes);
+                    GrokSessionTurnEventsReader closedBuriedReader =
+                        new GrokSessionTurnEventsReader();
+                    closedBuriedReader.Poll(closedBuriedPath);
+                    GrokSessionTurnState closedBuried =
+                        closedBuriedReader.TurnState(closedBuriedPath);
+                    Assert(!closedBuried.IsOpen,
+                        "first attach must see a completed turn buried before a 1MB phase tail");
+                    Assert(closedBuried.LastEndedAtUtc != DateTime.MinValue,
+                        "buried completed turn records LastEndedAtUtc for terminal-wins");
                 }
                 finally
                 {
@@ -2337,6 +2393,86 @@ public static class Diagnostics
                     }
                 }
 
+                // completed turn_ended must report a monitor change so the
+                // focused Grok tick rebuilds liveness from turnStates.
+                string completedHome = Path.Combine(Path.GetTempPath(),
+                    "agent-halo-grok-completed-" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    string statusPath = Path.Combine(completedHome, "grok-status.jsonl");
+                    string sessionsRoot = Path.Combine(completedHome, "sessions");
+                    string cwd = "/tmp/AgentHaloCompletedTest";
+                    string sessionId = "sess-completed-1";
+                    string encoded =
+                        GrokSessionContextReader.EncodeWorkspaceDirectory(cwd);
+                    string sessionDir = Path.Combine(sessionsRoot, encoded, sessionId);
+                    Directory.CreateDirectory(sessionDir);
+                    DateTime completedBaseUtc = DateTime.UtcNow.AddSeconds(-6);
+                    File.WriteAllText(statusPath,
+                        "{\"timestamp\":\"" + completedBaseUtc.AddSeconds(1).ToString("o") + "\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"source\":\"grok-hook\"}\n" +
+                        "{\"timestamp\":\"" + completedBaseUtc.AddSeconds(3).ToString("o") + "\",\"event\":\"PreToolUse\",\"sessionId\":\"" + sessionId + "\",\"cwd\":\"" + cwd + "\",\"toolName\":\"read_file\",\"source\":\"grok-hook\"}\n",
+                        Encoding.UTF8);
+                    File.WriteAllText(Path.Combine(sessionDir, "events.jsonl"),
+                        "{\"ts\":\"" + completedBaseUtc.AddSeconds(1.5).ToString("o") + "\",\"type\":\"turn_started\"}\n",
+                        Encoding.UTF8);
+
+                    GrokHookStatusMonitor completedMonitor =
+                        new GrokHookStatusMonitor(statusPath, sessionsRoot);
+                    Assert(completedMonitor.Refresh(), "hooks load for completed turn");
+                    SessionSnapshot workingBeforeComplete =
+                        completedMonitor.Snapshots().FirstOrDefault();
+                    Assert(workingBeforeComplete != null &&
+                        workingBeforeComplete.State == HaloState.Working,
+                        "precondition: working before completed turn_ended");
+                    Assert(completedMonitor.TurnStates().ContainsKey(sessionId) &&
+                        completedMonitor.TurnStates()[sessionId].IsOpen,
+                        "precondition: turn is open before completed turn_ended");
+
+                    File.AppendAllText(Path.Combine(sessionDir, "events.jsonl"),
+                        "{\"ts\":\"" + completedBaseUtc.AddSeconds(4).ToString("o") + "\",\"type\":\"turn_ended\",\"outcome\":\"completed\"}\n",
+                        Encoding.UTF8);
+                    Assert(completedMonitor.Refresh(),
+                        "completed turn_ended must report a monitor change");
+                    GrokSessionTurnState afterComplete =
+                        completedMonitor.TurnStates()[sessionId];
+                    Assert(!afterComplete.IsOpen,
+                        "completed turn_ended closes durable turn state");
+                    List<GrokActiveSessionRef> stillListed =
+                        new List<GrokActiveSessionRef>
+                        {
+                            new GrokActiveSessionRef
+                            {
+                                SessionId = sessionId,
+                                WorkingDirectory = cwd,
+                                ProcessId = 321
+                            }
+                        };
+                    AggregateSnapshot afterCompleteAgg =
+                        HaloWindow.BuildGrokAggregateForTest(
+                            completedMonitor.Snapshots(), false, stillListed,
+                            completedMonitor.TurnStates(), DateTime.UtcNow);
+                    Assert(afterCompleteAgg.State == HaloState.Idle &&
+                        afterCompleteAgg.Sessions.Count == 0,
+                        "completed turn_ended takes the ring down even if registry still lists the id");
+                    Assert(HaloWindow.ShouldRefreshGrokStateForTick(
+                        true, false, new AggregateSnapshot
+                        {
+                            State = HaloState.Working,
+                            FocusedAgent = AgentKind.Grok
+                        }),
+                        "a turnStates-only monitor change must rebuild the Grok tick");
+                }
+                finally
+                {
+                    try
+                    {
+                        Directory.Delete(completedHome, true);
+                    }
+                    catch
+                    {
+                    }
+                }
+
                 string grokDir = Path.Combine(home, ".grok");
                 Directory.CreateDirectory(grokDir);
                 File.WriteAllText(Path.Combine(grokDir, "active_sessions.json"),
@@ -2345,6 +2481,12 @@ public static class Diagnostics
                     "array entry without pid counts as present");
                 Assert(GrokActiveSessionsReader.LiveSessionIds(home).Contains("abc"),
                     "Grok active sessions reader exposes the live session id");
+                List<GrokActiveSessionRef> activeRefs =
+                    GrokActiveSessionsReader.LiveSessions(home);
+                Assert(activeRefs.Count == 1 &&
+                    String.Equals(activeRefs[0].WorkingDirectory, "/tmp/x",
+                        StringComparison.Ordinal),
+                    "Grok active sessions reader preserves workspace evidence");
                 try
                 {
                     Directory.Delete(home, true);
@@ -2431,6 +2573,94 @@ public static class Diagnostics
                 Assert(endedAttnGrok.State == HaloState.Idle &&
                     endedAttnGrok.Sessions.Count == 0,
                     "ended Grok session drops stale attention to offline");
+
+                List<GrokActiveSessionRef> replacementIdSameWorkspace =
+                    new List<GrokActiveSessionRef>
+                    {
+                        new GrokActiveSessionRef
+                        {
+                            SessionId = "replacement-session-id",
+                            WorkingDirectory = "/tmp/AgentHalo/.",
+                            ProcessId = 321
+                        }
+                    };
+                longAttnGrok[0].WorkingDirectory = "/tmp/AgentHalo";
+                Dictionary<string, GrokSessionTurnState> openTurns =
+                    new Dictionary<string, GrokSessionTurnState>(
+                        StringComparer.OrdinalIgnoreCase)
+                    {
+                        {
+                            "g-attn",
+                            new GrokSessionTurnState
+                            {
+                                LastStartedAtUtc = aggNow.AddMinutes(-30)
+                            }
+                        }
+                    };
+                AggregateSnapshot replacedButOpen =
+                    HaloWindow.BuildGrokAggregateForTest(
+                        longAttnGrok, false, replacementIdSameWorkspace,
+                        openTurns, aggNow);
+                Assert(replacedButOpen.State == HaloState.Attention,
+                    "same-workspace open turn survives a replaced Grok session id");
+
+                List<SessionSnapshot> recentWorkingGrok =
+                    new List<SessionSnapshot>
+                    {
+                        new SessionSnapshot
+                        {
+                            ThreadId = "g-working",
+                            Agent = AgentKind.Grok,
+                            State = HaloState.Working,
+                            Active = true,
+                            LastEventUtc = aggNow.AddSeconds(-30),
+                            WorkingDirectory = "/tmp/AgentHalo",
+                            ProjectName = "AgentHalo",
+                            Action = "Running command"
+                        }
+                    };
+                AggregateSnapshot recentIdMismatch =
+                    HaloWindow.BuildGrokAggregateForTest(
+                        recentWorkingGrok, false, replacementIdSameWorkspace,
+                        new Dictionary<string, GrokSessionTurnState>(), aggNow);
+                Assert(recentIdMismatch.State == HaloState.Working,
+                    "recent same-workspace hook bridges a Grok session id mismatch");
+                AggregateSnapshot staleWithoutOpenTurn =
+                    HaloWindow.BuildGrokAggregateForTest(
+                        longAttnGrok, false, replacementIdSameWorkspace,
+                        new Dictionary<string, GrokSessionTurnState>(), aggNow);
+                Assert(staleWithoutOpenTurn.State == HaloState.Idle,
+                    "stale attention still requires exact id or an open turn");
+
+                Dictionary<string, GrokSessionTurnState> closedTurns =
+                    new Dictionary<string, GrokSessionTurnState>(
+                        StringComparer.OrdinalIgnoreCase)
+                    {
+                        {
+                            "g-attn",
+                            new GrokSessionTurnState
+                            {
+                                LastStartedAtUtc = aggNow.AddMinutes(-30),
+                                LastEndedAtUtc = aggNow.AddMinutes(-20)
+                            }
+                        }
+                    };
+                List<GrokActiveSessionRef> exactStillListed =
+                    new List<GrokActiveSessionRef>
+                    {
+                        new GrokActiveSessionRef
+                        {
+                            SessionId = "g-attn",
+                            WorkingDirectory = "/tmp/AgentHalo",
+                            ProcessId = 321
+                        }
+                    };
+                AggregateSnapshot terminalWins =
+                    HaloWindow.BuildGrokAggregateForTest(
+                        longAttnGrok, false, exactStillListed, closedTurns, aggNow);
+                Assert(terminalWins.State == HaloState.Idle &&
+                    terminalWins.Sessions.Count == 0,
+                    "newer terminal turn boundary overrides an exact registry id");
                 AggregateSnapshot doneGrok = new AggregateSnapshot
                 {
                     State = HaloState.Done,
@@ -3074,6 +3304,23 @@ public static class Diagnostics
                 record["message"] = message;
             }
             return new JavaScriptSerializer().Serialize(record);
+        }
+
+        private static void WriteGrokEventsWithBuriedBoundary(
+            string path, string prefix, byte[] paddingLine, int paddingBytes)
+        {
+            using (FileStream stream = new FileStream(path, FileMode.Create,
+                FileAccess.Write, FileShare.Read))
+            {
+                byte[] prefixBytes = Encoding.UTF8.GetBytes(prefix);
+                stream.Write(prefixBytes, 0, prefixBytes.Length);
+                int written = 0;
+                while (written < paddingBytes)
+                {
+                    stream.Write(paddingLine, 0, paddingLine.Length);
+                    written += paddingLine.Length;
+                }
+            }
         }
 
         private static void Assert(bool condition, string name)

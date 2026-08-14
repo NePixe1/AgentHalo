@@ -31,6 +31,7 @@ final class GrokActivityMonitor: @unchecked Sendable {
     private static let activeIntervalMilliseconds = 300
     private static let idleIntervalMilliseconds = 2_000
     private static let dispatchThrottleSeconds: TimeInterval = 0.3
+    private static let recentHookFallbackSeconds: TimeInterval = 10 * 60
     // Presence probes only read `active_sessions.json` (+ cheap kill(0)).
     // Refresh when hooks change or this safety interval elapses so the active
     // 0.3s poll stays cheap when nothing moved.
@@ -55,7 +56,7 @@ final class GrokActivityMonitor: @unchecked Sendable {
     private var pendingDispatchWorkItem: DispatchWorkItem?
     private var lastDispatchAt = Date.distantPast
     private var cachedIsPresent = false
-    private var cachedLiveSessionIds: Set<String> = []
+    private var cachedLiveSessions: [GrokActiveSessionRef] = []
     private var cachedHasUnscopedPresence = false
     private var lastPresencePollAt = Date.distantPast
     private let pollBarrier: (@Sendable () -> Void)?
@@ -264,23 +265,26 @@ final class GrokActivityMonitor: @unchecked Sendable {
         let now = Date()
         let hookChanged = hookMonitor.refresh(now: now)
         let sessions = hookMonitor.snapshots()
+        let turnStates = hookMonitor.sessionTurnStates()
 
         if forcePresence
             || hookChanged
             || now.timeIntervalSince(lastPresencePollAt) >= Self.presencePollIntervalSeconds {
             lastPresencePollAt = now
-            cachedLiveSessionIds = GrokActiveSessionsReader.liveSessionIds(
+            cachedLiveSessions = GrokActiveSessionsReader.liveSessions(
                 homeDirectory: homeDirectory,
                 fileManager: fileManager
             )
-            cachedHasUnscopedPresence = cachedLiveSessionIds.isEmpty && processPresenceProbe()
-            cachedIsPresent = !cachedLiveSessionIds.isEmpty || cachedHasUnscopedPresence
+            cachedHasUnscopedPresence = cachedLiveSessions.isEmpty && processPresenceProbe()
+            cachedIsPresent = !cachedLiveSessions.isEmpty || cachedHasUnscopedPresence
         }
 
         let verifiedSessions = Self.sessionsWithVerifiedLiveness(
             sessions,
-            liveSessionIds: cachedLiveSessionIds,
-            hasUnscopedPresence: cachedHasUnscopedPresence
+            liveSessions: cachedLiveSessions,
+            turnStates: turnStates,
+            hasUnscopedPresence: cachedHasUnscopedPresence,
+            now: now
         )
         let nextSnapshot = GrokActivitySnapshot(
             sessions: verifiedSessions,
@@ -303,21 +307,68 @@ final class GrokActivityMonitor: @unchecked Sendable {
 
     static func sessionsWithVerifiedLiveness(
         _ sessions: [SessionSnapshot],
-        liveSessionIds: Set<String>,
-        hasUnscopedPresence: Bool = false
+        liveSessions: [GrokActiveSessionRef],
+        turnStates: [String: GrokSessionTurnState] = [:],
+        hasUnscopedPresence: Bool = false,
+        now: Date = Date()
     ) -> [SessionSnapshot] {
         sessions.map { snapshot in
             guard snapshot.active, !hasUnscopedPresence else {
                 return snapshot
             }
             var verified = snapshot
-            let hasMatchingSession = liveSessionIds.contains(snapshot.threadId)
-                || (snapshot.threadId == "grok" && !liveSessionIds.isEmpty)
-            if !hasMatchingSession {
+            if !isSessionLive(
+                snapshot,
+                liveSessions: liveSessions,
+                turnState: turnStates[snapshot.threadId],
+                now: now
+            ) {
                 verified.active = false
             }
             return verified
         }
+    }
+
+    private static func isSessionLive(
+        _ snapshot: SessionSnapshot,
+        liveSessions: [GrokActiveSessionRef],
+        turnState: GrokSessionTurnState?,
+        now: Date
+    ) -> Bool {
+        // A terminal turn boundary newer than the hook snapshot is stronger
+        // evidence than a stale active_sessions entry.
+        if let endedAt = turnState?.lastEndedAt,
+           turnState?.isOpen != true,
+           endedAt >= snapshot.lastEventAt {
+            return false
+        }
+
+        if liveSessions.contains(where: { $0.sessionId == snapshot.threadId })
+            || (snapshot.threadId == "grok" && !liveSessions.isEmpty) {
+            return true
+        }
+
+        let snapshotDirectory = normalizedDirectory(snapshot.workingDirectory)
+        guard !snapshotDirectory.isEmpty,
+              liveSessions.contains(where: {
+                  normalizedDirectory($0.cwd ?? "") == snapshotDirectory
+              }) else {
+            return false
+        }
+
+        // Grok can replace an active session id while several terminals share
+        // one process. An open per-session turn is authoritative; a recent
+        // hook is a bounded fallback while the replacement file catches up.
+        if turnState?.isOpen == true {
+            return true
+        }
+        return snapshot.lastEventAt >= now.addingTimeInterval(-recentHookFallbackSeconds)
+    }
+
+    private static func normalizedDirectory(_ path: String) -> String {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        return URL(fileURLWithPath: trimmed).standardizedFileURL.path
     }
 
     private func scheduleDispatch(
