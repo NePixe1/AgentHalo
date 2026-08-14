@@ -85,6 +85,7 @@ func runHaloInteractionChecks() {
     testUsageTerminationWaitsForCoordinatorCancellation()
     testUsageTerminationHandshakeRejectsDuplicateWork()
     testUsageMonitoringLifecycleWiring()
+    testAppDelegateRequiresExplicitSettingsStore()
     testPackagedVerificationRuntimeSelectionIsExplicit()
     testStatusLineConfigurationReconciliationIsWiredToTick()
     testTickPassesEnabledFlagToActivityMonitors()
@@ -143,6 +144,23 @@ func runHaloInteractionChecks() {
     testAgentToggleClickMapsEnabledSlotsOnly()
     testFocusSubmenuIncludesGrok()
     testDetailsPanelSwitchCallbackSelectsClaudeCode()
+}
+
+private func testAppDelegateRequiresExplicitSettingsStore() {
+    let appDelegateURL = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("AppDelegate.swift")
+    guard let source = try? String(contentsOf: appDelegateURL, encoding: .utf8) else {
+        fatalError("AppDelegate source should be readable")
+    }
+    expect(
+        source.contains("settingsStore: SettingsStore,"),
+        "AppDelegate should require callers to choose a settings store"
+    )
+    expect(
+        !source.contains("settingsStore: SettingsStore = SettingsStore()"),
+        "AppDelegate tests must not silently fall back to the production settings file"
+    )
 }
 
 private func testPackagedVerificationRuntimeSelectionIsExplicit() {
@@ -342,7 +360,7 @@ private func testSingleClickDoesNotActivateCodex() {
 
 @MainActor
 private func testHaloContextMenuContainsCurrentControls() {
-    let delegate = AppDelegate()
+    let delegate = AppDelegate(settingsStore: SettingsStore(settingsURL: temporarySettingsURL()))
     let menu = delegate.makeHaloContextMenu()
     let titles = menu.items.map(\.title)
 
@@ -364,7 +382,7 @@ private func testHaloContextMenuContainsCurrentControls() {
 
 @MainActor
 private func testFocusSubmenuListsOnlyEnabledAgents() {
-    let delegate = AppDelegate()
+    let delegate = AppDelegate(settingsStore: SettingsStore(settingsURL: temporarySettingsURL()))
     delegate.applyEnabledAgentsForTesting([.codex, .pi])
     let menu = delegate.makeHaloContextMenu()
     let focus = menu.items.first { $0.title == L10n.shared["menu.focus_target"] }
@@ -374,7 +392,7 @@ private func testFocusSubmenuListsOnlyEnabledAgents() {
 
 @MainActor
 private func testSettingsMenuItemOpensSettingsWindow() {
-    let delegate = AppDelegate()
+    let delegate = AppDelegate(settingsStore: SettingsStore(settingsURL: temporarySettingsURL()))
     let menu = delegate.makeHaloContextMenu()
     expect(
         menu.items.contains { $0.title == L10n.shared["menu.settings"] },
@@ -577,7 +595,7 @@ private func testHaloViewSystemOverlaySuspensionStopsAnimation() {
 
 @MainActor
 private func testPreviewSubmenuMarksLiveStateInitially() {
-    let delegate = AppDelegate()
+    let delegate = AppDelegate(settingsStore: SettingsStore(settingsURL: temporarySettingsURL()))
     let submenu = previewSubmenu(in: delegate.makeHaloContextMenu())
     let checkedTitles = submenu.items.filter { $0.state == .on }.map(\.title)
 
@@ -586,7 +604,7 @@ private func testPreviewSubmenuMarksLiveStateInitially() {
 
 @MainActor
 private func testPreviewSubmenuMovesCheckmarkAfterSelection() {
-    let delegate = AppDelegate()
+    let delegate = AppDelegate(settingsStore: SettingsStore(settingsURL: temporarySettingsURL()))
     let submenu = previewSubmenu(in: delegate.makeHaloContextMenu())
     let workingItem = menuItem(titled: L10n.shared["halo.working_preview"], in: submenu)
 
@@ -2795,7 +2813,7 @@ private func testDisabledMonitorDropsCommittedSnapshotCallback() {
 
 @MainActor
 private func testSetFocusedAgentIgnoresDisabledAgent() {
-    let delegate = AppDelegate()
+    let delegate = AppDelegate(settingsStore: SettingsStore(settingsURL: temporarySettingsURL()))
     delegate.applyEnabledAgentsForTesting(AgentKind.allCases.filter { $0 != .claudeCode })
     let before = delegate.focusedAgentForTesting
     delegate.setFocusedAgent(.claudeCode)
@@ -2838,7 +2856,7 @@ private func testApplyEnabledAgentsForTestingSyncsDetailsToggle() {
 
 @MainActor
 private func testApplySettingsFromWindowRemapsDisabledFocus() {
-    let delegate = AppDelegate()
+    let delegate = AppDelegate(settingsStore: SettingsStore(settingsURL: temporarySettingsURL()))
     delegate.applySettingsFromWindowForTesting(
         HaloSettings(focusedAgent: .claudeCode, enabledAgents: AgentKind.allCases)
     )

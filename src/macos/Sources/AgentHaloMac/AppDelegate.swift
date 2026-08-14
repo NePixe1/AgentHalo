@@ -171,7 +171,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     init(
-        settingsStore: SettingsStore = SettingsStore(),
+        settingsStore: SettingsStore,
         codexActivator: @escaping @MainActor () -> Void = CodexAppDetector.activateCodex,
         usageCoordinator: UsageMonitoringCoordinator = .live()
     ) {

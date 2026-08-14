@@ -20,6 +20,9 @@ let usageCoordinator = UsageMonitoringCoordinator.live(mode: runtimeMode)
 if runtimeMode == .packagedVerification {
     FileHandle.standardError.write(Data("PACKAGED_VERIFICATION_KEYCHAIN_DISABLED\n".utf8))
 }
-let delegate = AppDelegate(usageCoordinator: usageCoordinator)
+let delegate = AppDelegate(
+    settingsStore: SettingsStore(),
+    usageCoordinator: usageCoordinator
+)
 app.delegate = delegate
 app.run()
