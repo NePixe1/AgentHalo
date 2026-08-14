@@ -3,7 +3,8 @@
 ## 文档状态
 
 - 日期：2026-08-14
-- 状态：设计已确认，待用户审阅本规格后进入实施计划
+- 状态：设计已确认，已进入详细实施计划
+- 实施计划：[本地 Tokens 统计与迷你热力 Implementation Plan](../plans/2026-08-14-macos-token-stats-heatmap-implementation.md)
 - 实现范围：AgentHalo **macOS**
 - 调研：[OpenUsage Tokens 统计调研](../../research/openusage-token-statistics.md)
 - 参考实现：`/Users/wjs/work/ossp/openusage` 的 `CodexLogUsageScanner` / `ClaudeLogUsageScanner` / `GrokLogUsageScanner` / `IncrementalJSONLScanner` / `DailyUsageAccumulator`
@@ -73,14 +74,18 @@ AppDelegate
 src/macos/Sources/AgentHaloCore/TokenStats/
 ├── TokenStatsModels.swift
 ├── DailyTokenAccumulator.swift
-├── IncrementalJSONLScanner.swift
 ├── JSONLScanning.swift
+├── IncrementalJSONLScanner.swift
+├── JSONLScanCacheStore.swift          # 解析缓存的 manifest / record / writer
+├── TokenStatsSnapshotStore.swift      # token-stats-v1.json
 ├── TokenStatsCoordinator.swift
 ├── CodexTokenLogScanner.swift
 ├── ClaudeTokenLogScanner.swift
 ├── GrokTokenLogScanner.swift
 └── PiTokenLogScanner.swift
 ```
+
+解析缓存不是可选项：冷启动可能面对数千个 JSONL，只靠内存会让每次启动都全量重读。`IncrementalJSONLScanner` 必须带版本化磁盘缓存（path+size+mtime）。Grok 单文件追加日志可以不走泛型扫描器，但仍要能按 mtime/size 跳过未变化文件。
 
 修改：
 
@@ -107,13 +112,16 @@ public struct TokenStatsSnapshot: Equatable, Sendable {
 }
 
 public enum TokenStatsStatus: Equatable, Sendable {
-    case ready(TokenStatsSnapshot)
-    case empty                          // 日志存在但窗口内无用量，或没有日志
-    case scanning                       // 首次扫描尚未完成；有旧快照时不得用此态盖住旧快照
+    case ready(TokenStatsSnapshot)      // 窗口内至少有一天 totalTokens > 0
+    case empty                          // 没有日志，或日志在窗口内无用量
+    case scanning                       // 该 agent 尚无成功快照，扫描进行中
 }
 
 public actor TokenStatsCoordinator {
+    /// 立即返回磁盘/内存里的状态，不开始扫描。无缓存则为 `empty`（不是 `scanning`）。
     public func prepare(_ agent: AgentKind) async -> TokenStatsStatus
+    /// 缓存对「本进程内成功扫描」未满 5 分钟则原样返回；否则开扫。
+    /// 磁盘加载的快照可以立刻 `ready`/`empty` 展示，但不算 fresh，首次 `ensureFresh` 必须扫。
     public func ensureFresh(_ agent: AgentKind) async -> TokenStatsStatus
     public func state(for agent: AgentKind) -> TokenStatsStatus
     public func cancelAll()
@@ -130,18 +138,21 @@ public actor TokenStatsCoordinator {
 
 `TokenDayTotals` 只保留总量。input / output / cache / byModel 本期不建模。
 
-扫描结果缓存（进程内 + 可选磁盘解析缓存）按 `AgentKind` 隔离。成功快照可写入 `~/.agent-halo/cache/token-stats-v1.json`（schema 版本、agent、days、scannedAt）。不写路径原文以外的会话内容；不写 Token / API Key。每个 agent 只留一份最新成功快照。超过 30 天的 `scannedAt` 启动时丢掉。
+扫描结果缓存按 `AgentKind` 隔离，必须落盘：`~/.agent-halo/cache/token-stats-v1.json`（schema 版本、每个 agent 一份 `{days, scannedAt}`）。只写日合计，不写路径、行内容、Token / API Key。权限 `0600`。`scannedAt` 超过 30 天的条目启动时丢掉。
 
-解析缓存（按文件 path+size+mtime）单独放在 `~/.agent-halo/cache/log-scan/<namespace>-<fingerprint>/`，格式可对齐 OpenUsage 的 versioned plist，但目录不得使用 OpenUsage 的 Application Support。
+解析缓存：`~/.agent-halo/cache/log-scan/<namespace>-<fingerprint>/`，版本化 plist，不得使用 OpenUsage 的 Application Support 目录。
 
 ## 统计窗口与日键
 
 - `previousDays = 30`：今天 + 往前 30 个本地日历日，共 31 天。
 - `sinceDate` = 窗口最早那天的 `startOfDay`。禁止 `now - 30*86400`。
 - `dayKey` = `yyyy-MM-dd`，`Calendar` 可注入，生产用 `.current`。
-- 热力画 **5 个周列 × 7 行**。周列对齐 `Calendar.current` 的周（`firstWeekday`）。今天所在周是最右列。
-- 落在 5 列网格里、但早于 31 日窗口的格子：空心，不扫、不计、不着色。
-- 时区：按本机日历。无日志时区字段时，用事件时间戳的绝对时间再转本地日。
+- 热力画 **5 个周列 × 7 行**。周列对齐注入的 `Calendar`（生产用 `.current`）的 `firstWeekday`。今天所在周是最右列。
+- 网格里三类空心，都不着色、不写 `0 tokens`：
+  1. 早于 31 日窗口
+  2. **晚于今天**（本周尚未到来的格子）
+  3. 窗口内但 `totalTokens == 0` / 缺日
+- 时区：事件时间戳转本地日。日志带偏移则尊重偏移。
 
 ## 各 Agent 日志
 
@@ -152,7 +163,7 @@ public actor TokenStatsCoordinator {
 | Grok | `$GROK_HOME/logs/unified.jsonl` 否则 `~/.grok/logs/unified.jsonl` | `msg == "shell.turn.inference_done"`；`total = prompt + completion + reasoning`；`cached_prompt_tokens` 是 prompt 子集，不得再加 | `updates.jsonl` / `signals.json` 的上下文占用、`totalTokens` 窗口字段 |
 | Pi | `$PI_CODING_AGENT_SESSION_DIR` 否则 `~/.pi/agent/sessions/**/*.jsonl` | assistant `usage`；优先 `usage.totalTokens`，否则分桶求和 | 把这些行并进 Claude / Codex 卡片 |
 
-跟随 symlink。读失败的文件不写入解析缓存。
+跟随 symlink。单个文件读失败：跳过该文件，不写解析缓存，其余文件继续计入。根目录不存在 → `empty`。根目录存在但枚举/读全部失败 → 失败（保留该 agent 上一份成功快照；没有则 `empty`）。
 
 ### Codex 去重（必须按 OpenUsage 测试语义）
 
@@ -173,8 +184,8 @@ public actor TokenStatsCoordinator {
 
 ### Grok
 
-1. 按 `pid` 跟踪模型事件，仅用于将来若加模型拆分；本期即使归因失败，**只要有 token 字段仍计入当天总量**。
-2. 模型事件不受 `since` 限制（为以后归因留状态）；用量行仍要 `timestamp >= since`。
+1. 不解析、不保留模型名。有 `prompt_tokens`（或等价字段）的 `inference_done` 就计入。
+2. 用量行必须 `timestamp >= since`。
 
 ### Pi
 
@@ -190,11 +201,12 @@ public actor TokenStatsCoordinator {
 - 打开详情、切换 Agent 时 `ensureFresh`；本进程内同一 agent 的成功快照未满 5 分钟则不重扫。
 - 周期 5 分钟，不挂高频 `tick()`。
 - 旧 Agent 的异步结果只能写自己的状态。
-- 取消返回「非权威空」：不得把取消写成 `empty`。
-- 失败：保留该 agent 上一份成功快照；没有则 `empty`。不显示额度那种黄色三角（本地扫描不是账户 API）。
+- 取消：不发布新状态。调用方继续看到取消前的 `state(for:)`。禁止把取消映射成 `empty`（那会被当成「今天没用量」）。
+- 失败：保留该 agent 上一份成功快照（`ready` 或权威 `empty`）；从未成功过则保持 `empty`。不显示额度那种黄色三角。
+- `settings.paused == true`：不新开扫描；已在飞的扫描可跑完但结果仍只写自己的 agent。面板仍可展示上一份快照。
 - 应用退出 `cancelAll()`。
 
-首次进入 tokens 页时若仍在扫描且无快照：热力全空心，摘要隐藏。不得转圈、不得骨架屏闪光。
+`scanning` 只在「该 agent 从未有过成功结果、扫描尚未完成」时出现。有磁盘/内存快照时，扫描期间继续展示旧快照。首次进入 tokens 页若是 `scanning`：热力全空心，摘要隐藏。不得转圈、不得骨架屏闪光。
 
 ## 详情面板
 
@@ -205,28 +217,32 @@ public actor TokenStatsCoordinator {
 | 宽 | 278pt，禁止撑宽 |
 | 高 | 拟合 172pt；默认页 ↔ tokens 页、OAuth ↔ API Key、Offline ↔ Online **全部同高** |
 | 圆角 / 材质 / 边框 / 顶栏 / 状态大标题 | 不改 |
-| 主体槽 | 现有 quota 70pt / session 68pt+equalizer 的贡献不变；tokens 页必须落在**同一垂直预算**里 |
+| 主体槽 | quota 仍 70pt（两行 × 33pt + spacing 4）；session 仍 68pt + 7pt equalizer。**点指示器不进这个槽。** |
+| 点指示器位置 | 画在 stack **底边 inset** 里，两页同一位置。为保持 172：`edgeInsets.top` 从 14 收到 6，`edgeInsets.bottom` 从 4 收到 12。净值不变。禁止叠在 Weekly 条或会话卡脚行上。 |
 
-验收金标准沿用 2026-08-05：改前改后同一 fixture 高度仍为 172；切页不得改 `frame.width`。
+验收金标准沿用 2026-08-05：改前改后同一 fixture 高度仍为 **172** 且为偶像素（`evenPanelHeight`）；切页不得改 `frame.width`。顶栏、额度行 33pt、会话卡 68pt 的数字不得为了点指示器再改。
 
 ### 点指示器
 
-- 两颗点，水平居中，画在主体槽底部，**两页共用同一位置**。
-- 直径约 4pt，间距约 8pt，颜色：当前页 ≈ 墨色 45% 不透明；另一页 ≈ 12%。
-- 无文案、无 tooltip「用量/额度」字样。可访问性：自定义 action「Show token stats」/「Show usage」，不在视觉上加标签。
-- 命中：点本身 + 点所在水平条带（约 12pt 高）可点；不得让整张额度条都变成翻转热区。
-- 左点 = 默认页（额度或会话卡），右点 = tokens 页。
-- 切换无高度动画、无淡入；先藏当前主体再显示目标，避免同帧叠两页。
-- 切 Agent：立刻回到默认页，并清空上一 Agent 的热力/摘要，禁止串数。
-- 面板 `onMouseExited` 导致隐藏时重置为默认页。
+- 两颗点，水平居中，落在 12pt 底边 inset 内。
+- 直径 4pt，间距 8pt，颜色：当前页 ≈ 墨色 45% 不透明；另一页 ≈ 12%。
+- 无文案、无「用量/额度」tooltip。VoiceOver 用 `tokens.page.show_stats` / `tokens.page.show_default`。
+- 命中：点本身 + 底边 inset 那条水平带（约 12pt 高）。不得把 70pt 额度/会话卡做成热区。
+- 左点 = 默认页，右点 = tokens 页。
+- 切换无高度动画、无淡入；先藏当前主体再显示目标。
+- 切 Agent：立刻回到默认页，并清空上一 Agent 的热力/摘要。
+- 面板因 `onMouseExited` 隐藏时重置为默认页。
 
 ### tokens 页结构（自上而下，总高吃进主体槽）
 
 ```text
-Today 89.1M          30d 1.1B     ← 一行，11–12pt
-                         5×7 格     ← 水平居中
-              ○      ●             ← 与默认页同一点槽
+Today 89.1M          30d 1.1B     ← 一行，11–12pt（在 70pt 槽内）
+                         5×7 格     ← 水平居中（在 70pt 槽内）
+──────────────────────────────────
+              ○      ●             ← 12pt 底边 inset，不在 70pt 内
 ```
+
+70pt 槽预算：摘要 14 + 间隙 4 + 热力 47 = 65，余 5pt 容差。热力用 **5pt 格 + 2pt 间隙**：`7×(5+2)-2 = 47`。禁止用 6pt 格（会变成 54，加上摘要就超过 70）。自检仍超高则先减间隙到 1.5pt，**禁止**加高面板。
 
 **摘要行**
 
@@ -243,14 +259,15 @@ Today 89.1M          30d 1.1B     ← 一行，11–12pt
   | `< 1_000_000_000` | `89.1M` / `1M` |
   | 更大 | `1.1B` / `2B` |
 
-  小数一位，能整除则不写小数；locale 用 `en_US_POSIX` 的小数点，与现网 `k` 一致。会话卡上的当前轮 input/output 继续用同一函数（现在的小数字行为不变）。
+  小数一位，能整除则不写小数；locale 用 `en_US_POSIX` 的小数点，与现网 `k` 一致。`< 1_000_000` 的现网行为保持不变。会话卡上 **≥ 1M** 的当前轮数字会从 `1500k` 变成 `1.5M`，这是可接受的顺带变化，须加一条自检。
 
 **热力**
 
 - 5 列（旧→新从左到右）× 7 行（`firstWeekday` 在上）。
-- 不画周一/周日文字、不画月份。格子本身就是图。
-- 单元格约 6pt，间隙 2pt。7×(6+2)-2 = 54pt，摘要约 14pt，点槽约 10pt，落在 70pt 预算内。若自检超高，先减单元格到 5pt，**禁止**加高面板。
-- 空心：无用量或窗口外。填充：窗口内 `totalTokens > 0`。
+- 不画周一/周日文字、不画月份。
+- 单元格 **5pt**，间隙 2pt（见上节预算）。悬停命中为格+间隙（7pt），不要按 5pt 严格点中。
+- 热力是**一个**可访问分组，不要生成 35 个 VoiceOver 格子。
+- 空心 / 实心见「统计窗口」。填充：窗口内且 `date <= today` 且 `totalTokens > 0`。
 - 浓度相对**本窗口内最大日用量**分 4 档（加空心共 5 态）。最大为 0 则全空心。
 
   | 档 | 相对 `max` | 填充（浅色面板） |
@@ -262,8 +279,8 @@ Today 89.1M          30d 1.1B     ← 一行，11–12pt
   | 4 | `(0.75, 1]` | `#C45A1C` |
 
 - 不用 Halo 状态色。深色桌面上面板仍是浅 popover，热力按上表，不必做暗色变体。
-- 悬停格子：原生 tooltip。窗口内有用量：`{本地月日} · {紧凑数字} tokens`（中文：`{月日} · {紧凑数字} tokens` 即可，月日用现有 `date` locale）。空心格：可无 tooltip，或只显示日期；不要写 `0 tokens`。
-- 格子不可点（除点条带外）。单击格子不切日、不弹层。
+- 悬停格子：原生 tooltip。窗口内有用量：`tokens.cell.tooltip` = `{0} · {1} tokens`，`{0}` 为 `tokens.cell.date`（**禁止**复用 `date.other_format`，中文那项带「刷新」）。空心格无 tooltip，不写 `0 tokens`。
+- 格子不可点。单击格子不切日、不弹层。
 
 ### 与默认页的关系
 
@@ -290,6 +307,7 @@ Pi 焦点：默认页按现网（无 OAuth 额度则走会话卡）。tokens 页
 | --- | --- | --- |
 | `tokens.summary.today` | `Today` | `今日` |
 | `tokens.summary.period` | `30d` | `30天` |
+| `tokens.cell.date` | `MMM d` | `M月d日` |
 | `tokens.cell.tooltip` | `{0} · {1} tokens` | `{0} · {1} tokens` |
 | `tokens.page.show_stats` | `Show token stats` | `显示 Token 统计` |
 | `tokens.page.show_default` | `Show status details` | `显示状态详情` |
@@ -317,9 +335,11 @@ Pi 焦点：默认页按现网（无 OAuth 额度则走会话卡）。tokens 页
 - 切 Agent 回到默认页且热力数字更换。
 - 关面板再开回到默认页。
 - 两侧摘要为 nil 时不出现 `0` / `--`。
-- 热力 5×7；窗外格子空心。
-- 点条带点击不改变 Halo 状态色。
+- 热力 5×7；窗外、未来日、零用量格子空心。
+- 点条带点击不改变 Halo 状态色；点不得挡住 Weekly 条或会话卡脚行。
 - 长数字不撑宽。
+- `compactTokenCount(1_500_000) == "1.5M"`；`compactTokenCount(38_000)` 仍为现网 `k` 形式。
+- 顶 inset / 底 inset 对调后拟合高仍为偶像素 172。
 
 ### 验证命令
 
