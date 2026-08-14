@@ -236,6 +236,16 @@ func testAntigravityDetailsResolverUsesUsageBodyAndSignInCopy() {
 
 在 `HaloInteractionChecks.swift` 的 `testAgentToggleUsesSharedSVGAssets` 增加 `antigravity.svg` 存在断言。把 `usageProviderID` 源码断言扩成同时要求 `case .antigravity:` + `return .antigravity`（保留 Pi → `nil`）。
 
+**同一任务必须改掉按「四个 agent」写死的 `--self-check`，否则加上 `.antigravity` 图标后现网断言会红：**
+
+| 现网断言 | 改法 |
+| --- | --- |
+| `testAgentToggleUsesCodexAndClaudeIcons` / `testAgentToggleDimsInactiveIconMoreStrongly` 的 `icons.count == 4`（约 3921、3930） | `icons.count == AgentKind.allCases.count`。dim 测试继续用下标 0…3 测 Codex/CC/Grok/Pi；**另加** `icons[4].alphaValue == 0.40`（默认 focus Codex 时 AG 暗）以及 `setAgent(.antigravity)` 后 AG 为 1。不要 `guard icons.count == 4`。 |
+| `testAgentToggleSupportsThreeAgentsIncludingGrok`：`setEnabledAgents(AgentKind.allCases)` 后 `bounds.width == 144`（约 3994） | 要么改成期望 `36 * AgentKind.allCases.count`（现为 180），要么把该用例的输入改成 `HaloSettings.defaultEnabledAgents`（仍 144）。点槽坐标注释「108-144 Pi」在 allCases=5 时仍然成立（Pi 仍是第 4 槽），但要补 AG 槽 `144-180` 的一次点击。 |
+| `testAgentToggleWidthScalesWithEnabledCount`：`setEnabledAgents(AgentKind.allCases)` 后 `144`（约 4039） | 改成 `36 * CGFloat(AgentKind.allCases.count)`（180）。`defaultEnabledAgents` 的 144（约 3880、2823）**保持不动**。 |
+
+原则：`defaultEnabledAgents` 仍是四槽 144；`AgentKind.allCases` 永远按 `slotWidth × count`，禁止再写死 4 或 144。
+
 在 `main.swift` 调用新检查。在 `runUsageModelChecks` 调用 `testAntigravityDetailsResolverUsesUsageBodyAndSignInCopy()`。
 
 - [ ] **Step 2: 运行检查确认失败**
@@ -958,7 +968,7 @@ git commit -m "feat(macos): configure agy named-group hooks"
 - Modify: `src/macos/Sources/AgentHaloCoreChecks/main.swift`
 
 **Interfaces:**
-- Produces: `AntigravityHookStatusReducer.consume` / `applyWorkingVisibility`；`SessionSnapshot.agent == .antigravity`
+- Produces: `AntigravityHookStatusReducer.consume` / `applyWorkingVisibility`；`SessionSnapshot.agent == .antigravity`；`projectName` 默认 `"Antigravity"`，cwd 末段可覆盖
 
 - [ ] **Step 1: 写失败检查**
 
@@ -967,8 +977,11 @@ git commit -m "feat(macos): configure agy named-group hooks"
 ```swift
 func testAntigravityReducerLifecycle() {
     var reducer = AntigravityHookStatusReducer(threadId: "t1", now: now)
-    reducer.consume(jsonLine: line(event: "PreInvocation", ts: now), now: now)
+    expect(reducer.snapshot.projectName, "Antigravity", "default projectName")
+    expect(reducer.snapshot.agent, .antigravity, "agent stamp")
+    reducer.consume(jsonLine: line(event: "PreInvocation", ts: now, cwd: "/tmp/my-repo"), now: now)
     expect(reducer.snapshot.state, .thinking, "pre invocation")
+    expect(reducer.snapshot.projectName, "my-repo", "cwd last path component")
     reducer.consume(jsonLine: line(event: "PostInvocation", ts: now.addingTimeInterval(1)), now: now.addingTimeInterval(1))
     expect(reducer.snapshot.state, .thinking, "post invocation is not done")
     reducer.consume(jsonLine: line(event: "PreToolUse", tool: "run_command", ts: now.addingTimeInterval(2)), now: now.addingTimeInterval(2))
@@ -1008,7 +1021,9 @@ Expected: reducer 类型不存在。
 
 - [ ] **Step 3: 最小实现**
 
-复制 `ClaudeHookStatusReducer` 的骨架，删掉 Notification / permission / compact 特例。事件表按 spec：
+复制 `ClaudeHookStatusReducer` 的骨架，删掉 Notification / permission / compact 特例。`init` 里 `SessionSnapshot.projectName` 默认 **`"Antigravity"`**（不要留 `"Claude Code"`）。consume 时若 `cwd` 非空，用 `URL(fileURLWithPath: cwd).lastPathComponent` 覆盖；末段为空则仍用 `"Antigravity"`。`sessionTitle` / `modelName` 仅当 payload 有值时填写。
+
+事件表按 spec：
 
 | 事件 | 状态 |
 | --- | --- |
@@ -1196,7 +1211,8 @@ git commit -m "docs: document optional macOS Antigravity agent"
 | Spec 要求 | 任务 |
 | --- | --- |
 | AgentKind / AG 标签 / 默认四开 | 1 |
-| 槽宽 36pt；五开 = 180 | 1（既有 slotWidth 断言）+ 10 |
+| 槽宽 36pt；`defaultEnabledAgents` 仍 144；`allCases` 随 count 变宽 | 1（改掉写死 4/144 的 self-check）+ 10 |
+| `SessionSnapshot.projectName` 默认 Antigravity；cwd 末段覆盖 | 8 |
 | Gemini 两窗 mapper + 旧接口仅 session | 2 |
 | Keychain + 指纹缓存，不写回；坏缓存当 miss（不扩展 `UsageFileAccessing.remove`） | 3 |
 | LS 优先 + Cloud Code + loopback HTTP；summary 后 GetUserStatus 只取 plan | 4–5 |
@@ -1204,7 +1220,7 @@ git commit -m "docs: document optional macOS Antigravity agent"
 | Coordinator 只刷新焦点 | 5（沿用现有） |
 | Hook 三分流 + 真实 env | 6 |
 | named-group configurator；禁用不删 group | 7、9 |
-| Reducer：PostInvocation ≠ done；不画 attention；fatal 才 error | 8 |
+| Reducer：PostInvocation ≠ done；不画 attention；fatal 才 error；projectName | 8 |
 | Monitor / presence / AppDelegate；不点击唤起 | 9 |
 | 空 context pill、文档、验收文案 | 1、10 |
 | 不改 Windows | 全局约束 |
