@@ -3,7 +3,7 @@
 ## 文档状态
 
 - 日期：2026-08-14
-- 状态：设计已确认，待写实施计划
+- 状态：设计已确认；实施计划见 [2026-08-14-macos-antigravity-agent-implementation.md](../plans/2026-08-14-macos-antigravity-agent-implementation.md)
 - 实现范围：AgentHalo **macOS only**
 - 产品原则：见 [PRODUCT.md](../../PRODUCT.md)
 - 额度管线先例：[OpenUsage 风格监控 macOS 设计](./2026-07-10-openusage-monitoring-macos-design.md)
