@@ -65,18 +65,31 @@ OpenUsage 的 Antigravity provider **只做额度**，不做光环生命周期�
 - 切换条槽宽锁死 36pt；启用第 5 个 agent 后总宽变为 `36 × enabledCount`，不得改成 `144 / allCases.count`。
 - 现有 hook 二进制已在 Claude / Grok 之间分流（`GROK_SESSION_ID` / `GROK_HOOK_EVENT`）。
 
-### `agy` 生命周期
+### `agy` 生命周期（本机核对，2026-08-14）
 
-Antigravity CLI 支持 hooks。全局配置出现过两个路径：
+`agy` 二进制会从 **多个** `hooks.json` 加载 **named hook group**（日志：`loaded %d named hooks from %d hooks.json file(s)`）。本机实际文件是：
 
-| 路径 | 角色 |
-| --- | --- |
-| `~/.gemini/config/hooks.json` | 文档中的全局 hooks |
-| `~/.gemini/antigravity-cli/hooks.json` | 部分 CLI 构建实际读写的路径 |
+```json
+// ~/.gemini/config/hooks.json
+{
+  "orca-status": {
+    "PreInvocation": [ { "type": "command", "command": "…", "timeout": 10 } ],
+    "PostInvocation": [ { "type": "command", "command": "…", "timeout": 10 } ],
+    "Stop": [ { "type": "command", "command": "…", "timeout": 10 } ],
+    "PostToolUse": [ { "matcher": "*", "hooks": [ { "type": "command", "command": "…" } ] } ]
+  }
+}
+```
 
-工作区 `.agents/hooks.json` 是 per-project，Halo **不写**（启动时不知道用户工作区）。
+同一文件里两种 entry 形状并存：`PreInvocation` / `PostInvocation` / `Stop` 是扁平 `type+command`；`PostToolUse` 带 `matcher` + 嵌套 `hooks`。
 
-事件名因构建而异，文档与第三方对照后的并集为：`SessionStart` / `BeforeAgent` / `UserPromptSubmit` / `PreInvocation` / `PreToolUse` / `BeforeTool` / `PostToolUse` / `AfterTool` / `Notification` / `PermissionRequest` / `Stop` / `AfterAgent` / `PostInvocation` / `StopFailure` / `SessionEnd`。配置器按「文件里已有的 key + 本机构造器白名单」合并；reducer 认官方名和别名。
+`~/.gemini/antigravity-cli/hooks.json` **不存在**。`~/.gemini/antigravity-cli/settings.json` 和 `~/.gemini/settings.json` 里另有 Gemini/插件风格的 `hooks.SessionStart` / `BeforeTool`——那是另一套管线，**Halo 不写**，以免污染 Gemini CLI。
+
+工作区 `.agents/hooks.json` 是 per-project，Halo **不写**。
+
+`agy` 二进制里确认的生命周期相关事件：`PreInvocation`（文案 "Before each LLM invocation"）、`PreToolUse`、`PostToolUse`、`Stop`。本机 `hooks.json` 另外登记了 `PostInvocation`。第三方文章里的 `SessionStart` / `BeforeAgent` / `PermissionRequest` **未**作为 `agy` hooks.json 事件写入白名单。
+
+进程环境（二进制字符串，非臆造）：`ANTIGRAVITY_AGENT`、`ANTIGRAVITY_TRAJECTORY_ID`。没有发现 `AGY_SESSION_ID` / `AGY_HOOK_EVENT`。
 
 ## 已确认的架构决策
 
@@ -87,7 +100,7 @@ Antigravity CLI 支持 hooks。全局配置出现过两个路径：
 5. **只后台刷新当前焦点 Provider**；OAuth 刷新周期与现有 5 分钟策略一致。
 6. **刷新后的 access token 只写入** `~/.agent-halo/cache/antigravity-auth.json`，用 refresh token 的 SHA-256 指纹绑定；**永不写回** Keychain `gemini`/`antigravity`。
 7. **额度失败不改变 halo 生命周期状态**。
-8. **无 OAuth 时**走 `oauthNeedsSignIn`，不做 API Key 会话卡。
+8. **无 Keychain 且无 LS 时**走 `oauthNeedsSignIn`；有 LS 无 Keychain 仍按 OAuth UI 刷额度。不做 API Key 会话卡，`resolveAccess` 禁止返回 `.apiKey`。
 9. **context pill 对 Antigravity 为空**。
 10. 禁用 Agent 时立刻停采、清空该 agent 快照；未启用期间不 configure / 不 repair `agy` hooks。
 
@@ -195,8 +208,12 @@ Windows 的 `AgentKind`、locale 副本、C# 监视器 **不改**。macOS 打包
 - 刷新缓存路径：`AgentHaloPaths.cacheDirectory/antigravity-auth.json`（`~/.../.agent-halo/cache/antigravity-auth.json`）。
 - 缓存条目：`accessToken`、`expiresAtMs`、`credentialFingerprint`（refresh token 的 SHA-256）。指纹不符、过期、文件损坏 → 丢弃后重刷。
 - `AccountCacheKey.digest`：对稳定账户标识（若 payload 无稳定 id，则对 refresh token 指纹本身）做 SHA-256 hex。**永不**把 raw token 写入日志或 usage 缓存键。
-- Keychain 读失败（未解锁 / 权限）→ `credentialStoreUnreadable`，UI `signInAgain`。
-- Keychain 无条目 → 无 OAuth，`oauthNeedsSignIn`。
+- Keychain 读失败（未解锁 / 权限）→ `credentialStoreUnreadable`。若此时 LS 也发现不了，UI `signInAgain`。
+- **`resolveAccess` 永远不要返回 `.apiKey`**（否则详情面板会走会话卡，与「不做 API Key 卡」冲突）。
+- Coordinator 只在 `.oauth` 时调用 `refresh()`。因此：
+  - Keychain 有可用 token → `.oauth`（真实 access/refresh）。
+  - Keychain 没有，但 `language_server` / `agy` LS 可发现 → 仍返回 `.oauth`，`accessToken` 为空字符串，`source = .file(path: cacheDirectory/antigravity-ls)`，`accountKey.digest` 用固定本地身份 `"antigravity-ls"` 的 SHA-256。`refresh()` 走 LS，不打 Cloud Code。
+  - 两者都没有 → `.oauthNeedsSignIn`。
 
 ### AntigravityUsageClient
 
@@ -215,6 +232,8 @@ Windows 的 `AgentKind`、locale 副本、C# 监视器 **不改**。macOS 打包
 Google OAuth installed-app `client_id` / `client_secret` 与 OpenUsage / Antigravity 应用包内公开值相同。这是 installed-app 客户端的既有取舍，不是私密密钥；实现时从 OpenUsage `AntigravityUsageClient` 原样拷贝，不另造一套。
 
 HTTP 错误分类对齐现有 provider：`401/403 → signInAgain`，`429 → rateLimited`，`5xx → serviceUnavailable`，解码失败 → `invalidResponse`，传输失败 → `network`。
+
+**不要**复用现有 `URLSessionUsageHTTPClient` 打 LS：它把 URL 拼成 `https://{host}{path}`，没有 loopback、没有自签、也接不了 `127.0.0.1:port`。LS 单独做一个允许 insecure loopback 的 client（对齐 OpenUsage `URLSessionHTTPClient(allowsInsecureLoopback:)`），Cloud Code / Google OAuth 继续用校验证书的 client。
 
 ### AntigravityLanguageServerDiscovery
 
@@ -256,27 +275,30 @@ refresh()
 
 1. **Grok 优先**（现有）：`GROK_SESSION_ID` 或 `GROK_HOOK_EVENT` 非空 → `grok-status.jsonl`，`source: grok-hook`。
 2. **否则 Antigravity**，以下任一成立（hook 进程内不扫进程表）：
-   - 环境变量非空：`AGY_SESSION_ID`、`AGY_HOOK_EVENT`、`ANTIGRAVITY_SESSION_ID`、`ANTIGRAVITY_HOOK_EVENT`。本机 `agy` 核对后，注释标明哪些名字真实存在；判定函数仍必须覆盖整份候选，避免漏分流。
-   - payload / 环境中的 `transcriptPath` / `transcript_path` 落在 `~/.gemini/antigravity-cli/`，或路径含 `/antigravity-cli/`。
+   - `ANTIGRAVITY_AGENT` 非空（`agy` 会设 `ANTIGRAVITY_AGENT=1`）。
+   - `ANTIGRAVITY_TRAJECTORY_ID` 非空。
+   - payload / 环境中的 `transcriptPath` / `transcript_path` 落在 `~/.gemini/antigravity-cli/`（**不要**用裸 `/antigravity/`，以免 IDE 会话误入）。
 3. 否则保持 Claude。
+
+实现时用本机 `agy` 打一轮，确认事件名是 argv、stdin JSON，还是二者皆空。若 `agy` 调 `status-hook` 时既无 argv 也无 event 字段，配置器改为 `status-hook PreInvocation` 这种带事件名的 command（与旧 Claude 写法相同），不得静默 `exit 0`。
 
 Antigravity 记录：
 
 - 路径：`AgentHaloPaths.antigravityStatusLog` = `~/.agent-halo/logs/antigravity-status.jsonl`
 - `source: "antigravity-hook"`
-- 字段同 Claude/Grok：`timestamp`、`event`、`sessionId`、`cwd`、`toolName`、`errorText`、可选 `notificationType` / `permissionMode`
-- 事件名写盘时规范为 PascalCase；额外映射：
+- 字段同 Claude/Grok：`timestamp`、`event`、`sessionId`、`cwd`、`toolName`、`errorText`
+- `sessionId` 优先 `ANTIGRAVITY_TRAJECTORY_ID`，否则 payload 里的 conversation/session id，再否则 `"antigravity"`
+- 事件名写盘时规范为 PascalCase。`agy` 白名单：
 
 ```text
-before_agent / BeforeAgent           → BeforeAgent
-after_agent / AfterAgent             → AfterAgent
-before_tool / BeforeTool             → BeforeTool
-after_tool / AfterTool               → AfterTool
-pre_invocation / PreInvocation       → PreInvocation
-post_invocation / PostInvocation     → PostInvocation
+pre_invocation / PreInvocation     → PreInvocation
+post_invocation / PostInvocation   → PostInvocation
+pre_tool_use / PreToolUse          → PreToolUse
+post_tool_use / PostToolUse        → PostToolUse
+stop / Stop                        → Stop
 ```
 
-以及现有 Claude/Grok 那组 `session_start` → `SessionStart` 等。
+stdin 若出现其它 Claude/Grok 别名，normalize 后交给 reducer；未知事件只更新 `lastEventAt`。
 
 JSONL 滚动策略与 Claude/Grok 相同（同一体积上限与截断常量）。
 
@@ -285,34 +307,36 @@ JSONL 滚动策略与 Claude/Grok 相同（同一体积上限与截断常量）�
 仅当 `enabledAgents.contains(.antigravity)` 时由 `AgentHaloRuntimeBootstrap` 调用。
 
 1. 确认 `~/.agent-halo/bin/status-hook` 已 stage（与 Claude/Grok 共用）。
-2. 选择全局 hooks 文件（只选一个写，避免双份事件）：
-   1. 若 `~/.gemini/antigravity-cli/hooks.json` 存在 → 合并写入该文件。
-   2. 否则若 `~/.gemini/config/hooks.json` 存在 → 合并写入该文件。
-   3. 否则创建 `~/.gemini/config/hooks.json`。
-3. **按目标文件已有 schema 合并**，不把 Claude/Grok 的 `{"hooks": {Event: [...]}}` 强行套上去。目标文件若已是顶层事件 key（官方 `hooks.json` 常见写法），就在那些 key 下追加 Halo command；若已是带 `hooks` 包装的对象，就沿用该包装。不删除用户其它 hook。Halo 命令已是 preferred `status-hook` 且白名单事件都在 → 不改 mtime。
-4. 注册白名单事件（目标 schema 支持 matcher 时，工具类事件 matcher 为 `.*`）：
+2. **只写** `~/.gemini/config/hooks.json`（`agy` 的 named-group 文件）。不存在则创建 `{}` 再合并。不写 `~/.gemini/settings.json`、不写 `~/.gemini/antigravity-cli/settings.json`、不写工作区 `.agents/hooks.json`。
+3. 以 named group `agent-halo-status` 合并，**不得改动**同文件里其它 group（例如本机的 `orca-status`）。group 已指向 preferred `status-hook` 且五件事件齐全 → 不改 mtime。
+4. 只注册本机 / 二进制已证实的事件，并按该事件在现有文件里的形状写：
 
-   `SessionStart`、`BeforeAgent`、`UserPromptSubmit`、`PreInvocation`、`PreToolUse`、`BeforeTool`、`PostToolUse`、`AfterTool`、`Notification`、`PermissionRequest`、`Stop`、`AfterAgent`、`PostInvocation`、`StopFailure`、`SessionEnd`
+   | 事件 | entry 形状 |
+   | --- | --- |
+   | `PreInvocation` | `[{ "type": "command", "command": "<status-hook> PreInvocation", "timeout": 10 }]` |
+   | `PostInvocation` | 同上 |
+   | `Stop` | 同上 |
+   | `PreToolUse` | `[{ "matcher": "*", "hooks": [{ "type": "command", "command": "<status-hook> PreToolUse", "timeout": 10 }] }]` |
+   | `PostToolUse` | 同上 |
 
-   若写入后 `agy` 因未知 key 拒载整文件：下一启动只保留该文件里已经存在的事件 key 加上探测到的、该构建已使用的 key。不得覆盖非 Halo 条目。
-5. 失败只打日志，不挡启动。不写工作区 `.agents/hooks.json`。
+   不注册 `SessionStart` / `BeforeAgent` / `PermissionRequest` / `SessionEnd` 等未证实 key。
+5. 失败只打日志，不挡启动。禁用 Agent 时不删该 group（与「不删用户 `~/.gemini`」一致）；只是不再 repair。
 
 ### AntigravityHookStatusReducer
 
-对齐 Claude **最小集**，不搬 Grok 的 `permissionMode` / Auto 等待特例。
+对齐 Claude hook reducer **最小集**，不搬 Grok 的 `permissionMode` / Auto 等待特例。**不要**把 `PostInvocation` 当成回合结束——`agy` 文案是每次 LLM 调用前后。
 
 | 输入（写盘后的 PascalCase） | 结果 |
 | --- | --- |
-| `SessionStart`、`BeforeAgent`、`UserPromptSubmit`、`PreInvocation` | `thinking` |
-| `PreToolUse`、`BeforeTool` | `working`；`toolName` 走现有 `actionRules` |
-| `PostToolUse`、`AfterTool`（无 error） | 回到 `thinking`；短工具保持 `working` **1.8s**（与现有蓝环可读契约一致） |
-| `PostToolUseFailure`、带 error 的 `AfterTool` | 工具失败回到 `thinking`；**整轮**失败才 `error` |
-| `Notification`（permission / needs input）或 `PermissionRequest` | `attention` |
-| `Stop`、`AfterAgent`、`PostInvocation`（成功） | `done` |
-| `StopFailure` 或明确 fatal | `error` |
-| `SessionEnd` | `idle` |
+| `PreInvocation` | `thinking` |
+| `PostInvocation` | 仍在回合内 → `thinking`（若正在 working hold 内则保持 working） |
+| `PreToolUse` | `working`；`toolName` 走现有 `actionRules` |
+| `PostToolUse` | 与 `ClaudeHookStatusReducer` 相同：先 `working` / Reviewing result，再按现有 fade（hook 侧 0.65s review，live 可见性 `ClaudeContextUsageConstants.workingVisibilityExtension` = 1.8s）回到 `thinking` |
+| `PostToolUse` 带 error | 工具失败回到 `thinking`；**整轮**失败才 `error` |
+| `Stop` | `done` |
+| 明确 fatal（若 payload 带失败） | `error` |
 
-未知事件：更新 `lastEventAt`，不改状态。坏 JSON 行跳过。
+不主动画 `attention`：本机 / 二进制未证实 permission hook。未知事件：更新 `lastEventAt`，不改状态。坏 JSON 行跳过。
 
 `SessionSnapshot.agent` 必须是 `.antigravity`。`projectName` 默认 `Antigravity`，可用 cwd 末段覆盖。`sessionTitle` / `modelName` 仅当 payload 有值时填写。
 
@@ -332,8 +356,10 @@ JSONL 滚动策略与 Claude/Grok 相同（同一体积上限与截断常量）�
 - 无会话且无 `agy` presence → offline（`status.offline_antigravity`）
 - 有 presence 或近期 hook 但无活动 → standby
 - 详情面板额度两行不改高度、不改标题文案（仍用 `quota.5h` / `quota.weekly`）
-- context pill 不显示数值（空 / `--`，与「无 context 源」一致）
+- context pill 不显示数值（空 / `--`，与「无 context 源」一致）。`DetailsPanel.update` 里 `switch focusedAgent` 必须加 `.antigravity`，不得误入 Claude/Grok context 分支。
+- `DetailsContentResolver.providerName` / `warning` 的 `UsageProviderID` switch 补 `.antigravity`（编译器也会逼改）。
 - 点击光环：不激活任何 Antigravity 窗口（与 Claude 相同）
+- 其它写死 `switch AgentKind` 的地方（`AppDelegate`、`SettingsWindowController` 图标、`HaloInteractionChecks` 源码断言）一并补 case；能改成 `allCases` 的检查不要再写死四个。
 
 切换条：启用后多一个 36pt 槽；图标 `antigravity.svg`。视觉保持克制，单色标记，与现有 `codex.svg` / `grok.svg` 密度一致。
 
@@ -374,16 +400,24 @@ JSONL 滚动策略与 Claude/Grok 相同（同一体积上限与截断常量）�
 
 **Hook 分流**
 
-- `agy` 候选环境 / `antigravity-cli` transcript 路径 → 只追加 `antigravity-status.jsonl`。
+- `ANTIGRAVITY_AGENT=1` 或 `ANTIGRAVITY_TRAJECTORY_ID` 或 `antigravity-cli` transcript → 只追加 `antigravity-status.jsonl`。
+- 路径含 `/antigravity/` 但不含 `antigravity-cli` → **不**当作 AG（回归：不得误分流）。
 - `GROK_*` 仍只写 Grok 日志。
 - 无上述信号 → Claude 日志。
-- 事件名 snake_case / 别名写盘为 PascalCase。
+- 事件名 snake_case 写盘为 PascalCase。
+- configurator 写出的 `hooks.json` 含 named group `agent-halo-status`，且不改现有其它 group。
 
 **Reducer**
 
 - 事件表每一行至少一条用例。
-- 短工具：PostToolUse 后 1.8s 内保持 working。
+- `PostInvocation` 不得变成 `done`。
+- `PostToolUse` fade 与 Claude hook reducer 一致。
 - 坏行不崩溃、不改前一状态。
+
+**额度 access**
+
+- 无 Keychain 但 LS 可发现 → `resolveAccess` 为 `.oauth`，refresh 走 LS。
+- 两者都无 → `.oauthNeedsSignIn`，**不是** `.apiKey`。
 
 **Settings / 聚合**
 
