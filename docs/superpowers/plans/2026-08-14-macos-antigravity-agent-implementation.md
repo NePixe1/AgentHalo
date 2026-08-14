@@ -76,8 +76,8 @@ AGENTS.md
 公开接口（本计划锁定）：
 
 ```swift
-public enum AgentKind { /* + case antigravity */ }
-public enum UsageProviderID { /* + case antigravity */ }
+public enum AgentKind { case codex, claudeCode, grok, pi, antigravity }
+public enum UsageProviderID { case codex, claude, grok, antigravity }
 
 extension AgentHaloPaths {
     public var antigravityStatusLog: URL {
@@ -355,7 +355,7 @@ git commit -m "feat(macos): add opt-in Antigravity agent kind"
 
 **Interfaces:**
 - Consumes: `UsageSnapshot` / `UsageWindow` / `AccountCacheKey` / `UsageHTTPResponse`
-- Produces: `AntigravityUsageMapper.mapQuotaSummary`、`windowsFromQuotaSummaryBody`、`formatPlan`
+- Produces: `AntigravityUsageMapper.mapQuotaSummary`、`windowsFromQuotaSummaryBody`、`sessionWindowFromLegacyGeminiConfigs`、`formatPlan`
 
 - [ ] **Step 1: 写失败检查**
 
@@ -502,7 +502,7 @@ public enum AntigravityUsageMapper {
     public static let sessionDuration: TimeInterval = 18_000
     public static let weeklyDuration: TimeInterval = 604_800
 
-    public static func windowsFromQuotaSummaryBody(_ data: Data) -> [UsageWindow]? { /* nil = not a summary */ }
+    public static func windowsFromQuotaSummaryBody(_ data: Data) -> [UsageWindow]?
 
     public static func mapQuotaSummary(
         response: UsageHTTPResponse,
@@ -717,10 +717,10 @@ git commit -m "feat(macos): add Antigravity LS discovery and usage client"
 
 - [ ] **Step 1: 写失败检查**
 
-1. LS `RetrieveUserQuotaSummary` 2xx 且可解析（哪怕零 bucket）→ 不再打 legacy LS 方法，也不打 Cloud Code。
-2. LS 不可发现 + Keychain token → Cloud Code summary。
+1. LS `RetrieveUserQuotaSummary` 2xx 且 `windowsFromQuotaSummaryBody` 非 nil（哪怕零窗）→ **不得**再用 `GetUserStatus` / `GetCommandModelConfigs` 的 remainingFraction 填额度。允许再打一次 `GetUserStatus` **只取** `formatPlan(userTier)`。该源结束后不打 Cloud Code。
+2. LS 不可发现 + Keychain token → Cloud Code `retrieveUserQuotaSummary`；summary 不是该 RPC（404 / 非 summary body）才回退 `fetchAvailableModels` / `retrieveUserQuota`，且只准走 `sessionWindowFromLegacyGeminiConfigs`（无 weekly）。
 3. LS 不可发现 + 无 Keychain → `resolveAccess` 为 `.oauthNeedsSignIn`；`refresh(using: .oauthNeedsSignIn)` 返回 `.failure(.signInAgain)`，不发 HTTP。
-4. 探测顺序：先 `language_server`（antigravity 标记），再 `agy`。
+4. 探测顺序：先 `language_server`（antigravity 标记），再 `agy`，最后 Cloud Code。
 
 用 fake discovery / fake HTTP 注入 provider。
 
@@ -770,6 +770,9 @@ public struct AntigravityUsageProvider: UsageProvider, Sendable {
         }
         return await probeCloudCode(oauth)
     }
+
+    /// Summary 2xx + 可解析（含空窗）即返回；可选第二次 `GetUserStatus` 只填 `planName`。
+    /// Summary 不是该 RPC 时，才用 legacy configs → `sessionWindowFromLegacyGeminiConfigs`。
 }
 ```
 
@@ -1015,6 +1018,7 @@ Expected: reducer 类型不存在。
 | PostToolUse | working / Reviewing result，`workingVisibleUntil = eventAt + 0.65` |
 | PostToolUse 带 errorText | 同上，action `Tool failed` |
 | Stop | done，`completedAt = eventAt`，`active = false` |
+| payload 带明确 fatal / `errorText` 且事件为 Stop 失败语义 | `error`（整轮失败）。单次工具失败不走这里 |
 
 `applyWorkingVisibility` 与 Claude hook 相同（0.65s fade + 180s stuck-tool safety net）。不画 attention。
 
@@ -1045,7 +1049,7 @@ git commit -m "feat(macos): reduce agy hook events to halo states"
 - Modify: `src/macos/Sources/AgentHaloCoreChecks/main.swift`
 
 **Interfaces:**
-- Produces: `AntigravityHookStatusMonitor.refresh` → `[SessionSnapshot]`；`AntigravityActivityMonitor` 与 Grok 相同的 polling API
+- Produces: `AntigravityHookStatusMonitor.refresh(now:) -> Bool` 与 `snapshots() -> [SessionSnapshot]`（同 `ClaudeHookStatusMonitor`）；`AntigravityActivityMonitor` 与 Grok 相同的 polling API（`start` / `updatePollingContext` / `requestRefresh` / `snapshot()`）
 
 - [ ] **Step 1: 写失败检查**
 
@@ -1085,6 +1089,7 @@ static func isPresent(
 - `hasLiveSessionForFocusedAgent`：`.antigravity → snapshot.isPresent`
 - 新增 `antigravitySnapshots()`，`allSnapshots()` 改成 `+ antigravitySnapshots()`。Aggregator 自己按 `focusedAgent` 过滤，不要在 AppDelegate 里先丢掉其它 agent。
 - `applyEnabledAgents`：刚打开 AG 时立刻 `AntigravityHookConfigurator.configure` + `requestRefresh()`；关掉时停 monitor、清空 snapshot，**不删** `hooks.json` 里的 group。
+- **不要**给 Antigravity 加点击光环唤起（现有 `CodexAppDetector.activateCodex` 仅在 `focusedAgent == .codex` 时走）。
 
 - [ ] **Step 4: 运行检查**
 
@@ -1131,6 +1136,10 @@ expect(
     appDelegateSource.contains("return .antigravity"),
     "usageProviderID maps antigravity"
 )
+let five = AgentToggleView(frame: .zero)
+five.setEnabledAgents([.codex, .claudeCode, .grok, .pi, .antigravity], focused: .antigravity)
+five.layoutSubtreeIfNeeded()
+expect(five.bounds.width, 180, "five enabled agents = 36pt × 5; slot width stays 36")
 ```
 
 - [ ] **Step 2: 运行确认失败（若断言尚未满足）**
@@ -1187,14 +1196,20 @@ git commit -m "docs: document optional macOS Antigravity agent"
 | Spec 要求 | 任务 |
 | --- | --- |
 | AgentKind / AG 标签 / 默认四开 | 1 |
+| 槽宽 36pt；五开 = 180 | 1（既有 slotWidth 断言）+ 10 |
 | Gemini 两窗 mapper + 旧接口仅 session | 2 |
-| Keychain + 指纹缓存，不写回 | 3 |
-| LS 优先 + Cloud Code + loopback HTTP | 4–5 |
+| Keychain + 指纹缓存，不写回；坏缓存当 miss（不扩展 `UsageFileAccessing.remove`） | 3 |
+| LS 优先 + Cloud Code + loopback HTTP；summary 后 GetUserStatus 只取 plan | 4–5 |
 | `resolveAccess` 禁止 apiKey；LS-only oauth | 3、5 |
 | Coordinator 只刷新焦点 | 5（沿用现有） |
 | Hook 三分流 + 真实 env | 6 |
-| named-group configurator | 7 |
-| Reducer 映射（PostInvocation ≠ done） | 8 |
-| Monitor / presence / AppDelegate | 9 |
-| 空 context pill、文档、验收文案 | 10 |
+| named-group configurator；禁用不删 group | 7、9 |
+| Reducer：PostInvocation ≠ done；不画 attention；fatal 才 error | 8 |
+| Monitor / presence / AppDelegate；不点击唤起 | 9 |
+| 空 context pill、文档、验收文案 | 1、10 |
 | 不改 Windows | 全局约束 |
+
+## Residuals（明确不做进自动化任务）
+
+- **live `agy` hook argv / stdin**：Task 6 / 7 已要求 command 写成 `status-hook PreInvocation` 兜底。本机 `agy` 实际传入形状只能 live 打一轮确认，不能靠 fixture 猜。
+- **live LS loopback**：Task 4–5 自动化只测组请求与探测顺序；自签 127.0.0.1 在本机是否真通，不挡收口。
