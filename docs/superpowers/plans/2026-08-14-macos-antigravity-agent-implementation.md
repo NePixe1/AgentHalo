@@ -94,8 +94,30 @@ public enum AntigravityUsageMapper {
         planName: String?,
         now: Date
     ) throws -> UsageSnapshot
+    /// `nil` = not a summary envelope (caller may fall back to legacy).
     public static func windowsFromQuotaSummaryBody(_ data: Data) -> [UsageWindow]?
+    /// Legacy per-model Gemini configs → at most one `.session` window. Never weekly.
+    public static func sessionWindowFromLegacyGeminiConfigs(
+        remainingFractions: [Double],
+        resetTime: Date?
+    ) -> UsageWindow?
     public static func formatPlan(_ raw: String?) -> String?
+}
+
+public struct AntigravityLanguageServerDiscovery: Sendable {
+    public struct Options: Sendable {
+        public var processName: String
+        public var markers: [String]
+        public var csrfFlag: String
+        public var portFlag: String?
+    }
+    public struct Result: Sendable {
+        public var pid: Int32
+        public var csrf: String
+        public var ports: [Int]
+        public var extensionPort: Int?
+    }
+    public func discover(_ options: Options) -> Result?
 }
 
 public struct AntigravityAuthStore: Sendable {
@@ -168,10 +190,16 @@ func testAntigravityKindIsOptInAndPersistsWhenEnabled() throws {
         .appendingPathComponent("agent-halo-ag-settings-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: dir) }
+    let url = dir.appendingPathComponent("settings.json")
 
-    var settings = HaloSettings(focusedAgent: .antigravity, enabledAgents: [.antigravity, .codex])
+    var settings = HaloSettings(focusedAgent: .antigravity, enabledAgents: [.codex, .antigravity])
     expect(settings.enabledAgents.contains(.antigravity), true, "can enable antigravity")
     expect(settings.focusedAgent, .antigravity, "focus can be antigravity when enabled")
+    SettingsStore(settingsURL: url).save(settings)
+    let loaded = SettingsStore(settingsURL: url).load()
+    expect(loaded.focusedAgent, .antigravity, "focused antigravity persists")
+    expect(loaded.enabledAgents.contains(.antigravity), true, "enabled antigravity persists")
+
     settings.setAgent(.antigravity, enabled: false)
     expect(settings.enabledAgents.contains(.antigravity), false, "can disable antigravity")
     expect(settings.focusedAgent, .codex, "focus leaves antigravity when disabled")
@@ -206,12 +234,7 @@ func testAntigravityDetailsResolverUsesUsageBodyAndSignInCopy() {
 }
 ```
 
-在 `HaloInteractionChecks.swift` 的 `testAgentToggleUsesSharedSVGAssets` 增加：
-
-```swift
-let agURL = assetDirectory.appendingPathComponent("antigravity.svg")
-expect(FileManager.default.fileExists(atPath: agURL.path), "Antigravity SVG should live in shared assets")
-```
+在 `HaloInteractionChecks.swift` 的 `testAgentToggleUsesSharedSVGAssets` 增加 `antigravity.svg` 存在断言。把 `usageProviderID` 源码断言扩成同时要求 `case .antigravity:` + `return .antigravity`（保留 Pi → `nil`）。
 
 在 `main.swift` 调用新检查。在 `runUsageModelChecks` 调用 `testAntigravityDetailsResolverUsesUsageBodyAndSignInCopy()`。
 
@@ -344,6 +367,7 @@ import AgentHaloCore
 
 func runAntigravityUsageChecks() async {
     try! testAntigravityMapperKeepsOnlyGeminiWindows()
+    testAntigravityMapperLegacyGeminiIsSessionOnly()
     testAntigravityMapperDropsMissingFraction()
     testAntigravityMapperIgnoresUnknownAnd3PBuckets()
     testAntigravityMapperRejectsNonSummary()
@@ -370,11 +394,35 @@ func testAntigravityMapperKeepsOnlyGeminiWindows() throws {
         now: Date(timeIntervalSince1970: 1)
     )
     expect(snap.windows.count, 2, "only gemini windows")
-    expect(snap.windows[0].kind, .session, "gemini-5h → session")
+    expect(snap.windows[0].kind, .session, "gemini-5h → session, always first")
     expect(snap.windows[0].usedPercent, 25, "1-0.75")
+    expect(snap.windows[0].duration, 18_000, "5h duration")
     expect(snap.windows[1].kind, .weekly, "gemini-weekly → weekly")
     expect(snap.windows[1].usedPercent, 10, "1-0.9")
+    expect(snap.windows[1].duration, 604_800, "weekly duration")
     expect(snap.planName, "Pro", "plan passthrough")
+
+    let wrapped = AntigravityUsageMapper.windowsFromQuotaSummaryBody(
+        Data("{\"response\":\(json)}".utf8)
+    )
+    expect(wrapped?.count, 2, "wrapped response.groups is a summary")
+}
+
+func testAntigravityMapperLegacyGeminiIsSessionOnly() {
+    let window = AntigravityUsageMapper.sessionWindowFromLegacyGeminiConfigs(
+        remainingFractions: [0.8, 0.5],
+        resetTime: Date(timeIntervalSince1970: 9)
+    )
+    expect(window?.kind, .session, "legacy is 5h only")
+    expect(window?.usedPercent, 50, "worst remaining fraction")
+    expect(
+        AntigravityUsageMapper.sessionWindowFromLegacyGeminiConfigs(
+            remainingFractions: [],
+            resetTime: nil
+        ) == nil,
+        true,
+        "no gemini configs → no window"
+    )
 }
 
 func testAntigravityMapperDropsMissingFraction() {
@@ -487,7 +535,9 @@ public enum AntigravityUsageMapper {
 }
 ```
 
-`usedPercent = min(100, max(0, (1 - remainingFraction) * 100))`。缺 fraction 的 bucket 丢掉该行，不编造。未识别 `bucketId` 跳过。无 `groups` → `windowsFromQuotaSummaryBody` 返回 `nil`。
+`usedPercent = min(100, max(0, (1 - remainingFraction) * 100))`。缺 fraction 的 bucket 丢掉该行，不编造。未识别 `bucketId` 跳过。无 `groups` → `windowsFromQuotaSummaryBody` 返回 `nil`。窗顺序固定：先 `.session` 再 `.weekly`（JSON 乱序也一样）。
+
+`sessionWindowFromLegacyGeminiConfigs`：取最小 `remainingFraction`（最差剩余），产出一个 `.session`；空数组返回 `nil`。不产出 weekly。Task 5 的 legacy LS/Cloud Code 路径只准走这个函数。
 
 - [ ] **Step 4: 运行检查**
 
@@ -525,7 +575,7 @@ git commit -m "feat(macos): map Antigravity Gemini quota windows"
 1. 无 Keychain 且 `lsAvailable == false` → `.oauthNeedsSignIn`，不是 `.apiKey`。
 2. 无 Keychain 且 `lsAvailable == true` → `.oauth`，`accessToken == ""`，`accountKey.digest == AntigravityAuthStore.localLSAccountDigest`。
 3. Keychain JSON（可带 `go-keyring-base64:` 前缀）→ `.oauth` 且带 access/refresh。
-4. 缓存指纹不匹配 → `loadCachedAccessToken` 为 nil，并删除坏文件。
+4. 缓存指纹不匹配 → `loadCachedAccessToken` 为 nil。`UsageFileAccessing` **没有** `remove`；丢弃方式是下次当 miss（可再 `writeAtomically` 空 `{}` 覆盖，不要扩展协议）。
 5. 过期缓存（`expiresAtMs` 距今不足 60s）→ miss。
 6. `extractToken` 纯函数：嵌套 `token.access_token`、Bearer 前缀、坏 JSON 返回 nil。
 
@@ -565,7 +615,16 @@ Expected: `AntigravityAuthStore` 找不到。
 
 从 OpenUsage `AntigravityAuthStore` 移植 `extractToken` / `tokenFromObject` / `unwrapGoKeyring`（若 Core 没有 unwrap helper，把 unwrap 做成 `AntigravityAuthStore` 私有：去掉前缀 `go-keyring-base64:` 再 base64 解码；失败则当原文 JSON）。
 
-缓存文件：`AgentHaloPaths(homeDirectory:).cacheDirectory.appendingPathComponent("antigravity-auth.json")`。Codable：`accessToken`、`expiresAtMs`、`credentialFingerprint`（refresh token 的 SHA-256 **hex 字符串** 或 Data，选一种并在编解码里固定）。匹配失败或过期调用 `files` 删除。
+缓存文件：`AgentHaloPaths(homeDirectory:).cacheDirectory.appendingPathComponent("antigravity-auth.json")`。Codable：`accessToken`、`expiresAtMs`、`credentialFingerprint`（refresh token 的 SHA-256 **hex 字符串**）。匹配失败或过期视为 miss；不要调用不存在的 `files.remove`。`init` 签名锁定为：
+
+```swift
+public init(
+    homeDirectory: URL,
+    keychain: any UsageKeychainAccessing,
+    files: any UsageFileAccessing,
+    now: @escaping @Sendable () -> Date = Date.init
+)
+```
 
 `resolveAccess(lsAvailable:)` 按 spec 三分支。Keychain 读抛错且 `!lsAvailable` → `.oauthNeedsSignIn`。OAuth `source`：有 Keychain 用 `.keychain(service: "gemini", account: "antigravity")`；LS-only 用 `.file(path: cacheDirectory.appendingPathComponent("antigravity-ls").path)`。
 
@@ -598,7 +657,7 @@ git commit -m "feat(macos): add Antigravity auth store and token cache"
 - Modify: `src/macos/Sources/AgentHaloCoreChecks/AntigravityUsageChecks.swift`
 
 **Interfaces:**
-- Produces: `AntigravityLoopbackHTTPClienting.send(url:method:headers:body:timeout:)`；`AntigravityLanguageServerDiscovery.discover`；`AntigravityUsageClient.callLS` / `cloudCode` / `refreshGoogleToken`
+- Produces: `AntigravityLoopbackHTTPClienting.send(url:method:headers:body:timeout:)`；`AntigravityLanguageServerDiscovery.discover(_ options:)`（不要另造 `discoverLanguageServer()` / `discoverAgy()`）；`AntigravityUsageClient.callLS` / `cloudCode` / `refreshGoogleToken`
 
 - [ ] **Step 1: 写失败检查**
 
@@ -678,18 +737,38 @@ Expected: `AntigravityUsageProvider` 找不到。
 ```swift
 public struct AntigravityUsageProvider: UsageProvider, Sendable {
     public let providerID = UsageProviderID.antigravity
+    static let languageServerOptions = AntigravityLanguageServerDiscovery.Options(
+        processName: "language_server",
+        markers: ["antigravity", "antigravity-ide"],
+        csrfFlag: "--csrf_token",
+        portFlag: "--extension_server_port"
+    )
+    static let agyOptions = AntigravityLanguageServerDiscovery.Options(
+        processName: "agy",
+        markers: [],
+        csrfFlag: "",
+        portFlag: nil
+    )
     public func resolveAccess(accountKey: AccountCacheKey?) async -> ResolvedProviderAccess {
-        let lsAvailable = discovery.discoverLanguageServer() != nil
-            || discovery.discoverAgy() != nil
+        let lsAvailable =
+            discovery.discover(Self.languageServerOptions) != nil
+            || discovery.discover(Self.agyOptions) != nil
         return authStore.resolveAccess(lsAvailable: lsAvailable)
     }
     public func refresh(using access: ResolvedProviderAccess) async -> UsageRefreshResult {
         guard case .oauth(let oauth) = access else {
             return UsageRefreshResult(providerID: .antigravity, outcome: .failure(.signInAgain))
         }
-        // 1) probe LS language_server  2) probe LS agy
-        // 3) if oauth.accessToken non-empty: probe Cloud Code (refresh cache if needed)
-        // RetrieveUserQuotaSummary parsed (including empty windows) ends that source
+        if let snapshot = await probeLS(Self.languageServerOptions, accountKey: oauth.accountKey) {
+            return UsageRefreshResult(providerID: .antigravity, snapshot: snapshot, failure: nil)
+        }
+        if let snapshot = await probeLS(Self.agyOptions, accountKey: oauth.accountKey) {
+            return UsageRefreshResult(providerID: .antigravity, snapshot: snapshot, failure: nil)
+        }
+        guard !oauth.accessToken.isEmpty else {
+            return UsageRefreshResult(providerID: .antigravity, outcome: .failure(.signInAgain))
+        }
+        return await probeCloudCode(oauth)
     }
 }
 ```
@@ -900,7 +979,20 @@ func testAntigravityReducerLifecycle() {
     expect(reducer.snapshot.agent, .antigravity, "agent stamp")
 }
 
-func testAntigravityReducerIgnoresBadLineAndUnknownEvent() { /* 坏 JSON 不改状态；Unknown 只更新 lastEventAt */ }
+func testAntigravityReducerIgnoresBadLineAndUnknownEvent() {
+    let now = Date(timeIntervalSince1970: 1_000)
+    var reducer = AntigravityHookStatusReducer(threadId: "t1", now: now)
+    reducer.consume(jsonLine: #"{"event":"PreInvocation","timestamp":"1970-01-01T00:16:40Z","sessionId":"t1"}"#, now: now)
+    let before = reducer.snapshot
+    reducer.consume(jsonLine: "not-json", now: now.addingTimeInterval(1))
+    expect(reducer.snapshot.state, before.state, "bad line keeps state")
+    reducer.consume(
+        jsonLine: #"{"event":"TotallyUnknown","timestamp":"1970-01-01T00:16:42Z","sessionId":"t1"}"#,
+        now: now.addingTimeInterval(2)
+    )
+    expect(reducer.snapshot.state, .thinking, "unknown event does not change state")
+    expect(reducer.snapshot.lastEventAt != before.lastEventAt, true, "unknown event updates lastEventAt")
+}
 ```
 
 - [ ] **Step 2: 运行确认失败**
@@ -971,18 +1063,28 @@ Expected: monitor 不存在。
 
 - [ ] **Step 3: 最小实现**
 
-`AntigravityHookStatusMonitor`：镜像 `GrokHookStatusMonitor`（增量读 JSONL、按 sessionId 分组、每会话一个 reducer、`applyWorkingVisibility`）。默认 URL `AgentHaloPaths().antigravityStatusLog`。
+`AntigravityHookStatusMonitor`：镜像 **`ClaudeHookStatusMonitor`**（只增量读 JSONL + 每会话一个 reducer + `applyWorkingVisibility`）。**不要**抄 `GrokHookStatusMonitor`——后者还会读 `~/.grok/sessions` 的 turn events。默认 URL `AgentHaloPaths().antigravityStatusLog`。`refresh(now:) -> Bool`，`snapshots() -> [SessionSnapshot]`。
 
-`AntigravityActivityMonitor`：从 `GrokActivityMonitor.swift` 复制结构，改类型名与 `AgentKind.antigravity`。Presence：`isPresent` = 有近期 hook freshness（抄 Grok 的窗口常量）**或** 进程名恰好为 `agy`（`/bin/ps`，不要把 `language_server` 算进去）。
+`AntigravityActivityMonitor`：复制 `GrokActivityMonitor` 的队列 / 300ms / 2000ms / `updatePollingContext` 形状，改成 `AgentKind.antigravity`。Presence：
+
+```swift
+static func isPresent(
+    sessions: [SessionSnapshot],
+    now: Date,
+    processPresenceProbe: () -> Bool
+) -> Bool
+```
+
+近期 hook：沿用 `ClaudeHookStatusMonitor.shouldRetainSnapshot` 的窗口（active 600s / idle 300s）内还有快照，**或** `processPresenceProbe() == true`。生产 probe 查进程名恰好为 `agy`（可注入，测试不要依赖本机真有 `agy`）。不要把 `language_server` 算成在线。
 
 `AppDelegate`：
 
-- 持有 `antigravityActivityMonitor` / snapshot
+- 持有 `antigravityActivityMonitor` / `antigravityActivitySnapshot`
 - `applicationDidFinishLaunching` 里 `start`
-- `tick` 里 `updatePollingContext(focusedAgent:detailsPanelVisible:enabled: isAgentEnabled(.antigravity))`
+- `tick` 里 `updatePollingContext(focusedAgent:detailsPanelVisible:enabled:)`
 - `hasLiveSessionForFocusedAgent`：`.antigravity → snapshot.isPresent`
-- `allSnapshots()`：enabled 且 focus 需要时并入 AG 快照（与 Grok 相同：仅 `focusedAgent == .antigravity` 时送进 aggregator）
-- enable 从关到开：`requestRefresh()` + 若刚启用则 `AntigravityHookConfigurator.configure`（或依赖下次 launch bootstrap；本任务在 `applyEnabledAgents` 开 AG 时立刻 configure，关 AG 时停 monitor、清空 snapshot，不删 hooks 文件）
+- 新增 `antigravitySnapshots()`，`allSnapshots()` 改成 `+ antigravitySnapshots()`。Aggregator 自己按 `focusedAgent` 过滤，不要在 AppDelegate 里先丢掉其它 agent。
+- `applyEnabledAgents`：刚打开 AG 时立刻 `AntigravityHookConfigurator.configure` + `requestRefresh()`；关掉时停 monitor、清空 snapshot，**不删** `hooks.json` 里的 group。
 
 - [ ] **Step 4: 运行检查**
 
@@ -1085,7 +1187,7 @@ git commit -m "docs: document optional macOS Antigravity agent"
 | Spec 要求 | 任务 |
 | --- | --- |
 | AgentKind / AG 标签 / 默认四开 | 1 |
-| Gemini 两窗 mapper | 2 |
+| Gemini 两窗 mapper + 旧接口仅 session | 2 |
 | Keychain + 指纹缓存，不写回 | 3 |
 | LS 优先 + Cloud Code + loopback HTTP | 4–5 |
 | `resolveAccess` 禁止 apiKey；LS-only oauth | 3、5 |
