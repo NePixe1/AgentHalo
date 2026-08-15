@@ -55,6 +55,10 @@ public struct AgentHaloPaths: Sendable, Equatable {
         logsDirectory.appendingPathComponent("pi-status.jsonl")
     }
 
+    public var antigravityStatusLog: URL {
+        logsDirectory.appendingPathComponent("antigravity-status.jsonl")
+    }
+
     public var claudeContextsDirectory: URL {
         cacheDirectory.appendingPathComponent("claude-contexts", isDirectory: true)
     }

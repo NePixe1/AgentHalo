@@ -26,6 +26,7 @@ func runUsageModelChecks() async {
     testDetailsContentResolverSeparatesOAuthUsageAndAPISessionDetails()
     testDetailsContentResolverKeepsOfflineAndContextDataIndependent()
     testDetailsContentResolverWarningPriorityAndRedaction()
+    testAntigravityDetailsResolverUsesUsageBodyAndSignInCopy()
 
     do {
         try testFilesystemUsageFilesWritesEmptyAndNonEmptyDataWithMode0600()
@@ -270,6 +271,30 @@ func testDetailsContentResolverSeparatesOAuthUsageAndAPISessionDetails() {
         expect(api.usageWarning == nil, "API mode must not expose a Usage warning")
         expect(api.contextUsedPercent, 37, "API mode keeps exact context")
         expect(api.body, .session(exactSession), "API mode keeps session fields independent")
+    }
+}
+
+func testAntigravityDetailsResolverUsesUsageBodyAndSignInCopy() {
+    let state = UsageMonitorState(
+        providerID: .antigravity,
+        accessMode: .oauth,
+        snapshot: nil,
+        status: .signInAgain,
+        lastFailure: .signInAgain,
+        isRefreshing: false
+    )
+    let model = DetailsContentResolver.resolve(
+        providerID: .antigravity,
+        monitorState: state,
+        isOffline: false,
+        sessionDetails: SessionDetailsSnapshot(),
+        contextUsedPercent: 12,
+        now: Date()
+    )
+    expect(model.providerName, "Antigravity", "AG provider name")
+    expect(model.usageWarning, L10n.shared["usage.warning.sign_in_antigravity"], "AG sign-in copy")
+    if case .usage = model.body {} else {
+        fatalError("antigravity oauth must stay on usage body, not session card")
     }
 }
 

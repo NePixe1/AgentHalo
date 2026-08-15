@@ -7,6 +7,7 @@ public enum UsageProviderID: String, Codable, Sendable {
     case codex
     case claude
     case grok
+    case antigravity
 }
 
 /// How a provider's credentials are accessed. Drives the access-mode badge

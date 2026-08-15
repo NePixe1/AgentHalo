@@ -682,6 +682,39 @@ func testPiFocusedAgentPersistence() {
     expect(loaded.focusedAgent, .pi, "focused agent pi should persist")
 }
 
+func testAntigravityKindIsOptInAndPersistsWhenEnabled() throws {
+    expect(AgentKind.antigravity.menuTitle, "Antigravity", "menu title")
+    expect(AgentKind.antigravity.segmentedTitle, "AG", "segmented title")
+    expect(
+        HaloSettings.defaultEnabledAgents.contains(.antigravity),
+        false,
+        "new AgentKind must stay opt-in"
+    )
+    expect(
+        HaloSettings.defaultEnabledAgents,
+        [.codex, .claudeCode, .grok, .pi],
+        "frozen default-on set"
+    )
+
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("agent-halo-ag-settings-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let url = dir.appendingPathComponent("settings.json")
+
+    var settings = HaloSettings(focusedAgent: .antigravity, enabledAgents: [.codex, .antigravity])
+    expect(settings.enabledAgents.contains(.antigravity), true, "can enable antigravity")
+    expect(settings.focusedAgent, .antigravity, "focus can be antigravity when enabled")
+    SettingsStore(settingsURL: url).save(settings)
+    let loaded = SettingsStore(settingsURL: url).load()
+    expect(loaded.focusedAgent, .antigravity, "focused antigravity persists")
+    expect(loaded.enabledAgents.contains(.antigravity), true, "enabled antigravity persists")
+
+    settings.setAgent(.antigravity, enabled: false)
+    expect(settings.enabledAgents.contains(.antigravity), false, "can disable antigravity")
+    expect(settings.focusedAgent, .codex, "focus leaves antigravity when disabled")
+}
+
 func testSettingsDefaultsEnabledAgentsAndMenuBarIconWhenMissing() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-enabled-legacy-\(UUID().uuidString)", isDirectory: true)
@@ -4868,6 +4901,11 @@ do {
 testSettingsPersistsFocusedAgent()
 testGrokFocusedAgentPersistence()
 testPiFocusedAgentPersistence()
+do {
+    try testAntigravityKindIsOptInAndPersistsWhenEnabled()
+} catch {
+    fatalError("antigravity kind checks failed: \(error)")
+}
 do {
     try testSettingsDefaultsEnabledAgentsAndMenuBarIconWhenMissing()
     try testSettingsDefaultEnabledAgentsIsFrozenAllowlist()

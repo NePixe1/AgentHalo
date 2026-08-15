@@ -87,6 +87,8 @@ public enum DetailsContentResolver {
             return "Claude Code"
         case .grok:
             return "Grok"
+        case .antigravity:
+            return "Antigravity"
         }
     }
 
@@ -104,6 +106,8 @@ public enum DetailsContentResolver {
                 return L10n.shared["usage.warning.sign_in_claude"]
             case .grok:
                 return L10n.shared["usage.warning.sign_in_grok"]
+            case .antigravity:
+                return L10n.shared["usage.warning.sign_in_antigravity"]
             }
         }
 

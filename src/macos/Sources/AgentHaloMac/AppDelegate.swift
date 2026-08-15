@@ -402,6 +402,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return grokActivitySnapshot.isPresent
         case .pi:
             return piActivitySnapshot.isPresent
+        case .antigravity:
+            return false
         }
     }
 
@@ -766,7 +768,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             grokActivityMonitor.requestRefresh()
         case .pi:
             piActivityMonitor.requestRefresh()
-        case .codex:
+        case .codex, .antigravity:
             break
         }
         tick()
@@ -1064,6 +1066,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 standbySession: piActivitySnapshot.preferredStandbySession,
                 isStandby: displayedAggregate.label == "STANDBY"
             )
+        case .antigravity:
+            exactSessionDetails = SessionDetailsSnapshot()
+            exactContextUsedPercent = nil
         }
 
         let model: DetailsPanelViewModel
@@ -1209,6 +1214,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return .claude
         case .grok:
             return .grok
+        case .antigravity:
+            return .antigravity
         case .pi:
             return nil
         }
@@ -1602,7 +1609,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 case .claudeCode: claudeActivityMonitor.requestRefresh()
                 case .grok: grokActivityMonitor.requestRefresh()
                 case .pi: piActivityMonitor.requestRefresh()
-                case .codex: break
+                case .codex, .antigravity: break
                 }
             }
         }

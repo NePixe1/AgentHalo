@@ -2443,6 +2443,7 @@ private func testUsageMonitoringLifecycleWiring() {
         source.contains("case .codex:") && source.contains("return .codex")
             && source.contains("case .claudeCode:") && source.contains("return .claude")
             && source.contains("case .grok:") && source.contains("return .grok")
+            && source.contains("case .antigravity:") && source.contains("return .antigravity")
             && source.contains("case .pi:") && source.contains("return nil"),
         "AgentKind should map to its Usage Provider (Pi is session-only)"
     )
@@ -3857,6 +3858,7 @@ private func testUsageProviderMappingIsTotal() {
     expect(AppDelegate.usageProviderID(for: .codex), .codex, "Codex Provider mapping")
     expect(AppDelegate.usageProviderID(for: .claudeCode), .claude, "Claude Provider mapping")
     expect(AppDelegate.usageProviderID(for: .grok), .grok, "grok focus maps to grok usage")
+    expect(AppDelegate.usageProviderID(for: .antigravity), .antigravity, "Antigravity Provider mapping")
     expect(AppDelegate.usageProviderID(for: .pi) == nil, true, "Pi has no official usage provider")
 }
 
@@ -3877,10 +3879,12 @@ private func testAgentToggleUsesSharedSVGAssets() {
         .appendingPathComponent("scripts/build-macos.sh")
 
     let piURL = assetDirectory.appendingPathComponent("pi.svg")
+    let antigravityURL = assetDirectory.appendingPathComponent("antigravity.svg")
     expect(FileManager.default.fileExists(atPath: codexURL.path), "Codex SVG should live in shared assets")
     expect(FileManager.default.fileExists(atPath: claudeURL.path), "Claude SVG should live in shared assets")
     expect(FileManager.default.fileExists(atPath: grokURL.path), "Grok SVG should live in shared assets")
     expect(FileManager.default.fileExists(atPath: piURL.path), "Pi SVG should live in shared assets")
+    expect(FileManager.default.fileExists(atPath: antigravityURL.path), "Antigravity SVG should live in shared assets")
     let piImage = (try? Data(contentsOf: piURL)).flatMap(NSImage.init(data:))
     expect(piImage?.size.width ?? 0, 24, "Pi SVG should use the shared 24pt intrinsic width")
     expect(piImage?.size.height ?? 0, 24, "Pi SVG should use the shared 24pt intrinsic height")
@@ -3936,7 +3940,7 @@ private func testAgentToggleUsesCodexAndClaudeIcons() {
     expect(!visibleLabels.contains("CC"), "agent toggle should replace the CC text with an icon")
     expect(!visibleLabels.contains("Grok"), "agent toggle should replace the Grok text with an icon")
     expect(!visibleLabels.contains("Pi"), "agent toggle should replace the Pi text with an icon")
-    expect(icons.count == 4, "agent toggle should render one icon for each agent")
+    expect(icons.count == AgentKind.allCases.count, "agent toggle should render one icon for each agent")
     expect(icons.allSatisfy { $0.image != nil }, "agent toggle should load all shared SVG images")
 }
 
@@ -3945,13 +3949,13 @@ private func testAgentToggleDimsInactiveIconMoreStrongly() {
     let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 144, height: 24))
     let icons = allDescendants(of: toggle).compactMap { $0 as? NSImageView }
 
-    expect(icons.count == 4, "agent toggle should expose all agent icons for opacity checks")
-    guard icons.count == 4 else { return }
+    expect(icons.count == AgentKind.allCases.count, "agent toggle should expose all agent icons for opacity checks")
 
     expect(icons[0].alphaValue, 1, "selected Codex icon should remain fully opaque")
     expect(icons[1].alphaValue, 0.40, "inactive Claude Code icon should use stronger dimming")
     expect(icons[2].alphaValue, 0.40, "inactive Grok icon should use stronger dimming")
     expect(icons[3].alphaValue, 0.40, "inactive Pi icon should use stronger dimming")
+    expect(icons[4].alphaValue, 0.40, "inactive Antigravity icon should use stronger dimming")
 
     toggle.setAgent(.claudeCode)
 
@@ -3959,6 +3963,7 @@ private func testAgentToggleDimsInactiveIconMoreStrongly() {
     expect(icons[1].alphaValue, 1, "selected Claude Code icon should remain fully opaque")
     expect(icons[2].alphaValue, 0.40, "inactive Grok icon should stay dimmed")
     expect(icons[3].alphaValue, 0.40, "inactive Pi icon should stay dimmed")
+    expect(icons[4].alphaValue, 0.40, "inactive Antigravity icon should stay dimmed")
 
     toggle.setAgent(.grok)
 
@@ -3966,6 +3971,7 @@ private func testAgentToggleDimsInactiveIconMoreStrongly() {
     expect(icons[1].alphaValue, 0.40, "inactive Claude Code icon should stay dimmed")
     expect(icons[2].alphaValue, 1, "selected Grok icon should remain fully opaque")
     expect(icons[3].alphaValue, 0.40, "inactive Pi icon should stay dimmed")
+    expect(icons[4].alphaValue, 0.40, "inactive Antigravity icon should stay dimmed")
 
     toggle.setAgent(.pi)
 
@@ -3973,6 +3979,15 @@ private func testAgentToggleDimsInactiveIconMoreStrongly() {
     expect(icons[1].alphaValue, 0.40, "inactive Claude Code icon should stay dimmed")
     expect(icons[2].alphaValue, 0.40, "inactive Grok icon should stay dimmed")
     expect(icons[3].alphaValue, 1, "selected Pi icon should remain fully opaque")
+    expect(icons[4].alphaValue, 0.40, "inactive Antigravity icon should stay dimmed")
+
+    toggle.setAgent(.antigravity)
+
+    expect(icons[0].alphaValue, 0.40, "inactive Codex icon should stay dimmed")
+    expect(icons[1].alphaValue, 0.40, "inactive Claude Code icon should stay dimmed")
+    expect(icons[2].alphaValue, 0.40, "inactive Grok icon should stay dimmed")
+    expect(icons[3].alphaValue, 0.40, "inactive Pi icon should stay dimmed")
+    expect(icons[4].alphaValue, 1, "selected Antigravity icon should remain fully opaque")
 }
 
 @MainActor
@@ -4009,7 +4024,11 @@ private func testAgentToggleSupportsThreeAgentsIncludingGrok() {
     toggle.setEnabledAgents(AgentKind.allCases, focused: .codex)
     toggle.layoutSubtreeIfNeeded()
 
-    expect(toggle.bounds.width, 144, "four-way agent toggle should use a wider control")
+    expect(
+        toggle.bounds.width,
+        AgentToggleView.slotWidth * CGFloat(AgentKind.allCases.count),
+        "allCases agent toggle width is slotWidth times the catalog size"
+    )
 
     toggle.setAgent(.grok)
     expect(toggle.selectedAgent, .grok, "setAgent(.grok) should select Grok")
@@ -4022,7 +4041,7 @@ private func testAgentToggleSupportsThreeAgentsIncludingGrok() {
 
     var selected: AgentKind?
     toggle.onAgentSelected = { selected = $0 }
-    // slots: 0-36 Codex, 36-72 Claude, 72-108 Grok, 108-144 Pi
+    // slots: 0-36 Codex, 36-72 Claude, 72-108 Grok, 108-144 Pi, 144-180 AG
     toggle.selectAgentAtXForTesting(90)
     expect(toggle.selectedAgent, .grok, "clicking the Grok slot should select Grok")
     expect(selected, .grok, "Grok-slot click should emit Grok")
@@ -4030,6 +4049,10 @@ private func testAgentToggleSupportsThreeAgentsIncludingGrok() {
     toggle.selectAgentAtXForTesting(126)
     expect(toggle.selectedAgent, .pi, "clicking the Pi slot should select Pi")
     expect(selected, .pi, "Pi-slot click should emit Pi")
+
+    toggle.selectAgentAtXForTesting(162)
+    expect(toggle.selectedAgent, .antigravity, "clicking the AG slot should select Antigravity")
+    expect(selected, .antigravity, "AG-slot click should emit Antigravity")
 
     toggle.selectAgentAtXForTesting(18)
     expect(toggle.selectedAgent, .codex, "clicking the left slot should select Codex")
@@ -4054,7 +4077,11 @@ private func testAgentToggleWidthScalesWithEnabledCount() {
 
     toggle.setEnabledAgents(AgentKind.allCases, focused: .codex)
     toggle.layoutSubtreeIfNeeded()
-    expect(toggle.bounds.width, 144, "all agents keep the current 144pt control")
+    expect(
+        toggle.bounds.width,
+        36 * CGFloat(AgentKind.allCases.count),
+        "allCases width is slotWidth times the catalog size"
+    )
 }
 
 @MainActor
