@@ -3837,12 +3837,18 @@ private func runClaudeCodeStatusHook(
     for (key, value) in environment {
         env[key] = value
     }
-    // Drop inherited GROK_* unless the caller set them explicitly.
+    // Drop inherited GROK_* / ANTIGRAVITY_* unless the caller set them explicitly.
     if environment["GROK_SESSION_ID"] == nil {
         env.removeValue(forKey: "GROK_SESSION_ID")
     }
     if environment["GROK_HOOK_EVENT"] == nil {
         env.removeValue(forKey: "GROK_HOOK_EVENT")
+    }
+    if environment["ANTIGRAVITY_AGENT"] == nil {
+        env.removeValue(forKey: "ANTIGRAVITY_AGENT")
+    }
+    if environment["ANTIGRAVITY_TRAJECTORY_ID"] == nil {
+        env.removeValue(forKey: "ANTIGRAVITY_TRAJECTORY_ID")
     }
     process.environment = env
 
@@ -3914,6 +3920,123 @@ func testClaudeCodeStatusHookIsolatesGrokAndClaudeStatusFiles() throws {
     let grokAfterClaude = try String(contentsOf: grokStatus, encoding: .utf8)
     expect(!grokAfterClaude.contains("claude-1"), "Claude session id must not be written to logs/grok-status.jsonl")
     expect(!claudeText.contains("test-grok-session"), "Grok session must not leak into Claude status file")
+}
+
+/// End-to-end: shared hook binary routes Antigravity to logs/antigravity-status.jsonl,
+/// never pollutes Claude/Grok, and keeps Grok first when both signals exist.
+func testClaudeCodeStatusHookIsolatesAntigravityStatusFiles() throws {
+    let home = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-ag-hook-isolation-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: home) }
+    try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+
+    let binary = try resolveClaudeCodeStatusHookBinary()
+    let paths = AgentHaloPaths(homeDirectory: home)
+    let grokStatus = paths.grokStatusLog
+    let claudeStatus = paths.claudeStatusLog
+    let agStatus = paths.antigravityStatusLog
+
+    // 1. ANTIGRAVITY_AGENT + trajectory id; snake_case pre_invocation → PreInvocation.
+    try runClaudeCodeStatusHook(
+        binary: binary,
+        home: home,
+        arguments: ["pre_invocation"],
+        environment: [
+            "ANTIGRAVITY_AGENT": "1",
+            "ANTIGRAVITY_TRAJECTORY_ID": "traj-ag-1",
+        ],
+        stdinJSON: #"{"cwd":"/tmp/ag-proj"}"#
+    )
+
+    expect(FileManager.default.fileExists(atPath: agStatus.path), "AG path should write logs/antigravity-status.jsonl")
+    let agText = try String(contentsOf: agStatus, encoding: .utf8)
+    expect(agText.contains("antigravity-hook"), "AG record source should be antigravity-hook")
+    expect(agText.contains("\"PreInvocation\""), "snake_case pre_invocation should normalize to PreInvocation")
+    expect(agText.contains("traj-ag-1"), "AG sessionId should come from ANTIGRAVITY_TRAJECTORY_ID")
+    if FileManager.default.fileExists(atPath: claudeStatus.path) {
+        let existingClaude = try String(contentsOf: claudeStatus, encoding: .utf8)
+        expect(!existingClaude.contains("traj-ag-1"), "AG session id must not appear in logs/claude-status.jsonl")
+    }
+    if FileManager.default.fileExists(atPath: grokStatus.path) {
+        let existingGrok = try String(contentsOf: grokStatus, encoding: .utf8)
+        expect(!existingGrok.contains("traj-ag-1"), "AG session id must not appear in logs/grok-status.jsonl")
+    }
+
+    // 2. GROK_SESSION_ID + AG env → Grok wins.
+    try runClaudeCodeStatusHook(
+        binary: binary,
+        home: home,
+        arguments: ["pre_invocation"],
+        environment: [
+            "GROK_SESSION_ID": "test-grok-wins",
+            "ANTIGRAVITY_AGENT": "1",
+            "ANTIGRAVITY_TRAJECTORY_ID": "traj-should-not-win",
+        ],
+        stdinJSON: #"{"cwd":"/tmp/g"}"#
+    )
+    expect(FileManager.default.fileExists(atPath: grokStatus.path), "Grok priority should write logs/grok-status.jsonl")
+    let grokText = try String(contentsOf: grokStatus, encoding: .utf8)
+    expect(grokText.contains("grok-hook"), "Grok-priority record source should be grok-hook")
+    expect(grokText.contains("test-grok-wins"), "Grok-priority record should include Grok session id")
+    let agAfterGrok = try String(contentsOf: agStatus, encoding: .utf8)
+    expect(!agAfterGrok.contains("test-grok-wins"), "Grok session id must not appear in AG log")
+    expect(!agAfterGrok.contains("traj-should-not-win"), "Grok-priority AG trajectory must not write AG log")
+
+    // 3. transcript_path under antigravity-cli, no AG env → AG.
+    try runClaudeCodeStatusHook(
+        binary: binary,
+        home: home,
+        arguments: ["post_invocation"],
+        environment: [:],
+        stdinJSON: #"{"transcript_path":"/Users/x/.gemini/antigravity-cli/brain/c1/transcript.jsonl","cwd":"/tmp/cli","session_id":"cli-session"}"#
+    )
+    let agAfterTranscript = try String(contentsOf: agStatus, encoding: .utf8)
+    expect(agAfterTranscript.contains("cli-session"), "antigravity-cli transcript should write AG log")
+    expect(agAfterTranscript.contains("\"PostInvocation\""), "post_invocation should normalize to PostInvocation")
+    expect(agAfterTranscript.contains("antigravity-hook"), "transcript-path AG record source should be antigravity-hook")
+    if FileManager.default.fileExists(atPath: claudeStatus.path) {
+        let existingClaude = try String(contentsOf: claudeStatus, encoding: .utf8)
+        expect(!existingClaude.contains("cli-session"), "AG transcript session must not appear in Claude log")
+    }
+
+    // 4. IDE path /antigravity/ without antigravity-cli → Claude, not AG.
+    try runClaudeCodeStatusHook(
+        binary: binary,
+        home: home,
+        arguments: ["UserPromptSubmit"],
+        environment: [:],
+        stdinJSON: #"{"transcript_path":"/Users/x/.gemini/antigravity/brain/c1/transcript.jsonl","cwd":"/tmp/ide","session_id":"ide-session"}"#
+    )
+    expect(FileManager.default.fileExists(atPath: claudeStatus.path), "IDE /antigravity/ path should write Claude log")
+    let claudeAfterIDE = try String(contentsOf: claudeStatus, encoding: .utf8)
+    expect(claudeAfterIDE.contains("claude-hook"), "IDE path should be treated as Claude")
+    expect(claudeAfterIDE.contains("ide-session"), "IDE session should land in Claude log")
+    let agAfterIDE = try String(contentsOf: agStatus, encoding: .utf8)
+    expect(!agAfterIDE.contains("ide-session"), "bare /antigravity/ must not write AG log")
+
+    // 5. No AG/Grok signal → Claude.
+    try runClaudeCodeStatusHook(
+        binary: binary,
+        home: home,
+        arguments: ["PreToolUse"],
+        environment: [:],
+        stdinJSON: #"{"session_id":"claude-plain","cwd":"/tmp/c","tool_name":"Bash"}"#
+    )
+    let claudeAfterPlain = try String(contentsOf: claudeStatus, encoding: .utf8)
+    expect(claudeAfterPlain.contains("claude-hook"), "no-signal record source should be claude-hook")
+    expect(claudeAfterPlain.contains("claude-plain"), "no-signal session should write Claude log")
+    let agAfterPlain = try String(contentsOf: agStatus, encoding: .utf8)
+    expect(!agAfterPlain.contains("claude-plain"), "Claude session must not appear in AG log")
+
+    // 6. Claude / Grok files must never contain AG session ids.
+    expect(!claudeAfterPlain.contains("traj-ag-1"), "AG session id must not appear in Claude log")
+    expect(!claudeAfterPlain.contains("cli-session"), "AG transcript session must not appear in Claude log")
+    if FileManager.default.fileExists(atPath: grokStatus.path) {
+        let grokAfter = try String(contentsOf: grokStatus, encoding: .utf8)
+        expect(!grokAfter.contains("traj-ag-1"), "AG session id must not appear in Grok log")
+        expect(!grokAfter.contains("cli-session"), "AG transcript session must not appear in Grok log")
+        expect(!grokAfter.contains("claude-plain"), "Claude session must not appear in Grok log")
+    }
 }
 
 func testClaudeHookReducerStuckPreToolUseRecoversAfterSafetyTimeout() {
@@ -5080,6 +5203,7 @@ testGrokHookReducerMapsEscCancelToInterrupted()
 testGrokHookReducerSteerCancelDoesNotPaintError()
 do {
     try testClaudeCodeStatusHookIsolatesGrokAndClaudeStatusFiles()
+    try testClaudeCodeStatusHookIsolatesAntigravityStatusFiles()
 } catch {
     fatalError("hook isolation check failed: \(error)")
 }

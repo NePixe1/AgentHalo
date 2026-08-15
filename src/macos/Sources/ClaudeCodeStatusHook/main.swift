@@ -51,6 +51,8 @@ func normalizeEventName(_ raw: String) -> String {
         "session_end": "SessionEnd",
         "pre_compact": "PreCompact",
         "post_compact": "PostCompact",
+        "pre_invocation": "PreInvocation",
+        "post_invocation": "PostInvocation",
     ]
     if let mapped = mapping[raw] {
         return mapped
@@ -61,9 +63,20 @@ func normalizeEventName(_ raw: String) -> String {
     return raw
 }
 
+func antigravityHookMatch(env: [String: String], payload: [String: Any]) -> Bool {
+    if !(env["ANTIGRAVITY_AGENT"] ?? "").isEmpty { return true }
+    if !(env["ANTIGRAVITY_TRAJECTORY_ID"] ?? "").isEmpty { return true }
+    let transcript = firstString(
+        payload["transcript_path"], payload["transcriptPath"],
+        env["ANTIGRAVITY_TRANSCRIPT_PATH"]
+    )
+    return transcript.contains("/antigravity-cli/")
+}
+
 let env = ProcessInfo.processInfo.environment
 let isGrok = !(env["GROK_SESSION_ID"] ?? "").isEmpty
     || !(env["GROK_HOOK_EVENT"] ?? "").isEmpty
+let isAntigravity = !isGrok && antigravityHookMatch(env: env, payload: payload)
 
 let rawEventName = firstString(
     event,
@@ -86,13 +99,24 @@ let cwd = firstString(
     FileManager.default.currentDirectoryPath
 )
 
-let sessionId = firstString(
-    payload["session_id"],
-    payload["sessionId"],
-    payload["conversation_id"],
-    env["GROK_SESSION_ID"],
-    isGrok ? "grok-build" : "claude-code"
-)
+let sessionId: String
+if isAntigravity {
+    sessionId = firstString(
+        env["ANTIGRAVITY_TRAJECTORY_ID"],
+        payload["session_id"],
+        payload["sessionId"],
+        payload["conversation_id"],
+        "antigravity"
+    )
+} else {
+    sessionId = firstString(
+        payload["session_id"],
+        payload["sessionId"],
+        payload["conversation_id"],
+        env["GROK_SESSION_ID"],
+        isGrok ? "grok-build" : "claude-code"
+    )
+}
 
 let toolName = firstString(
     payload["tool_name"],
@@ -142,7 +166,7 @@ let timestamp = firstString(
 
 // MARK: - Build record
 
-let source = isGrok ? "grok-hook" : "claude-hook"
+let source = isGrok ? "grok-hook" : isAntigravity ? "antigravity-hook" : "claude-hook"
 
 
 var record: [String: Any?] = [
@@ -175,7 +199,7 @@ let homeURL: URL = {
 }()
 
 let paths = AgentHaloPaths(homeDirectory: homeURL)
-let statusURL = isGrok ? paths.grokStatusLog : paths.claudeStatusLog
+let statusURL = isGrok ? paths.grokStatusLog : isAntigravity ? paths.antigravityStatusLog : paths.claudeStatusLog
 
 // Create logs directory with 0o700
 try? FileManager.default.createDirectory(
