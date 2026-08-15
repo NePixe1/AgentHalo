@@ -18,6 +18,11 @@ func runAntigravityUsageChecks() async {
     await testAntigravityRefreshGoogleTokenPostsInstalledAppForm()
     await testAntigravityCallLSUsesLoopbackURLAndCSRFHeaders()
     testAntigravityDiscoveryParsesMarkedLanguageServerAndDropsUnmarked()
+    await testAntigravityProviderSummaryDoesNotFillWindowsFromLegacyRemainingFraction()
+    try! await testAntigravityProviderCloudCodeFallsBackToLegacySessionOnly()
+    await testAntigravityProviderSignInAgainWithoutHTTPWhenNoLSAndNoKeychain()
+    await testAntigravityProviderProbesLanguageServerThenAgyThenCloudCode()
+    try! await testAntigravityProviderRefreshesUnusableAccessThenCachesViaFocusWrite()
 }
 
 func testAntigravityMapperKeepsOnlyGeminiWindows() throws {
@@ -520,5 +525,389 @@ actor RecordingAntigravityLoopbackHTTPClient: AntigravityLoopbackHTTPClienting {
             return UsageHTTPResponse(statusCode: 200, headers: [:], body: Data())
         }
         return queuedResponses.removeFirst()
+    }
+}
+
+// MARK: - AntigravityUsageProvider
+
+func testAntigravityProviderSummaryDoesNotFillWindowsFromLegacyRemainingFraction() async {
+    let discovery = FakeAntigravityDiscovery(resultsByProcess: [
+        "language_server": antigravityCheckLSResult(ports: [5555]),
+    ])
+    let lsHTTP = RecordingAntigravityLoopbackHTTPClient()
+    await lsHTTP.enqueue(response: UsageHTTPResponse(
+        statusCode: 200,
+        headers: [:],
+        body: Data(#"{"groups":[]}"#.utf8)
+    ))
+    await lsHTTP.enqueue(response: UsageHTTPResponse(
+        statusCode: 200,
+        headers: [:],
+        body: Data(
+            """
+            {"userStatus":{"userTier":{"name":"Google AI Pro"},
+            "cascadeModelConfigData":{"clientModelConfigs":[
+              {"label":"Gemini 3 Pro","quotaInfo":{"remainingFraction":0.1}}
+            ]}}}
+            """.utf8
+        )
+    ))
+    await lsHTTP.enqueue(response: UsageHTTPResponse(
+        statusCode: 200,
+        headers: [:],
+        body: Data(
+            """
+            {"clientModelConfigs":[
+              {"label":"Gemini 3 Pro","quotaInfo":{"remainingFraction":0.05}}
+            ]}
+            """.utf8
+        )
+    ))
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: UsageHTTPResponse(
+        statusCode: 200,
+        headers: [:],
+        body: Data(#"{"groups":[{"buckets":[{"bucketId":"gemini-5h","remainingFraction":0.5}]}]}"#.utf8)
+    ))
+    let provider = antigravityCheckProvider(discovery: discovery, lsHTTP: lsHTTP, http: http)
+
+    let access = await provider.resolveAccess(accountKey: nil)
+    if case .apiKey = access { fatalError("provider must not resolve apiKey") }
+    guard case .oauth(let oauth) = access else {
+        fatalError("LS available without Keychain must be oauth")
+    }
+    let result = await provider.refresh(using: access)
+    guard let snapshot = result.snapshot else {
+        fatalError("authoritative empty summary must still produce a snapshot: \(String(describing: result.failure))")
+    }
+    expect(snapshot.windows.isEmpty, true, "empty summary must not fill windows from GetUserStatus remainingFraction")
+    expect(snapshot.planName, "Pro", "GetUserStatus userTier is plan only")
+    expect(snapshot.accountKey, oauth.accountKey, "snapshot keeps LS account key")
+
+    let lsRequests = await lsHTTP.capturedRequests
+    expect(lsRequests.count, 2, "summary then one GetUserStatus; no GetCommandModelConfigs")
+    expect(
+        lsRequests[0].url.absoluteString,
+        "https://127.0.0.1:5555/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary",
+        "summary first"
+    )
+    expect(
+        lsRequests[1].url.absoluteString,
+        "https://127.0.0.1:5555/exa.language_server_pb.LanguageServerService/GetUserStatus",
+        "plan-only GetUserStatus"
+    )
+    expect(await http.capturedRequests.isEmpty, true, "authoritative LS summary must not hit Cloud Code")
+}
+
+func testAntigravityProviderCloudCodeFallsBackToLegacySessionOnly() async throws {
+    let discovery = FakeAntigravityDiscovery()
+    let keychain = FakeUsageKeychain()
+    try keychain.write(
+        service: AntigravityAuthStore.keychainService,
+        account: AntigravityAuthStore.keychainAccount,
+        value: """
+        {"token":{"access_token":"ya29.cloud","refresh_token":"1//refresh","expiry":"2099-01-01T00:00:00Z"}}
+        """
+    )
+    let lsHTTP = RecordingAntigravityLoopbackHTTPClient()
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: UsageHTTPResponse(
+        statusCode: 200,
+        headers: [:],
+        body: Data(#"{"foo":1}"#.utf8)
+    ))
+    await http.enqueue(response: UsageHTTPResponse(
+        statusCode: 200,
+        headers: [:],
+        body: Data(
+            """
+            {"models":{
+              "gemini-3-pro":{"displayName":"Gemini 3 Pro","quotaInfo":{"remainingFraction":0.6}},
+              "claude-4":{"displayName":"Claude Sonnet","quotaInfo":{"remainingFraction":0.1}}
+            }}
+            """.utf8
+        )
+    ))
+    let provider = antigravityCheckProvider(
+        discovery: discovery,
+        keychain: keychain,
+        lsHTTP: lsHTTP,
+        http: http
+    )
+
+    let access = await provider.resolveAccess(accountKey: nil)
+    if case .apiKey = access { fatalError("provider must not resolve apiKey") }
+    guard case .oauth = access else { fatalError("Keychain token must be oauth") }
+    let result = await provider.refresh(using: access)
+    guard let snapshot = result.snapshot else {
+        fatalError("legacy Cloud Code models must map to a snapshot: \(String(describing: result.failure))")
+    }
+    expect(snapshot.windows.count, 1, "legacy Cloud Code is session only")
+    expect(snapshot.windows[0].kind, .session, "legacy Gemini pool is 5h")
+    expect(snapshot.windows[0].usedPercent, 40, "worst Gemini remaining 0.6 → 40, ignore Claude")
+    expect(snapshot.windows.contains { $0.kind == .weekly }, false, "legacy must not synthesize weekly")
+
+    let requests = await http.capturedRequests
+    expect(requests.count >= 2, true, "summary then fetchAvailableModels")
+    expect(requests[0].path, "/v1internal:retrieveUserQuotaSummary", "Cloud Code summary first")
+    expect(requests[1].path, "/v1internal:fetchAvailableModels", "non-summary falls back to models")
+    expect(
+        requests.contains { $0.path == "/v1internal:retrieveUserQuota" },
+        false,
+        "usable fetchAvailableModels must not also hit retrieveUserQuota"
+    )
+    expect(await lsHTTP.capturedRequests.isEmpty, true, "undiscoverable LS must not call loopback")
+}
+
+func testAntigravityProviderSignInAgainWithoutHTTPWhenNoLSAndNoKeychain() async {
+    let lsHTTP = RecordingAntigravityLoopbackHTTPClient()
+    let http = RecordingUsageHTTPClient()
+    let provider = antigravityCheckProvider(
+        discovery: FakeAntigravityDiscovery(),
+        lsHTTP: lsHTTP,
+        http: http
+    )
+
+    let access = await provider.resolveAccess(accountKey: nil)
+    if case .apiKey = access { fatalError("provider must not resolve apiKey") }
+    guard case .oauthNeedsSignIn = access else {
+        fatalError("no LS and no Keychain must be oauthNeedsSignIn")
+    }
+    let result = await provider.refresh(using: access)
+    guard case .failure(let failure) = result.outcome else {
+        fatalError("refresh(oauthNeedsSignIn) must fail")
+    }
+    expect(failure, .signInAgain, "sign-in-again without credentials")
+    expect(await lsHTTP.capturedRequests.isEmpty, true, "no LS HTTP when nothing is discoverable")
+    expect(await http.capturedRequests.isEmpty, true, "no Cloud Code / OAuth HTTP")
+}
+
+func testAntigravityProviderProbesLanguageServerThenAgyThenCloudCode() async {
+    expect(
+        AntigravityUsageProvider.languageServerOptions.processName,
+        "language_server",
+        "language_server process"
+    )
+    expect(
+        AntigravityUsageProvider.languageServerOptions.markers,
+        ["antigravity", "antigravity-ide"],
+        "language_server markers"
+    )
+    expect(AntigravityUsageProvider.languageServerOptions.csrfFlag, "--csrf_token", "language_server csrf")
+    expect(
+        AntigravityUsageProvider.languageServerOptions.portFlag,
+        "--extension_server_port" as String?,
+        "language_server port flag"
+    )
+    expect(AntigravityUsageProvider.agyOptions.processName, "agy", "agy process")
+    expect(AntigravityUsageProvider.agyOptions.markers, [String](), "agy matches any instance")
+    expect(AntigravityUsageProvider.agyOptions.csrfFlag, "", "agy has no csrf flag")
+    expect(AntigravityUsageProvider.agyOptions.portFlag == nil, true, "agy has no port flag")
+
+    let lsThenAgy = FakeAntigravityDiscovery(resultsByProcess: [
+        "language_server": antigravityCheckLSResult(ports: [1111]),
+        "agy": antigravityCheckLSResult(pid: 8000, csrf: "", ports: [2222]),
+    ])
+    let lsHTTP = RecordingAntigravityLoopbackHTTPClient()
+    await lsHTTP.enqueue(response: UsageHTTPResponse(
+        statusCode: 200,
+        headers: [:],
+        body: Data(#"{"groups":[{"buckets":[{"bucketId":"gemini-5h","remainingFraction":0.75}]}]}"#.utf8)
+    ))
+    await lsHTTP.enqueue(response: UsageHTTPResponse(
+        statusCode: 200,
+        headers: [:],
+        body: Data(#"{"userStatus":{"userTier":{"name":"Google AI Ultra"}}}"#.utf8)
+    ))
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: UsageHTTPResponse(
+        statusCode: 200,
+        headers: [:],
+        body: Data(#"{"groups":[{"buckets":[{"bucketId":"gemini-weekly","remainingFraction":0.5}]}]}"#.utf8)
+    ))
+    let keychain = FakeUsageKeychain()
+    try! keychain.write(
+        service: AntigravityAuthStore.keychainService,
+        account: AntigravityAuthStore.keychainAccount,
+        value: #"{"token":{"access_token":"ya29.unused","refresh_token":"1//r","expiry":"2099-01-01T00:00:00Z"}}"#
+    )
+    let provider = antigravityCheckProvider(
+        discovery: lsThenAgy,
+        keychain: keychain,
+        lsHTTP: lsHTTP,
+        http: http
+    )
+
+    let access = await provider.resolveAccess(accountKey: nil)
+    if case .apiKey = access { fatalError("provider must not resolve apiKey") }
+    let result = await provider.refresh(using: access)
+    guard let snapshot = result.snapshot else {
+        fatalError("language_server summary must win: \(String(describing: result.failure))")
+    }
+    expect(snapshot.windows.count, 1, "language_server summary windows")
+    expect(snapshot.windows[0].kind, .session, "gemini-5h from language_server")
+    expect(snapshot.windows[0].usedPercent, 25, "1-0.75")
+    expect(snapshot.planName, "Ultra", "plan from language_server GetUserStatus")
+
+    expect(lsThenAgy.processNames.first, "language_server", "probe language_server first")
+    expect(lsThenAgy.processNames.contains("agy"), false, "successful language_server must not continue to agy")
+    let lsRequests = await lsHTTP.capturedRequests
+    expect(lsRequests.contains { $0.url.port == 1111 }, true, "language_server port probed")
+    expect(lsRequests.contains { $0.url.port == 2222 }, false, "agy port skipped after language_server success")
+    expect(await http.capturedRequests.isEmpty, true, "Cloud Code skipped after language_server success")
+
+    let agyOnly = FakeAntigravityDiscovery(resultsByProcess: [
+        "agy": antigravityCheckLSResult(pid: 8000, csrf: "", ports: [2222]),
+    ])
+    let agyHTTP = RecordingAntigravityLoopbackHTTPClient()
+    await agyHTTP.enqueue(response: UsageHTTPResponse(
+        statusCode: 200,
+        headers: [:],
+        body: Data(#"{"groups":[{"buckets":[{"bucketId":"gemini-weekly","remainingFraction":0.8}]}]}"#.utf8)
+    ))
+    await agyHTTP.enqueue(response: UsageHTTPResponse(
+        statusCode: 200,
+        headers: [:],
+        body: Data(#"{"userStatus":{"userTier":{"name":"Free"}}}"#.utf8)
+    ))
+    let unusedCloud = RecordingUsageHTTPClient()
+    await unusedCloud.enqueue(response: UsageHTTPResponse(
+        statusCode: 200,
+        headers: [:],
+        body: Data(#"{"groups":[{"buckets":[{"bucketId":"gemini-5h","remainingFraction":0.1}]}]}"#.utf8)
+    ))
+    let agyProvider = antigravityCheckProvider(
+        discovery: agyOnly,
+        keychain: keychain,
+        lsHTTP: agyHTTP,
+        http: unusedCloud
+    )
+    let agyAccess = await agyProvider.resolveAccess(accountKey: nil)
+    let agyResult = await agyProvider.refresh(using: agyAccess)
+    guard let agySnapshot = agyResult.snapshot else {
+        fatalError("agy must be tried after language_server miss: \(String(describing: agyResult.failure))")
+    }
+    expect(agySnapshot.windows.first?.kind, .weekly, "agy summary windows")
+    expect(agyOnly.processNames.first, "language_server", "agy path still asks language_server first")
+    expect(agyOnly.processNames.contains("agy"), true, "then agy")
+    expect(await agyHTTP.capturedRequests.contains { $0.url.port == 2222 }, true, "agy port probed")
+    expect(await unusedCloud.capturedRequests.isEmpty, true, "Cloud Code is last and skipped after agy")
+}
+
+func testAntigravityProviderRefreshesUnusableAccessThenCachesViaFocusWrite() async throws {
+    let discovery = FakeAntigravityDiscovery()
+    let keychain = FakeUsageKeychain()
+    let original = """
+    {"token":{"access_token":"ya29.stale","refresh_token":"1//refresh","expiry":"1970-01-01T00:00:00Z"}}
+    """
+    try keychain.write(
+        service: AntigravityAuthStore.keychainService,
+        account: AntigravityAuthStore.keychainAccount,
+        value: original
+    )
+    let files = FakeUsageFiles()
+    let lsHTTP = RecordingAntigravityLoopbackHTTPClient()
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: UsageHTTPResponse(
+        statusCode: 200,
+        headers: [:],
+        body: Data(#"{"access_token":"ya29.fresh","expires_in":3600}"#.utf8)
+    ))
+    await http.enqueue(response: UsageHTTPResponse(
+        statusCode: 200,
+        headers: [:],
+        body: Data(#"{"groups":[{"buckets":[{"bucketId":"gemini-5h","remainingFraction":0.8}]}]}"#.utf8)
+    ))
+    let provider = antigravityCheckProvider(
+        discovery: discovery,
+        keychain: keychain,
+        files: files,
+        lsHTTP: lsHTTP,
+        http: http
+    )
+
+    let access = await provider.resolveAccess(accountKey: nil)
+    guard case .oauth = access else { fatalError("expired Keychain token is still oauth") }
+    let result = await provider.refresh(using: access)
+    guard let snapshot = result.snapshot else {
+        fatalError("refreshed Cloud Code must yield a snapshot: \(String(describing: result.failure))")
+    }
+    expect(snapshot.windows.first?.usedPercent, 20, "refreshed token used for summary")
+
+    let requests = await http.capturedRequests
+    expect(requests.count, 2, "Google refresh then Cloud Code summary")
+    expect(requests[0].host, "oauth2.googleapis.com", "unusable access refreshes first")
+    expect(requests[0].path, "/token", "Google token path")
+    expect(requests[1].path, "/v1internal:retrieveUserQuotaSummary", "Cloud Code after refresh")
+    expect(requests[1].headers["authorization"], "Bearer ya29.fresh", "Cloud Code uses refreshed access")
+    expect(await lsHTTP.capturedRequests.isEmpty, true, "no LS after discovery miss")
+
+    let writes = files.capturedWrites()
+    expect(writes.isEmpty, false, "cacheAccessToken must write via focus credential write")
+    let cacheText = writes.compactMap { String(data: $0.data, encoding: .utf8) }.joined()
+    expect(cacheText.contains("ya29.fresh"), true, "cache stores refreshed access")
+    expect(cacheText.contains("1//refresh"), false, "cache must not store raw refresh token")
+    expect(
+        try keychain.read(
+            service: AntigravityAuthStore.keychainService,
+            account: AntigravityAuthStore.keychainAccount
+        ),
+        original,
+        "refreshed access must not write Keychain"
+    )
+}
+
+private func antigravityCheckProvider(
+    discovery: FakeAntigravityDiscovery,
+    keychain: any UsageKeychainAccessing = FakeUsageKeychain(),
+    files: FakeUsageFiles = FakeUsageFiles(),
+    lsHTTP: RecordingAntigravityLoopbackHTTPClient,
+    http: RecordingUsageHTTPClient,
+    now: Date = Date(timeIntervalSince1970: 1_000_000)
+) -> AntigravityUsageProvider {
+    AntigravityUsageProvider(
+        authStore: AntigravityAuthStore(
+            homeDirectory: antigravityCheckHome(),
+            keychain: keychain,
+            files: files,
+            now: { now }
+        ),
+        usageClient: AntigravityUsageClient(lsHTTP: lsHTTP, http: http),
+        discovery: discovery,
+        focusController: UsageProviderFocusController(),
+        now: { now }
+    )
+}
+
+private func antigravityCheckLSResult(
+    pid: Int32 = 9001,
+    csrf: String = "csrf",
+    ports: [Int] = [5555],
+    extensionPort: Int? = nil
+) -> AntigravityLanguageServerDiscovery.Result {
+    AntigravityLanguageServerDiscovery.Result(
+        pid: pid,
+        csrf: csrf,
+        ports: ports,
+        extensionPort: extensionPort
+    )
+}
+
+final class FakeAntigravityDiscovery: AntigravityLanguageServerDiscovering, @unchecked Sendable {
+    private let lock = NSLock()
+    private var resultsByProcess: [String: AntigravityLanguageServerDiscovery.Result]
+    private(set) var processNames: [String] = []
+
+    init(resultsByProcess: [String: AntigravityLanguageServerDiscovery.Result] = [:]) {
+        self.resultsByProcess = resultsByProcess
+    }
+
+    func discover(
+        _ options: AntigravityLanguageServerDiscovery.Options
+    ) -> AntigravityLanguageServerDiscovery.Result? {
+        lock.lock()
+        defer { lock.unlock() }
+        processNames.append(options.processName)
+        return resultsByProcess[options.processName]
     }
 }

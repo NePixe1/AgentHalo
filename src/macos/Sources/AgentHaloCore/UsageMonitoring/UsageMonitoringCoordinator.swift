@@ -278,10 +278,21 @@ public actor UsageMonitoringCoordinator {
             usageClient: GrokUsageClient(http: http),
             focusController: focusController
         )
+        let antigravityAuthStore = AntigravityAuthStore(
+            homeDirectory: homeDirectory,
+            keychain: keychain,
+            files: files
+        )
+        let antigravityProvider = AntigravityUsageProvider(
+            authStore: antigravityAuthStore,
+            usageClient: AntigravityUsageClient(http: http),
+            discovery: AntigravityLanguageServerDiscovery(),
+            focusController: focusController
+        )
         let cacheURL = AgentHaloPaths(homeDirectory: homeDirectory).usageSnapshots
         let cache = UsageSnapshotCache(cacheURL: cacheURL, files: files)
         return UsageMonitoringCoordinator(
-            providers: [codexProvider, claudeProvider, grokProvider],
+            providers: [codexProvider, claudeProvider, grokProvider, antigravityProvider],
             cache: cache,
             focusController: focusController
         )
