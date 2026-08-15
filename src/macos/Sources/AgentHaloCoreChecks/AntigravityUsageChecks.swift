@@ -23,6 +23,8 @@ func runAntigravityUsageChecks() async {
     await testAntigravityProviderSignInAgainWithoutHTTPWhenNoLSAndNoKeychain()
     await testAntigravityProviderProbesLanguageServerThenAgyThenCloudCode()
     try! await testAntigravityProviderRefreshesUnusableAccessThenCachesViaFocusWrite()
+    try! await testAntigravityProviderUnusableAccessRefreshOutageIsServiceUnavailable()
+    try! await testAntigravityProviderCloudCodeAuthFailureThenRefreshOutageIsServiceUnavailable()
 }
 
 func testAntigravityMapperKeepsOnlyGeminiWindows() throws {
@@ -854,6 +856,113 @@ func testAntigravityProviderRefreshesUnusableAccessThenCachesViaFocusWrite() asy
         ),
         original,
         "refreshed access must not write Keychain"
+    )
+}
+
+func testAntigravityProviderUnusableAccessRefreshOutageIsServiceUnavailable() async throws {
+    let original = """
+    {"token":{"access_token":"ya29.stale","refresh_token":"1//refresh","expiry":"1970-01-01T00:00:00Z"}}
+    """
+    let keychain = FakeUsageKeychain()
+    try keychain.write(
+        service: AntigravityAuthStore.keychainService,
+        account: AntigravityAuthStore.keychainAccount,
+        value: original
+    )
+    let files = FakeUsageFiles()
+    let lsHTTP = RecordingAntigravityLoopbackHTTPClient()
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: UsageHTTPResponse(statusCode: 503, headers: [:], body: Data()))
+    await http.enqueue(response: UsageHTTPResponse(statusCode: 401, headers: [:], body: Data()))
+    let provider = antigravityCheckProvider(
+        discovery: FakeAntigravityDiscovery(),
+        keychain: keychain,
+        files: files,
+        lsHTTP: lsHTTP,
+        http: http
+    )
+
+    let access = await provider.resolveAccess(accountKey: nil)
+    if case .apiKey = access { fatalError("provider must not resolve apiKey") }
+    guard case .oauth = access else { fatalError("expired Keychain token is still oauth") }
+    let result = await provider.refresh(using: access)
+    guard case .failure(let failure) = result.outcome else {
+        fatalError("refresh outage on unusable access must fail: \(String(describing: result.outcome))")
+    }
+    expect(failure, .serviceUnavailable, "Google refresh outage is not sign-in")
+    expect(failure == .signInAgain, false, "must not classify refresh outage as sign-in")
+
+    let requests = await http.capturedRequests
+    expect(requests.count, 1, "must not send Cloud Code with a known-unusable token")
+    expect(requests[0].host, "oauth2.googleapis.com", "only Google refresh is attempted")
+    expect(requests[0].path, "/token", "Google token path")
+    expect(
+        requests.contains { $0.host.contains("cloudcode") },
+        false,
+        "Cloud Code skipped after refresh outage"
+    )
+    expect(await lsHTTP.capturedRequests.isEmpty, true, "no LS after discovery miss")
+    expect(files.capturedWrites().isEmpty, true, "failed refresh must not cache")
+    expect(
+        try keychain.read(
+            service: AntigravityAuthStore.keychainService,
+            account: AntigravityAuthStore.keychainAccount
+        ),
+        original,
+        "refresh outage must not write Keychain"
+    )
+}
+
+func testAntigravityProviderCloudCodeAuthFailureThenRefreshOutageIsServiceUnavailable() async throws {
+    let original = """
+    {"token":{"access_token":"ya29.live","refresh_token":"1//refresh","expiry":"2099-01-01T00:00:00Z"}}
+    """
+    let keychain = FakeUsageKeychain()
+    try keychain.write(
+        service: AntigravityAuthStore.keychainService,
+        account: AntigravityAuthStore.keychainAccount,
+        value: original
+    )
+    let files = FakeUsageFiles()
+    let lsHTTP = RecordingAntigravityLoopbackHTTPClient()
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: UsageHTTPResponse(statusCode: 401, headers: [:], body: Data()))
+    await http.enqueue(response: UsageHTTPResponse(statusCode: 503, headers: [:], body: Data()))
+    await http.enqueue(response: UsageHTTPResponse(statusCode: 401, headers: [:], body: Data()))
+    let provider = antigravityCheckProvider(
+        discovery: FakeAntigravityDiscovery(),
+        keychain: keychain,
+        files: files,
+        lsHTTP: lsHTTP,
+        http: http
+    )
+
+    let access = await provider.resolveAccess(accountKey: nil)
+    if case .apiKey = access { fatalError("provider must not resolve apiKey") }
+    guard case .oauth = access else { fatalError("Keychain token must be oauth") }
+    let result = await provider.refresh(using: access)
+    guard case .failure(let failure) = result.outcome else {
+        fatalError("Cloud Code 401 + refresh outage must fail: \(String(describing: result.outcome))")
+    }
+    expect(failure, .serviceUnavailable, "refresh outage after Cloud Code 401 is not sign-in")
+    expect(failure == .signInAgain, false, "must not classify post-401 refresh outage as sign-in")
+
+    let requests = await http.capturedRequests
+    expect(requests.count, 2, "Cloud Code then Google refresh; no retry with no new token")
+    expect(requests[0].host, "daily-cloudcode-pa.googleapis.com", "Cloud Code first with usable access")
+    expect(requests[0].path, "/v1internal:retrieveUserQuotaSummary", "quota summary 401")
+    expect(requests[0].headers["authorization"], "Bearer ya29.live", "usable access sent once")
+    expect(requests[1].host, "oauth2.googleapis.com", "refresh after Cloud Code authFailed")
+    expect(requests[1].path, "/token", "Google token path")
+    expect(await lsHTTP.capturedRequests.isEmpty, true, "no LS after discovery miss")
+    expect(files.capturedWrites().isEmpty, true, "failed refresh must not cache")
+    expect(
+        try keychain.read(
+            service: AntigravityAuthStore.keychainService,
+            account: AntigravityAuthStore.keychainAccount
+        ),
+        original,
+        "post-401 refresh outage must not write Keychain"
     )
 }
 

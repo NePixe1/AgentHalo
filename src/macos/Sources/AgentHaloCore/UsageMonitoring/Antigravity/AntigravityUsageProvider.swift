@@ -69,10 +69,14 @@ public struct AntigravityUsageProvider: UsageProvider, Sendable {
         if let snapshot = await probeLS(Self.agyOptions, accountKey: oauth.accountKey) {
             return UsageRefreshResult(providerID: .antigravity, snapshot: snapshot, failure: nil)
         }
-        guard let token = await resolvedCloudCodeToken(oauth) else {
+        switch await resolvedCloudCodeToken(oauth) {
+        case .ready(let token):
+            return await probeCloudCode(oauth, accessToken: token)
+        case .signInAgain:
             return UsageRefreshResult(providerID: .antigravity, outcome: .failure(.signInAgain))
+        case .serviceUnavailable:
+            return UsageRefreshResult(providerID: .antigravity, outcome: .failure(.serviceUnavailable))
         }
-        return await probeCloudCode(oauth, accessToken: token)
     }
 
     /// Summary 2xx + 可解析（含空窗）即返回；可选第二次 `GetUserStatus` 只填 `planName`。
@@ -151,7 +155,8 @@ public struct AntigravityUsageProvider: UsageProvider, Sendable {
         return Self.userTierPlan(from: status.body)
     }
 
-    private func resolvedCloudCodeToken(_ oauth: OAuthAccess) async -> String? {
+    /// Unusable access + refresh outage is not sign-in; do not send that token to Cloud Code.
+    private func resolvedCloudCodeToken(_ oauth: OAuthAccess) async -> CloudCodeTokenResolution {
         let keychainToken = (try? authStore.loadKeychainToken()) ?? AntigravityKeychainToken(
             accessToken: oauth.accessToken.isEmpty ? nil : oauth.accessToken,
             refreshToken: oauth.refreshToken,
@@ -159,23 +164,26 @@ public struct AntigravityUsageProvider: UsageProvider, Sendable {
         )
 
         if !oauth.accessToken.isEmpty, authStore.isUsable(expiry: oauth.expiresAt) {
-            return oauth.accessToken
+            return .ready(oauth.accessToken)
         }
         if let cached = authStore.loadCachedAccessToken(matching: keychainToken) {
-            return cached
+            return .ready(cached)
         }
         if let refresh = nonempty(oauth.refreshToken) ?? nonempty(keychainToken.refreshToken) {
             switch await usageClient.refreshGoogleToken(refresh) {
             case .refreshed(let accessToken, let expiresIn):
                 cacheRefreshedAccess(accessToken, expiresIn: expiresIn, refreshToken: refresh)
-                return accessToken
+                return .ready(accessToken)
             case .authFailed:
-                return nil
+                return .signInAgain
             case .unavailable:
-                return nonempty(oauth.accessToken)
+                return .serviceUnavailable
             }
         }
-        return nonempty(oauth.accessToken)
+        if let access = nonempty(oauth.accessToken) {
+            return .ready(access)
+        }
+        return .signInAgain
     }
 
     private func cacheRefreshedAccess(
@@ -204,7 +212,8 @@ public struct AntigravityUsageProvider: UsageProvider, Sendable {
         case .success(let snapshot):
             return UsageRefreshResult(providerID: .antigravity, snapshot: snapshot, failure: nil)
         case .authFailed:
-            if let retryToken = await refreshedTokenAfterAuthFailure(oauth, used: accessToken) {
+            switch await refreshedTokenAfterAuthFailure(oauth, used: accessToken) {
+            case .ready(let retryToken):
                 switch await fetchCloudCode(token: retryToken, accountKey: oauth.accountKey) {
                 case .success(let snapshot):
                     return UsageRefreshResult(providerID: .antigravity, snapshot: snapshot, failure: nil)
@@ -213,32 +222,46 @@ public struct AntigravityUsageProvider: UsageProvider, Sendable {
                 case .unavailable:
                     return UsageRefreshResult(providerID: .antigravity, outcome: .failure(.serviceUnavailable))
                 }
+            case .signInAgain:
+                return UsageRefreshResult(providerID: .antigravity, outcome: .failure(.signInAgain))
+            case .serviceUnavailable:
+                return UsageRefreshResult(providerID: .antigravity, outcome: .failure(.serviceUnavailable))
             }
-            return UsageRefreshResult(providerID: .antigravity, outcome: .failure(.signInAgain))
         case .unavailable:
             return UsageRefreshResult(providerID: .antigravity, outcome: .failure(.serviceUnavailable))
         }
     }
 
-    private func refreshedTokenAfterAuthFailure(_ oauth: OAuthAccess, used: String) async -> String? {
+    private func refreshedTokenAfterAuthFailure(
+        _ oauth: OAuthAccess,
+        used: String
+    ) async -> CloudCodeTokenResolution {
         let keychainToken = (try? authStore.loadKeychainToken()) ?? AntigravityKeychainToken(
             accessToken: oauth.accessToken.isEmpty ? nil : oauth.accessToken,
             refreshToken: oauth.refreshToken,
             expiry: oauth.expiresAt
         )
         guard let refresh = nonempty(oauth.refreshToken) ?? nonempty(keychainToken.refreshToken) else {
-            return nil
+            return .signInAgain
         }
         if let cached = authStore.loadCachedAccessToken(matching: keychainToken), cached != used {
-            return cached
+            return .ready(cached)
         }
         switch await usageClient.refreshGoogleToken(refresh) {
         case .refreshed(let accessToken, let expiresIn):
             cacheRefreshedAccess(accessToken, expiresIn: expiresIn, refreshToken: refresh)
-            return accessToken
-        case .authFailed, .unavailable:
-            return nil
+            return .ready(accessToken)
+        case .authFailed:
+            return .signInAgain
+        case .unavailable:
+            return .serviceUnavailable
         }
+    }
+
+    private enum CloudCodeTokenResolution {
+        case ready(String)
+        case signInAgain
+        case serviceUnavailable
     }
 
     private enum CloudCodeProbe {
