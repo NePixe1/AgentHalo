@@ -15,6 +15,7 @@ func runAntigravityUsageChecks() async {
     try! testAntigravityCachedAccessTokenMissesWhenExpiringWithinBuffer()
     testAntigravityExtractToken()
     await testAntigravityCloudCodeHitsDailyBaseAndStopsOn401()
+    await testAntigravityCloudCodeSurfaces429AsRateLimited()
     await testAntigravityRefreshGoogleTokenPostsInstalledAppForm()
     await testAntigravityCallLSUsesLoopbackURLAndCSRFHeaders()
     testAntigravityDiscoveryParsesMarkedLanguageServerAndDropsUnmarked()
@@ -25,6 +26,7 @@ func runAntigravityUsageChecks() async {
     try! await testAntigravityProviderRefreshesUnusableAccessThenCachesViaFocusWrite()
     try! await testAntigravityProviderUnusableAccessRefreshOutageIsServiceUnavailable()
     try! await testAntigravityProviderCloudCodeAuthFailureThenRefreshOutageIsServiceUnavailable()
+    try! await testAntigravityProviderCloudCode429IsRateLimited()
 }
 
 func testAntigravityMapperKeepsOnlyGeminiWindows() throws {
@@ -108,6 +110,7 @@ func testAntigravityMapperHTTPErrors() {
     let key = AccountCacheKey(providerID: .antigravity, digest: "d")
     let cases: [(Int, UsageProviderFailure)] = [
         (401, .signInAgain),
+        (429, .rateLimited(retryAt: nil)),
         (503, .serviceUnavailable),
         (418, .invalidResponse),
     ]
@@ -388,6 +391,33 @@ func testAntigravityCloudCodeHitsDailyBaseAndStopsOn401() async {
         "Cloud Code bases stay daily then prod"
     )
     expect(await lsHTTP.capturedRequests.isEmpty, true, "cloudCode must not use the loopback client")
+}
+
+func testAntigravityCloudCodeSurfaces429AsRateLimited() async {
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: UsageHTTPResponse(statusCode: 429, headers: [:], body: Data()))
+    await http.enqueue(response: UsageHTTPResponse(
+        statusCode: 200,
+        headers: [:],
+        body: Data(#"{"groups":[]}"#.utf8)
+    ))
+    let lsHTTP = RecordingAntigravityLoopbackHTTPClient()
+    let client = AntigravityUsageClient(lsHTTP: lsHTTP, http: http)
+
+    let outcome = await client.cloudCode(
+        path: AntigravityUsageClient.quotaSummaryPath,
+        token: "ya29.access",
+        userAgent: "antigravity",
+        body: [:]
+    )
+    if case .rateLimited = outcome {} else {
+        fatalError("Cloud Code 429 must be rateLimited, got \(String(describing: outcome))")
+    }
+
+    let requests = await http.capturedRequests
+    expect(requests.count, 1, "429 on first Cloud Code base must not try the second")
+    expect(requests[0].host, "daily-cloudcode-pa.googleapis.com", "first Cloud Code base")
+    expect(await lsHTTP.capturedRequests.isEmpty, true, "cloudCode 429 must not use the loopback client")
 }
 
 func testAntigravityRefreshGoogleTokenPostsInstalledAppForm() async {
@@ -964,6 +994,51 @@ func testAntigravityProviderCloudCodeAuthFailureThenRefreshOutageIsServiceUnavai
         original,
         "post-401 refresh outage must not write Keychain"
     )
+}
+
+func testAntigravityProviderCloudCode429IsRateLimited() async throws {
+    let original = """
+    {"token":{"access_token":"ya29.live","refresh_token":"1//refresh","expiry":"2099-01-01T00:00:00Z"}}
+    """
+    let keychain = FakeUsageKeychain()
+    try keychain.write(
+        service: AntigravityAuthStore.keychainService,
+        account: AntigravityAuthStore.keychainAccount,
+        value: original
+    )
+    let files = FakeUsageFiles()
+    let lsHTTP = RecordingAntigravityLoopbackHTTPClient()
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: UsageHTTPResponse(statusCode: 429, headers: [:], body: Data()))
+    await http.enqueue(response: UsageHTTPResponse(
+        statusCode: 200,
+        headers: [:],
+        body: Data(#"{"groups":[{"buckets":[{"bucketId":"gemini-5h","remainingFraction":0.5}]}]}"#.utf8)
+    ))
+    let provider = antigravityCheckProvider(
+        discovery: FakeAntigravityDiscovery(),
+        keychain: keychain,
+        files: files,
+        lsHTTP: lsHTTP,
+        http: http
+    )
+
+    let access = await provider.resolveAccess(accountKey: nil)
+    if case .apiKey = access { fatalError("provider must not resolve apiKey") }
+    guard case .oauth = access else { fatalError("Keychain token must be oauth") }
+    let result = await provider.refresh(using: access)
+    guard case .failure(let failure) = result.outcome else {
+        fatalError("Cloud Code 429 must fail: \(String(describing: result.outcome))")
+    }
+    expect(failure, .rateLimited(retryAt: nil), "Cloud Code 429 is rateLimited, not serviceUnavailable")
+    expect(failure == .serviceUnavailable, false, "must not classify 429 as serviceUnavailable")
+
+    let requests = await http.capturedRequests
+    expect(requests.count, 1, "429 must not fall through to the second base or later endpoints")
+    expect(requests[0].host, "daily-cloudcode-pa.googleapis.com", "first Cloud Code base")
+    expect(requests[0].path, "/v1internal:retrieveUserQuotaSummary", "quota summary 429")
+    expect(await lsHTTP.capturedRequests.isEmpty, true, "no LS after discovery miss")
+    expect(files.capturedWrites().isEmpty, true, "429 must not cache")
 }
 
 private func antigravityCheckProvider(

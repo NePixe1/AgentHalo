@@ -135,8 +135,14 @@ if eventName == "Notification" {
     notificationType = ""
 }
 
+// Claude/Grok only emit dedicated *Failure events. Antigravity registers
+// Stop / PostToolUse and puts errorText / fatal on those events.
+let capturesFailureFields = eventName == "StopFailure"
+    || eventName == "PostToolUseFailure"
+    || (isAntigravity && (eventName == "Stop" || eventName == "PostToolUse"))
+
 let errorText: String
-if eventName == "StopFailure" || eventName == "PostToolUseFailure" {
+if capturesFailureFields {
     errorText = firstString(
         payload["error"],
         payload["error_text"],
@@ -145,6 +151,25 @@ if eventName == "StopFailure" || eventName == "PostToolUseFailure" {
     )
 } else {
     errorText = ""
+}
+
+let fatal: Bool
+if isAntigravity && (eventName == "Stop" || eventName == "PostToolUse") {
+    let value = payload["fatal"]
+    if let value = value as? Bool {
+        fatal = value
+    } else if let value = value as? NSNumber {
+        fatal = value != 0
+    } else {
+        switch firstString(value).lowercased() {
+        case "true", "1", "yes":
+            fatal = true
+        default:
+            fatal = false
+        }
+    }
+} else {
+    fatal = false
 }
 
 // Grok: default | auto | plan | bypassPermissions (every hook event).
@@ -177,6 +202,7 @@ var record: [String: Any?] = [
     "toolName": toolName.isEmpty ? nil : toolName,
     "notificationType": notificationType.isEmpty ? nil : notificationType,
     "errorText": errorText.isEmpty ? nil : errorText,
+    "fatal": fatal ? true : nil,
     "permissionMode": permissionMode.isEmpty ? nil : permissionMode,
     "source": source,
 ]

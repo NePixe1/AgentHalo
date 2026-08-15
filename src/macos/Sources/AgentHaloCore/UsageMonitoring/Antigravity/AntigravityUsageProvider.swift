@@ -219,6 +219,8 @@ public struct AntigravityUsageProvider: UsageProvider, Sendable {
                     return UsageRefreshResult(providerID: .antigravity, snapshot: snapshot, failure: nil)
                 case .authFailed:
                     return UsageRefreshResult(providerID: .antigravity, outcome: .failure(.signInAgain))
+                case .rateLimited:
+                    return UsageRefreshResult(providerID: .antigravity, outcome: .failure(.rateLimited(retryAt: nil)))
                 case .unavailable:
                     return UsageRefreshResult(providerID: .antigravity, outcome: .failure(.serviceUnavailable))
                 }
@@ -227,6 +229,8 @@ public struct AntigravityUsageProvider: UsageProvider, Sendable {
             case .serviceUnavailable:
                 return UsageRefreshResult(providerID: .antigravity, outcome: .failure(.serviceUnavailable))
             }
+        case .rateLimited:
+            return UsageRefreshResult(providerID: .antigravity, outcome: .failure(.rateLimited(retryAt: nil)))
         case .unavailable:
             return UsageRefreshResult(providerID: .antigravity, outcome: .failure(.serviceUnavailable))
         }
@@ -267,6 +271,7 @@ public struct AntigravityUsageProvider: UsageProvider, Sendable {
     private enum CloudCodeProbe {
         case success(UsageSnapshot)
         case authFailed
+        case rateLimited
         case unavailable
     }
 
@@ -279,6 +284,8 @@ public struct AntigravityUsageProvider: UsageProvider, Sendable {
         ) {
         case .authFailed:
             return .authFailed
+        case .rateLimited:
+            return .rateLimited
         case .ok(let data):
             if let windows = AntigravityUsageMapper.windowsFromQuotaSummaryBody(data) {
                 return .success(makeSnapshot(accountKey: accountKey, planName: nil, windows: windows))
@@ -295,6 +302,8 @@ public struct AntigravityUsageProvider: UsageProvider, Sendable {
         ) {
         case .authFailed:
             return .authFailed
+        case .rateLimited:
+            return .rateLimited
         case .ok(let data):
             if let window = Self.sessionWindow(from: Self.geminiConfigs(fromCloudModels: data)) {
                 return .success(makeSnapshot(accountKey: accountKey, planName: nil, windows: [window]))
@@ -311,6 +320,8 @@ public struct AntigravityUsageProvider: UsageProvider, Sendable {
         ) {
         case .authFailed:
             return .authFailed
+        case .rateLimited:
+            return .rateLimited
         case .ok(let data):
             if let window = Self.sessionWindow(from: Self.geminiConfigs(fromQuotaBuckets: data)) {
                 return .success(makeSnapshot(accountKey: accountKey, planName: nil, windows: [window]))

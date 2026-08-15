@@ -5,6 +5,7 @@ import Foundation
 public enum AntigravityCloudCodeOutcome: Sendable {
     case ok(Data)
     case authFailed
+    case rateLimited
     case unavailable
 }
 
@@ -73,8 +74,9 @@ public struct AntigravityUsageClient: Sendable {
     }
 
     /// POST a Cloud Code endpoint. A 401/403 on the first base short-circuits
-    /// (the same token would fail on the other base). Other non-2xx / transport
-    /// errors fall through to the next base and finally `.unavailable`.
+    /// (the same token would fail on the other base). A 429 is `.rateLimited`
+    /// on the first hit — quota is per-account, not per-host. Other non-2xx /
+    /// transport errors fall through to the next base and finally `.unavailable`.
     public func cloudCode(
         path: String,
         token: String,
@@ -99,6 +101,7 @@ public struct AntigravityUsageClient: Sendable {
             )
             guard let response = try? await http.send(request) else { continue }
             if response.statusCode == 401 || response.statusCode == 403 { return .authFailed }
+            if response.statusCode == 429 { return .rateLimited }
             if (200..<300).contains(response.statusCode) { return .ok(response.body) }
         }
         return .unavailable

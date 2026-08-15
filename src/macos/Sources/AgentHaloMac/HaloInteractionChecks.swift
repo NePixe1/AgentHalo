@@ -112,6 +112,7 @@ func runHaloInteractionChecks() {
     testGrokPollingIsThrottledWhenNotFocused()
     testPiActivityFiltersDeadLifecycleAndAddsRuntimeFallback()
     testGrokPresencePrefersActiveSessionsFile()
+    testAntigravityPresenceUsesHookSnapshotOrAgyNotLanguageServer()
     testGrokActivityDropsEndedAttention()
     testGrokLiveStandbyUsesStableGreenAggregate()
     testClaudeLiveSessionsRefreshIsThrottled()
@@ -3278,6 +3279,56 @@ private func testGrokPresencePrefersActiveSessionsFile() {
     expect(
         GrokActivityMonitor.isPresent(homeDirectory: root, processPresenceProbe: { false }),
         "legacy active_sessions entries without pid still report presence"
+    )
+}
+
+private func testAntigravityPresenceUsesHookSnapshotOrAgyNotLanguageServer() {
+    let now = Date()
+    func snapshot(active: Bool, age: TimeInterval, state: HaloState) -> SessionSnapshot {
+        SessionSnapshot(
+            threadId: "ag-1",
+            projectName: "AgentHalo",
+            workingDirectory: "/tmp/AgentHalo",
+            state: state,
+            action: "test",
+            lastEventAt: now.addingTimeInterval(-age),
+            completedAt: state == .done ? now.addingTimeInterval(-age) : nil,
+            active: active,
+            agent: .antigravity
+        )
+    }
+
+    expect(
+        AntigravityActivityMonitor.isPresent(
+            sessions: [snapshot(active: true, age: 30, state: .thinking)],
+            now: now,
+            processPresenceProbe: { false }
+        ),
+        "recent retained hook snapshot should report presence"
+    )
+    expect(
+        AntigravityActivityMonitor.isPresent(
+            sessions: [snapshot(active: false, age: 400, state: .done)],
+            now: now,
+            processPresenceProbe: { true }
+        ),
+        "processPresenceProbe true should report presence without a live agy process"
+    )
+    expect(
+        !AntigravityActivityMonitor.isPresent(
+            sessions: [snapshot(active: false, age: 400, state: .done)],
+            now: now,
+            processPresenceProbe: { false }
+        ),
+        "language_server must not count as present when probe is false and snapshot is not retained"
+    )
+    expect(
+        !AntigravityActivityMonitor.isPresent(
+            sessions: [],
+            now: now,
+            processPresenceProbe: { false }
+        ),
+        "no hook snapshot and no agy probe is absent"
     )
 }
 

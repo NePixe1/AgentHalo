@@ -4481,6 +4481,70 @@ func testClaudeCodeStatusHookIsolatesAntigravityStatusFiles() throws {
     }
 }
 
+/// AG Stop / PostToolUse carry errorText + fatal on the live events (agy has
+/// no StopFailure). Those keys must land in antigravity-status.jsonl only.
+func testClaudeCodeStatusHookPersistsAntigravityFailureFields() throws {
+    let home = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-ag-hook-failure-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: home) }
+    try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+
+    let binary = try resolveClaudeCodeStatusHookBinary()
+    let paths = AgentHaloPaths(homeDirectory: home)
+    let grokStatus = paths.grokStatusLog
+    let claudeStatus = paths.claudeStatusLog
+    let agStatus = paths.antigravityStatusLog
+
+    try runClaudeCodeStatusHook(
+        binary: binary,
+        home: home,
+        arguments: ["stop"],
+        environment: [
+            "ANTIGRAVITY_AGENT": "1",
+            "ANTIGRAVITY_TRAJECTORY_ID": "traj-fail-stop",
+        ],
+        stdinJSON: #"{"cwd":"/tmp/ag-fail","errorText":"turn boom","fatal":true,"timestamp":"2026-08-15T00:00:00Z"}"#
+    )
+
+    expect(FileManager.default.fileExists(atPath: agStatus.path), "AG failure Stop should write antigravity-status.jsonl")
+    let stopText = try String(contentsOf: agStatus, encoding: .utf8)
+    expect(stopText.contains("antigravity-hook"), "AG failure record source should be antigravity-hook")
+    expect(stopText.contains("\"Stop\""), "stop should normalize to Stop")
+    expect(stopText.contains("traj-fail-stop"), "AG failure session should come from trajectory id")
+    expect(stopText.contains("\"errorText\":\"turn boom\""), "AG Stop errorText must be persisted")
+    expect(stopText.contains("\"fatal\":true"), "AG Stop fatal must be persisted")
+    expect(!FileManager.default.fileExists(atPath: claudeStatus.path), "AG Stop failure must not create Claude status file")
+    expect(!FileManager.default.fileExists(atPath: grokStatus.path), "AG Stop failure must not create Grok status file")
+
+    try runClaudeCodeStatusHook(
+        binary: binary,
+        home: home,
+        arguments: ["post_tool_use"],
+        environment: [
+            "ANTIGRAVITY_AGENT": "1",
+            "ANTIGRAVITY_TRAJECTORY_ID": "traj-fail-tool",
+        ],
+        stdinJSON: #"{"cwd":"/tmp/ag-fail","error":"exit 1","tool_name":"run_command","timestamp":"2026-08-15T00:00:01Z"}"#
+    )
+
+    let toolText = try String(contentsOf: agStatus, encoding: .utf8)
+    expect(toolText.contains("traj-fail-tool"), "AG PostToolUse failure session should write AG log")
+    expect(toolText.contains("\"PostToolUse\""), "post_tool_use should normalize to PostToolUse")
+    expect(toolText.contains("\"errorText\":\"exit 1\""), "AG PostToolUse error equivalent must become errorText")
+    if FileManager.default.fileExists(atPath: claudeStatus.path) {
+        let claudeText = try String(contentsOf: claudeStatus, encoding: .utf8)
+        expect(!claudeText.contains("traj-fail-stop"), "AG Stop failure must not appear in Claude log")
+        expect(!claudeText.contains("traj-fail-tool"), "AG tool failure must not appear in Claude log")
+        expect(!claudeText.contains("turn boom"), "AG errorText must not appear in Claude log")
+    }
+    if FileManager.default.fileExists(atPath: grokStatus.path) {
+        let grokText = try String(contentsOf: grokStatus, encoding: .utf8)
+        expect(!grokText.contains("traj-fail-stop"), "AG Stop failure must not appear in Grok log")
+        expect(!grokText.contains("traj-fail-tool"), "AG tool failure must not appear in Grok log")
+        expect(!grokText.contains("turn boom"), "AG errorText must not appear in Grok log")
+    }
+}
+
 func testClaudeHookReducerStuckPreToolUseRecoversAfterSafetyTimeout() {
     let now = ISO8601DateFormatter().date(from: "2026-06-16T04:00:00Z")!
     var reducer = ClaudeHookStatusReducer(threadId: "stuck-pretool", now: now)
@@ -5663,6 +5727,7 @@ testGrokHookReducerSteerCancelDoesNotPaintError()
 do {
     try testClaudeCodeStatusHookIsolatesGrokAndClaudeStatusFiles()
     try testClaudeCodeStatusHookIsolatesAntigravityStatusFiles()
+    try testClaudeCodeStatusHookPersistsAntigravityFailureFields()
 } catch {
     fatalError("hook isolation check failed: \(error)")
 }
