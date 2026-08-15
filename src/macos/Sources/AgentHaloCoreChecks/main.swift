@@ -1471,6 +1471,240 @@ func testRuntimeBootstrapSkipsDisabledAgentUserConfig() throws {
     expect(try Data(contentsOf: piFile), beforePi, "disabled Pi extension is not rewritten")
 }
 
+func testAntigravityHookConfiguratorCreatesNamedGroupHooksJSON() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent(
+        "agent-halo-agy-hooks-create-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    defer { try? fm.removeItem(at: home) }
+    try fm.createDirectory(at: home, withIntermediateDirectories: true)
+
+    let bundled = home.appendingPathComponent("bundle-hook")
+    try Data("ag-hook".utf8).write(to: bundled)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundled.path)
+
+    AntigravityHookConfigurator.configure(homeDirectory: home, bundledHookBinary: bundled)
+
+    let hooksURL = AntigravityHookConfigurator.hooksFile(homeDirectory: home)
+    expect(fm.fileExists(atPath: hooksURL.path), "creates ~/.gemini/config/hooks.json")
+    expect(
+        !fm.fileExists(atPath: home.appendingPathComponent(".gemini/settings.json").path),
+        "must not write ~/.gemini/settings.json"
+    )
+    expect(
+        !fm.fileExists(atPath: home.appendingPathComponent(".gemini/antigravity-cli/settings.json").path),
+        "must not write ~/.gemini/antigravity-cli/settings.json"
+    )
+
+    let paths = AgentHaloPaths(homeDirectory: home)
+    expect(fm.isExecutableFile(atPath: paths.statusHook.path), "status-hook staged under .agent-halo/bin")
+
+    let json = try JSONSerialization.jsonObject(with: Data(contentsOf: hooksURL)) as! [String: Any]
+    expect(json.keys.contains(AntigravityHookConfigurator.groupName), "top-level key is agent-halo-status")
+    let group = json[AntigravityHookConfigurator.groupName] as! [String: Any]
+    for event in ["PreInvocation", "PostInvocation", "Stop"] {
+        let command = antigravityFlatHookCommand(group, event: event)
+        expect(command?.hasSuffix(" \(event)") == true, "\(event) command ends with event name")
+        expect(command?.contains("status-hook") == true, "\(event) command uses status-hook")
+        expect(command, "\(paths.statusHook.path) \(event)", "\(event) command is preferred path + event")
+    }
+    for event in ["PreToolUse", "PostToolUse"] {
+        let entries = group[event] as! [[String: Any]]
+        expect(entries.first?["matcher"] as? String, "*", "\(event) matcher is *")
+        let hooks = entries.first?["hooks"] as? [[String: Any]]
+        let command = hooks?.first?["command"] as? String
+        expect(command?.hasSuffix(" \(event)") == true, "\(event) nested command ends with event name")
+        expect(command, "\(paths.statusHook.path) \(event)", "\(event) nested command is preferred path + event")
+    }
+}
+
+func testAntigravityHookConfiguratorMergesWithoutReplacingOrcaStatus() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent(
+        "agent-halo-agy-hooks-merge-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    defer { try? fm.removeItem(at: home) }
+
+    let hooksURL = AntigravityHookConfigurator.hooksFile(homeDirectory: home)
+    try fm.createDirectory(at: hooksURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let orcaCommand = "if [ -x '/tmp/orca/antigravity-hook.sh' ]; then ORCA_ANTIGRAVITY_EVENT='PreInvocation' /bin/sh '/tmp/orca/antigravity-hook.sh'; fi"
+    let existing: [String: Any] = [
+        "orca-status": [
+            "PreInvocation": [[
+                "type": "command",
+                "command": orcaCommand,
+                "timeout": 10,
+            ]],
+            "PostToolUse": [[
+                "matcher": "*",
+                "hooks": [[
+                    "type": "command",
+                    "command": "ORCA_ANTIGRAVITY_EVENT='PostToolUse' /bin/sh '/tmp/orca/antigravity-hook.sh'",
+                ]],
+            ]],
+        ],
+        "unrelated-key": "keep-me",
+    ]
+    try JSONSerialization.data(withJSONObject: existing, options: [.prettyPrinted])
+        .write(to: hooksURL)
+
+    let bundled = home.appendingPathComponent("bundle-hook")
+    try Data("ag-hook".utf8).write(to: bundled)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundled.path)
+
+    AntigravityHookConfigurator.configure(homeDirectory: home, bundledHookBinary: bundled)
+
+    let json = try JSONSerialization.jsonObject(with: Data(contentsOf: hooksURL)) as! [String: Any]
+    let text = try String(contentsOf: hooksURL, encoding: .utf8)
+    expect(text.contains(orcaCommand), "orca-status command string is preserved")
+    let orca = json["orca-status"] as! [String: Any]
+    let orcaPre = orca["PreInvocation"] as! [[String: Any]]
+    expect(orcaPre.first?["command"] as? String, orcaCommand, "orca-status PreInvocation command unchanged")
+    expect(json["unrelated-key"] as? String, "keep-me", "other top-level keys are left alone")
+    expect(json[AntigravityHookConfigurator.groupName] != nil, true, "agent-halo-status group is merged in")
+}
+
+func testAntigravityHookConfiguratorLeavesPreferredPathConfigAlone() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent(
+        "agent-halo-agy-hooks-stable-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    defer { try? fm.removeItem(at: home) }
+    try fm.createDirectory(at: home, withIntermediateDirectories: true)
+
+    let paths = AgentHaloPaths(homeDirectory: home)
+    let bundled = home.appendingPathComponent("bundle-hook")
+    try Data("ag-hook".utf8).write(to: bundled)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundled.path)
+    try AgentHaloBinaryStaging.stageStatusHook(
+        from: bundled,
+        homeDirectory: home,
+        fileManager: fm
+    )
+
+    let hooksURL = AntigravityHookConfigurator.hooksFile(homeDirectory: home)
+    try fm.createDirectory(at: hooksURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let config: [String: Any] = [
+        AntigravityHookConfigurator.groupName: antigravityPreferredHookGroup(statusHook: paths.statusHook.path)
+    ]
+    try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted])
+        .write(to: hooksURL)
+
+    let before = try Data(contentsOf: hooksURL)
+    let mtimeBefore = try fm.attributesOfItem(atPath: hooksURL.path)[.modificationDate] as? Date
+    Thread.sleep(forTimeInterval: 0.05)
+    AntigravityHookConfigurator.configure(homeDirectory: home, bundledHookBinary: bundled)
+    let after = try Data(contentsOf: hooksURL)
+    let mtimeAfter = try fm.attributesOfItem(atPath: hooksURL.path)[.modificationDate] as? Date
+    expect(after, before, "preferred-path five-event group must not be rewritten")
+    expect(mtimeAfter, mtimeBefore, "preferred-path five-event group must not bump mtime")
+}
+
+func testAntigravityHookConfiguratorAbortsWhenRootIsNotADictionary() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent(
+        "agent-halo-agy-hooks-bad-root-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    defer { try? fm.removeItem(at: home) }
+
+    let hooksURL = AntigravityHookConfigurator.hooksFile(homeDirectory: home)
+    try fm.createDirectory(at: hooksURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let original = Data("[]".utf8)
+    try original.write(to: hooksURL)
+
+    let bundled = home.appendingPathComponent("bundle-hook")
+    try Data("ag-hook".utf8).write(to: bundled)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundled.path)
+
+    AntigravityHookConfigurator.configure(homeDirectory: home, bundledHookBinary: bundled)
+
+    expect(try Data(contentsOf: hooksURL), original, "non-dict root must not be overwritten")
+}
+
+func testRuntimeBootstrapDoesNotCreateAntigravityHooksWhenDisabled() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent(
+        "agent-halo-bootstrap-no-agy-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    defer { try? fm.removeItem(at: home) }
+    try fm.createDirectory(at: home, withIntermediateDirectories: true)
+
+    let bundledHook = home.appendingPathComponent("bundled-hook")
+    try Data("hook".utf8).write(to: bundledHook)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundledHook.path)
+
+    AgentHaloRuntimeBootstrap.bootstrap(
+        homeDirectory: home,
+        bundledHookBinary: bundledHook,
+        fileManager: fm,
+        enabledAgents: [.codex]
+    )
+
+    expect(
+        !fm.fileExists(atPath: AntigravityHookConfigurator.hooksFile(homeDirectory: home).path),
+        "bootstrap(enabledAgents: [.codex]) must not create ~/.gemini/config/hooks.json"
+    )
+}
+
+func testRuntimeBootstrapCreatesAntigravityHooksWhenEnabled() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent(
+        "agent-halo-bootstrap-agy-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    defer { try? fm.removeItem(at: home) }
+    try fm.createDirectory(at: home, withIntermediateDirectories: true)
+
+    let bundledHook = home.appendingPathComponent("bundled-hook")
+    try Data("hook".utf8).write(to: bundledHook)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundledHook.path)
+
+    AgentHaloRuntimeBootstrap.bootstrap(
+        homeDirectory: home,
+        bundledHookBinary: bundledHook,
+        fileManager: fm,
+        enabledAgents: [.antigravity]
+    )
+
+    let hooksURL = AntigravityHookConfigurator.hooksFile(homeDirectory: home)
+    expect(fm.fileExists(atPath: hooksURL.path), "bootstrap(enabledAgents: [.antigravity]) creates hooks.json")
+    let json = try JSONSerialization.jsonObject(with: Data(contentsOf: hooksURL)) as! [String: Any]
+    expect(json[AntigravityHookConfigurator.groupName] != nil, true, "bootstrap writes agent-halo-status group")
+}
+
+private func antigravityFlatHookCommand(_ group: [String: Any], event: String) -> String? {
+    let entries = group[event] as? [[String: Any]]
+    return entries?.first?["command"] as? String
+}
+
+private func antigravityPreferredHookGroup(statusHook: String) -> [String: Any] {
+    func hook(_ event: String) -> [String: Any] {
+        [
+            "type": "command",
+            "command": "\(statusHook) \(event)",
+            "timeout": 10,
+        ]
+    }
+    return [
+        "PreInvocation": [hook("PreInvocation")],
+        "PostInvocation": [hook("PostInvocation")],
+        "Stop": [hook("Stop")],
+        "PreToolUse": [[
+            "matcher": "*",
+            "hooks": [hook("PreToolUse")],
+        ]],
+        "PostToolUse": [[
+            "matcher": "*",
+            "hooks": [hook("PostToolUse")],
+        ]],
+    ]
+}
+
 /// Preferred-path Grok config must not be rewritten on routine launches.
 func testGrokHookConfiguratorLeavesPreferredPathConfigAlone() throws {
     let fm = FileManager.default
@@ -5071,6 +5305,12 @@ do {
     try testGrokHookConfiguratorWritesHooksJSON()
     try testRuntimeBootstrapUpgradesLayoutV1WithoutStrandingHookPaths()
     try testRuntimeBootstrapSkipsDisabledAgentUserConfig()
+    try testAntigravityHookConfiguratorCreatesNamedGroupHooksJSON()
+    try testAntigravityHookConfiguratorMergesWithoutReplacingOrcaStatus()
+    try testAntigravityHookConfiguratorLeavesPreferredPathConfigAlone()
+    try testAntigravityHookConfiguratorAbortsWhenRootIsNotADictionary()
+    try testRuntimeBootstrapDoesNotCreateAntigravityHooksWhenDisabled()
+    try testRuntimeBootstrapCreatesAntigravityHooksWhenEnabled()
     try testGrokHookConfiguratorLeavesPreferredPathConfigAlone()
     try testGrokHookConfiguratorRewritesLegacyRootPath()
     try testGrokHookConfiguratorRepairsDeadExecutableCommand()
