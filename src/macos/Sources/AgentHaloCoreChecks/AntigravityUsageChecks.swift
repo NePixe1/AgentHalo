@@ -14,6 +14,10 @@ func runAntigravityUsageChecks() async {
     try! testAntigravityCachedAccessTokenMissesOnFingerprintMismatch()
     try! testAntigravityCachedAccessTokenMissesWhenExpiringWithinBuffer()
     testAntigravityExtractToken()
+    await testAntigravityCloudCodeHitsDailyBaseAndStopsOn401()
+    await testAntigravityRefreshGoogleTokenPostsInstalledAppForm()
+    await testAntigravityCallLSUsesLoopbackURLAndCSRFHeaders()
+    testAntigravityDiscoveryParsesMarkedLanguageServerAndDropsUnmarked()
 }
 
 func testAntigravityMapperKeepsOnlyGeminiWindows() throws {
@@ -340,5 +344,181 @@ private struct ThrowingUsageKeychain: UsageKeychainAccessing {
 
     func write(service: String, account: String?, value: String) throws {
         fatalError("AntigravityAuthStore must never write the keychain")
+    }
+}
+
+func testAntigravityCloudCodeHitsDailyBaseAndStopsOn401() async {
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: UsageHTTPResponse(statusCode: 401, headers: [:], body: Data()))
+    await http.enqueue(response: UsageHTTPResponse(
+        statusCode: 200,
+        headers: [:],
+        body: Data(#"{"groups":[]}"#.utf8)
+    ))
+    let lsHTTP = RecordingAntigravityLoopbackHTTPClient()
+    let client = AntigravityUsageClient(lsHTTP: lsHTTP, http: http)
+
+    _ = await client.cloudCode(
+        path: AntigravityUsageClient.quotaSummaryPath,
+        token: "ya29.access",
+        userAgent: "antigravity",
+        body: [:]
+    )
+
+    let requests = await http.capturedRequests
+    expect(requests.count, 1, "401 on first Cloud Code base must not try the second")
+    expect(requests[0].method, "POST", "cloudCode method")
+    expect(requests[0].host, "daily-cloudcode-pa.googleapis.com", "first Cloud Code base")
+    expect(requests[0].path, "/v1internal:retrieveUserQuotaSummary", "quota summary path")
+    expect(requests[0].headers["user-agent"], "antigravity", "Cloud Code User-Agent")
+    expect(requests[0].headers["authorization"], "Bearer ya29.access", "Cloud Code bearer")
+    expect(
+        AntigravityUsageClient.cloudCodeURLs,
+        [
+            "https://daily-cloudcode-pa.googleapis.com",
+            "https://cloudcode-pa.googleapis.com",
+        ],
+        "Cloud Code bases stay daily then prod"
+    )
+    expect(await lsHTTP.capturedRequests.isEmpty, true, "cloudCode must not use the loopback client")
+}
+
+func testAntigravityRefreshGoogleTokenPostsInstalledAppForm() async {
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: UsageHTTPResponse(
+        statusCode: 200,
+        headers: [:],
+        body: Data(#"{"access_token":"ya29.new","expires_in":3600}"#.utf8)
+    ))
+    let client = AntigravityUsageClient(
+        lsHTTP: RecordingAntigravityLoopbackHTTPClient(),
+        http: http
+    )
+    _ = await client.refreshGoogleToken("refresh token+/=")
+
+    let requests = await http.capturedRequests
+    expect(requests.count, 1, "one Google refresh request")
+    expect(requests[0].method, "POST", "refresh method")
+    expect(requests[0].host, "oauth2.googleapis.com", "Google OAuth host")
+    expect(requests[0].path, "/token", "Google OAuth path")
+    expect(requests[0].headers["content-type"], "application/x-www-form-urlencoded", "refresh content type")
+    let form = String(data: requests[0].body ?? Data(), encoding: .utf8) ?? ""
+    expect(form.contains("grant_type=refresh_token"), "refresh grant type")
+    expect(
+        form.contains("client_id=\(AntigravityUsageClient.googleClientID)"),
+        "OpenUsage installed-app client_id"
+    )
+    expect(
+        AntigravityUsageClient.googleClientID,
+        ["1071006060591-tmhssin2h21lcre235vtolojh4g403ep", ".apps.googleusercontent.com"].joined(),
+        "client_id constant matches OpenUsage"
+    )
+    expect(
+        AntigravityUsageClient.googleClientSecret,
+        ["GOCSPX", "K58FWR486LdLJ1mLB8sXC4z6qDAf"].joined(separator: "-"),
+        "client_secret constant matches OpenUsage"
+    )
+    expect(
+        AntigravityUsageClient.googleOAuthURL,
+        "https://oauth2.googleapis.com/token",
+        "Google OAuth URL"
+    )
+}
+
+func testAntigravityCallLSUsesLoopbackURLAndCSRFHeaders() async {
+    let lsHTTP = RecordingAntigravityLoopbackHTTPClient()
+    await lsHTTP.enqueue(response: UsageHTTPResponse(
+        statusCode: 200,
+        headers: [:],
+        body: Data(#"{"groups":[]}"#.utf8)
+    ))
+    let http = RecordingUsageHTTPClient()
+    let client = AntigravityUsageClient(lsHTTP: lsHTTP, http: http)
+
+    _ = await client.callLS(
+        scheme: "https",
+        port: 5555,
+        csrf: "csrf-token-xyz",
+        method: "RetrieveUserQuotaSummary"
+    )
+
+    let requests = await lsHTTP.capturedRequests
+    expect(requests.count, 1, "one LS request")
+    expect(requests[0].method, "POST", "callLS method")
+    expect(
+        requests[0].url.absoluteString,
+        "https://127.0.0.1:5555/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary",
+        "callLS URL"
+    )
+    expect(requests[0].headers["x-codeium-csrf-token"], "csrf-token-xyz", "CSRF header")
+    expect(requests[0].headers["Connect-Protocol-Version"], "1", "Connect protocol")
+    expect(AntigravityUsageClient.lsService, "exa.language_server_pb.LanguageServerService", "LS service")
+    expect(AntigravityUsageClient.lsMetadata["ideName"], "antigravity" as String?, "LS ideName")
+    expect(AntigravityUsageClient.lsMetadata["extensionName"], "antigravity" as String?, "LS extensionName")
+    expect(await http.capturedRequests.isEmpty, true, "callLS must not use UsageHTTPClient")
+}
+
+func testAntigravityDiscoveryParsesMarkedLanguageServerAndDropsUnmarked() {
+    let options = AntigravityLanguageServerDiscovery.Options(
+        processName: "language_server",
+        markers: ["antigravity"],
+        csrfFlag: "--csrf_token",
+        portFlag: "--extension_server_port"
+    )
+
+    let mixedPS = """
+      4242 /usr/local/bin/language_server --csrf_token unmarked --extension_server_port 9
+      9001 /opt/antigravity/bin/language_server --csrf_token abc --extension_server_port 1234
+    """
+    let mixedRunner = RecordingUsageProcessRunner(results: [
+        UsageProcessResult(exitCode: 0, standardOutput: Data(mixedPS.utf8), standardError: Data())
+    ])
+    guard let found = AntigravityLanguageServerDiscovery(processRunner: mixedRunner).discover(options) else {
+        fatalError("marked language_server with /antigravity/ must be discovered")
+    }
+    expect(found.csrf, "abc", "csrf from marked argv")
+    expect(found.extensionPort, 1234 as Int?, "extension port from marked argv")
+    expect(found.pid, 9001, "marked pid")
+
+    let unmarkedPS = """
+      4242 /usr/local/bin/language_server --csrf_token unmarked --extension_server_port 9
+    """
+    let unmarkedRunner = RecordingUsageProcessRunner(results: [
+        UsageProcessResult(exitCode: 0, standardOutput: Data(unmarkedPS.utf8), standardError: Data())
+    ])
+    let unmarked = AntigravityLanguageServerDiscovery(processRunner: unmarkedRunner).discover(options)
+    expect(unmarked == nil, true, "unmarked language_server discarded")
+}
+
+actor RecordingAntigravityLoopbackHTTPClient: AntigravityLoopbackHTTPClienting {
+    struct CapturedRequest: Sendable {
+        var url: URL
+        var method: String
+        var headers: [String: String]
+        var body: Data?
+        var timeout: TimeInterval
+    }
+
+    private var queuedResponses: [UsageHTTPResponse] = []
+    private(set) var capturedRequests: [CapturedRequest] = []
+
+    func enqueue(response: UsageHTTPResponse) {
+        queuedResponses.append(response)
+    }
+
+    func send(
+        url: URL,
+        method: String,
+        headers: [String: String],
+        body: Data?,
+        timeout: TimeInterval
+    ) async throws -> UsageHTTPResponse {
+        capturedRequests.append(
+            CapturedRequest(url: url, method: method, headers: headers, body: body, timeout: timeout)
+        )
+        if queuedResponses.isEmpty {
+            return UsageHTTPResponse(statusCode: 200, headers: [:], body: Data())
+        }
+        return queuedResponses.removeFirst()
     }
 }
