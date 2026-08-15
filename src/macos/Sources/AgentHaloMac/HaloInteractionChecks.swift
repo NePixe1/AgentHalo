@@ -3913,6 +3913,23 @@ private func testAgentToggleUsesSharedSVGAssets() {
             || detailsSource?.contains("assetName: \"pi\"") == true,
         "details panel should load the Pi agent icon"
     )
+    expect(detailsSource?.contains("assetName: \"antigravity\"") == true, "details panel loads AG icon")
+
+    let appDelegateSource = (try? String(
+        contentsOf: sourceDirectory.appendingPathComponent("AppDelegate.swift"),
+        encoding: .utf8
+    )) ?? ""
+    expect(appDelegateSource.contains("case .antigravity"), "AppDelegate handles AG focus")
+    expect(
+        appDelegateSource.contains("usageProviderID") &&
+        appDelegateSource.contains("case .antigravity:") &&
+        appDelegateSource.contains("return .antigravity"),
+        "usageProviderID maps antigravity"
+    )
+    let five = AgentToggleView(frame: .zero)
+    five.setEnabledAgents([.codex, .claudeCode, .grok, .pi, .antigravity], focused: .antigravity)
+    five.layoutSubtreeIfNeeded()
+    expect(five.bounds.width, 180, "five enabled agents = 36pt × 5; slot width stays 36")
 
     let buildScript = try? String(contentsOf: buildScriptURL, encoding: .utf8)
     expect(

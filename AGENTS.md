@@ -6,7 +6,7 @@ The entire UI must stay **minimal and refined** : ambient-first, low visual nois
 
 ## Product intent
 
-Agent Halo is a local, always-on-top desktop status ring for coding agents. Windows and macOS support Codex, Claude Code, and Grok Build. Ambient first: readable in peripheral vision; honest lifecycle inference; privacy-first (no session upload). Product framing: [docs/PRODUCT.md](docs/PRODUCT.md).
+Agent Halo is a local, always-on-top desktop status ring for coding agents. Windows and macOS support Codex, Claude Code, Grok Build, and Pi; macOS optionally supports Antigravity (`agy`, default off). Ambient first: readable in peripheral vision; honest lifecycle inference; privacy-first (no session upload). Product framing: [docs/PRODUCT.md](docs/PRODUCT.md).
 
 ## Architecture
 
@@ -61,7 +61,7 @@ User-home `.agent-halo` (shared layout):
 | --- | --- |
 | `bin/` | Staged hook binaries (`status-hook` / `statusline-proxy` on macOS; `status-hook.exe` on Windows) |
 | `state/` | Small durable state (e.g. chained statusline command on macOS) |
-| `logs/` | Recent lifecycle events (`claude-status.jsonl`, `grok-status.jsonl`; rotated) |
+| `logs/` | Recent lifecycle events (`claude-status.jsonl`, `grok-status.jsonl`, `antigravity-status.jsonl`; rotated) |
 | `cache/` | Disposable cache (Claude context snapshots, usage snapshots) |
 
 Platform extras:
@@ -71,6 +71,7 @@ Platform extras:
 - **Windows** Claude hook host: on launch, the current `AgentHalo.exe` is atomically staged as `%USERPROFILE%\.agent-halo\bin\status-hook.exe`; hooks invoke `status-hook.exe --claude-hook <event>` (not a separate download)
 - **macOS** Claude: lifecycle hooks + status line proxy in `~/.claude/settings.json`
 - **macOS** Grok: lifecycle hooks in `~/.grok/hooks/agent-halo-status.json`
+- **macOS** Antigravity: lifecycle hooks named group `agent-halo-status` in `~/.gemini/config/hooks.json`
 
 ## Privacy / network (implementation constraints)
 
