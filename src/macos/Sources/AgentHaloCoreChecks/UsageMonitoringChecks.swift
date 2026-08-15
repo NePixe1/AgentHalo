@@ -52,6 +52,7 @@ func runUsageModelChecks() async {
     await runCodexUsageChecks()
     await runClaudeUsageChecks()
     await runGrokUsageChecks()
+    await runAntigravityUsageChecks()
 }
 
 func testUsageProviderFocusControllerInvalidatesOldAuthorizations() {
