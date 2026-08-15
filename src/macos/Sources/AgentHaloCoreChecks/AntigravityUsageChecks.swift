@@ -9,6 +9,11 @@ func runAntigravityUsageChecks() async {
     testAntigravityMapperRejectsNonSummary()
     testAntigravityMapperHTTPErrors()
     testAntigravityFormatPlan()
+    testAntigravityResolveAccessNeverReturnsAPIKey()
+    try! testAntigravityResolveAccessFromKeychainJSON()
+    try! testAntigravityCachedAccessTokenMissesOnFingerprintMismatch()
+    try! testAntigravityCachedAccessTokenMissesWhenExpiringWithinBuffer()
+    testAntigravityExtractToken()
 }
 
 func testAntigravityMapperKeepsOnlyGeminiWindows() throws {
@@ -116,4 +121,224 @@ func testAntigravityFormatPlan() {
     expect(AntigravityUsageMapper.formatPlan("Google AI Pro"), "Pro", "strip Google AI prefix")
     expect(AntigravityUsageMapper.formatPlan("Gemini Code Assist in Google One AI Ultra"), "Ultra", "keyword")
     expect(AntigravityUsageMapper.formatPlan("   "), nil, "blank")
+}
+
+func testAntigravityResolveAccessNeverReturnsAPIKey() {
+    let tmpHome = antigravityCheckHome()
+    let emptyKeychain = FakeUsageKeychain()
+    let store = AntigravityAuthStore(
+        homeDirectory: tmpHome,
+        keychain: emptyKeychain,
+        files: FakeUsageFiles()
+    )
+    if case .apiKey = store.resolveAccess(lsAvailable: false) {
+        fatalError("must not be apiKey")
+    }
+    if case .oauthNeedsSignIn = store.resolveAccess(lsAvailable: false) {} else {
+        fatalError("expected sign-in")
+    }
+    if case .oauth(let access) = store.resolveAccess(lsAvailable: true) {
+        expect(access.accessToken.isEmpty, true, "LS-only token empty")
+        expect(access.accountKey.digest, AntigravityAuthStore.localLSAccountDigest, "fixed LS digest")
+        expect(
+            access.accountKey.digest,
+            UsageDigest.sha256("antigravity-ls"),
+            "LS digest is SHA-256 of antigravity-ls"
+        )
+        let expectedPath = AgentHaloPaths(homeDirectory: tmpHome).cacheDirectory
+            .appendingPathComponent("antigravity-ls").path
+        if case .file(let path) = access.source {
+            expect(path, expectedPath, "LS-only source is cache/antigravity-ls")
+        } else {
+            fatalError("LS-only source must be file")
+        }
+        expect(access.providerID, .antigravity, "LS-only provider")
+    } else {
+        fatalError("LS-only must be oauth")
+    }
+
+    let throwingStore = AntigravityAuthStore(
+        homeDirectory: tmpHome,
+        keychain: ThrowingUsageKeychain(),
+        files: FakeUsageFiles()
+    )
+    if case .oauthNeedsSignIn = throwingStore.resolveAccess(lsAvailable: false) {} else {
+        fatalError("keychain throw without LS is sign-in")
+    }
+    if case .oauth(let access) = throwingStore.resolveAccess(lsAvailable: true) {
+        expect(access.accessToken.isEmpty, true, "keychain throw with LS is empty oauth")
+        expect(access.accountKey.digest, AntigravityAuthStore.localLSAccountDigest, "throw+LS uses LS digest")
+    } else {
+        fatalError("keychain throw with LS must be oauth")
+    }
+}
+
+func testAntigravityResolveAccessFromKeychainJSON() throws {
+    let tmpHome = antigravityCheckHome()
+    let inner = """
+    {"token":{"access_token":"ya29.test","refresh_token":"1//refresh","expiry":"2099-01-01T00:00:00Z"}}
+    """
+    let wrapped = antigravityCheckGoKeyring(inner)
+
+    let wrappedKeychain = FakeUsageKeychain()
+    try wrappedKeychain.write(
+        service: AntigravityAuthStore.keychainService,
+        account: AntigravityAuthStore.keychainAccount,
+        value: wrapped
+    )
+    let wrappedStore = AntigravityAuthStore(
+        homeDirectory: tmpHome,
+        keychain: wrappedKeychain,
+        files: FakeUsageFiles()
+    )
+    guard case .oauth(let wrappedAccess) = wrappedStore.resolveAccess(lsAvailable: false) else {
+        fatalError("go-keyring keychain JSON must be oauth")
+    }
+    expect(wrappedAccess.accessToken, "ya29.test", "wrapped access")
+    expect(wrappedAccess.refreshToken, "1//refresh", "wrapped refresh")
+    expect(wrappedAccess.providerID, .antigravity, "keychain provider")
+    if case .keychain(let service, let account) = wrappedAccess.source {
+        expect(service, "gemini", "keychain service")
+        expect(account, "antigravity", "keychain account")
+    } else {
+        fatalError("keychain oauth source must be keychain")
+    }
+    expect(wrappedKeychain.contains(service: "gemini", account: "antigravity"), true, "resolve must not drop keychain")
+
+    let rawKeychain = FakeUsageKeychain()
+    try rawKeychain.write(
+        service: AntigravityAuthStore.keychainService,
+        account: AntigravityAuthStore.keychainAccount,
+        value: inner
+    )
+    let rawStore = AntigravityAuthStore(
+        homeDirectory: tmpHome,
+        keychain: rawKeychain,
+        files: FakeUsageFiles()
+    )
+    guard case .oauth(let rawAccess) = rawStore.resolveAccess(lsAvailable: true) else {
+        fatalError("bare keychain JSON must be oauth even when LS is available")
+    }
+    expect(rawAccess.accessToken, "ya29.test", "bare JSON access")
+    expect(rawAccess.refreshToken, "1//refresh", "bare JSON refresh")
+    if case .keychain = rawAccess.source {} else {
+        fatalError("keychain wins over LS-only")
+    }
+}
+
+func testAntigravityCachedAccessTokenMissesOnFingerprintMismatch() throws {
+    let tmpHome = antigravityCheckHome()
+    let now = Date(timeIntervalSince1970: 1_000_000)
+    let files = FakeUsageFiles()
+    let store = AntigravityAuthStore(
+        homeDirectory: tmpHome,
+        keychain: FakeUsageKeychain(),
+        files: files,
+        now: { now }
+    )
+    try store.cacheAccessToken("ya29.cached", expiresIn: 7_200, sourceRefreshToken: "refresh-a")
+
+    let cachePath = antigravityCheckCachePath(home: tmpHome)
+    guard let written = try files.readDataIfPresent(at: cachePath),
+          let text = String(data: written, encoding: .utf8)
+    else {
+        fatalError("cacheAccessToken must write antigravity-auth.json")
+    }
+    expect(text.contains("refresh-a"), false, "cache must not store raw refresh token")
+    expect(text.contains("ya29.cached"), true, "cache stores access token")
+    expect(text.contains(UsageDigest.sha256("refresh-a")), true, "cache stores hex fingerprint")
+
+    let matching = AntigravityKeychainToken(accessToken: nil, refreshToken: "refresh-a", expiry: nil)
+    expect(store.loadCachedAccessToken(matching: matching), "ya29.cached", "matching fingerprint hits")
+
+    let other = AntigravityKeychainToken(accessToken: nil, refreshToken: "refresh-b", expiry: nil)
+    expect(store.loadCachedAccessToken(matching: other) == nil, true, "fingerprint mismatch is a miss")
+}
+
+func testAntigravityCachedAccessTokenMissesWhenExpiringWithinBuffer() throws {
+    let tmpHome = antigravityCheckHome()
+    let now = Date(timeIntervalSince1970: 1_000_000)
+    let cachePath = antigravityCheckCachePath(home: tmpHome)
+    let fingerprint = UsageDigest.sha256("refresh")
+    let soonMs = (now.timeIntervalSince1970 + 30) * 1_000
+    let soonJSON = """
+    {"accessToken":"ya29.soon","expiresAtMs":\(soonMs),"credentialFingerprint":"\(fingerprint)"}
+    """
+    let files = FakeUsageFiles(contents: [cachePath: Data(soonJSON.utf8)])
+    let store = AntigravityAuthStore(
+        homeDirectory: tmpHome,
+        keychain: FakeUsageKeychain(),
+        files: files,
+        now: { now }
+    )
+    let source = AntigravityKeychainToken(accessToken: nil, refreshToken: "refresh", expiry: nil)
+    expect(store.loadCachedAccessToken(matching: source) == nil, true, "expires within 60s is a miss")
+
+    try store.cacheAccessToken("ya29.far", expiresIn: 7_200, sourceRefreshToken: "refresh")
+    expect(store.loadCachedAccessToken(matching: source), "ya29.far", "far expiry hits")
+
+    let boundaryMs = (now.timeIntervalSince1970 + AntigravityAuthStore.refreshBuffer) * 1_000
+    let boundaryJSON = """
+    {"accessToken":"ya29.edge","expiresAtMs":\(boundaryMs),"credentialFingerprint":"\(fingerprint)"}
+    """
+    try files.writeAtomically(Data(boundaryJSON.utf8), to: cachePath, preservingModeOf: nil)
+    expect(
+        store.loadCachedAccessToken(matching: source) == nil,
+        true,
+        "exactly 60s remaining is a miss"
+    )
+}
+
+func testAntigravityExtractToken() {
+    let nested = #"{"token":{"access_token":"ya29.nested","refresh_token":"1//r"}}"#
+    let nestedToken = AntigravityAuthStore.extractToken(fromKeychainRaw: nested)
+    expect(nestedToken?.accessToken, "ya29.nested", "nested token.access_token")
+    expect(nestedToken?.refreshToken, "1//r", "nested refresh")
+
+    let bearer = AntigravityAuthStore.extractToken(fromKeychainRaw: "Bearer xyz")
+    expect(bearer?.accessToken, "xyz", "Bearer prefix")
+    expect(bearer?.refreshToken == nil, true, "Bearer has no refresh")
+
+    expect(
+        AntigravityAuthStore.extractToken(fromKeychainRaw: "{not-json") == nil,
+        true,
+        "bad JSON returns nil"
+    )
+    expect(
+        AntigravityAuthStore.extractToken(fromKeychainRaw: "[") == nil,
+        true,
+        "broken array JSON returns nil"
+    )
+
+    let wrapped = antigravityCheckGoKeyring(nested)
+    let wrappedToken = AntigravityAuthStore.extractToken(fromKeychainRaw: wrapped)
+    expect(wrappedToken?.accessToken, "ya29.nested", "go-keyring unwrap then nested token")
+    expect(wrappedToken?.refreshToken, "1//r", "go-keyring nested refresh")
+}
+
+private func antigravityCheckHome() -> URL {
+    URL(fileURLWithPath: "/tmp/agent-halo-ag-auth-\(UUID().uuidString)", isDirectory: true)
+}
+
+private func antigravityCheckCachePath(home: URL) -> String {
+    AgentHaloPaths(homeDirectory: home).cacheDirectory
+        .appendingPathComponent("antigravity-auth.json").path
+}
+
+private func antigravityCheckGoKeyring(_ json: String) -> String {
+    "go-keyring-base64:" + Data(json.utf8).base64EncodedString()
+}
+
+private struct ThrowingUsageKeychain: UsageKeychainAccessing {
+    func read(service: String, account: String?) throws -> String? {
+        throw NSError(domain: "AntigravityAuthCheck", code: 1)
+    }
+
+    func readFirstMatching(service: String) throws -> UsageKeychainItem? {
+        throw NSError(domain: "AntigravityAuthCheck", code: 1)
+    }
+
+    func write(service: String, account: String?, value: String) throws {
+        fatalError("AntigravityAuthStore must never write the keychain")
+    }
 }
