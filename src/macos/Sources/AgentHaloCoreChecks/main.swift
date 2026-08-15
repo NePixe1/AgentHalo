@@ -3393,6 +3393,142 @@ func testClaudeHookReducerStopFailureMapsToError() {
     expect(reducer.snapshot.active, false, "StopFailure should deactivate")
 }
 
+func testAntigravityReducerLifecycle() {
+    let now = Date(timeIntervalSince1970: 1_000)
+    var reducer = AntigravityHookStatusReducer(threadId: "t1", now: now)
+    expect(reducer.snapshot.projectName, "Antigravity", "default projectName")
+    expect(reducer.snapshot.agent, .antigravity, "agent stamp")
+    reducer.consume(jsonLine: line(event: "PreInvocation", ts: now, cwd: "/tmp/my-repo"), now: now)
+    expect(reducer.snapshot.state, .thinking, "pre invocation")
+    expect(reducer.snapshot.projectName, "my-repo", "cwd last path component")
+    reducer.consume(jsonLine: line(event: "PostInvocation", ts: now.addingTimeInterval(1)), now: now.addingTimeInterval(1))
+    expect(reducer.snapshot.state, .thinking, "post invocation is not done")
+    reducer.consume(jsonLine: line(event: "PreToolUse", tool: "run_command", ts: now.addingTimeInterval(2)), now: now.addingTimeInterval(2))
+    expect(reducer.snapshot.state, .working, "pre tool")
+    reducer.consume(jsonLine: line(event: "PostToolUse", ts: now.addingTimeInterval(3)), now: now.addingTimeInterval(3))
+    expect(reducer.snapshot.state, .working, "reviewing")
+    reducer.applyWorkingVisibility(now: now.addingTimeInterval(3.7))
+    expect(reducer.snapshot.state, .thinking, "fade after 0.65s")
+    reducer.consume(jsonLine: line(event: "Stop", ts: now.addingTimeInterval(5)), now: now.addingTimeInterval(5))
+    expect(reducer.snapshot.state, .done, "stop")
+    expect(reducer.snapshot.agent, .antigravity, "agent stamp")
+}
+
+func testAntigravityReducerIgnoresBadLineAndUnknownEvent() {
+    let now = Date(timeIntervalSince1970: 1_000)
+    var reducer = AntigravityHookStatusReducer(threadId: "t1", now: now)
+    reducer.consume(jsonLine: #"{"event":"PreInvocation","timestamp":"1970-01-01T00:16:40Z","sessionId":"t1"}"#, now: now)
+    let before = reducer.snapshot
+    reducer.consume(jsonLine: "not-json", now: now.addingTimeInterval(1))
+    expect(reducer.snapshot.state, before.state, "bad line keeps state")
+    reducer.consume(
+        jsonLine: #"{"event":"TotallyUnknown","timestamp":"1970-01-01T00:16:42Z","sessionId":"t1"}"#,
+        now: now.addingTimeInterval(2)
+    )
+    expect(reducer.snapshot.state, .thinking, "unknown event does not change state")
+    expect(reducer.snapshot.lastEventAt != before.lastEventAt, true, "unknown event updates lastEventAt")
+}
+
+func testAntigravityReducerStopFailureAndToolFailureSemantics() {
+    let now = Date(timeIntervalSince1970: 1_000)
+    var toolFail = AntigravityHookStatusReducer(threadId: "t1", now: now)
+    toolFail.consume(jsonLine: line(event: "PreInvocation", ts: now), now: now)
+    toolFail.consume(jsonLine: line(event: "PreToolUse", tool: "run_command", ts: now.addingTimeInterval(2)), now: now.addingTimeInterval(2))
+    toolFail.consume(jsonLine: line(event: "PostToolUse", ts: now.addingTimeInterval(3), errorText: "exit 1"), now: now.addingTimeInterval(3))
+    expect(toolFail.snapshot.state, .working, "single tool failure stays working")
+    expect(toolFail.snapshot.action, "Tool failed", "tool failure action")
+    expect(toolFail.snapshot.active, true, "single tool failure stays active")
+    toolFail.applyWorkingVisibility(now: now.addingTimeInterval(3.7))
+    expect(toolFail.snapshot.state, .thinking, "tool failure fades to thinking")
+
+    var fatalStop = AntigravityHookStatusReducer(threadId: "t1", now: now)
+    fatalStop.consume(jsonLine: line(event: "PreInvocation", ts: now), now: now)
+    fatalStop.consume(jsonLine: line(event: "Stop", ts: now.addingTimeInterval(5), fatal: true), now: now.addingTimeInterval(5))
+    expect(fatalStop.snapshot.state, .error, "fatal stop is whole-turn error")
+    expect(fatalStop.snapshot.active, false, "fatal stop deactivates")
+    expect(fatalStop.snapshot.completedAt == nil, true, "fatal stop has no completedAt")
+
+    var errorStop = AntigravityHookStatusReducer(threadId: "t1", now: now)
+    errorStop.consume(jsonLine: line(event: "PreInvocation", ts: now), now: now)
+    errorStop.consume(jsonLine: line(event: "Stop", ts: now.addingTimeInterval(5), errorText: "boom"), now: now.addingTimeInterval(5))
+    expect(errorStop.snapshot.state, .error, "stop errorText is whole-turn error")
+    expect(errorStop.snapshot.active, false, "stop errorText deactivates")
+}
+
+func testAntigravityReducerIdentityPostInvocationHoldAndNoAttention() {
+    let now = Date(timeIntervalSince1970: 1_000)
+    var reducer = AntigravityHookStatusReducer(threadId: "t1", now: now)
+    expect(reducer.snapshot.sessionTitle == nil, true, "title starts empty")
+    expect(reducer.snapshot.modelName == nil, true, "model starts empty")
+    reducer.consume(
+        jsonLine: line(event: "PreInvocation", ts: now, cwd: "/tmp/my-repo", sessionTitle: "Wire AG", modelName: "gemini-3"),
+        now: now
+    )
+    expect(reducer.snapshot.sessionTitle, "Wire AG", "title filled when present")
+    expect(reducer.snapshot.modelName, "gemini-3", "model filled when present")
+    reducer.consume(jsonLine: line(event: "PreInvocation", ts: now.addingTimeInterval(0.5)), now: now.addingTimeInterval(0.5))
+    expect(reducer.snapshot.sessionTitle, "Wire AG", "missing title does not clear")
+    expect(reducer.snapshot.modelName, "gemini-3", "missing model does not clear")
+
+    reducer.consume(jsonLine: line(event: "PreToolUse", tool: "run_command", ts: now.addingTimeInterval(2)), now: now.addingTimeInterval(2))
+    reducer.consume(jsonLine: line(event: "PostToolUse", ts: now.addingTimeInterval(3)), now: now.addingTimeInterval(3))
+    reducer.consume(jsonLine: line(event: "PostInvocation", ts: now.addingTimeInterval(3.2)), now: now.addingTimeInterval(3.2))
+    expect(reducer.snapshot.state, .working, "post invocation keeps working hold")
+    reducer.applyWorkingVisibility(now: now.addingTimeInterval(3.7))
+    expect(reducer.snapshot.state, .thinking, "working hold still fades at 0.65s")
+    reducer.consume(jsonLine: line(event: "PostInvocation", ts: now.addingTimeInterval(4)), now: now.addingTimeInterval(4))
+    expect(reducer.snapshot.state, .thinking, "post invocation after hold is thinking")
+
+    reducer.consume(
+        jsonLine: #"{"event":"Notification","notificationType":"permission_prompt","timestamp":"1970-01-01T00:16:45Z","sessionId":"t1"}"#,
+        now: now.addingTimeInterval(5)
+    )
+    expect(reducer.snapshot.state, .thinking, "permission notification is ignored")
+    expect(reducer.snapshot.state != .attention, true, "must not draw attention")
+}
+
+func testAntigravityReducerStuckPreToolUseRecoversAfterSafetyTimeout() {
+    let now = Date(timeIntervalSince1970: 1_000)
+    var reducer = AntigravityHookStatusReducer(threadId: "t1", now: now)
+    reducer.consume(jsonLine: line(event: "PreInvocation", ts: now), now: now)
+    reducer.consume(jsonLine: line(event: "PreToolUse", tool: "run_command", ts: now.addingTimeInterval(2)), now: now.addingTimeInterval(2))
+    expect(reducer.snapshot.state, .working, "pre tool working")
+    reducer.applyWorkingVisibility(now: now.addingTimeInterval(2 + 179))
+    expect(reducer.snapshot.state, .working, "still working before 180s")
+    reducer.applyWorkingVisibility(now: now.addingTimeInterval(2 + 181))
+    expect(reducer.snapshot.state, .thinking, "stuck tool fades after 180s")
+}
+
+private func line(
+    event: String,
+    tool: String? = nil,
+    ts: Date,
+    cwd: String? = nil,
+    sessionId: String = "t1",
+    errorText: String? = nil,
+    fatal: Bool? = nil,
+    sessionTitle: String? = nil,
+    modelName: String? = nil
+) -> String {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime]
+    formatter.timeZone = TimeZone(secondsFromGMT: 0)
+    var obj: [String: Any] = [
+        "event": event,
+        "timestamp": formatter.string(from: ts),
+        "sessionId": sessionId,
+        "source": "antigravity-hook",
+    ]
+    if let cwd { obj["cwd"] = cwd }
+    if let tool { obj["toolName"] = tool }
+    if let errorText { obj["errorText"] = errorText }
+    if let fatal { obj["fatal"] = fatal }
+    if let sessionTitle { obj["sessionTitle"] = sessionTitle }
+    if let modelName { obj["modelName"] = modelName }
+    let data = try! JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])
+    return String(data: data, encoding: .utf8)!
+}
+
 func testGrokHookReducerLifecycle() {
     var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
     r.consume(jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p/AgentHalo","permissionMode":"auto","source":"grok-hook"}"#, now: Date(timeIntervalSince1970: 1))
@@ -5431,6 +5567,11 @@ testClaudeHookReducerPermissionPromptHoldsUntilResolved()
 testClaudeHookReducerIdlePromptReturnsToReady()
 testClaudeHookIdlePromptDoesNotDriveThinkingAggregate()
 testClaudeHookReducerStopFailureMapsToError()
+testAntigravityReducerLifecycle()
+testAntigravityReducerIgnoresBadLineAndUnknownEvent()
+testAntigravityReducerStopFailureAndToolFailureSemantics()
+testAntigravityReducerIdentityPostInvocationHoldAndNoAttention()
+testAntigravityReducerStuckPreToolUseRecoversAfterSafetyTimeout()
 testGrokHookReducerLifecycle()
 testGrokHookReducerPermissionPromptWhileThinkingIsAttention()
 testGrokHookReducerAutoModeShellPermissionNeverAttention()
