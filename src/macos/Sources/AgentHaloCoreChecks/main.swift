@@ -3034,6 +3034,56 @@ func testAggregatorFiltersClaudeAndGrokByFocusedAgent() {
     expect(claudeAggregate.detail, "ClaudeProject - Running command", "Claude focus detail should stay Claude-only")
 }
 
+func testAggregatorFiltersByAntigravityFocusedAgent() {
+    let now = Date(timeIntervalSince1970: 2_000)
+    let grokWorking = SessionSnapshot(
+        threadId: "grok-working",
+        projectName: "GrokProject",
+        workingDirectory: "",
+        state: .working,
+        action: "Running command",
+        lastEventAt: now,
+        completedAt: nil,
+        active: true,
+        agent: .grok
+    )
+    let agWorking = SessionSnapshot(
+        threadId: "ag-working",
+        projectName: "AGProject",
+        workingDirectory: "",
+        state: .working,
+        action: "Thinking",
+        lastEventAt: now.addingTimeInterval(1),
+        completedAt: nil,
+        active: true,
+        agent: .antigravity
+    )
+    let settings = HaloSettings(
+        paused: false,
+        installedAt: now.addingTimeInterval(-60),
+        acknowledged: [:]
+    )
+
+    let agAggregate = SessionAggregator.aggregate(
+        snapshots: [grokWorking, agWorking],
+        settings: settings,
+        focusedAgent: .antigravity,
+        now: now.addingTimeInterval(2)
+    )
+    expect(agAggregate.focusedAgent, .antigravity, "AG aggregate should stamp focus")
+    expect(agAggregate.state, .working, "AG focus should use AG working state")
+    expect(agAggregate.sessions.map(\.threadId), ["ag-working"], "AG focus should only keep AG sessions")
+    expect(agAggregate.detail, "AGProject - Thinking", "AG focus detail")
+
+    let grokAggregate = SessionAggregator.aggregate(
+        snapshots: [grokWorking, agWorking],
+        settings: settings,
+        focusedAgent: .grok,
+        now: now.addingTimeInterval(2)
+    )
+    expect(grokAggregate.sessions.map(\.threadId), ["grok-working"], "Grok focus should not include AG sessions")
+}
+
 func testAggregatorIdleDetailUsesFocusedAgent() {
     let now = ISO8601DateFormatter().date(from: "2026-06-13T02:00:00Z")!
 
@@ -3527,6 +3577,28 @@ private func line(
     if let modelName { obj["modelName"] = modelName }
     let data = try! JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])
     return String(data: data, encoding: .utf8)!
+}
+
+func testAntigravityHookStatusMonitorMapsLifecycleAndSkipsBadLines() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-ag-hook-monitor-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let statusFile = root.appendingPathComponent("antigravity-status.jsonl")
+    let now = Date(timeIntervalSince1970: 1_000)
+    let pre = line(event: "PreInvocation", ts: now, cwd: "/tmp/my-repo", sessionId: "s1")
+    let stop = line(event: "Stop", ts: now.addingTimeInterval(5), sessionId: "s1")
+    try Data("\(pre)\nnot-json\n\(stop)\n".utf8).write(to: statusFile)
+
+    let monitor = AntigravityHookStatusMonitor(statusURL: statusFile)
+    _ = monitor.refresh(now: now.addingTimeInterval(5))
+    let snapshots = monitor.snapshots()
+    expect(snapshots.count, 1, "one session after pre+stop")
+    expect(snapshots[0].agent, .antigravity, "agent stamp")
+    expect(snapshots[0].state, .done, "final state is done")
+    expect(snapshots[0].threadId, "s1", "session id")
 }
 
 func testGrokHookReducerLifecycle() {
@@ -5551,6 +5623,7 @@ testCodexRealtimeActivityReaderDetectsRequestUserInput()
 testAggregatorInjectsUnacknowledgedCodexFailureWhenIdle()
 testAggregatorFiltersByFocusedAgent()
 testAggregatorFiltersClaudeAndGrokByFocusedAgent()
+testAggregatorFiltersByAntigravityFocusedAgent()
 testAggregatorIdleDetailUsesFocusedAgent()
 testAggregatorDoesNotInjectCodexFailureForClaudeFocus()
 testClaudeReducerDoesNotCompleteWithoutExplicitCompletionEvent()
@@ -5572,6 +5645,11 @@ testAntigravityReducerIgnoresBadLineAndUnknownEvent()
 testAntigravityReducerStopFailureAndToolFailureSemantics()
 testAntigravityReducerIdentityPostInvocationHoldAndNoAttention()
 testAntigravityReducerStuckPreToolUseRecoversAfterSafetyTimeout()
+do {
+    try testAntigravityHookStatusMonitorMapsLifecycleAndSkipsBadLines()
+} catch {
+    fatalError("\(error)")
+}
 testGrokHookReducerLifecycle()
 testGrokHookReducerPermissionPromptWhileThinkingIsAttention()
 testGrokHookReducerAutoModeShellPermissionNeverAttention()
