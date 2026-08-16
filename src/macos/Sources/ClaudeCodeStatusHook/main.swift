@@ -225,18 +225,18 @@ let timestamp = firstString(
 let source = isGrok ? "grok-hook" : isAntigravity ? "antigravity-hook" : "claude-hook"
 
 
-var record: [String: Any?] = [
+var record: [String: Any] = [
     "timestamp": timestamp,
     "event": eventName,
     "sessionId": sessionId,
     "cwd": cwd,
-    "toolName": toolName.isEmpty ? nil : toolName,
-    "notificationType": notificationType.isEmpty ? nil : notificationType,
-    "errorText": errorText.isEmpty ? nil : errorText,
-    "fatal": fatal ? true : nil,
-    "permissionMode": permissionMode.isEmpty ? nil : permissionMode,
     "source": source,
 ]
+if !toolName.isEmpty { record["toolName"] = toolName }
+if !notificationType.isEmpty { record["notificationType"] = notificationType }
+if !errorText.isEmpty { record["errorText"] = errorText }
+if fatal { record["fatal"] = true }
+if !permissionMode.isEmpty { record["permissionMode"] = permissionMode }
 
 let recordData = try! JSONSerialization.data(
     withJSONObject: record,

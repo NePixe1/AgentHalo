@@ -3503,6 +3503,19 @@ func testAntigravityReducerStopFailureAndToolFailureSemantics() {
     errorStop.consume(jsonLine: line(event: "Stop", ts: now.addingTimeInterval(5), errorText: "boom"), now: now.addingTimeInterval(5))
     expect(errorStop.snapshot.state, .error, "stop errorText is whole-turn error")
     expect(errorStop.snapshot.active, false, "stop errorText deactivates")
+
+    // Live hook JSONL writes `"errorText":null` / `"fatal":null` on successful
+    // Stop. NSNull must not be treated as a failure string.
+    var nullStop = AntigravityHookStatusReducer(threadId: "t1", now: now)
+    nullStop.consume(jsonLine: line(event: "PreInvocation", ts: now), now: now)
+    nullStop.consume(
+        jsonLine: #"{"cwd":"/Users/wjs/.gemini/config","errorText":null,"event":"Stop","fatal":null,"notificationType":null,"permissionMode":null,"sessionId":"t1","source":"antigravity-hook","timestamp":"2026-08-16T05:24:03.883Z","toolName":null}"#,
+        now: now.addingTimeInterval(5)
+    )
+    expect(nullStop.snapshot.state, .done, "Stop with JSON null errorText is success")
+    expect(nullStop.snapshot.action, "Complete", "successful Stop action")
+    expect(nullStop.snapshot.active, false, "successful Stop deactivates")
+    expect(nullStop.snapshot.completedAt != nil, true, "successful Stop has completedAt")
 }
 
 func testAntigravityReducerIdentityPostInvocationHoldAndPermission() {
@@ -4554,6 +4567,8 @@ func testClaudeCodeStatusHookIsolatesAntigravityStatusFiles() throws {
     expect(agText.contains("antigravity-hook"), "AG record source should be antigravity-hook")
     expect(agText.contains("\"PreInvocation\""), "snake_case pre_invocation should normalize to PreInvocation")
     expect(agText.contains("traj-ag-1"), "AG sessionId should come from ANTIGRAVITY_TRAJECTORY_ID")
+    expect(!agText.contains("errorText"), "successful AG hook must omit empty errorText")
+    expect(!agText.contains("\"fatal\""), "successful AG hook must omit false fatal")
     if FileManager.default.fileExists(atPath: claudeStatus.path) {
         let existingClaude = try String(contentsOf: claudeStatus, encoding: .utf8)
         expect(!existingClaude.contains("traj-ag-1"), "AG session id must not appear in logs/claude-status.jsonl")

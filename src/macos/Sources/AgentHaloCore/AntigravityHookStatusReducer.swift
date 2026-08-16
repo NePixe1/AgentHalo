@@ -370,9 +370,15 @@ public struct AntigravityHookStatusReducer: Sendable {
     }
 
     private static func string(_ value: Any?) -> String {
-        if let value {
-            return String(describing: value)
+        guard let value, !(value is NSNull) else {
+            return ""
         }
-        return ""
+        if let value = value as? String {
+            return value
+        }
+        if let value = value as? NSNumber {
+            return value.stringValue
+        }
+        return String(describing: value)
     }
 }
