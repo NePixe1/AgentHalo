@@ -1933,6 +1933,33 @@ public static class Diagnostics
                     ClaudeHookStatusWriter.NormalizeEventName("PreToolUse"),
                     "PreToolUse", StringComparison.Ordinal),
                     "NormalizeEventName keeps PascalCase");
+                Assert(String.Equals(
+                    ClaudeHookStatusWriter.NormalizeEventName("stop_cancelled"),
+                    "StopCancelled", StringComparison.Ordinal),
+                    "NormalizeEventName stop_cancelled");
+                int grokCancelCode = ClaudeHookStatusWriter.WriteForTest(
+                    eventName: "stop_cancelled",
+                    home: hookIsoHome,
+                    grokSessionId: "test-grok-session",
+                    grokHookEvent: "stop_cancelled",
+                    stdinJson: "{\"sessionId\":\"test-grok-session\",\"cwd\":\"/tmp/proj\"," +
+                        "\"hookEventName\":\"StopCancelled\"," +
+                        "\"reason\":\"user_interrupt\",\"cancelledBy\":\"user\"," +
+                        "\"cancelTrigger\":\"esc\",\"promptId\":\"p-esc\"}");
+                Assert(grokCancelCode == 0, "grok StopCancelled writer exit 0");
+                string grokCancelText = File.ReadAllText(grokStatusPath);
+                Assert(grokCancelText.IndexOf("\"StopCancelled\"",
+                    StringComparison.Ordinal) >= 0,
+                    "stop_cancelled normalizes to StopCancelled");
+                Assert(grokCancelText.IndexOf("\"reason\":\"user_interrupt\"",
+                    StringComparison.Ordinal) >= 0,
+                    "hook should persist StopCancelled reason");
+                Assert(grokCancelText.IndexOf("\"promptId\":\"p-esc\"",
+                    StringComparison.Ordinal) >= 0,
+                    "hook should persist promptId");
+                Assert(grokCancelText.IndexOf("\"cancelledBy\":\"user\"",
+                    StringComparison.Ordinal) >= 0,
+                    "hook should persist cancelledBy");
                 try
                 {
                     Directory.Delete(hookIsoHome, true);
@@ -1956,6 +1983,10 @@ public static class Diagnostics
                     "command uses --claude-hook");
                 Assert(hooksJson.IndexOf("UserPromptSubmit", StringComparison.Ordinal) >= 0,
                     "registers UserPromptSubmit");
+                Assert(hooksJson.IndexOf("StopCancelled", StringComparison.Ordinal) >= 0,
+                    "registers StopCancelled");
+                Assert(hooksJson.IndexOf("PermissionDenied", StringComparison.Ordinal) >= 0,
+                    "registers PermissionDenied");
                 // Idempotent: second call does not throw; content still valid
                 GrokHookConfigurator.Configure(home, fakeExe);
                 Assert(File.Exists(hooksPath) &&
@@ -2140,6 +2171,204 @@ public static class Diagnostics
                 idleCancel.ApplyTurnCancelled(t0.AddSeconds(15));
                 Assert(idleCancel.Snapshot.State == HaloState.Idle,
                     "cancel on idle Ready is a no-op");
+
+                GrokHookStatusReducer hookCancel =
+                    new GrokHookStatusReducer("stop-cancelled");
+                hookCancel.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:10Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"stop-cancelled\",\"cwd\":\"/p\",\"promptId\":\"p1\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(10));
+                hookCancel.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:12Z\",\"event\":\"PreToolUse\",\"sessionId\":\"stop-cancelled\",\"cwd\":\"/p\",\"toolName\":\"read_file\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(12));
+                hookCancel.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:13Z\",\"event\":\"StopCancelled\",\"sessionId\":\"stop-cancelled\",\"reason\":\"user_interrupt\",\"promptId\":\"p1\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(13));
+                Assert(hookCancel.Snapshot.State == HaloState.Error,
+                    "StopCancelled user_interrupt -> error");
+                Assert(String.Equals(hookCancel.Snapshot.Action, "Interrupted",
+                    StringComparison.Ordinal),
+                    "StopCancelled user_interrupt action");
+                Assert(!hookCancel.Snapshot.Active,
+                    "StopCancelled user_interrupt clears active");
+
+                GrokHookStatusReducer rejected =
+                    new GrokHookStatusReducer("perm-reject");
+                rejected.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:10Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"perm-reject\",\"cwd\":\"/p\",\"promptId\":\"p1\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(10));
+                rejected.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:13Z\",\"event\":\"StopCancelled\",\"sessionId\":\"perm-reject\",\"reason\":\"permission_rejected\",\"promptId\":\"p1\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(13));
+                Assert(rejected.Snapshot.State == HaloState.Error,
+                    "StopCancelled permission_rejected -> error");
+                Assert(String.Equals(rejected.Snapshot.Action, "Permission denied",
+                    StringComparison.Ordinal),
+                    "StopCancelled permission_rejected action");
+
+                GrokHookStatusReducer dismissed =
+                    new GrokHookStatusReducer("perm-dismiss");
+                dismissed.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:10Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"perm-dismiss\",\"cwd\":\"/p\",\"promptId\":\"p1\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(10));
+                dismissed.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:13Z\",\"event\":\"StopCancelled\",\"sessionId\":\"perm-dismiss\",\"reason\":\"permission_cancelled\",\"promptId\":\"p1\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(13));
+                Assert(dismissed.Snapshot.State == HaloState.Idle,
+                    "StopCancelled permission_cancelled -> idle");
+                Assert(String.Equals(dismissed.Snapshot.Action, "Ready",
+                    StringComparison.Ordinal),
+                    "StopCancelled permission_cancelled action");
+
+                GrokHookStatusReducer maxTurns =
+                    new GrokHookStatusReducer("max-turns");
+                maxTurns.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:10Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"max-turns\",\"cwd\":\"/p\",\"promptId\":\"p1\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(10));
+                maxTurns.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:13Z\",\"event\":\"StopCancelled\",\"sessionId\":\"max-turns\",\"reason\":\"max_turns\",\"promptId\":\"p1\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(13));
+                Assert(maxTurns.Snapshot.State == HaloState.Error,
+                    "StopCancelled max_turns -> error");
+                Assert(String.Equals(maxTurns.Snapshot.Action,
+                    "Grok stopped with an error", StringComparison.Ordinal),
+                    "StopCancelled max_turns action");
+
+                GrokHookStatusReducer stalePrompt =
+                    new GrokHookStatusReducer("stale-prompt");
+                stalePrompt.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:09Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"stale-prompt\",\"cwd\":\"/p\",\"promptId\":\"p1\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(9));
+                stalePrompt.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:10Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"stale-prompt\",\"cwd\":\"/p\",\"promptId\":\"p2\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(10));
+                DateTime promptAt = stalePrompt.Snapshot.LastEventUtc;
+                stalePrompt.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:13Z\",\"event\":\"StopCancelled\",\"sessionId\":\"stale-prompt\",\"reason\":\"user_interrupt\",\"promptId\":\"p1\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(13));
+                Assert(stalePrompt.Snapshot.State == HaloState.Thinking,
+                    "stale StopCancelled promptId keeps thinking");
+                Assert(stalePrompt.Snapshot.Active,
+                    "stale StopCancelled leaves the new turn active");
+                Assert(stalePrompt.Snapshot.LastEventUtc == promptAt,
+                    "ignored StopCancelled does not advance lastEventUtc");
+                stalePrompt.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:14Z\",\"event\":\"StopCancelled\",\"sessionId\":\"stale-prompt\",\"reason\":\"max_turns\",\"promptId\":\"p2\",\"subagentType\":\"explore\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(14));
+                Assert(stalePrompt.Snapshot.State == HaloState.Thinking,
+                    "subagent StopCancelled does not drive the session ring");
+
+                GrokHookStatusReducer activityPrompt =
+                    new GrokHookStatusReducer("activity-prompt");
+                activityPrompt.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:10Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"activity-prompt\",\"cwd\":\"/p\",\"promptId\":\"p1\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(10));
+                activityPrompt.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:11Z\",\"event\":\"Stop\",\"sessionId\":\"activity-prompt\",\"cwd\":\"/p\",\"promptId\":\"p1\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(11));
+                activityPrompt.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:12Z\",\"event\":\"PreToolUse\",\"sessionId\":\"activity-prompt\",\"cwd\":\"/p\",\"toolName\":\"run_terminal_command\",\"promptId\":\"p2\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(12));
+                Assert(activityPrompt.Snapshot.State == HaloState.Working,
+                    "activity without UserPromptSubmit starts the new turn");
+                Assert(activityPrompt.Snapshot.Active,
+                    "activity-only turn is active");
+                DateTime activityAt = activityPrompt.Snapshot.LastEventUtc;
+                activityPrompt.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:13Z\",\"event\":\"StopCancelled\",\"sessionId\":\"activity-prompt\",\"reason\":\"user_interrupt\",\"promptId\":\"p1\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(13));
+                Assert(activityPrompt.Snapshot.State == HaloState.Working,
+                    "old cancel must not overwrite the activity-only turn");
+                Assert(activityPrompt.Snapshot.Active,
+                    "old cancel leaves the activity-only turn active");
+                Assert(activityPrompt.Snapshot.LastEventUtc == activityAt,
+                    "ignored old cancel does not advance lastEventUtc");
+                activityPrompt.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:14Z\",\"event\":\"StopCancelled\",\"sessionId\":\"activity-prompt\",\"reason\":\"user_interrupt\",\"promptId\":\"p2\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(14));
+                Assert(activityPrompt.Snapshot.State == HaloState.Error,
+                    "matching activity promptId settles the turn");
+                Assert(!activityPrompt.Snapshot.Active,
+                    "activity-only cancel clears active");
+
+                GrokHookStatusReducer unseenPrompt =
+                    new GrokHookStatusReducer("unseen-prompt");
+                unseenPrompt.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:10Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"unseen-prompt\",\"cwd\":\"/p\",\"promptId\":\"p1\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(10));
+                unseenPrompt.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:11Z\",\"event\":\"Stop\",\"sessionId\":\"unseen-prompt\",\"cwd\":\"/p\",\"promptId\":\"p1\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(11));
+                unseenPrompt.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:12Z\",\"event\":\"StopCancelled\",\"sessionId\":\"unseen-prompt\",\"reason\":\"user_interrupt\",\"promptId\":\"p2\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(12));
+                Assert(unseenPrompt.Snapshot.State == HaloState.Error,
+                    "unseen promptId without activity still settles");
+                Assert(String.Equals(unseenPrompt.Snapshot.Action, "Interrupted",
+                    StringComparison.Ordinal),
+                    "unseen promptId cancel action");
+                DateTime unseenCancelAt = unseenPrompt.Snapshot.LastEventUtc;
+                unseenPrompt.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:13Z\",\"event\":\"StopCancelled\",\"sessionId\":\"unseen-prompt\",\"reason\":\"permission_cancelled\",\"promptId\":\"p1\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(13));
+                Assert(unseenPrompt.Snapshot.State == HaloState.Error,
+                    "known older prompt remains stale after unseen turn");
+                Assert(unseenPrompt.Snapshot.LastEventUtc == unseenCancelAt,
+                    "known older cancel stays ignored");
+
+                GrokHookStatusReducer refineDismiss =
+                    new GrokHookStatusReducer("refine-dismiss");
+                refineDismiss.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:10Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"refine-dismiss\",\"cwd\":\"/p\",\"promptId\":\"p1\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(10));
+                refineDismiss.ApplyTurnCancelled(t0.AddSeconds(12));
+                Assert(refineDismiss.Snapshot.State == HaloState.Error,
+                    "precondition: events.jsonl cancel painted error");
+                refineDismiss.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:13Z\",\"event\":\"StopCancelled\",\"sessionId\":\"refine-dismiss\",\"reason\":\"permission_cancelled\",\"promptId\":\"p1\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(13));
+                Assert(refineDismiss.Snapshot.State == HaloState.Idle,
+                    "permission_cancelled refines events.jsonl error");
+                Assert(String.Equals(refineDismiss.Snapshot.Action, "Ready",
+                    StringComparison.Ordinal),
+                    "permission_cancelled action after refine");
+
+                GrokHookStatusReducer refineStop =
+                    new GrokHookStatusReducer("refine-stop");
+                refineStop.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:10Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"refine-stop\",\"cwd\":\"/p\",\"promptId\":\"p1\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(10));
+                refineStop.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:12Z\",\"event\":\"Stop\",\"sessionId\":\"refine-stop\",\"promptId\":\"p1\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(12));
+                Assert(refineStop.Snapshot.State == HaloState.Done,
+                    "precondition: Stop painted Complete");
+                refineStop.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:13Z\",\"event\":\"StopCancelled\",\"sessionId\":\"refine-stop\",\"reason\":\"user_interrupt\",\"promptId\":\"p1\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(13));
+                Assert(refineStop.Snapshot.State == HaloState.Error,
+                    "StopCancelled after Stop gate interrupt is error");
+                Assert(String.Equals(refineStop.Snapshot.Action, "Interrupted",
+                    StringComparison.Ordinal),
+                    "Stop-then-cancel action");
+
+                GrokHookStatusReducer nestedDeny =
+                    new GrokHookStatusReducer("nested-deny");
+                nestedDeny.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:10Z\",\"event\":\"UserPromptSubmit\",\"sessionId\":\"nested-deny\",\"cwd\":\"/p\",\"promptId\":\"p1\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(10));
+                DateTime nestedPromptAt = nestedDeny.Snapshot.LastEventUtc;
+                nestedDeny.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:12Z\",\"event\":\"PermissionDenied\",\"sessionId\":\"nested-deny\",\"cwd\":\"/p\",\"subagentType\":\"explore\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(12));
+                Assert(nestedDeny.Snapshot.State == HaloState.Thinking,
+                    "subagent PermissionDenied must not paint attention");
+                Assert(nestedDeny.Snapshot.LastEventUtc == nestedPromptAt,
+                    "ignored deny does not advance lastEventUtc");
+                nestedDeny.Consume(
+                    "{\"timestamp\":\"2026-07-25T00:00:13Z\",\"event\":\"PermissionDenied\",\"sessionId\":\"nested-deny\",\"cwd\":\"/p\",\"source\":\"grok-hook\"}",
+                    t0.AddSeconds(13));
+                Assert(nestedDeny.Snapshot.State == HaloState.Attention,
+                    "session PermissionDenied still becomes attention");
 
                 // Steer soft-cancel must not paint the red fault ring.
                 GrokHookStatusReducer steerReducer =

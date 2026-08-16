@@ -22,7 +22,8 @@ namespace CodexHalo
             new JavaScriptSerializer();
 
         // Grok Build lifecycle set (macOS GrokHookConfigurator) — no Claude-only
-        // PostToolBatch / PermissionRequest / PermissionDenied.
+        // PostToolBatch / PermissionRequest. PermissionDenied and StopCancelled
+        // are first-class Grok events as of 1.0.4.
         private static readonly HookSpec[] HookSpecs =
         {
             new HookSpec("SessionStart", null),
@@ -30,9 +31,11 @@ namespace CodexHalo
             new HookSpec("PreToolUse", ".*"),
             new HookSpec("PostToolUse", ".*"),
             new HookSpec("PostToolUseFailure", ".*"),
+            new HookSpec("PermissionDenied", null),
             new HookSpec("Notification", null),
             new HookSpec("Stop", null),
             new HookSpec("StopFailure", null),
+            new HookSpec("StopCancelled", null),
             new HookSpec("SessionEnd", null),
             new HookSpec("PreCompact", ""),
             new HookSpec("PostCompact", "")
@@ -406,6 +409,13 @@ namespace CodexHalo
         private bool hasPrePermissionResume;
         private HaloState prePermissionResumeState;
         private string prePermissionResumeAction;
+        /// <summary>
+        /// Newest main-session promptId from a turn-scoped hook. Drops a late
+        /// StopCancelled that belongs to an already-replaced turn.
+        /// </summary>
+        private string currentPromptId = String.Empty;
+        private readonly HashSet<string> knownPromptIds =
+            new HashSet<string>(StringComparer.Ordinal);
 
         public SessionSnapshot Snapshot { get; private set; }
 
@@ -439,14 +449,30 @@ namespace CodexHalo
             {
                 eventUtc = nowUtc;
             }
+            DateTime previousLastEventUtc = Snapshot.LastEventUtc;
             Snapshot.LastEventUtc = eventUtc;
             Snapshot.EvidenceSource = AgentEvidenceSource.GrokHook;
             UpdateIdentity(root);
             UpdatePermissionMode(root);
 
-            switch (StringValue(root, "event"))
+            string eventName = StringValue(root, "event");
+            if (String.Equals(eventName, "UserPromptSubmit", StringComparison.Ordinal))
+            {
+                if (!HasSubagentType(root))
+                {
+                    SetCurrentPromptId(FirstField(root, "promptId", "prompt_id"));
+                }
+            }
+            else if (EstablishesCurrentPrompt(eventName))
+            {
+                AdoptCurrentPromptId(root);
+            }
+
+            switch (eventName)
             {
                 case "SessionStart":
+                    currentPromptId = String.Empty;
+                    knownPromptIds.Clear();
                     if (wasActiveBeforeCompaction.HasValue)
                     {
                         ClearPermissionHold();
@@ -551,6 +577,11 @@ namespace CodexHalo
                     ApplyPermissionPromptHook(eventUtc, nowUtc);
                     break;
                 case "PermissionDenied":
+                    if (HasSubagentType(root))
+                    {
+                        Snapshot.LastEventUtc = previousLastEventUtc;
+                        break;
+                    }
                     wasActiveBeforeCompaction = null;
                     pendingPermissionRequestedAtUtc = DateTime.MinValue;
                     permissionPrompt = true;
@@ -584,6 +615,12 @@ namespace CodexHalo
                     Snapshot.State = HaloState.Error;
                     Snapshot.Action = "Grok stopped with an error";
                     Snapshot.CompletedUtc = DateTime.MinValue;
+                    break;
+                case "StopCancelled":
+                    if (!ApplyStopCancelled(root, eventUtc))
+                    {
+                        Snapshot.LastEventUtc = previousLastEventUtc;
+                    }
                     break;
                 case "PreCompact":
                     if (!wasActiveBeforeCompaction.HasValue)
@@ -645,9 +682,120 @@ namespace CodexHalo
         }
 
         /// <summary>
-        /// Grok skips Stop / StopFailure hooks on user interrupt (Esc / Ctrl+C).
-        /// Session events.jsonl records turn_ended with outcome "cancelled" —
-        /// map that to the same fault ring Codex uses for interruptions.
+        /// First-class Grok 1.0.4+ hook for a turn that ended without completing.
+        /// Returns false when ignored (nested subagent, or a stale promptId).
+        /// events.jsonl turn_ended cancelled remains the fallback for older Grok.
+        /// </summary>
+        public bool ApplyStopCancelled(Dictionary<string, object> root, DateTime eventUtc)
+        {
+            if (HasSubagentType(root))
+            {
+                return false;
+            }
+            string incomingPromptId = FirstField(root, "promptId", "prompt_id");
+            if (ShouldIgnoreStopCancelled(incomingPromptId))
+            {
+                return false;
+            }
+            if (!String.IsNullOrEmpty(incomingPromptId))
+            {
+                SetCurrentPromptId(incomingPromptId);
+            }
+            string reason = FirstField(root, "reason");
+            reason = reason == null ? String.Empty : reason.ToLowerInvariant();
+            if (reason == "permission_rejected")
+            {
+                ApplyInterruptedTurn(eventUtc, "Permission denied", true, true);
+            }
+            else if (reason == "permission_cancelled")
+            {
+                ApplyInterruptedTurn(eventUtc, "Ready", false, true);
+            }
+            else if (reason == "max_turns" || reason == "no_progress")
+            {
+                ApplyInterruptedTurn(eventUtc, "Grok stopped with an error", true, true);
+            }
+            else
+            {
+                ApplyInterruptedTurn(eventUtc, "Interrupted", true, true);
+            }
+            return true;
+        }
+
+        private bool ShouldIgnoreStopCancelled(string incomingPromptId)
+        {
+            if (!String.IsNullOrEmpty(incomingPromptId) &&
+                !String.IsNullOrEmpty(currentPromptId) &&
+                !String.Equals(incomingPromptId, currentPromptId,
+                    StringComparison.Ordinal))
+            {
+                // A known mismatch belongs to an older turn. An unseen ID is a
+                // valid activity-less bash/builtin turn and must be settled.
+                return knownPromptIds.Contains(incomingPromptId);
+            }
+            if (String.IsNullOrEmpty(incomingPromptId) &&
+                !String.IsNullOrEmpty(currentPromptId) &&
+                IsInFlight())
+            {
+                return true;
+            }
+            return false;
+        }
+
+        private bool IsInFlight()
+        {
+            return Snapshot.Active ||
+                Snapshot.State == HaloState.Thinking ||
+                Snapshot.State == HaloState.Working ||
+                Snapshot.State == HaloState.Attention;
+        }
+
+        /// <summary>
+        /// Turn-scoped activity can occur without UserPromptSubmit (notably bash
+        /// mode). Track its promptId without letting nested subagents replace the
+        /// parent turn identity.
+        /// </summary>
+        private void AdoptCurrentPromptId(Dictionary<string, object> root)
+        {
+            if (HasSubagentType(root))
+            {
+                return;
+            }
+            string promptId = FirstField(root, "promptId", "prompt_id");
+            if (!String.IsNullOrEmpty(promptId))
+            {
+                SetCurrentPromptId(promptId);
+            }
+        }
+
+        private void SetCurrentPromptId(string promptId)
+        {
+            currentPromptId = promptId ?? String.Empty;
+            if (!String.IsNullOrEmpty(currentPromptId))
+            {
+                knownPromptIds.Add(currentPromptId);
+            }
+        }
+
+        private static bool EstablishesCurrentPrompt(string eventName)
+        {
+            return eventName == "PreToolUse" ||
+                eventName == "PostToolUse" ||
+                eventName == "PostToolBatch" ||
+                eventName == "PostToolUseFailure" ||
+                eventName == "Notification" ||
+                eventName == "PermissionRequest" ||
+                eventName == "PermissionDenied" ||
+                eventName == "Stop" ||
+                eventName == "StopFailure" ||
+                eventName == "PreCompact" ||
+                eventName == "PostCompact";
+        }
+
+        /// <summary>
+        /// Fallback for pre-1.0.4 Grok, which skipped Stop / StopFailure on
+        /// Esc / Ctrl+C. Session events.jsonl records turn_ended with outcome
+        /// "cancelled" — map that to the same fault ring Codex uses.
         /// Steer / Sent now also emits cancelled (often trigger send_now); those
         /// must not paint red — call ApplySteerCancel instead.
         /// </summary>
@@ -676,11 +824,15 @@ namespace CodexHalo
 
         private void ApplyInterruptedTurn(DateTime eventUtc, string action, bool asError)
         {
-            // Only override an in-flight turn. Idle/done/error already terminal.
-            if (!Snapshot.Active &&
-                Snapshot.State != HaloState.Thinking &&
-                Snapshot.State != HaloState.Working &&
-                Snapshot.State != HaloState.Attention)
+            ApplyInterruptedTurn(eventUtc, action, asError, false);
+        }
+
+        private void ApplyInterruptedTurn(
+            DateTime eventUtc, string action, bool asError, bool refineTerminal)
+        {
+            bool sameTurnTerminal = refineTerminal &&
+                (Snapshot.State == HaloState.Done || Snapshot.State == HaloState.Error);
+            if (!IsInFlight() && !sameTurnTerminal)
             {
                 return;
             }
@@ -1113,6 +1265,30 @@ namespace CodexHalo
                 ? Convert.ToString(value, CultureInfo.InvariantCulture)
                 : String.Empty;
         }
+
+        private static string FirstField(Dictionary<string, object> dictionary,
+            params string[] keys)
+        {
+            if (keys == null)
+            {
+                return String.Empty;
+            }
+            for (int i = 0; i < keys.Length; i++)
+            {
+                string value = StringValue(dictionary, keys[i]);
+                if (!String.IsNullOrEmpty(value))
+                {
+                    return value;
+                }
+            }
+            return String.Empty;
+        }
+
+        private static bool HasSubagentType(Dictionary<string, object> root)
+        {
+            return !String.IsNullOrEmpty(
+                FirstField(root, "subagentType", "subagent_type"));
+        }
     }
 
     public sealed class GrokHookStatusMonitor
@@ -1224,7 +1400,7 @@ namespace CodexHalo
 
         /// <summary>
         /// Poll session events.jsonl for:
-        /// - Esc cancel / failed turn_ended (hooks skip Stop on interrupt)
+        /// - Esc cancel / failed turn_ended (fallback when StopCancelled is absent)
         /// - Steer supersede (send_now / cancel_then_send / newer turn_started)
         /// - permission_requested / permission_resolved (Strategy C: Auto vs human)
         /// </summary>

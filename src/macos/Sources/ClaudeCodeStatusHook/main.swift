@@ -48,6 +48,7 @@ func normalizeEventName(_ raw: String) -> String {
         "notification": "Notification",
         "stop": "Stop",
         "stop_failure": "StopFailure",
+        "stop_cancelled": "StopCancelled",
         "session_end": "SessionEnd",
         "pre_compact": "PreCompact",
         "post_compact": "PostCompact",
@@ -108,6 +109,7 @@ let isAntigravity = !isGrok && antigravityHookMatch(env: env, payload: payload)
 let rawEventName = firstString(
     event,
     env["GROK_HOOK_EVENT"],
+    payload["hookEventName"],
     payload["hook_event_name"],
     payload["event"],
     payload["eventName"]
@@ -210,6 +212,28 @@ let permissionMode = firstString(
     payload["permissionMode"]
 )
 
+let promptId = firstString(
+    payload["promptId"],
+    payload["prompt_id"]
+)
+
+let subagentType = firstString(
+    payload["subagentType"],
+    payload["subagent_type"]
+)
+
+let reason = firstString(payload["reason"])
+
+let cancelledBy = firstString(
+    payload["cancelledBy"],
+    payload["cancelled_by"]
+)
+
+let cancelTrigger = firstString(
+    payload["cancelTrigger"],
+    payload["cancel_trigger"]
+)
+
 let timestamp = firstString(
     payload["timestamp"],
     {
@@ -237,6 +261,11 @@ if !notificationType.isEmpty { record["notificationType"] = notificationType }
 if !errorText.isEmpty { record["errorText"] = errorText }
 if fatal { record["fatal"] = true }
 if !permissionMode.isEmpty { record["permissionMode"] = permissionMode }
+if !promptId.isEmpty { record["promptId"] = promptId }
+if !subagentType.isEmpty { record["subagentType"] = subagentType }
+if !reason.isEmpty { record["reason"] = reason }
+if !cancelledBy.isEmpty { record["cancelledBy"] = cancelledBy }
+if !cancelTrigger.isEmpty { record["cancelTrigger"] = cancelTrigger }
 
 let recordData = try! JSONSerialization.data(
     withJSONObject: record,
