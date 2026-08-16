@@ -26,9 +26,13 @@ public struct GrokHookStatusReducer: Sendable {
     /// is no second PreToolUse after approve, so we must not drop back to Thinking
     /// while the tool is still running.
     private var prePermissionResume: (state: HaloState, action: String)?
-    /// Newest `promptId` from `UserPromptSubmit`. Used to drop a late
-    /// `StopCancelled` that belongs to an already-replaced turn.
+    /// Newest main-session `promptId` from a turn-scoped hook. Used to drop a
+    /// late `StopCancelled` that belongs to an already-replaced turn.
     private var currentPromptId = ""
+    /// Prompt IDs already observed in this reducer. A mismatching known ID is
+    /// stale; a never-seen ID may be an interrupted bash/builtin turn that did
+    /// not emit UserPromptSubmit and must still be allowed to settle.
+    private var knownPromptIds: Set<String> = []
 
     /// Fast path resolutions (read/grep Auto, rule allow) complete well under this.
     /// Shell Auto often sits in the 1.5–3 s band; those are gated by `permissionMode`
@@ -65,9 +69,19 @@ public struct GrokHookStatusReducer: Sendable {
         updateIdentity(from: root)
         updatePermissionMode(from: root)
 
-        switch Self.string(root["event"]) {
+        let eventName = Self.string(root["event"])
+        if eventName == "UserPromptSubmit" {
+            if !Self.hasSubagentType(root) {
+                setCurrentPromptId(Self.firstString(root["promptId"], root["prompt_id"]))
+            }
+        } else if Self.establishesCurrentPrompt(eventName) {
+            adoptCurrentPromptId(from: root)
+        }
+
+        switch eventName {
         case "SessionStart":
             currentPromptId = ""
+            knownPromptIds.removeAll()
             if wasActiveBeforeCompaction != nil {
                 clearPermissionHold()
                 workingVisibleUntil = nil
@@ -90,7 +104,6 @@ public struct GrokHookStatusReducer: Sendable {
             snapshot.completedAt = nil
         case "UserPromptSubmit":
             wasActiveBeforeCompaction = nil
-            currentPromptId = Self.firstString(root["promptId"], root["prompt_id"])
             workingVisibleUntil = nil
             thinkingVisibleUntil = eventAt.addingTimeInterval(0.7)
             pendingWorkingAction = nil
@@ -513,6 +526,9 @@ public struct GrokHookStatusReducer: Sendable {
         if shouldIgnoreStopCancelled(incomingPromptId: incomingPromptId) {
             return false
         }
+        if !incomingPromptId.isEmpty {
+            setCurrentPromptId(incomingPromptId)
+        }
         let reason = Self.firstString(root["reason"]).lowercased()
         switch reason {
         case "permission_rejected":
@@ -534,7 +550,9 @@ public struct GrokHookStatusReducer: Sendable {
     private func shouldIgnoreStopCancelled(incomingPromptId: String) -> Bool {
         if !incomingPromptId.isEmpty, !currentPromptId.isEmpty,
            incomingPromptId != currentPromptId {
-            return true
+            // A known mismatch belongs to an older turn. An unseen ID is a
+            // valid activity-less bash/builtin turn and must be settled.
+            return knownPromptIds.contains(incomingPromptId)
         }
         // Unlabeled cancel only threatens a still-running identified turn.
         // After done/error, the same turn's late StopCancelled must still refine.
@@ -549,6 +567,35 @@ public struct GrokHookStatusReducer: Sendable {
             || snapshot.state == .thinking
             || snapshot.state == .working
             || snapshot.state == .attention
+    }
+
+    /// Turn-scoped activity can occur without UserPromptSubmit (notably bash mode).
+    /// Keep the prompt identity current so a later StopCancelled is compared with
+    /// the turn that actually produced the activity, not the previous prompt.
+    private mutating func adoptCurrentPromptId(from root: [String: Any]) {
+        guard !Self.hasSubagentType(root) else { return }
+        let promptId = Self.firstString(root["promptId"], root["prompt_id"])
+        if !promptId.isEmpty {
+            setCurrentPromptId(promptId)
+        }
+    }
+
+    private mutating func setCurrentPromptId(_ promptId: String) {
+        currentPromptId = promptId
+        if !promptId.isEmpty {
+            knownPromptIds.insert(promptId)
+        }
+    }
+
+    private static func establishesCurrentPrompt(_ eventName: String) -> Bool {
+        switch eventName {
+        case "PreToolUse", "PostToolUse", "PostToolBatch", "PostToolUseFailure",
+             "Notification", "PermissionRequest", "PermissionDenied",
+             "Stop", "StopFailure", "PreCompact", "PostCompact":
+            return true
+        default:
+            return false
+        }
     }
 
     /// Fallback for pre-1.0.4 Grok, which skipped `Stop` / `StopFailure` on

@@ -410,10 +410,12 @@ namespace CodexHalo
         private HaloState prePermissionResumeState;
         private string prePermissionResumeAction;
         /// <summary>
-        /// Newest promptId from UserPromptSubmit. Drops a late StopCancelled
-        /// that belongs to an already-replaced turn.
+        /// Newest main-session promptId from a turn-scoped hook. Drops a late
+        /// StopCancelled that belongs to an already-replaced turn.
         /// </summary>
         private string currentPromptId = String.Empty;
+        private readonly HashSet<string> knownPromptIds =
+            new HashSet<string>(StringComparer.Ordinal);
 
         public SessionSnapshot Snapshot { get; private set; }
 
@@ -453,10 +455,24 @@ namespace CodexHalo
             UpdateIdentity(root);
             UpdatePermissionMode(root);
 
-            switch (StringValue(root, "event"))
+            string eventName = StringValue(root, "event");
+            if (String.Equals(eventName, "UserPromptSubmit", StringComparison.Ordinal))
+            {
+                if (!HasSubagentType(root))
+                {
+                    SetCurrentPromptId(FirstField(root, "promptId", "prompt_id"));
+                }
+            }
+            else if (EstablishesCurrentPrompt(eventName))
+            {
+                AdoptCurrentPromptId(root);
+            }
+
+            switch (eventName)
             {
                 case "SessionStart":
                     currentPromptId = String.Empty;
+                    knownPromptIds.Clear();
                     if (wasActiveBeforeCompaction.HasValue)
                     {
                         ClearPermissionHold();
@@ -480,7 +496,6 @@ namespace CodexHalo
                     break;
                 case "UserPromptSubmit":
                     wasActiveBeforeCompaction = null;
-                    currentPromptId = FirstField(root, "promptId", "prompt_id");
                     ClearPermissionHold();
                     workingVisibleUntilUtc = DateTime.MinValue;
                     thinkingVisibleUntilUtc = eventUtc.AddSeconds(0.7);
@@ -682,6 +697,10 @@ namespace CodexHalo
             {
                 return false;
             }
+            if (!String.IsNullOrEmpty(incomingPromptId))
+            {
+                SetCurrentPromptId(incomingPromptId);
+            }
             string reason = FirstField(root, "reason");
             reason = reason == null ? String.Empty : reason.ToLowerInvariant();
             if (reason == "permission_rejected")
@@ -710,7 +729,9 @@ namespace CodexHalo
                 !String.Equals(incomingPromptId, currentPromptId,
                     StringComparison.Ordinal))
             {
-                return true;
+                // A known mismatch belongs to an older turn. An unseen ID is a
+                // valid activity-less bash/builtin turn and must be settled.
+                return knownPromptIds.Contains(incomingPromptId);
             }
             if (String.IsNullOrEmpty(incomingPromptId) &&
                 !String.IsNullOrEmpty(currentPromptId) &&
@@ -727,6 +748,48 @@ namespace CodexHalo
                 Snapshot.State == HaloState.Thinking ||
                 Snapshot.State == HaloState.Working ||
                 Snapshot.State == HaloState.Attention;
+        }
+
+        /// <summary>
+        /// Turn-scoped activity can occur without UserPromptSubmit (notably bash
+        /// mode). Track its promptId without letting nested subagents replace the
+        /// parent turn identity.
+        /// </summary>
+        private void AdoptCurrentPromptId(Dictionary<string, object> root)
+        {
+            if (HasSubagentType(root))
+            {
+                return;
+            }
+            string promptId = FirstField(root, "promptId", "prompt_id");
+            if (!String.IsNullOrEmpty(promptId))
+            {
+                SetCurrentPromptId(promptId);
+            }
+        }
+
+        private void SetCurrentPromptId(string promptId)
+        {
+            currentPromptId = promptId ?? String.Empty;
+            if (!String.IsNullOrEmpty(currentPromptId))
+            {
+                knownPromptIds.Add(currentPromptId);
+            }
+        }
+
+        private static bool EstablishesCurrentPrompt(string eventName)
+        {
+            return eventName == "PreToolUse" ||
+                eventName == "PostToolUse" ||
+                eventName == "PostToolBatch" ||
+                eventName == "PostToolUseFailure" ||
+                eventName == "Notification" ||
+                eventName == "PermissionRequest" ||
+                eventName == "PermissionDenied" ||
+                eventName == "Stop" ||
+                eventName == "StopFailure" ||
+                eventName == "PreCompact" ||
+                eventName == "PostCompact";
         }
 
         /// <summary>

@@ -3460,6 +3460,10 @@ func testGrokHookReducerStopCancelledMapsReasons() {
 func testGrokHookReducerStopCancelledIgnoresSubagentAndStalePrompt() {
     var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
     r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:00Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p","promptId":"p1","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 0)
+    )
+    r.consume(
         jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p","promptId":"p2","source":"grok-hook"}"#,
         now: Date(timeIntervalSince1970: 1)
     )
@@ -3487,6 +3491,64 @@ func testGrokHookReducerStopCancelledIgnoresSubagentAndStalePrompt() {
     )
     expect(r.snapshot.state, .error, "matching promptId interrupt settles the turn")
     expect(r.snapshot.action, "Interrupted", "matching promptId action")
+}
+
+func testGrokHookReducerTracksPromptFromActivityWithoutSubmit() {
+    var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p","promptId":"p1","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:02Z","event":"Stop","sessionId":"s1","cwd":"/p","promptId":"p1","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 2)
+    )
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:03Z","event":"PreToolUse","sessionId":"s1","cwd":"/p","toolName":"run_terminal_command","promptId":"p2","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 3)
+    )
+    expect(r.snapshot.state, .working, "activity without UserPromptSubmit starts the new turn")
+    expect(r.snapshot.active, true, "activity-only turn is active")
+    let activityAt = r.snapshot.lastEventAt
+
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:04Z","event":"StopCancelled","sessionId":"s1","reason":"user_interrupt","promptId":"p1","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 4)
+    )
+    expect(r.snapshot.state, .working, "old cancel must not overwrite the activity-only turn")
+    expect(r.snapshot.active, true, "old cancel leaves the activity-only turn active")
+    expect(r.snapshot.lastEventAt, activityAt, "ignored old cancel does not advance lastEventAt")
+
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:05Z","event":"StopCancelled","sessionId":"s1","reason":"user_interrupt","promptId":"p2","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 5)
+    )
+    expect(r.snapshot.state, .error, "matching activity promptId settles the turn")
+    expect(r.snapshot.action, "Interrupted", "activity-only cancel action")
+    expect(r.snapshot.active, false, "activity-only cancel clears active")
+
+    var unseen = GrokHookStatusReducer(threadId: "s2", now: Date(timeIntervalSince1970: 0))
+    unseen.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s2","cwd":"/p","promptId":"p1","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    unseen.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:02Z","event":"Stop","sessionId":"s2","cwd":"/p","promptId":"p1","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 2)
+    )
+    unseen.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:03Z","event":"StopCancelled","sessionId":"s2","reason":"user_interrupt","promptId":"p2","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 3)
+    )
+    expect(unseen.snapshot.state, .error, "unseen promptId without activity still settles")
+    expect(unseen.snapshot.action, "Interrupted", "unseen promptId cancel action")
+    let unseenCancelAt = unseen.snapshot.lastEventAt
+    unseen.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:04Z","event":"StopCancelled","sessionId":"s2","reason":"permission_cancelled","promptId":"p1","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 4)
+    )
+    expect(unseen.snapshot.state, .error, "known older prompt remains stale after unseen turn")
+    expect(unseen.snapshot.lastEventAt, unseenCancelAt, "known older cancel stays ignored")
 }
 
 func testGrokHookReducerStopCancelledRefinesEarlierTerminal() {
@@ -5297,6 +5359,7 @@ testGrokHookReducerHumanWaitAfterPreToolUseBecomesAttention()
 testGrokHookReducerMapsEscCancelToInterrupted()
 testGrokHookReducerStopCancelledMapsReasons()
 testGrokHookReducerStopCancelledIgnoresSubagentAndStalePrompt()
+testGrokHookReducerTracksPromptFromActivityWithoutSubmit()
 testGrokHookReducerStopCancelledRefinesEarlierTerminal()
 testGrokHookReducerPermissionDeniedIgnoresSubagent()
 testGrokHookReducerSteerCancelDoesNotPaintError()
