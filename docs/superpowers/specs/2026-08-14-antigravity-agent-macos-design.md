@@ -18,7 +18,7 @@
 
 1. **焦点切换**：设置里可启用；详情条出现 `AG`；菜单名为 `Antigravity`。
 2. **OAuth 额度**：焦点在 Antigravity 时，详情面板现有两行显示 Gemini 池的 5-Hour / Weekly。
-3. **最小生命周期光环**：`agy` hooks 驱动 thinking / working / done / attention / error。
+3. **最小生命周期光环**：`agy` 与 Antigravity 2.0 桌面 hook 驱动 thinking / working / done / attention / error。
 4. **状态隔离**：`agy` hook 事件只写入 Antigravity JSONL，不得进入 Claude / Grok / Pi 日志。
 
 用户确认的产品选择：
@@ -26,7 +26,7 @@
 - 方案：**按 Grok 的形状加 agent**（共用 `status-hook` 分流 + OpenUsage 同款额度探测）
 - 平台：**仅 macOS**
 - 额度行：**只显示 Gemini 池两行**（`gemini-5h` / `gemini-weekly`）
-- 生命周期：**仅 `agy` CLI hooks**（不做 IDE 会话推断）
+- 生命周期：**`agy` CLI + Antigravity 2.0 桌面 hook**（不做 IDE 会话文件推断）
 - 额度源：**LS 优先，否则 Keychain + Cloud Code**（完整对齐 OpenUsage 探测顺序）
 - 分段标签：**`AG`**
 - 默认启用：**否**（不进入 `HaloSettings.defaultEnabledAgents`）
@@ -34,7 +34,7 @@
 ## 非目标
 
 - Windows 实现或共享 C# 运行时改动。
-- Antigravity IDE / `language_server` 的生命周期推断。
+- 从会话文件（`conversations/` / `.pb`）推断 thinking / working / done。桌面应用走与 CLI 同一套 `~/.gemini/config/hooks.json`；IDE（`/antigravity-ide/`）仍排除。
 - 非 Gemini 池（`3p-5h` / `3p-weekly`，OpenUsage 里的 Claude / Claude Weekly）。
 - API Key 会话卡、context pill、会话标题深挖。
 - 点击光环唤起 Antigravity 窗口或终端。
@@ -275,9 +275,9 @@ refresh()
 
 1. **Grok 优先**（现有）：`GROK_SESSION_ID` 或 `GROK_HOOK_EVENT` 非空 → `grok-status.jsonl`，`source: grok-hook`。
 2. **否则 Antigravity**，以下任一成立（hook 进程内不扫进程表）：
-   - `ANTIGRAVITY_AGENT` 非空（`agy` 会设 `ANTIGRAVITY_AGENT=1`）。
-   - `ANTIGRAVITY_TRAJECTORY_ID` 非空。
-   - payload / 环境中的 `transcriptPath` / `transcript_path` 落在 `~/.gemini/antigravity-cli/`（**不要**用裸 `/antigravity/`，以免 IDE 会话误入）。
+   - `ANTIGRAVITY_AGENT` 非空（`agy` / 桌面 agent 会设 `ANTIGRAVITY_AGENT=1`）。
+   - `ANTIGRAVITY_TRAJECTORY_ID` 或 `ANTIGRAVITY_CONVERSATION_ID` 非空。
+   - payload / 环境中的 `transcriptPath` / `transcript_path` 含 `/antigravity-cli/`（CLI）或 `/antigravity/`（Antigravity 2.0 桌面）。**不要**把 `/antigravity-ide/` 当 AG。
 3. 否则保持 Claude。
 
 实现时用本机 `agy` 打一轮，确认事件名是 argv、stdin JSON，还是二者皆空。若 `agy` 调 `status-hook` 时既无 argv 也无 event 字段，配置器改为 `status-hook PreInvocation` 这种带事件名的 command（与旧 Claude 写法相同），不得静默 `exit 0`。
@@ -287,7 +287,7 @@ Antigravity 记录：
 - 路径：`AgentHaloPaths.antigravityStatusLog` = `~/.agent-halo/logs/antigravity-status.jsonl`
 - `source: "antigravity-hook"`
 - 字段同 Claude/Grok：`timestamp`、`event`、`sessionId`、`cwd`、`toolName`、`errorText`
-- `sessionId` 优先 `ANTIGRAVITY_TRAJECTORY_ID`，否则 payload 里的 conversation/session id，再否则 `"antigravity"`
+- `sessionId` 优先 `ANTIGRAVITY_TRAJECTORY_ID` / `ANTIGRAVITY_CONVERSATION_ID`，否则 payload 的 `session_id` / `sessionId` / `conversation_id` / `conversationId`，再否则 `"antigravity"`
 - 事件名写盘时规范为 PascalCase。`agy` 白名单：
 
 ```text
@@ -330,13 +330,18 @@ JSONL 滚动策略与 Claude/Grok 相同（同一体积上限与截断常量）�
 | --- | --- |
 | `PreInvocation` | `thinking` |
 | `PostInvocation` | 仍在回合内 → `thinking`（若正在 working hold 内则保持 working） |
-| `PreToolUse` | `working`；`toolName` 走现有 `actionRules` |
+| `PreToolUse` | 立刻 `working`；`toolName` 走现有 `actionRules`。桌面/CLI 在授权弹窗**之前**就打出此事件，**单独不算** attention |
+| 会话库 `steps.status == 9`（`CORTEX_STEP_STATUS_WAITING`） | 对齐 Grok `events.jsonl` 的 `permission_requested`：先 arm，`pendingPermissionAttentionDelay`（0.25s）后 `attention` / Awaiting permission |
+| 同一 step 离开 WAITING → RUNNING/DONE/PENDING | `permission_resolved` allow：恢复 PreToolUse 的 working |
+| 同一 step 离开 WAITING → CANCELED/ERROR/CLEARED | deny → `attention` / Permission denied |
+| `Notification` + `permission_prompt` / `PermissionRequest` | 只 arm，不立刻画紫（与 Grok Strategy A 相同） |
+| `PermissionDenied` | `attention` / Permission denied |
 | `PostToolUse` | 与 `ClaudeHookStatusReducer` 相同：先 `working` / Reviewing result，再按现有 fade（hook 侧 0.65s review，live 可见性 `ClaudeContextUsageConstants.workingVisibilityExtension` = 1.8s）回到 `thinking` |
 | `PostToolUse` 带 error | 工具失败回到 `thinking`；**整轮**失败才 `error` |
 | `Stop` | `done` |
 | 明确 fatal（若 payload 带失败） | `error` |
 
-不主动画 `attention`：本机 / 二进制未证实 permission hook。未知事件：更新 `lastEventAt`，不改状态。坏 JSON 行跳过。
+`attention` 不自动 fade。未知事件：更新 `lastEventAt`，不改状态。坏 JSON 行跳过。仍不把 `PermissionRequest` 写入 `hooks.json`（agy 白名单未证实该 key）。会话库路径：`~/.gemini/antigravity/conversations/<sessionId>.db` 与 `~/.gemini/antigravity-cli/conversations/<sessionId>.db`。
 
 `SessionSnapshot.agent` 必须是 `.antigravity`。`projectName` 默认 `Antigravity`，可用 cwd 末段覆盖。`sessionTitle` / `modelName` 仅当 payload 有值时填写。
 
@@ -347,13 +352,13 @@ JSONL 滚动策略与 Claude/Grok 相同（同一体积上限与截断常量）�
 - utility 队列轮询；主线程只读缓存。
 - 焦点是 Antigravity **或** 详情面板可见 → 300ms；否则 2000ms。
 - 未启用 → 停表、空快照。
-- Presence：近期 hook（与 Grok 相同的 freshness 窗口）或进程名 `agy`。不把 IDE `language_server` 当成 CLI 在线（避免 IDE-only 用户看到虚假 standby）。
+- Presence：近期 hook（与 Grok 相同的 freshness 窗口）、进程名 `agy`，或 Antigravity 2.0 桌面应用进程名恰好为 `Antigravity`（`/Applications/Antigravity.app`，不是 IDE）。不把 `language_server` / `Antigravity Helper` 当成独立在线信号。打开该桌面应用为 standby；thinking / working / done 来自 `agy` 与桌面应用共用的 hooks。
 
 ### 聚合与 UI
 
 `AppDelegate` 在 `focusedAgent == .antigravity` 时把 AG 快照送进 `SessionAggregator`，其它 agent 快照不混入。优先级沿用现有：attention > error > working > thinking > done > idle。
 
-- 无会话且无 `agy` presence → offline（`status.offline_antigravity`）
+- 无会话且无 `agy` / `Antigravity` presence → offline（`status.offline_antigravity`）
 - 有 presence 或近期 hook 但无活动 → standby
 - 详情面板额度两行不改高度、不改标题文案（仍用 `quota.5h` / `quota.weekly`）
 - context pill 不显示数值（空 / `--`，与「无 context 源」一致）。`DetailsPanel.update` 里 `switch focusedAgent` 必须加 `.antigravity`，不得误入 Claude/Grok context 分支。
@@ -400,8 +405,8 @@ JSONL 滚动策略与 Claude/Grok 相同（同一体积上限与截断常量）�
 
 **Hook 分流**
 
-- `ANTIGRAVITY_AGENT=1` 或 `ANTIGRAVITY_TRAJECTORY_ID` 或 `antigravity-cli` transcript → 只追加 `antigravity-status.jsonl`。
-- 路径含 `/antigravity/` 但不含 `antigravity-cli` → **不**当作 AG（回归：不得误分流）。
+- `ANTIGRAVITY_AGENT=1` / `ANTIGRAVITY_TRAJECTORY_ID` / `ANTIGRAVITY_CONVERSATION_ID`，或 transcript 含 `/antigravity-cli/` / `/antigravity/` → 只追加 `antigravity-status.jsonl`。
+- 路径含 `/antigravity-ide/` → **不**当作 AG（回归：不得误分流）。
 - `GROK_*` 仍只写 Grok 日志。
 - 无上述信号 → Claude 日志。
 - 事件名 snake_case 写盘为 PascalCase。

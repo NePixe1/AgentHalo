@@ -8,7 +8,8 @@ import AgentHaloCore
 struct AntigravityActivitySnapshot: Equatable, Sendable {
     var sessions: [SessionSnapshot]
     /// True when a retained hook snapshot is inside the 600s/300s windows, or
-    /// a process named exactly `agy` is running. Drives STANDBY vs OFFLINE.
+    /// a process named exactly `agy` / `Antigravity` is running. Drives
+    /// STANDBY vs OFFLINE.
     var isPresent: Bool
 
     static let empty = AntigravityActivitySnapshot(sessions: [], isPresent: false)
@@ -20,7 +21,7 @@ struct AntigravityActivitySnapshot: Equatable, Sendable {
 // throttled so burst hook changes coalesce into one onChange per window.
 //
 // No click-to-activate path. Presence is recent hook snapshots or an exact
-// `agy` process name — never `language_server`, and never `~/.grok` sessions.
+// `agy` / `Antigravity` process name — never `language_server` or helpers.
 final class AntigravityActivityMonitor: @unchecked Sendable {
     private struct PollingContext: Equatable {
         var focusedAgent: AgentKind = .codex
@@ -36,7 +37,8 @@ final class AntigravityActivityMonitor: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.agenthalo.antigravity-activity", qos: .utility)
     private let stateLock = NSLock()
     private let hookMonitor: AntigravityHookStatusMonitor
-    /// Production default scans for a process named exactly `agy`. Tests inject.
+    /// Production default scans for `agy` or the `Antigravity` desktop app.
+    /// Tests inject.
     private let processPresenceProbe: () -> Bool
     private var timer: DispatchSourceTimer?
     private var currentIntervalMilliseconds = AntigravityActivityMonitor.activeIntervalMilliseconds
@@ -56,7 +58,7 @@ final class AntigravityActivityMonitor: @unchecked Sendable {
 
     init(
         hookMonitor: AntigravityHookStatusMonitor = AntigravityHookStatusMonitor(),
-        processPresenceProbe: @escaping () -> Bool = AntigravityActivityMonitor.agyProcessIsRunning,
+        processPresenceProbe: @escaping () -> Bool = AntigravityActivityMonitor.agentProcessIsRunning,
         pollBarrier: (@Sendable () -> Void)? = nil,
         preDispatchBarrier: (@Sendable () -> Void)? = nil,
         callbackDispatch: @escaping @Sendable (@escaping @Sendable () -> Void) -> Void = {
@@ -161,8 +163,8 @@ final class AntigravityActivityMonitor: @unchecked Sendable {
 
     /// Present when a retained hook snapshot is still inside the Claude hook
     /// windows (active 600s / idle 300s), or `processPresenceProbe()` is true.
-    /// The production probe matches process name `agy` exactly — never
-    /// `language_server`.
+    /// The production probe matches `agy` or the desktop app `Antigravity` —
+    /// never `language_server` or `Antigravity Helper`.
     static func isPresent(
         sessions: [SessionSnapshot],
         now: Date,
@@ -174,10 +176,21 @@ final class AntigravityActivityMonitor: @unchecked Sendable {
         return processPresenceProbe()
     }
 
-    /// Production presence probe: process name is exactly `agy`.
-    static func agyProcessIsRunning() -> Bool {
-        hasExactProcessNamed("agy")
+    /// Production presence probe: `agy` CLI or the `Antigravity` desktop app.
+    static func agentProcessIsRunning() -> Bool {
+        hasPresentProcess()
     }
+
+    /// Exact last-path-component match for presence. `agy` is the CLI;
+    /// `Antigravity` is the Antigravity 2.0 desktop app (not the IDE).
+    /// Helpers and `language_server` stay out.
+    static func countsAsPresentProcess(comm: String, name: String) -> Bool {
+        let commBase = URL(fileURLWithPath: comm).lastPathComponent
+        let nameBase = URL(fileURLWithPath: name).lastPathComponent
+        return presentProcessNames.contains(commBase) || presentProcessNames.contains(nameBase)
+    }
+
+    private static let presentProcessNames: Set<String> = ["agy", "Antigravity"]
 
     private func isCurrent(generation: UInt64, enabled: Bool) -> Bool {
         stateLock.lock()
@@ -310,8 +323,8 @@ final class AntigravityActivityMonitor: @unchecked Sendable {
     }
 
     /// Exact process-name match via libproc. Does not spawn `/bin/ps`, and
-    /// never treats `language_server` as `agy`.
-    private static func hasExactProcessNamed(_ expected: String) -> Bool {
+    /// never treats `language_server` or Helper processes as present.
+    private static func hasPresentProcess() -> Bool {
         let requested = proc_listallpids(nil, 0)
         guard requested > 0 else { return false }
         var pids = [pid_t](repeating: 0, count: Int(requested) + 64)
@@ -328,9 +341,7 @@ final class AntigravityActivityMonitor: @unchecked Sendable {
             guard read == size else { continue }
             let comm = processCString(info.pbi_comm)
             let name = processCString(info.pbi_name)
-            let commBase = URL(fileURLWithPath: comm).lastPathComponent
-            let nameBase = URL(fileURLWithPath: name).lastPathComponent
-            if commBase == expected || nameBase == expected {
+            if countsAsPresentProcess(comm: comm, name: name) {
                 return true
             }
         }

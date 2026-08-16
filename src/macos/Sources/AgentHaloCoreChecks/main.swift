@@ -3505,7 +3505,7 @@ func testAntigravityReducerStopFailureAndToolFailureSemantics() {
     expect(errorStop.snapshot.active, false, "stop errorText deactivates")
 }
 
-func testAntigravityReducerIdentityPostInvocationHoldAndNoAttention() {
+func testAntigravityReducerIdentityPostInvocationHoldAndPermission() {
     let now = Date(timeIntervalSince1970: 1_000)
     var reducer = AntigravityHookStatusReducer(threadId: "t1", now: now)
     expect(reducer.snapshot.sessionTitle == nil, true, "title starts empty")
@@ -3533,8 +3533,72 @@ func testAntigravityReducerIdentityPostInvocationHoldAndNoAttention() {
         jsonLine: #"{"event":"Notification","notificationType":"permission_prompt","timestamp":"1970-01-01T00:16:45Z","sessionId":"t1"}"#,
         now: now.addingTimeInterval(5)
     )
-    expect(reducer.snapshot.state, .thinking, "permission notification is ignored")
-    expect(reducer.snapshot.state != .attention, true, "must not draw attention")
+    expect(reducer.snapshot.state, .thinking, "permission_prompt only arms, like Grok")
+    reducer.applyWorkingVisibility(
+        now: now.addingTimeInterval(5 + AntigravityHookStatusReducer.pendingPermissionAttentionDelay + 0.05)
+    )
+    expect(reducer.snapshot.state, .attention, "permission_prompt becomes attention after delay")
+    expect(reducer.snapshot.action, "Awaiting permission", "permission_prompt action")
+    expect(reducer.snapshot.active, true, "permission_prompt stays active")
+    reducer.applyWorkingVisibility(now: now.addingTimeInterval(30))
+    expect(reducer.snapshot.state, .attention, "permission hold does not fade")
+}
+
+func testAntigravityReducerUsesSessionPermissionLifecycleLikeGrok() {
+    let now = Date(timeIntervalSince1970: 1_000)
+    let delay = AntigravityHookStatusReducer.pendingPermissionAttentionDelay
+    let toolAt = now.addingTimeInterval(2)
+
+    var hang = AntigravityHookStatusReducer(threadId: "t1", now: now)
+    hang.consume(jsonLine: line(event: "PreInvocation", ts: now), now: now)
+    hang.consume(jsonLine: line(event: "PreToolUse", tool: "read_url_content", ts: toolAt), now: toolAt)
+    expect(hang.snapshot.state, .working, "pre tool starts working")
+    hang.applyWorkingVisibility(now: toolAt.addingTimeInterval(delay + 1))
+    expect(hang.snapshot.state, .working, "bare PreToolUse must not become attention")
+
+    hang.applyPermissionUpdate(
+        AntigravityPermissionUpdate(at: toolAt, kind: .requested),
+        now: toolAt
+    )
+    expect(hang.snapshot.state, .working, "requested only arms the delay")
+    expect(hang.snapshot.action, "Executing", "tool action preserved while pending")
+    hang.applyWorkingVisibility(now: toolAt.addingTimeInterval(delay - 0.05))
+    expect(hang.snapshot.state, .working, "still working before permission delay")
+    hang.applyWorkingVisibility(now: toolAt.addingTimeInterval(delay + 0.05))
+    expect(hang.snapshot.state, .attention, "WAITING step is awaiting permission")
+    expect(hang.snapshot.action, "Awaiting permission", "permission action")
+    hang.applyWorkingVisibility(now: toolAt.addingTimeInterval(181))
+    expect(hang.snapshot.state, .attention, "permission hold does not use the 180s fade")
+
+    hang.applyPermissionUpdate(
+        AntigravityPermissionUpdate(at: toolAt.addingTimeInterval(200), kind: .resolved(decision: "allow")),
+        now: toolAt.addingTimeInterval(200)
+    )
+    expect(hang.snapshot.state, .working, "allow restores the in-flight tool")
+    expect(hang.snapshot.action, "Executing", "resume the PreToolUse action")
+
+    var deny = AntigravityHookStatusReducer(threadId: "t2", now: now)
+    deny.consume(jsonLine: line(event: "PreInvocation", ts: now), now: now)
+    deny.consume(jsonLine: line(event: "PreToolUse", tool: "read_url_content", ts: toolAt), now: toolAt)
+    deny.applyPermissionUpdate(AntigravityPermissionUpdate(at: toolAt, kind: .requested), now: toolAt)
+    deny.applyWorkingVisibility(now: toolAt.addingTimeInterval(delay + 0.05))
+    deny.applyPermissionUpdate(
+        AntigravityPermissionUpdate(at: toolAt.addingTimeInterval(3), kind: .resolved(decision: "deny")),
+        now: toolAt.addingTimeInterval(3)
+    )
+    expect(deny.snapshot.state, .attention, "deny stays attention")
+    expect(deny.snapshot.action, "Permission denied", "deny action")
+
+    var request = AntigravityHookStatusReducer(threadId: "t3", now: now)
+    request.consume(jsonLine: line(event: "PreInvocation", ts: now), now: now)
+    request.consume(jsonLine: line(event: "PreToolUse", tool: "read_url_content", ts: toolAt), now: toolAt)
+    request.consume(
+        jsonLine: #"{"event":"PermissionRequest","timestamp":"1970-01-01T00:16:42Z","sessionId":"t3"}"#,
+        now: toolAt.addingTimeInterval(0.05)
+    )
+    expect(request.snapshot.state, .working, "PermissionRequest hook only arms")
+    request.applyWorkingVisibility(now: toolAt.addingTimeInterval(delay + 0.1))
+    expect(request.snapshot.state, .attention, "PermissionRequest promotes after delay")
 }
 
 func testAntigravityReducerStuckPreToolUseRecoversAfterSafetyTimeout() {
@@ -3546,7 +3610,66 @@ func testAntigravityReducerStuckPreToolUseRecoversAfterSafetyTimeout() {
     reducer.applyWorkingVisibility(now: now.addingTimeInterval(2 + 179))
     expect(reducer.snapshot.state, .working, "still working before 180s")
     reducer.applyWorkingVisibility(now: now.addingTimeInterval(2 + 181))
-    expect(reducer.snapshot.state, .thinking, "stuck tool fades after 180s")
+    expect(reducer.snapshot.state, .thinking, "stuck tool without WAITING fades after 180s")
+}
+
+func testAntigravityPermissionReaderEmitsRequestedAndResolved() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-ag-perm-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let db = root.appendingPathComponent("s1.db")
+    try writeAntigravityConversationSteps(at: db, rows: [(0, 3), (1, 9)])
+
+    let reader = AntigravitySessionPermissionReader()
+    let first = reader.poll(databaseURL: db, now: Date(timeIntervalSince1970: 10))
+    expect(first.count, 1, "first attach of WAITING is requested")
+    expect(first.first?.kind, .requested, "WAITING → requested")
+
+    let again = reader.poll(databaseURL: db, now: Date(timeIntervalSince1970: 11))
+    expect(again.isEmpty, true, "unchanged WAITING does not re-emit")
+
+    try writeAntigravityConversationSteps(at: db, rows: [(0, 3), (1, 2)])
+    let allowed = reader.poll(databaseURL: db, now: Date(timeIntervalSince1970: 12))
+    expect(allowed.first?.kind, .resolved(decision: "allow"), "WAITING → RUNNING is allow")
+
+    try writeAntigravityConversationSteps(at: db, rows: [(0, 3), (1, 9)])
+    _ = reader.poll(databaseURL: db, now: Date(timeIntervalSince1970: 13))
+    try writeAntigravityConversationSteps(at: db, rows: [(0, 3), (1, 6)])
+    let denied = reader.poll(databaseURL: db, now: Date(timeIntervalSince1970: 14))
+    expect(denied.first?.kind, .resolved(decision: "deny"), "WAITING → CANCELED is deny")
+}
+
+func testAntigravityHookStatusMonitorAppliesConversationPermission() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-ag-perm-mon-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let conversations = root.appendingPathComponent("conversations", isDirectory: true)
+    try FileManager.default.createDirectory(at: conversations, withIntermediateDirectories: true)
+    let db = conversations.appendingPathComponent("s1.db")
+    try writeAntigravityConversationSteps(at: db, rows: [(0, 3), (1, 9)])
+
+    let statusFile = root.appendingPathComponent("antigravity-status.jsonl")
+    let now = Date(timeIntervalSince1970: 1_000)
+    let pre = line(event: "PreInvocation", ts: now, sessionId: "s1")
+    let tool = line(event: "PreToolUse", tool: "read_url_content", ts: now.addingTimeInterval(2), sessionId: "s1")
+    try Data("\(pre)\n\(tool)\n".utf8).write(to: statusFile)
+
+    let monitor = AntigravityHookStatusMonitor(
+        statusURL: statusFile,
+        conversationRoots: [conversations]
+    )
+    _ = monitor.refresh(now: now.addingTimeInterval(2))
+    expect(monitor.snapshots().first?.state, .working, "first poll arms WAITING without flashing")
+    _ = monitor.refresh(
+        now: now.addingTimeInterval(2 + AntigravityHookStatusReducer.pendingPermissionAttentionDelay + 0.05)
+    )
+    expect(monitor.snapshots().first?.state, .attention, "monitor promotes WAITING to attention")
+    expect(monitor.snapshots().first?.action, "Awaiting permission", "monitor permission action")
+
+    try writeAntigravityConversationSteps(at: db, rows: [(0, 3), (1, 2)])
+    _ = monitor.refresh(now: now.addingTimeInterval(4))
+    expect(monitor.snapshots().first?.state, .working, "RUNNING after WAITING restores working")
 }
 
 private func line(
@@ -3577,6 +3700,39 @@ private func line(
     if let modelName { obj["modelName"] = modelName }
     let data = try! JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])
     return String(data: data, encoding: .utf8)!
+}
+
+private func writeAntigravityConversationSteps(at url: URL, rows: [(Int, Int)]) throws {
+    if FileManager.default.fileExists(atPath: url.path) {
+        try FileManager.default.removeItem(at: url)
+        let wal = url.path + "-wal"
+        let shm = url.path + "-shm"
+        if FileManager.default.fileExists(atPath: wal) {
+            try FileManager.default.removeItem(at: URL(fileURLWithPath: wal))
+        }
+        if FileManager.default.fileExists(atPath: shm) {
+            try FileManager.default.removeItem(at: URL(fileURLWithPath: shm))
+        }
+    }
+    var sql = "CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER DEFAULT 0, status INTEGER DEFAULT 0);\n"
+    for (idx, status) in rows {
+        sql += "INSERT INTO steps(idx, status) VALUES (\(idx), \(status));\n"
+    }
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+    process.arguments = [url.path]
+    let stdin = Pipe()
+    let stderr = Pipe()
+    process.standardInput = stdin
+    process.standardError = stderr
+    try process.run()
+    try stdin.fileHandleForWriting.write(contentsOf: Data(sql.utf8))
+    try stdin.fileHandleForWriting.close()
+    process.waitUntilExit()
+    if process.terminationStatus != 0 {
+        let err = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        throw NSError(domain: "ag-perm-fixture", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: err])
+    }
 }
 
 func testAntigravityHookStatusMonitorMapsLifecycleAndSkipsBadLines() throws {
@@ -4292,6 +4448,9 @@ private func runClaudeCodeStatusHook(
     if environment["ANTIGRAVITY_TRAJECTORY_ID"] == nil {
         env.removeValue(forKey: "ANTIGRAVITY_TRAJECTORY_ID")
     }
+    if environment["ANTIGRAVITY_CONVERSATION_ID"] == nil {
+        env.removeValue(forKey: "ANTIGRAVITY_CONVERSATION_ID")
+    }
     process.environment = env
 
     let stdinPipe = Pipe()
@@ -4441,20 +4600,55 @@ func testClaudeCodeStatusHookIsolatesAntigravityStatusFiles() throws {
         expect(!existingClaude.contains("cli-session"), "AG transcript session must not appear in Claude log")
     }
 
-    // 4. IDE path /antigravity/ without antigravity-cli → Claude, not AG.
+    // 4. Desktop app path /antigravity/ (Antigravity 2.0), no AG env → AG.
+    try runClaudeCodeStatusHook(
+        binary: binary,
+        home: home,
+        arguments: ["PreInvocation"],
+        environment: [:],
+        stdinJSON: #"{"transcriptPath":"/Users/x/.gemini/antigravity/transcript.jsonl","conversationId":"desk-1"}"#
+    )
+    let agAfterDesktop = try String(contentsOf: agStatus, encoding: .utf8)
+    expect(agAfterDesktop.contains("desk-1"), "desktop /antigravity/ transcript should write AG log")
+    expect(agAfterDesktop.contains("antigravity-hook"), "desktop transcript record source should be antigravity-hook")
+    expect(agAfterDesktop.contains("\"PreInvocation\""), "desktop PreInvocation should stay PreInvocation")
+    if FileManager.default.fileExists(atPath: claudeStatus.path) {
+        let existingClaude = try String(contentsOf: claudeStatus, encoding: .utf8)
+        expect(!existingClaude.contains("desk-1"), "desktop conversation must not appear in Claude log")
+    }
+
+    // 4b. IDE path /antigravity-ide/ → Claude, not AG.
     try runClaudeCodeStatusHook(
         binary: binary,
         home: home,
         arguments: ["UserPromptSubmit"],
         environment: [:],
-        stdinJSON: #"{"transcript_path":"/Users/x/.gemini/antigravity/brain/c1/transcript.jsonl","cwd":"/tmp/ide","session_id":"ide-session"}"#
+        stdinJSON: #"{"transcript_path":"/Users/x/.gemini/antigravity-ide/brain/c1/transcript.jsonl","cwd":"/tmp/ide","session_id":"ide-session"}"#
     )
-    expect(FileManager.default.fileExists(atPath: claudeStatus.path), "IDE /antigravity/ path should write Claude log")
+    expect(FileManager.default.fileExists(atPath: claudeStatus.path), "IDE /antigravity-ide/ path should write Claude log")
     let claudeAfterIDE = try String(contentsOf: claudeStatus, encoding: .utf8)
     expect(claudeAfterIDE.contains("claude-hook"), "IDE path should be treated as Claude")
     expect(claudeAfterIDE.contains("ide-session"), "IDE session should land in Claude log")
     let agAfterIDE = try String(contentsOf: agStatus, encoding: .utf8)
-    expect(!agAfterIDE.contains("ide-session"), "bare /antigravity/ must not write AG log")
+    expect(!agAfterIDE.contains("ide-session"), "/antigravity-ide/ must not write AG log")
+
+    // 4c. Official desktop payload: toolCall.name + workspacePaths.
+    try runClaudeCodeStatusHook(
+        binary: binary,
+        home: home,
+        arguments: ["PreToolUse"],
+        environment: [:],
+        stdinJSON: #"{"transcriptPath":"/Users/x/proj/.gemini/antigravity/transcript.jsonl","conversationId":"desk-tool","workspacePaths":["/tmp/AgentHalo"],"toolCall":{"name":"run_command"}}"#
+    )
+    let agAfterOfficial = try String(contentsOf: agStatus, encoding: .utf8)
+    expect(agAfterOfficial.contains("desk-tool"), "official desktop conversationId should write AG log")
+    expect(agAfterOfficial.contains("run_command"), "official toolCall.name should persist as toolName")
+    expect(agAfterOfficial.contains("AgentHalo"), "official workspacePaths[0] should persist as cwd")
+    expect(agAfterOfficial.contains("antigravity-hook"), "official desktop payload source should be antigravity-hook")
+    if FileManager.default.fileExists(atPath: claudeStatus.path) {
+        let existingClaude = try String(contentsOf: claudeStatus, encoding: .utf8)
+        expect(!existingClaude.contains("desk-tool"), "official desktop conversation must not appear in Claude log")
+    }
 
     // 5. No AG/Grok signal → Claude.
     try runClaudeCodeStatusHook(
@@ -4473,10 +4667,13 @@ func testClaudeCodeStatusHookIsolatesAntigravityStatusFiles() throws {
     // 6. Claude / Grok files must never contain AG session ids.
     expect(!claudeAfterPlain.contains("traj-ag-1"), "AG session id must not appear in Claude log")
     expect(!claudeAfterPlain.contains("cli-session"), "AG transcript session must not appear in Claude log")
+    expect(!claudeAfterPlain.contains("desk-1"), "desktop conversation must not appear in Claude log")
+    expect(!claudeAfterPlain.contains("desk-tool"), "official desktop conversation must not appear in Claude log")
     if FileManager.default.fileExists(atPath: grokStatus.path) {
         let grokAfter = try String(contentsOf: grokStatus, encoding: .utf8)
         expect(!grokAfter.contains("traj-ag-1"), "AG session id must not appear in Grok log")
         expect(!grokAfter.contains("cli-session"), "AG transcript session must not appear in Grok log")
+        expect(!grokAfter.contains("desk-1"), "desktop conversation must not appear in Grok log")
         expect(!grokAfter.contains("claude-plain"), "Claude session must not appear in Grok log")
     }
 }
@@ -5707,10 +5904,13 @@ testClaudeHookReducerStopFailureMapsToError()
 testAntigravityReducerLifecycle()
 testAntigravityReducerIgnoresBadLineAndUnknownEvent()
 testAntigravityReducerStopFailureAndToolFailureSemantics()
-testAntigravityReducerIdentityPostInvocationHoldAndNoAttention()
+testAntigravityReducerIdentityPostInvocationHoldAndPermission()
+testAntigravityReducerUsesSessionPermissionLifecycleLikeGrok()
 testAntigravityReducerStuckPreToolUseRecoversAfterSafetyTimeout()
 do {
+    try testAntigravityPermissionReaderEmitsRequestedAndResolved()
     try testAntigravityHookStatusMonitorMapsLifecycleAndSkipsBadLines()
+    try testAntigravityHookStatusMonitorAppliesConversationPermission()
 } catch {
     fatalError("\(error)")
 }

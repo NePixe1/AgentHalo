@@ -113,6 +113,8 @@ func runHaloInteractionChecks() {
     testPiActivityFiltersDeadLifecycleAndAddsRuntimeFallback()
     testGrokPresencePrefersActiveSessionsFile()
     testAntigravityPresenceUsesHookSnapshotOrAgyNotLanguageServer()
+    testAntigravityPresenceCountsDesktopAppAndAgyNotHelpers()
+    testAntigravityAppDetectorMatchesDesktopAppNotHelpers()
     testGrokActivityDropsEndedAttention()
     testGrokLiveStandbyUsesStableGreenAggregate()
     testClaudeLiveSessionsRefreshIsThrottled()
@@ -3329,6 +3331,73 @@ private func testAntigravityPresenceUsesHookSnapshotOrAgyNotLanguageServer() {
             processPresenceProbe: { false }
         ),
         "no hook snapshot and no agy probe is absent"
+    )
+}
+
+private func testAntigravityPresenceCountsDesktopAppAndAgyNotHelpers() {
+    expect(
+        AntigravityActivityMonitor.countsAsPresentProcess(comm: "agy", name: "agy"),
+        "agy CLI should count as present"
+    )
+    expect(
+        AntigravityActivityMonitor.countsAsPresentProcess(comm: "Antigravity", name: "Antigravity"),
+        "Antigravity desktop app should count as present"
+    )
+    expect(
+        AntigravityActivityMonitor.countsAsPresentProcess(
+            comm: "Antigravity",
+            name: "/Applications/Antigravity.app/Contents/MacOS/Antigravity"
+        ),
+        "Antigravity executable path should count as present"
+    )
+    expect(
+        !AntigravityActivityMonitor.countsAsPresentProcess(
+            comm: "language_server",
+            name: "language_server"
+        ),
+        "language_server must not count as present on its own"
+    )
+    expect(
+        !AntigravityActivityMonitor.countsAsPresentProcess(
+            comm: "Antigravity Hel",
+            name: "Antigravity Helper"
+        ),
+        "Antigravity Helper must not count as the desktop app"
+    )
+}
+
+private func testAntigravityAppDetectorMatchesDesktopAppNotHelpers() {
+    expect(
+        AntigravityAppDetector.matchesPrimaryApp(
+            bundleIdentifier: "com.google.antigravity",
+            executableName: "Antigravity",
+            activationPolicy: .regular
+        ),
+        "Antigravity 2.0 desktop app should count as present"
+    )
+    expect(
+        AntigravityAppDetector.matchesPrimaryApp(
+            bundleIdentifier: "com.google.antigravity",
+            executableName: nil,
+            activationPolicy: .regular
+        ),
+        "bundle id com.google.antigravity should count as present"
+    )
+    expect(
+        !AntigravityAppDetector.matchesPrimaryApp(
+            bundleIdentifier: "com.google.antigravity.helper",
+            executableName: "Antigravity Helper",
+            activationPolicy: .accessory
+        ),
+        "helper processes must not count as the desktop app"
+    )
+    expect(
+        !AntigravityAppDetector.matchesPrimaryApp(
+            bundleIdentifier: nil,
+            executableName: "language_server",
+            activationPolicy: .prohibited
+        ),
+        "language_server must not count as the desktop app"
     )
 }
 

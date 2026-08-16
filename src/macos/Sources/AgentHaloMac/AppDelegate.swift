@@ -428,6 +428,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return piActivitySnapshot.isPresent
         case .antigravity:
             return antigravityActivitySnapshot.isPresent
+                || AntigravityAppDetector.isAntigravityRunning()
         }
     }
 
@@ -569,14 +570,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func workspaceApplicationDidLaunch(_ notification: Notification) {
         let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-        if CodexAppDetector.noteApplicationDidLaunch(app) {
+        let launchedCodex = CodexAppDetector.noteApplicationDidLaunch(app)
+        let launchedAntigravity = app.map(AntigravityAppDetector.isPrimaryApp) ?? false
+        if launchedCodex || launchedAntigravity {
             tick()
         }
     }
 
     @objc private func workspaceApplicationDidTerminate(_ notification: Notification) {
         let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-        guard CodexAppDetector.noteApplicationDidTerminate(app) else { return }
+        let terminatedCodex = CodexAppDetector.noteApplicationDidTerminate(app)
+        let terminatedAntigravity = app.map(AntigravityAppDetector.isPrimaryApp) ?? false
+        guard terminatedCodex || terminatedAntigravity else { return }
         updateFrontmostApplication(NSWorkspace.shared.frontmostApplication)
         tick()
     }

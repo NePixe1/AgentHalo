@@ -8,6 +8,18 @@ public struct AntigravityHookStatusReducer: Sendable {
     private var workingVisibleUntil: Date?
     private var thinkingVisibleUntil: Date?
     private var pendingWorkingAction: String?
+    /// Conversation-DB `WAITING` / hook `PermissionRequest` that has not yet
+    /// been promoted. Same role as Grok's `pendingPermissionRequestedAt`.
+    private var pendingPermissionRequestedAt: Date?
+    /// Genuine user-permission hold. Must not auto-fade via the stuck-tool net.
+    private var isPermissionPrompt = false
+    /// State/action to restore after a human allow. Antigravity does not emit a
+    /// second PreToolUse after the sheet; the tool just starts running.
+    private var prePermissionResume: (state: HaloState, action: String)?
+
+    /// Hold before painting attention so a same-poll auto resolve never flashes.
+    /// `WAITING` is already human-only; the delay is for observation-time replay.
+    public static let pendingPermissionAttentionDelay: TimeInterval = 0.25
 
     public init(threadId: String = "antigravity", now: Date = Date()) {
         self.snapshot = SessionSnapshot(
@@ -35,6 +47,7 @@ public struct AntigravityHookStatusReducer: Sendable {
 
         switch Self.string(root["event"]) {
         case "PreInvocation":
+            clearPermissionHold()
             workingVisibleUntil = nil
             thinkingVisibleUntil = eventAt.addingTimeInterval(0.7)
             pendingWorkingAction = nil
@@ -45,6 +58,10 @@ public struct AntigravityHookStatusReducer: Sendable {
         case "PostInvocation":
             snapshot.active = true
             snapshot.completedAt = nil
+            if isPermissionPrompt {
+                break
+            }
+            pendingPermissionRequestedAt = nil
             if snapshot.state == .working,
                let until = workingVisibleUntil,
                now < until {
@@ -55,8 +72,8 @@ public struct AntigravityHookStatusReducer: Sendable {
             snapshot.state = .thinking
             snapshot.action = "Thinking"
         case "PreToolUse":
-            // No auto-fade during tool execution. If PostToolUse never arrives,
-            // applyWorkingVisibility recovers after 180 s.
+            // Fires when the tool is *requested*. Auto-allowed tools follow
+            // with PostToolUse in tens of ms; permission sheets sit here.
             workingVisibleUntil = nil
             snapshot.active = true
             let action = GeneratedHaloSpec.friendlyAction(Self.normalizedToolName(Self.toolName(from: root)))
@@ -73,6 +90,7 @@ public struct AntigravityHookStatusReducer: Sendable {
             }
             snapshot.completedAt = nil
         case "PostToolUse":
+            clearPermissionHold()
             snapshot.active = true
             let failed = !Self.string(root["errorText"]).isEmpty
             let action = failed ? "Tool failed" : "Reviewing result"
@@ -88,7 +106,16 @@ public struct AntigravityHookStatusReducer: Sendable {
             }
             snapshot.completedAt = nil
             workingVisibleUntil = eventAt.addingTimeInterval(0.65)
+        case "Notification":
+            if Self.string(root["notificationType"]) == "permission_prompt" {
+                applyPermissionRequested(at: eventAt, observedAt: now)
+            }
+        case "PermissionRequest":
+            applyPermissionRequested(at: eventAt, observedAt: now)
+        case "PermissionDenied":
+            applyPermissionResolved(decision: "deny", at: eventAt)
         case "Stop":
+            clearPermissionHold()
             workingVisibleUntil = nil
             thinkingVisibleUntil = nil
             pendingWorkingAction = nil
@@ -107,7 +134,56 @@ public struct AntigravityHookStatusReducer: Sendable {
         }
     }
 
+    public mutating func applyPermissionUpdate(
+        _ update: AntigravityPermissionUpdate,
+        now: Date = Date()
+    ) {
+        switch update.kind {
+        case .requested:
+            applyPermissionRequested(at: update.at, observedAt: now)
+        case .resolved(let decision):
+            applyPermissionResolved(decision: decision, at: update.at)
+        }
+    }
+
+    public mutating func applyPermissionRequested(at eventAt: Date = Date(), observedAt: Date? = nil) {
+        armPendingPermission(eventAt: eventAt, observedAt: observedAt ?? eventAt)
+    }
+
+    public mutating func applyPermissionResolved(decision: String, at eventAt: Date = Date()) {
+        pendingPermissionRequestedAt = nil
+        if eventAt > snapshot.lastEventAt {
+            snapshot.lastEventAt = eventAt
+        }
+
+        if Self.isDeniedDecision(decision) {
+            isPermissionPrompt = true
+            prePermissionResume = nil
+            workingVisibleUntil = nil
+            thinkingVisibleUntil = nil
+            pendingWorkingAction = nil
+            snapshot.active = true
+            snapshot.state = .attention
+            snapshot.action = "Permission denied"
+            snapshot.completedAt = nil
+            return
+        }
+
+        if snapshot.state == .attention || isPermissionPrompt {
+            isPermissionPrompt = false
+            snapshot.active = true
+            if snapshot.state == .attention {
+                restoreAfterPermissionAllow()
+            } else {
+                prePermissionResume = nil
+            }
+            snapshot.completedAt = nil
+        }
+    }
+
     public mutating func applyWorkingVisibility(now: Date = Date()) {
+        applyPermissionVisibility(now: now)
+
         guard snapshot.active else { return }
 
         if let pendingWorkingAction,
@@ -117,10 +193,9 @@ public struct AntigravityHookStatusReducer: Sendable {
             self.thinkingVisibleUntil = nil
             snapshot.state = .working
             snapshot.action = pendingWorkingAction
-            return
         }
 
-        guard snapshot.state == .working else { return }
+        guard snapshot.state == .working, !isPermissionPrompt else { return }
 
         if let until = workingVisibleUntil, now >= until {
             workingVisibleUntil = nil
@@ -129,13 +204,85 @@ public struct AntigravityHookStatusReducer: Sendable {
             return
         }
 
-        // Safety net: stuck PreToolUse without PostToolUse. Force-fade after
-        // 180 seconds of inactivity so the ring can recover without Stop.
         if workingVisibleUntil == nil,
+           pendingPermissionRequestedAt == nil,
            now.timeIntervalSince(snapshot.lastEventAt) > 180 {
             snapshot.state = .thinking
             snapshot.action = "Thinking"
         }
+    }
+
+    public mutating func applyPermissionVisibility(now: Date = Date()) {
+        guard let pendingAt = pendingPermissionRequestedAt else { return }
+        guard now.timeIntervalSince(pendingAt) >= Self.pendingPermissionAttentionDelay else {
+            return
+        }
+        pendingPermissionRequestedAt = nil
+        capturePrePermissionResume()
+        isPermissionPrompt = true
+        workingVisibleUntil = nil
+        thinkingVisibleUntil = nil
+        pendingWorkingAction = nil
+        snapshot.active = true
+        snapshot.state = .attention
+        snapshot.action = "Awaiting permission"
+        snapshot.completedAt = nil
+        if now > snapshot.lastEventAt {
+            snapshot.lastEventAt = now
+        }
+    }
+
+    private mutating func armPendingPermission(eventAt: Date, observedAt: Date) {
+        if pendingPermissionRequestedAt == nil {
+            pendingPermissionRequestedAt = observedAt
+        }
+        if eventAt > snapshot.lastEventAt {
+            snapshot.lastEventAt = eventAt
+        }
+        if !snapshot.active,
+           snapshot.state == .idle || snapshot.state == .done {
+            snapshot.active = true
+        }
+    }
+
+    private mutating func capturePrePermissionResume() {
+        guard prePermissionResume == nil else { return }
+        if snapshot.state == .working {
+            prePermissionResume = (state: .working, action: snapshot.action)
+            return
+        }
+        if let pendingWorkingAction, !pendingWorkingAction.isEmpty {
+            prePermissionResume = (state: .working, action: pendingWorkingAction)
+            return
+        }
+        if snapshot.state == .thinking {
+            prePermissionResume = (state: .thinking, action: snapshot.action)
+            return
+        }
+        prePermissionResume = (state: .thinking, action: "Thinking")
+    }
+
+    private mutating func restoreAfterPermissionAllow() {
+        snapshot.active = true
+        if let resume = prePermissionResume {
+            snapshot.state = resume.state
+            snapshot.action = resume.action
+            prePermissionResume = nil
+            return
+        }
+        snapshot.state = .thinking
+        snapshot.action = "Thinking"
+    }
+
+    private mutating func clearPermissionHold() {
+        pendingPermissionRequestedAt = nil
+        isPermissionPrompt = false
+        prePermissionResume = nil
+    }
+
+    private static func isDeniedDecision(_ decision: String) -> Bool {
+        let lower = decision.lowercased()
+        return lower.contains("reject") || lower.contains("deny") || lower == "denied"
     }
 
     private mutating func updateIdentity(from root: [String: Any]) {

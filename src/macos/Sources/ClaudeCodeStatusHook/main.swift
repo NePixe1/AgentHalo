@@ -53,6 +53,8 @@ func normalizeEventName(_ raw: String) -> String {
         "post_compact": "PostCompact",
         "pre_invocation": "PreInvocation",
         "post_invocation": "PostInvocation",
+        "permission_request": "PermissionRequest",
+        "permission_denied": "PermissionDenied",
     ]
     if let mapped = mapping[raw] {
         return mapped
@@ -63,14 +65,39 @@ func normalizeEventName(_ raw: String) -> String {
     return raw
 }
 
+func firstWorkspacePath(_ payload: [String: Any]) -> String {
+    let raw = payload["workspacePaths"] ?? payload["workspace_paths"]
+    if let paths = raw as? [String], let first = paths.first, !first.isEmpty {
+        return first
+    }
+    if let paths = raw as? [Any] {
+        for item in paths {
+            if let s = item as? String, !s.isEmpty {
+                return s
+            }
+        }
+    }
+    return ""
+}
+
+/// CLI uses `.../antigravity-cli/`. Antigravity 2.0 desktop uses `.../antigravity/`.
+/// The IDE uses `.../antigravity-ide/` and must not match.
+func antigravityTranscriptMatch(_ transcript: String) -> Bool {
+    if transcript.contains("/antigravity-ide/") {
+        return false
+    }
+    return transcript.contains("/antigravity-cli/") || transcript.contains("/antigravity/")
+}
+
 func antigravityHookMatch(env: [String: String], payload: [String: Any]) -> Bool {
     if !(env["ANTIGRAVITY_AGENT"] ?? "").isEmpty { return true }
     if !(env["ANTIGRAVITY_TRAJECTORY_ID"] ?? "").isEmpty { return true }
+    if !(env["ANTIGRAVITY_CONVERSATION_ID"] ?? "").isEmpty { return true }
     let transcript = firstString(
         payload["transcript_path"], payload["transcriptPath"],
         env["ANTIGRAVITY_TRANSCRIPT_PATH"]
     )
-    return transcript.contains("/antigravity-cli/")
+    return antigravityTranscriptMatch(transcript)
 }
 
 let env = ProcessInfo.processInfo.environment
@@ -96,6 +123,7 @@ let cwd = firstString(
     payload["cwd"],
     nestedGet(payload, path: ["workspace", "current_dir"]),
     nestedGet(payload, path: ["workspace", "cwd"]),
+    firstWorkspacePath(payload),
     FileManager.default.currentDirectoryPath
 )
 
@@ -103,9 +131,11 @@ let sessionId: String
 if isAntigravity {
     sessionId = firstString(
         env["ANTIGRAVITY_TRAJECTORY_ID"],
+        env["ANTIGRAVITY_CONVERSATION_ID"],
         payload["session_id"],
         payload["sessionId"],
         payload["conversation_id"],
+        payload["conversationId"],
         "antigravity"
     )
 } else {
@@ -121,7 +151,8 @@ if isAntigravity {
 let toolName = firstString(
     payload["tool_name"],
     payload["toolName"],
-    nestedGet(payload, path: ["tool", "name"])
+    nestedGet(payload, path: ["tool", "name"]),
+    nestedGet(payload, path: ["toolCall", "name"])
 )
 
 let notificationType: String
