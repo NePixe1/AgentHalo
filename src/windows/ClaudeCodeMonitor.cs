@@ -109,7 +109,8 @@ public static class ClaudeHookStatusWriter
                 bool isGrok = !String.IsNullOrEmpty(grokSessionId) ||
                     !String.IsNullOrEmpty(grokHookEvent);
 
-                string resolvedEvent = FirstString(eventName, Value(payload, "hook_event_name"),
+                string resolvedEvent = FirstString(eventName, Value(payload, "hookEventName"),
+                    Value(payload, "hook_event_name"),
                     Value(payload, "event"), Value(payload, "eventName"),
                     isGrok ? grokHookEvent : null);
                 if (String.IsNullOrWhiteSpace(resolvedEvent))
@@ -154,6 +155,23 @@ public static class ClaudeHookStatusWriter
                     Value(payload, "permissionMode"));
                 record["permissionMode"] = String.IsNullOrEmpty(permissionMode)
                     ? null : permissionMode;
+                string promptId = FirstString(Value(payload, "promptId"),
+                    Value(payload, "prompt_id"));
+                record["promptId"] = String.IsNullOrEmpty(promptId) ? null : promptId;
+                string subagentType = FirstString(Value(payload, "subagentType"),
+                    Value(payload, "subagent_type"));
+                record["subagentType"] = String.IsNullOrEmpty(subagentType)
+                    ? null : subagentType;
+                string reason = FirstString(Value(payload, "reason"));
+                record["reason"] = String.IsNullOrEmpty(reason) ? null : reason;
+                string cancelledBy = FirstString(Value(payload, "cancelledBy"),
+                    Value(payload, "cancelled_by"));
+                record["cancelledBy"] = String.IsNullOrEmpty(cancelledBy)
+                    ? null : cancelledBy;
+                string cancelTrigger = FirstString(Value(payload, "cancelTrigger"),
+                    Value(payload, "cancel_trigger"));
+                record["cancelTrigger"] = String.IsNullOrEmpty(cancelTrigger)
+                    ? null : cancelTrigger;
                 record["source"] = isGrok ? "grok-hook" : "claude-hook";
 
                 string path = isGrok

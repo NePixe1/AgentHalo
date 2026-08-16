@@ -45,9 +45,11 @@ func normalizeEventName(_ raw: String) -> String {
         "pre_tool_use": "PreToolUse",
         "post_tool_use": "PostToolUse",
         "post_tool_use_failure": "PostToolUseFailure",
+        "permission_denied": "PermissionDenied",
         "notification": "Notification",
         "stop": "Stop",
         "stop_failure": "StopFailure",
+        "stop_cancelled": "StopCancelled",
         "session_end": "SessionEnd",
         "pre_compact": "PreCompact",
         "post_compact": "PostCompact",
@@ -68,6 +70,7 @@ let isGrok = !(env["GROK_SESSION_ID"] ?? "").isEmpty
 let rawEventName = firstString(
     event,
     env["GROK_HOOK_EVENT"],
+    payload["hookEventName"],
     payload["hook_event_name"],
     payload["event"],
     payload["eventName"]
@@ -130,6 +133,28 @@ let permissionMode = firstString(
     payload["permissionMode"]
 )
 
+let promptId = firstString(
+    payload["promptId"],
+    payload["prompt_id"]
+)
+
+let subagentType = firstString(
+    payload["subagentType"],
+    payload["subagent_type"]
+)
+
+let reason = firstString(payload["reason"])
+
+let cancelledBy = firstString(
+    payload["cancelledBy"],
+    payload["cancelled_by"]
+)
+
+let cancelTrigger = firstString(
+    payload["cancelTrigger"],
+    payload["cancel_trigger"]
+)
+
 let timestamp = firstString(
     payload["timestamp"],
     {
@@ -154,6 +179,11 @@ var record: [String: Any?] = [
     "notificationType": notificationType.isEmpty ? nil : notificationType,
     "errorText": errorText.isEmpty ? nil : errorText,
     "permissionMode": permissionMode.isEmpty ? nil : permissionMode,
+    "promptId": promptId.isEmpty ? nil : promptId,
+    "subagentType": subagentType.isEmpty ? nil : subagentType,
+    "reason": reason.isEmpty ? nil : reason,
+    "cancelledBy": cancelledBy.isEmpty ? nil : cancelledBy,
+    "cancelTrigger": cancelTrigger.isEmpty ? nil : cancelTrigger,
     "source": source,
 ]
 

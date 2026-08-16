@@ -1246,6 +1246,8 @@ func testGrokHookConfiguratorWritesHooksJSON() throws {
     expect(text.contains("SessionStart"), "SessionStart registered")
     expect(text.contains("SessionEnd"), "SessionEnd registered")
     expect(text.contains("PostCompact"), "PostCompact registered")
+    expect(text.contains("StopCancelled"), "StopCancelled registered")
+    expect(text.contains("PermissionDenied"), "PermissionDenied registered")
 
     let paths = AgentHaloPaths(homeDirectory: home)
     expect(FileManager.default.fileExists(atPath: paths.statusHook.path), "hook binary staged under .agent-halo/bin")
@@ -1465,7 +1467,9 @@ func testGrokHookConfiguratorLeavesPreferredPathConfigAlone() throws {
     let events: [(String, String?)] = [
         ("SessionStart", nil), ("UserPromptSubmit", nil),
         ("PreToolUse", ".*"), ("PostToolUse", ".*"), ("PostToolUseFailure", ".*"),
-        ("Notification", nil), ("Stop", nil), ("StopFailure", nil), ("SessionEnd", nil),
+        ("PermissionDenied", nil),
+        ("Notification", nil), ("Stop", nil), ("StopFailure", nil),
+        ("StopCancelled", nil), ("SessionEnd", nil),
         ("PreCompact", ""), ("PostCompact", ""),
     ]
     for (event, matcher) in events {
@@ -1483,6 +1487,67 @@ func testGrokHookConfiguratorLeavesPreferredPathConfigAlone() throws {
     GrokHookConfigurator.configure(homeDirectory: home, bundledHookBinary: bundled)
     let after = try Data(contentsOf: hooksFile)
     expect(after, before, "preferred-path config must not be rewritten")
+}
+
+func testGrokHookConfiguratorAddsStopCancelledToExistingPreferredConfig() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent(
+        "agent-halo-grok-add-stop-cancelled-\(UUID().uuidString)",
+        isDirectory: true
+    )
+    defer { try? fm.removeItem(at: home) }
+    try fm.createDirectory(at: home, withIntermediateDirectories: true)
+
+    let paths = AgentHaloPaths(homeDirectory: home)
+    let bundled = home.appendingPathComponent("bundle-hook")
+    try Data("hook".utf8).write(to: bundled)
+    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundled.path)
+    try AgentHaloBinaryStaging.stageStatusHook(
+        from: bundled,
+        homeDirectory: home,
+        fileManager: fm
+    )
+
+    let hooksDir = home.appendingPathComponent(".grok/hooks", isDirectory: true)
+    try fm.createDirectory(at: hooksDir, withIntermediateDirectories: true)
+    var hooks: [String: Any] = [:]
+    let events: [(String, String?)] = [
+        ("SessionStart", nil), ("UserPromptSubmit", nil),
+        ("PreToolUse", ".*"), ("PostToolUse", ".*"), ("PostToolUseFailure", ".*"),
+        ("Notification", nil), ("Stop", nil), ("StopFailure", nil), ("SessionEnd", nil),
+        ("PreCompact", ""), ("PostCompact", ""),
+    ]
+    for (event, matcher) in events {
+        var entry: [String: Any] = [
+            "hooks": [["type": "command", "command": paths.statusHook.path]],
+        ]
+        if let matcher { entry["matcher"] = matcher }
+        hooks[event] = [entry]
+    }
+    let hooksFile = hooksDir.appendingPathComponent("agent-halo-status.json")
+    try JSONSerialization.data(withJSONObject: ["hooks": hooks], options: [.prettyPrinted])
+        .write(to: hooksFile)
+
+    expect(
+        !GrokHookConfigurator.isOnPreferredPath(
+            at: hooksFile,
+            preferredPath: paths.statusHook.path,
+            fileManager: fm
+        ),
+        "config missing StopCancelled is not preferred"
+    )
+    GrokHookConfigurator.configure(homeDirectory: home, bundledHookBinary: bundled)
+    let text = try String(contentsOf: hooksFile, encoding: .utf8)
+    expect(text.contains("StopCancelled"), "rewrite adds StopCancelled")
+    expect(text.contains("PermissionDenied"), "rewrite adds PermissionDenied")
+    expect(
+        GrokHookConfigurator.isOnPreferredPath(
+            at: hooksFile,
+            preferredPath: paths.statusHook.path,
+            fileManager: fm
+        ),
+        "rewritten config is preferred"
+    )
 }
 
 /// Legacy root path in Grok hooks must be rewritten to bin/status-hook on launch.
@@ -3345,6 +3410,179 @@ func testGrokHookReducerMapsEscCancelToInterrupted() {
     expect(idle.snapshot.state, .idle, "cancel on idle Ready is a no-op")
 }
 
+func testGrokHookReducerStopCancelledMapsReasons() {
+    func consumeCancel(
+        reason: String,
+        promptId: String = "p1",
+        extra: String = ""
+    ) -> GrokHookStatusReducer {
+        var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
+        r.consume(
+            jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p","promptId":"p1","source":"grok-hook"}"#,
+            now: Date(timeIntervalSince1970: 1)
+        )
+        r.consume(
+            jsonLine: #"{"timestamp":"2026-07-25T00:00:02Z","event":"PreToolUse","sessionId":"s1","cwd":"/p","toolName":"read_file","source":"grok-hook"}"#,
+            now: Date(timeIntervalSince1970: 2)
+        )
+        r.consume(
+            jsonLine: #"{"timestamp":"2026-07-25T00:00:03Z","event":"StopCancelled","sessionId":"s1","reason":"\#(reason)","promptId":"\#(promptId)"\#(extra),"source":"grok-hook"}"#,
+            now: Date(timeIntervalSince1970: 3)
+        )
+        return r
+    }
+
+    let interrupt = consumeCancel(reason: "user_interrupt")
+    expect(interrupt.snapshot.state, .error, "user_interrupt → error")
+    expect(interrupt.snapshot.action, "Interrupted", "user_interrupt action")
+    expect(interrupt.snapshot.active, false, "user_interrupt clears active")
+    expect(interrupt.snapshot.completedAt == nil, "cancel is not a done completion")
+
+    let rejected = consumeCancel(reason: "permission_rejected")
+    expect(rejected.snapshot.state, .error, "permission_rejected → error")
+    expect(rejected.snapshot.action, "Permission denied", "permission_rejected action")
+    expect(rejected.snapshot.active, false, "permission_rejected ends the turn")
+
+    let dismissed = consumeCancel(reason: "permission_cancelled")
+    expect(dismissed.snapshot.state, .idle, "permission_cancelled → idle")
+    expect(dismissed.snapshot.action, "Ready", "permission_cancelled action")
+    expect(dismissed.snapshot.active, false, "permission_cancelled ends the turn")
+
+    let maxTurns = consumeCancel(reason: "max_turns")
+    expect(maxTurns.snapshot.state, .error, "max_turns → error")
+    expect(maxTurns.snapshot.action, "Grok stopped with an error", "max_turns action")
+
+    let noProgress = consumeCancel(reason: "no_progress")
+    expect(noProgress.snapshot.state, .error, "no_progress → error")
+    expect(noProgress.snapshot.action, "Grok stopped with an error", "no_progress action")
+}
+
+func testGrokHookReducerStopCancelledIgnoresSubagentAndStalePrompt() {
+    var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p","promptId":"p2","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    expect(r.snapshot.state, .thinking, "precondition thinking")
+    let promptAt = r.snapshot.lastEventAt
+
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:02Z","event":"StopCancelled","sessionId":"s1","reason":"user_interrupt","promptId":"p1","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 2)
+    )
+    expect(r.snapshot.state, .thinking, "stale promptId must not overwrite the new turn")
+    expect(r.snapshot.active, true, "stale cancel leaves the new turn active")
+    expect(r.snapshot.lastEventAt, promptAt, "ignored cancel must not advance lastEventAt")
+
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:03Z","event":"StopCancelled","sessionId":"s1","reason":"max_turns","promptId":"p2","subagentType":"explore","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 3)
+    )
+    expect(r.snapshot.state, .thinking, "subagent StopCancelled must not drive the session ring")
+    expect(r.snapshot.active, true, "subagent cancel leaves the parent turn active")
+
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:04Z","event":"StopCancelled","sessionId":"s1","reason":"user_interrupt","promptId":"p2","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 4)
+    )
+    expect(r.snapshot.state, .error, "matching promptId interrupt settles the turn")
+    expect(r.snapshot.action, "Interrupted", "matching promptId action")
+}
+
+func testGrokHookReducerStopCancelledRefinesEarlierTerminal() {
+    var dismissed = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
+    dismissed.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p","promptId":"p1","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    dismissed.applyTurnCancelled(at: Date(timeIntervalSince1970: 2))
+    expect(dismissed.snapshot.state, .error, "precondition: events.jsonl cancel painted error")
+    dismissed.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:03Z","event":"StopCancelled","sessionId":"s1","reason":"permission_cancelled","promptId":"p1","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 3)
+    )
+    expect(dismissed.snapshot.state, .idle, "permission_cancelled refines events.jsonl error")
+    expect(dismissed.snapshot.action, "Ready", "permission_cancelled action after refine")
+    expect(dismissed.snapshot.active, false, "refined dismiss stays inactive")
+
+    var completed = GrokHookStatusReducer(threadId: "s2", now: Date(timeIntervalSince1970: 0))
+    completed.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s2","cwd":"/p","promptId":"p1","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    completed.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:02Z","event":"Stop","sessionId":"s2","promptId":"p1","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 2)
+    )
+    expect(completed.snapshot.state, .done, "precondition: Stop painted Complete")
+    completed.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:03Z","event":"StopCancelled","sessionId":"s2","reason":"user_interrupt","promptId":"p1","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 3)
+    )
+    expect(completed.snapshot.state, .error, "StopCancelled after Stop gate interrupt is error")
+    expect(completed.snapshot.action, "Interrupted", "Stop-then-cancel action")
+    expect(completed.snapshot.completedAt == nil, "refined cancel is not a done completion")
+
+    var unlabeled = GrokHookStatusReducer(threadId: "s3", now: Date(timeIntervalSince1970: 0))
+    unlabeled.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s3","cwd":"/p","promptId":"p1","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    unlabeled.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:02Z","event":"Stop","sessionId":"s3","promptId":"p1","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 2)
+    )
+    unlabeled.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:03Z","event":"StopCancelled","sessionId":"s3","reason":"user_interrupt","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 3)
+    )
+    expect(unlabeled.snapshot.state, .error, "unlabeled StopCancelled still refines done")
+    expect(unlabeled.snapshot.action, "Interrupted", "unlabeled refine action")
+
+    var stale = GrokHookStatusReducer(threadId: "s4", now: Date(timeIntervalSince1970: 0))
+    stale.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s4","cwd":"/p","promptId":"p1","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    stale.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:02Z","event":"Stop","sessionId":"s4","promptId":"p1","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 2)
+    )
+    stale.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:03Z","event":"UserPromptSubmit","sessionId":"s4","cwd":"/p","promptId":"p2","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 3)
+    )
+    stale.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:04Z","event":"StopCancelled","sessionId":"s4","reason":"user_interrupt","promptId":"p1","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 4)
+    )
+    expect(stale.snapshot.state, .thinking, "stale cancel after a new prompt stays thinking")
+    expect(stale.snapshot.active, true, "stale cancel does not deactivate the new turn")
+}
+
+func testGrokHookReducerPermissionDeniedIgnoresSubagent() {
+    var r = GrokHookStatusReducer(threadId: "s1", now: Date(timeIntervalSince1970: 0))
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:01Z","event":"UserPromptSubmit","sessionId":"s1","cwd":"/p","promptId":"p1","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 1)
+    )
+    let promptAt = r.snapshot.lastEventAt
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:02Z","event":"PermissionDenied","sessionId":"s1","cwd":"/p","subagentType":"explore","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 2)
+    )
+    expect(r.snapshot.state, .thinking, "subagent PermissionDenied must not paint attention")
+    expect(r.snapshot.active, true, "subagent deny leaves the parent turn active")
+    expect(r.snapshot.lastEventAt, promptAt, "ignored deny must not advance lastEventAt")
+
+    r.consume(
+        jsonLine: #"{"timestamp":"2026-07-25T00:00:03Z","event":"PermissionDenied","sessionId":"s1","cwd":"/p","source":"grok-hook"}"#,
+        now: Date(timeIntervalSince1970: 3)
+    )
+    expect(r.snapshot.state, .attention, "session PermissionDenied still becomes attention")
+    expect(r.snapshot.action, "Permission denied", "session deny action")
+}
+
 func testGrokSessionTurnEventsReaderDetectsCancelledTurnEnded() throws {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-grok-turn-events-\(UUID().uuidString)", isDirectory: true)
@@ -3859,6 +4097,23 @@ func testClaudeCodeStatusHookIsolatesGrokAndClaudeStatusFiles() throws {
     expect(grokText.contains("test-grok-session"), "Grok record should include session id")
     expect(grokText.contains("\"PreToolUse\""), "snake_case pre_tool_use should normalize to PreToolUse")
     expect(grokText.contains("\"permissionMode\":\"auto\""), "hook should persist permissionMode for Auto ring gating")
+
+    try runClaudeCodeStatusHook(
+        binary: binary,
+        home: home,
+        arguments: ["stop_cancelled"],
+        environment: [
+            "GROK_SESSION_ID": "test-grok-session",
+            "GROK_HOOK_EVENT": "stop_cancelled",
+        ],
+        stdinJSON: #"{"sessionId":"test-grok-session","cwd":"/tmp/proj","hookEventName":"StopCancelled","reason":"user_interrupt","cancelledBy":"user","cancelTrigger":"esc","promptId":"p-esc","timestamp":"2026-07-25T00:00:08Z"}"#
+    )
+    let grokCancelText = try String(contentsOf: grokStatus, encoding: .utf8)
+    expect(grokCancelText.contains("\"StopCancelled\""), "stop_cancelled normalizes to StopCancelled")
+    expect(grokCancelText.contains("\"reason\":\"user_interrupt\""), "hook should persist StopCancelled reason")
+    expect(grokCancelText.contains("\"promptId\":\"p-esc\""), "hook should persist promptId")
+    expect(grokCancelText.contains("\"cancelledBy\":\"user\""), "hook should persist cancelledBy")
+    expect(grokCancelText.contains("\"cancelTrigger\":\"esc\""), "hook should persist cancelTrigger")
     if FileManager.default.fileExists(atPath: claudeStatus.path) {
         let existingClaude = try String(contentsOf: claudeStatus, encoding: .utf8)
         expect(!existingClaude.contains("test-grok-session"), "Grok session id must not appear in logs/claude-status.jsonl")
@@ -4911,6 +5166,7 @@ do {
     try testRuntimeBootstrapUpgradesLayoutV1WithoutStrandingHookPaths()
     try testRuntimeBootstrapSkipsDisabledAgentUserConfig()
     try testGrokHookConfiguratorLeavesPreferredPathConfigAlone()
+    try testGrokHookConfiguratorAddsStopCancelledToExistingPreferredConfig()
     try testGrokHookConfiguratorRewritesLegacyRootPath()
     try testGrokHookConfiguratorRepairsDeadExecutableCommand()
     try testBinaryStagingNeverLeavesDestinationMissing()
@@ -5039,6 +5295,10 @@ testGrokHookReducerHumanPermissionResolveClearsAttention()
 testGrokHookReducerAutoNoiseDuringToolExecutionStaysWorking()
 testGrokHookReducerHumanWaitAfterPreToolUseBecomesAttention()
 testGrokHookReducerMapsEscCancelToInterrupted()
+testGrokHookReducerStopCancelledMapsReasons()
+testGrokHookReducerStopCancelledIgnoresSubagentAndStalePrompt()
+testGrokHookReducerStopCancelledRefinesEarlierTerminal()
+testGrokHookReducerPermissionDeniedIgnoresSubagent()
 testGrokHookReducerSteerCancelDoesNotPaintError()
 do {
     try testClaudeCodeStatusHookIsolatesGrokAndClaudeStatusFiles()

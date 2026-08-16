@@ -26,6 +26,9 @@ public struct GrokHookStatusReducer: Sendable {
     /// is no second PreToolUse after approve, so we must not drop back to Thinking
     /// while the tool is still running.
     private var prePermissionResume: (state: HaloState, action: String)?
+    /// Newest `promptId` from `UserPromptSubmit`. Used to drop a late
+    /// `StopCancelled` that belongs to an already-replaced turn.
+    private var currentPromptId = ""
 
     /// Fast path resolutions (read/grep Auto, rule allow) complete well under this.
     /// Shell Auto often sits in the 1.5–3 s band; those are gated by `permissionMode`
@@ -56,6 +59,7 @@ public struct GrokHookStatusReducer: Sendable {
             return
         }
 
+        let previousLastEventAt = snapshot.lastEventAt
         let eventAt = Self.parseDate(Self.string(root["timestamp"])) ?? now
         snapshot.lastEventAt = eventAt
         updateIdentity(from: root)
@@ -63,6 +67,7 @@ public struct GrokHookStatusReducer: Sendable {
 
         switch Self.string(root["event"]) {
         case "SessionStart":
+            currentPromptId = ""
             if wasActiveBeforeCompaction != nil {
                 clearPermissionHold()
                 workingVisibleUntil = nil
@@ -85,6 +90,7 @@ public struct GrokHookStatusReducer: Sendable {
             snapshot.completedAt = nil
         case "UserPromptSubmit":
             wasActiveBeforeCompaction = nil
+            currentPromptId = Self.firstString(root["promptId"], root["prompt_id"])
             workingVisibleUntil = nil
             thinkingVisibleUntil = eventAt.addingTimeInterval(0.7)
             pendingWorkingAction = nil
@@ -169,6 +175,10 @@ public struct GrokHookStatusReducer: Sendable {
             // but apply the same Auto-safe rules as permission_prompt.
             applyPermissionPromptHook(at: eventAt, observedAt: now)
         case "PermissionDenied":
+            if Self.hasSubagentType(root) {
+                snapshot.lastEventAt = previousLastEventAt
+                break
+            }
             wasActiveBeforeCompaction = nil
             pendingPermissionRequestedAt = nil
             isPermissionPrompt = true
@@ -200,6 +210,10 @@ public struct GrokHookStatusReducer: Sendable {
             snapshot.state = .error
             snapshot.action = "Grok stopped with an error"
             snapshot.completedAt = nil
+        case "StopCancelled":
+            if !applyStopCancelled(from: root, at: eventAt) {
+                snapshot.lastEventAt = previousLastEventAt
+            }
         case "PreCompact":
             if wasActiveBeforeCompaction == nil {
                 wasActiveBeforeCompaction = snapshot.active
@@ -484,9 +498,62 @@ public struct GrokHookStatusReducer: Sendable {
         return lower.contains("reject") || lower.contains("deny") || lower == "denied"
     }
 
-    /// Grok skips `Stop` / `StopFailure` hooks on user interrupt (Esc / Ctrl+C).
-    /// Session `events.jsonl` records `turn_ended` with `outcome: "cancelled"`
-    /// instead — map that to the same fault ring Codex uses for interruptions.
+    /// First-class Grok 1.0.4+ hook for a turn that ended without completing.
+    /// Returns false when the event must be ignored (nested subagent, or a
+    /// stale `promptId` from a turn the session already replaced).
+    ///
+    /// `events.jsonl` `turn_ended cancelled` remains the fallback for older
+    /// Grok builds that never emit this hook.
+    @discardableResult
+    mutating func applyStopCancelled(from root: [String: Any], at eventAt: Date) -> Bool {
+        if Self.hasSubagentType(root) {
+            return false
+        }
+        let incomingPromptId = Self.firstString(root["promptId"], root["prompt_id"])
+        if shouldIgnoreStopCancelled(incomingPromptId: incomingPromptId) {
+            return false
+        }
+        let reason = Self.firstString(root["reason"]).lowercased()
+        switch reason {
+        case "permission_rejected":
+            applyInterruptedTurn(
+                at: eventAt, action: "Permission denied", asError: true, refineTerminal: true)
+        case "permission_cancelled":
+            applyInterruptedTurn(
+                at: eventAt, action: "Ready", asError: false, refineTerminal: true)
+        case "max_turns", "no_progress":
+            applyInterruptedTurn(
+                at: eventAt, action: "Grok stopped with an error", asError: true, refineTerminal: true)
+        default:
+            applyInterruptedTurn(
+                at: eventAt, action: "Interrupted", asError: true, refineTerminal: true)
+        }
+        return true
+    }
+
+    private func shouldIgnoreStopCancelled(incomingPromptId: String) -> Bool {
+        if !incomingPromptId.isEmpty, !currentPromptId.isEmpty,
+           incomingPromptId != currentPromptId {
+            return true
+        }
+        // Unlabeled cancel only threatens a still-running identified turn.
+        // After done/error, the same turn's late StopCancelled must still refine.
+        if incomingPromptId.isEmpty, !currentPromptId.isEmpty, isInFlight {
+            return true
+        }
+        return false
+    }
+
+    private var isInFlight: Bool {
+        snapshot.active
+            || snapshot.state == .thinking
+            || snapshot.state == .working
+            || snapshot.state == .attention
+    }
+
+    /// Fallback for pre-1.0.4 Grok, which skipped `Stop` / `StopFailure` on
+    /// Esc / Ctrl+C. Session `events.jsonl` records `turn_ended` with
+    /// `outcome: "cancelled"` — map that to the same fault ring Codex uses.
     ///
     /// Steer / Sent now also emits `cancelled` (often `trigger: send_now`). Those
     /// must not paint red — call `applySteerCancel` instead.
@@ -507,12 +574,17 @@ public struct GrokHookStatusReducer: Sendable {
         applyInterruptedTurn(at: eventAt, action: "Grok stopped with an error", asError: true)
     }
 
-    private mutating func applyInterruptedTurn(at eventAt: Date, action: String, asError: Bool) {
-        // Only override an in-flight turn. Idle/done/error already terminal.
-        guard snapshot.active
-            || snapshot.state == .thinking
-            || snapshot.state == .working
-            || snapshot.state == .attention else {
+    private mutating func applyInterruptedTurn(
+        at eventAt: Date,
+        action: String,
+        asError: Bool,
+        refineTerminal: Bool = false
+    ) {
+        // events.jsonl / Stop may already have parked the turn as error/done.
+        // Same-turn StopCancelled still needs to refine that terminal state.
+        let sameTurnTerminal = refineTerminal
+            && (snapshot.state == .done || snapshot.state == .error)
+        guard isInFlight || sameTurnTerminal else {
             return
         }
         wasActiveBeforeCompaction = nil
@@ -612,5 +684,19 @@ public struct GrokHookStatusReducer: Sendable {
             return String(describing: value)
         }
         return ""
+    }
+
+    private static func firstString(_ values: Any?...) -> String {
+        for value in values {
+            let text = string(value)
+            if !text.isEmpty {
+                return text
+            }
+        }
+        return ""
+    }
+
+    private static func hasSubagentType(_ root: [String: Any]) -> Bool {
+        !firstString(root["subagentType"], root["subagent_type"]).isEmpty
     }
 }

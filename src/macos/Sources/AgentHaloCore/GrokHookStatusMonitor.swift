@@ -112,7 +112,7 @@ public final class GrokHookStatusMonitor {
     }
 
     /// Poll session `events.jsonl` for:
-    /// - Esc cancel / failed `turn_ended` (hooks skip Stop on interrupt)
+    /// - Esc cancel / failed `turn_ended` (fallback when StopCancelled is absent)
     /// - Steer supersede (`send_now` / `cancel_then_send` / newer turn_started)
     /// - `permission_requested` / `permission_resolved` (Strategy C: Auto vs human)
     private func applySessionEvents(now: Date) -> Bool {
