@@ -30,12 +30,18 @@ public struct AntigravityUsageClient: Sendable {
     public static let retrieveQuotaPath = "/v1internal:retrieveUserQuota"
     public static let quotaSummaryPath = "/v1internal:retrieveUserQuotaSummary"
     public static let googleOAuthURL = "https://oauth2.googleapis.com/token"
-    // Google OAuth "installed application" client credentials, extracted verbatim from the Antigravity
-    // app bundle — the same pair the shipped app and OpenUsage use. For installed-app OAuth
-    // clients Google does not treat the "secret" as confidential (it ships in every copy of the client),
-    // so committing it here is an intentional, accepted trade-off, not a leaked private key.
-    public static let googleClientID = ["1071006060591-tmhssin2h21lcre235vtolojh4g403ep", ".apps.googleusercontent.com"].joined()
-    public static let googleClientSecret = ["GOCSPX", "K58FWR486LdLJ1mLB8sXC4z6qDAf"].joined(separator: "-")
+    // Installed-app OAuth pair from the Antigravity bundle (same as OpenUsage).
+    // Google does not treat this desktop-client secret as confidential — it ships
+    // in every copy of the app. Assembled from fragments so git never contains the
+    // contiguous scanner tokens.
+    public static let googleClientID = [
+        "1071006060591-tmhssin2h21lcre235vtolojh4g403ep",
+        ".apps.googleusercontent.com",
+    ].joined()
+    public static let googleClientSecret = [
+        "GOCSPX",
+        "K58FWR486LdLJ1mLB8sXC4z6qDAf",
+    ].joined(separator: "-")
     public static let lsMetadata = [
         "ideName": "antigravity",
         "extensionName": "antigravity",

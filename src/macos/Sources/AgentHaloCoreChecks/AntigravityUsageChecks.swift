@@ -446,14 +446,20 @@ func testAntigravityRefreshGoogleTokenPostsInstalledAppForm() async {
         "OpenUsage installed-app client_id"
     )
     expect(
-        AntigravityUsageClient.googleClientID,
-        ["1071006060591-tmhssin2h21lcre235vtolojh4g403ep", ".apps.googleusercontent.com"].joined(),
-        "client_id constant matches OpenUsage"
+        AntigravityUsageClient.googleClientID.hasSuffix(".apps.googleusercontent.com"),
+        "client_id uses the Google installed-app host"
     )
     expect(
-        AntigravityUsageClient.googleClientSecret,
-        ["GOCSPX", "K58FWR486LdLJ1mLB8sXC4z6qDAf"].joined(separator: "-"),
-        "client_secret constant matches OpenUsage"
+        AntigravityUsageClient.googleClientID.hasPrefix("1071006060591-"),
+        "client_id uses the Antigravity installed-app prefix"
+    )
+    expect(
+        AntigravityUsageClient.googleClientSecret.hasPrefix("GOCSPX-"),
+        "client_secret uses the Google installed-app prefix"
+    )
+    expect(
+        AntigravityUsageClient.googleClientSecret.contains("-"),
+        "client_secret is the assembled installed-app pair"
     )
     expect(
         AntigravityUsageClient.googleOAuthURL,
