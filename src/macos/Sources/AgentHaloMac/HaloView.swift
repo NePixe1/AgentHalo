@@ -320,29 +320,30 @@ final class HaloView: NSView {
     private func applyVisualState(_ state: HaloState, presentation: ErrorPresentation, answerStreaming nextAnswerStreaming: Bool) {
         let nextSteadyDone = state == .done && aggregate.sessions.isEmpty
         let nextPresentation: ErrorPresentation = state == .error ? presentation : .flashing
-        if visualState != state
+        guard visualState != state
             || steadyDone != nextSteadyDone
             || errorPresentation != nextPresentation
-            || answerStreaming != nextAnswerStreaming {
-            transitionFromVisual = HaloVisualModel.targetVisual(
-                state: renderState(state: visualState, answerStreaming: answerStreaming),
-                time: sinceState,
-                errorPresentation: errorPresentation,
-                steadyDone: steadyDone
-            )
-            sinceState = 0
-            transitionProgress = 0
-            if nextAnswerStreaming {
-                transitionDuration = 0.92
-            } else if answerStreaming {
-                transitionDuration = 1.12
-            } else if visualState == state && state == .error && errorPresentation != nextPresentation {
-                transitionDuration = nextPresentation == .flashing ? 0.82 : 1.24
-            } else if state == .done && nextSteadyDone {
-                transitionDuration = 1.45
-            } else {
-                transitionDuration = GeneratedHaloSpec.transitionDuration(target: state)
-            }
+            || answerStreaming != nextAnswerStreaming else {
+            return
+        }
+        transitionFromVisual = HaloVisualModel.targetVisual(
+            state: renderState(state: visualState, answerStreaming: answerStreaming),
+            time: sinceState,
+            errorPresentation: errorPresentation,
+            steadyDone: steadyDone
+        )
+        sinceState = 0
+        transitionProgress = 0
+        if nextAnswerStreaming {
+            transitionDuration = 0.92
+        } else if answerStreaming {
+            transitionDuration = 1.12
+        } else if visualState == state && state == .error && errorPresentation != nextPresentation {
+            transitionDuration = nextPresentation == .flashing ? 0.82 : 1.24
+        } else if state == .done && nextSteadyDone {
+            transitionDuration = 1.45
+        } else {
+            transitionDuration = GeneratedHaloSpec.transitionDuration(target: state)
         }
         visualState = state
         errorPresentation = nextPresentation

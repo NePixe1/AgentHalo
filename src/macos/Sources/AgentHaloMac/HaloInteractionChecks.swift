@@ -105,6 +105,7 @@ func runHaloInteractionChecks() {
     testCodexPollingWorkIsNotPerformedOnMainTick()
     testCodexActivityDispatchIsThrottled()
     testCodexSQLiteReadersUseInProcessSQLite()
+    testCodexSQLiteLogStoreReusesConnectionAndFileSignature()
     testCodexSQLiteReadersUseRecentRowWindows()
     testCodexAppDetectorUsesWorkspaceEvents()
     testSessionMonitorsUseFastFileMetadata()
@@ -2989,6 +2990,27 @@ private func testCodexSQLiteReadersUseInProcessSQLite() {
     expect(combined.contains("CodexSQLiteLogStore"), "Codex SQLite readers should share the in-process SQLite store")
 }
 
+private func testCodexSQLiteLogStoreReusesConnectionAndFileSignature() {
+    let storeURL = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("AgentHaloCore")
+        .appendingPathComponent("CodexSQLiteLogStore.swift")
+    guard let source = try? String(contentsOf: storeURL, encoding: .utf8) else {
+        fatalError("CodexSQLiteLogStore source should be readable")
+    }
+
+    expect(source.contains("SharedCache"), "Codex SQLite store should keep a process-wide connection cache")
+    expect(source.contains("FileSignature"), "Codex SQLite store should skip work when the db/WAL signature is unchanged")
+    expect(source.contains("queryCache"), "Codex SQLite store should reuse the last result for an unchanged query")
+    expect(source.contains("-wal"), "Codex SQLite store should watch the WAL file as well as the main db")
+    expect(source.contains("SQLITE_OPEN_READONLY"), "Codex SQLite store should keep opening the Codex log database read-only")
+    expect(
+        !source.contains("defer {\n            sqlite3_close(database)\n        }"),
+        "Codex SQLite store should not close the database after every query"
+    )
+}
+
 private func testCodexSQLiteReadersUseRecentRowWindows() {
     let sourceDirectory = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()
@@ -3458,6 +3480,7 @@ private func testRingSubmissionsAvoidConstantWork() {
     let refreshSource = appDelegateSource[refreshStart..<refreshEnd]
     let applySource = rendererSource[applyStart..<applyEnd]
     expect(!refreshSource.contains("haloView?.redrawRing()"), "aggregate refresh should not redraw the same ring state twice")
+    expect(haloViewSource.contains("guard visualState != state"), "unchanged aggregate ticks should not rebuild ring layers")
     expect(!applySource.contains("layer.fillColor ="), "fillColor should be initialized once instead of assigned every frame")
     expect(!applySource.contains("layer.lineCap ="), "lineCap should be initialized once instead of assigned every frame")
     expect(!applySource.contains("layer.lineJoin ="), "lineJoin should be initialized once instead of assigned every frame")

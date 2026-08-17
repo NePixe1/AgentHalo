@@ -2595,6 +2595,65 @@ func testClaudeStatusLineProxyRuntimeCapturesUsageAndForwardsInput() throws {
     expect(FileManager.default.fileExists(atPath: otherURL.path), "another Claude session should have its own snapshot")
 }
 
+func testCodexSQLiteLogStoreCachesUnchangedReadsAndSeesWrites() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("agent-halo-sqlite-cache-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let databaseURL = root.appendingPathComponent("logs_2.sqlite")
+
+    try execSqlite(
+        databaseURL,
+        """
+        create table logs (
+            id integer primary key,
+            ts real,
+            target text,
+            feedback_log_body text
+        );
+        insert into logs(ts, target, feedback_log_body)
+        values (1, 'codex_api::sse::responses', 'first');
+        """
+    )
+
+    let store = CodexSQLiteLogStore(databaseURL: databaseURL)
+    let query = "select feedback_log_body from logs order by id"
+    let first = try store.readSingleColumn(query: query)
+    expect(first, ["first"], "initial sqlite read should return the inserted body")
+
+    let cached = try store.readSingleColumn(query: query)
+    expect(cached, ["first"], "unchanged db/WAL signature should return the same rows")
+
+    try execSqlite(
+        databaseURL,
+        "insert into logs(ts, target, feedback_log_body) values (2, 'codex_api::sse::responses', 'second');"
+    )
+    let updated = try store.readSingleColumn(query: query)
+    expect(updated, ["first", "second"], "a new sqlite write must invalidate the cached rows")
+
+    try FileManager.default.removeItem(at: databaseURL)
+    let missing = try store.readSingleColumn(query: query)
+    expect(missing, [], "a removed database should read as empty instead of serving stale rows")
+}
+
+private func execSqlite(_ databaseURL: URL, _ sql: String) throws {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+    process.arguments = [databaseURL.path, sql]
+    let stderr = Pipe()
+    process.standardError = stderr
+    try process.run()
+    process.waitUntilExit()
+    if process.terminationStatus != 0 {
+        let message = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        throw NSError(
+            domain: "CodexSQLiteLogStoreCheck",
+            code: Int(process.terminationStatus),
+            userInfo: [NSLocalizedDescriptionKey: message]
+        )
+    }
+}
+
 func testCodexRealtimeActivityReaderDetectsAnswerStreaming() {
     let reader = CodexRealtimeActivityReader()
     let delta = #"SSE event: {"type":"response.output_text.delta","delta":"hello"}"#
@@ -5316,6 +5375,11 @@ do {
 }
 do {
     try testClaudeStatusLineProxyRuntimeCapturesUsageAndForwardsInput()
+} catch {
+    fatalError("\(error)")
+}
+do {
+    try testCodexSQLiteLogStoreCachesUnchangedReadsAndSeesWrites()
 } catch {
     fatalError("\(error)")
 }
