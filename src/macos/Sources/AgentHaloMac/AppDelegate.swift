@@ -1109,7 +1109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let model: DetailsPanelViewModel
         if let providerID = Self.usageProviderID(for: settings.focusedAgent) {
             let monitorState = usageStates[providerID]
-                ?? UsageMonitorState(providerID: providerID, accessMode: .apiKey)
+                ?? UsageMonitorState.unresolved(for: providerID)
             model = DetailsContentResolver.resolve(
                 providerID: providerID,
                 monitorState: monitorState,

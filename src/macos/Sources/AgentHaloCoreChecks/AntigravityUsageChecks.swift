@@ -11,6 +11,9 @@ func runAntigravityUsageChecks() async {
     testAntigravityFormatPlan()
     testAntigravityResolveAccessNeverReturnsAPIKey()
     try! testAntigravityResolveAccessFromKeychainJSON()
+    try! testAntigravityKeychainReadIsMemoizedAcrossResolveAndRefresh()
+    testAntigravityKeychainAuthorizationDeniedIsNotRetried()
+    testAntigravityKeychainTransientErrorIsRetried()
     try! testAntigravityCachedAccessTokenMissesOnFingerprintMismatch()
     try! testAntigravityCachedAccessTokenMissesWhenExpiringWithinBuffer()
     testAntigravityExtractToken()
@@ -240,6 +243,73 @@ func testAntigravityResolveAccessFromKeychainJSON() throws {
     }
 }
 
+func testAntigravityKeychainReadIsMemoizedAcrossResolveAndRefresh() throws {
+    let inner = """
+    {"token":{"access_token":"ya29.live","refresh_token":"1//refresh","expiry":"2099-01-01T00:00:00Z"}}
+    """
+    let keychain = FakeUsageKeychain()
+    try keychain.write(
+        service: AntigravityAuthStore.keychainService,
+        account: AntigravityAuthStore.keychainAccount,
+        value: inner
+    )
+    let store = AntigravityAuthStore(
+        homeDirectory: antigravityCheckHome(),
+        keychain: keychain,
+        files: FakeUsageFiles()
+    )
+    guard case .oauth = store.resolveAccess(lsAvailable: false) else {
+        fatalError("first resolve must read keychain")
+    }
+    guard case .oauth = store.resolveAccess(lsAvailable: false) else {
+        fatalError("second resolve must stay oauth")
+    }
+    _ = try store.loadKeychainToken()
+    expect(keychain.readCount, 1, "one Keychain prompt per process, not once per resolve/refresh")
+}
+
+func testAntigravityKeychainAuthorizationDeniedIsNotRetried() {
+    let keychain = DeniedUsageKeychain(code: -128)
+    let store = AntigravityAuthStore(
+        homeDirectory: antigravityCheckHome(),
+        keychain: keychain,
+        files: FakeUsageFiles()
+    )
+    if case .oauthNeedsSignIn = store.resolveAccess(lsAvailable: false) {} else {
+        fatalError("user cancel without LS is sign-in")
+    }
+    if case .oauthNeedsSignIn = store.resolveAccess(lsAvailable: false) {} else {
+        fatalError("denied Keychain must stay sign-in")
+    }
+    do {
+        _ = try store.loadKeychainToken()
+        fatalError("denied Keychain must not return a token")
+    } catch {
+        if case .unexpectedExitCode(let code) = error as? UsageKeychainError {
+            expect(code, -128, "denied memo keeps the original cancel code")
+        } else {
+            fatalError("denied memo must surface UsageKeychainError")
+        }
+    }
+    expect(keychain.readCount, 1, "user cancel must not open another Keychain prompt")
+}
+
+func testAntigravityKeychainTransientErrorIsRetried() {
+    let keychain = DeniedUsageKeychain(code: 1)
+    let store = AntigravityAuthStore(
+        homeDirectory: antigravityCheckHome(),
+        keychain: keychain,
+        files: FakeUsageFiles()
+    )
+    if case .oauthNeedsSignIn = store.resolveAccess(lsAvailable: false) {} else {
+        fatalError("transient keychain error without LS is sign-in")
+    }
+    if case .oauthNeedsSignIn = store.resolveAccess(lsAvailable: false) {} else {
+        fatalError("transient keychain error still sign-in on retry")
+    }
+    expect(keychain.readCount, 2, "non-authorization keychain errors must retry")
+}
+
 func testAntigravityCachedAccessTokenMissesOnFingerprintMismatch() throws {
     let tmpHome = antigravityCheckHome()
     let now = Date(timeIntervalSince1970: 1_000_000)
@@ -341,6 +411,30 @@ private func antigravityCheckCachePath(home: URL) -> String {
 
 private func antigravityCheckGoKeyring(_ json: String) -> String {
     "go-keyring-base64:" + Data(json.utf8).base64EncodedString()
+}
+
+private final class DeniedUsageKeychain: UsageKeychainAccessing, @unchecked Sendable {
+    private let code: Int
+    private let reads = LockedBox(0)
+
+    init(code: Int) {
+        self.code = code
+    }
+
+    var readCount: Int { reads.value }
+
+    func read(service: String, account: String?) throws -> String? {
+        reads.withValue { $0 += 1 }
+        throw UsageKeychainError.unexpectedExitCode(code)
+    }
+
+    func readFirstMatching(service: String) throws -> UsageKeychainItem? {
+        throw UsageKeychainError.unexpectedExitCode(code)
+    }
+
+    func write(service: String, account: String?, value: String) throws {
+        fatalError("AntigravityAuthStore must never write the keychain")
+    }
 }
 
 private struct ThrowingUsageKeychain: UsageKeychainAccessing {

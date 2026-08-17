@@ -123,6 +123,17 @@ public struct UsageMonitorState: Equatable, Sendable {
         self.lastFailure = lastFailure
         self.isRefreshing = isRefreshing
     }
+
+    /// Placeholder published before `resolveAccess` commits. Antigravity is
+    /// OAuth-only, so the details panel must not flash the API-key session card.
+    public static func unresolved(for providerID: UsageProviderID) -> UsageMonitorState {
+        switch providerID {
+        case .antigravity:
+            return UsageMonitorState(providerID: providerID, accessMode: .oauth)
+        case .codex, .claude, .grok:
+            return UsageMonitorState(providerID: providerID, accessMode: .apiKey)
+        }
+    }
 }
 
 /// Where a credential lives on disk or in the keychain. Used by auth stores

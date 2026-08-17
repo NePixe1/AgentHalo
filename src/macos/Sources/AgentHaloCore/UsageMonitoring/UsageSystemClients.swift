@@ -449,6 +449,18 @@ public enum UsageKeychainError: Error, Equatable, Sendable {
     case unexpectedExitCode(Int)
     case missingExactAccount
     case disabled
+
+    /// User canceled or the item is locked from this process. Retrying
+    /// immediately would stack another Keychain password sheet.
+    var isAuthorizationDenied: Bool {
+        guard case .unexpectedExitCode(let code) = self else { return false }
+        switch code {
+        case -128, -25293, -25308:
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 /// Production process runner backed by `Process`. Enforces a timeout so a

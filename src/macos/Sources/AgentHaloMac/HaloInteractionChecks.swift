@@ -4046,6 +4046,10 @@ private func testAgentToggleUsesSharedSVGAssets() {
         appDelegateSource.contains("return .antigravity"),
         "usageProviderID maps antigravity"
     )
+    expect(
+        appDelegateSource.contains("UsageMonitorState.unresolved(for: providerID)"),
+        "details fallback must use the provider-aware unresolved state, not a universal API key placeholder"
+    )
     let five = AgentToggleView(frame: .zero)
     five.setEnabledAgents([.codex, .claudeCode, .grok, .pi, .antigravity], focused: .antigravity)
     five.layoutSubtreeIfNeeded()

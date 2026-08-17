@@ -33,6 +33,7 @@ public struct AntigravityAuthStore: Sendable {
     private let keychain: any UsageKeychainAccessing
     private let files: any UsageFileAccessing
     private let now: @Sendable () -> Date
+    private let memo: AntigravityKeychainMemo
 
     public init(
         homeDirectory: URL,
@@ -44,6 +45,7 @@ public struct AntigravityAuthStore: Sendable {
         self.keychain = keychain
         self.files = files
         self.now = now
+        self.memo = AntigravityKeychainMemo()
     }
 
     public func resolveAccess(lsAvailable: Bool) -> ResolvedProviderAccess {
@@ -63,12 +65,14 @@ public struct AntigravityAuthStore: Sendable {
     }
 
     public func loadKeychainToken() throws -> AntigravityKeychainToken? {
-        let raw = try keychain.read(
-            service: Self.keychainService,
-            account: Self.keychainAccount
-        )
-        guard let raw else { return nil }
-        return Self.extractToken(fromKeychainRaw: raw)
+        try memo.load {
+            let raw = try keychain.read(
+                service: Self.keychainService,
+                account: Self.keychainAccount
+            )
+            guard let raw else { return nil }
+            return Self.extractToken(fromKeychainRaw: raw)
+        }
     }
 
     public func loadCachedAccessToken(matching source: AntigravityKeychainToken) -> String? {
@@ -246,6 +250,41 @@ public struct AntigravityAuthStore: Sendable {
         let trimmed = refreshToken.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         return UsageDigest.sha256(trimmed)
+    }
+
+    /// One Security prompt per process. Ad-hoc builds cannot persist
+    /// "Always Allow" across launches; we still must not re-prompt in-session.
+    fileprivate final class AntigravityKeychainMemo: @unchecked Sendable {
+        private let lock = NSLock()
+        private var state: State = .empty
+
+        private enum State {
+            case empty
+            case loaded(AntigravityKeychainToken?)
+            case denied(UsageKeychainError)
+        }
+
+        func load(_ read: () throws -> AntigravityKeychainToken?) throws -> AntigravityKeychainToken? {
+            lock.lock()
+            defer { lock.unlock() }
+            switch state {
+            case .loaded(let token):
+                return token
+            case .denied(let error):
+                throw error
+            case .empty:
+                do {
+                    let token = try read()
+                    state = .loaded(token)
+                    return token
+                } catch {
+                    if let denied = error as? UsageKeychainError, denied.isAuthorizationDenied {
+                        state = .denied(denied)
+                    }
+                    throw error
+                }
+            }
+        }
     }
 
     /// Strip `go-keyring-base64:` and base64-decode. Decode failure keeps the original text.
