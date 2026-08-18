@@ -40,7 +40,7 @@
 | Platform | Supported agents | Requirement |
 | --- | --- | --- |
 | Windows | Codex, Claude Code, Grok Build, Pi | Windows 10 or 11; .NET Framework 4.8 (usually preinstalled) |
-| macOS | Codex, Claude Code, Grok Build, Pi; optional Antigravity (`agy`, default off) | macOS 13 or later |
+| macOS | Codex, Claude Code, Grok Build, Pi; Antigravity (`agy`, default off) | macOS 13 or later |
 
 Install and sign in to at least one supported agent before using Agent Halo.
 
