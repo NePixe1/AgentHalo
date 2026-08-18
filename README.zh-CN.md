@@ -1,7 +1,7 @@
 <a id="readme-top"></a>
 
 <div align="center">
-  <img src="assets/agent-halo-readme-banner.png" alt="Agent Halo Banner" width="760"/>
+  <img src="assets/agent-halo-app-icon.png" alt="Agent Halo" width="160" style="border-radius: 22%;"/>
 </div>
 
 <h1 align="center">Agent Halo</h1>
@@ -23,6 +23,10 @@
   </p>
   <p>无需切换窗口，随时知道编码 Agent 正在思考、执行、完成、受阻，还是等待你。</p>
   <p><a href="README.md">English</a> | 简体中文</p>
+</div>
+
+<div align="center">
+  <img src="assets/agent-halo-readme-banner.png" alt="Agent Halo 截图" width="760"/>
 </div>
 
 ---

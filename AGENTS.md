@@ -37,6 +37,7 @@ Apps compile generated source; they do **not** load the JSON contract at runtime
 python scripts/generate_shared.py
 python scripts/generate_shared.py --check
 python scripts/check_shared.py
+python scripts/generate_app_icons.py   # regenerate .icns / .ico from assets/agent-halo-app-icon.png
 ```
 
 CI installs `scripts/requirements-ci.in` and validates the schema. Fixtures under `src/shared/fixtures/` and `src/shared/expected/` cover lifecycle reduction, failure classification, rate limits, and deterministic animation samples.
@@ -49,7 +50,7 @@ src/windows/         # Windows app + monitors
 src/macos/           # Swift package: AgentHaloMac, AgentHaloCore, hooks, diagnostics
 scripts/             # generate_shared, run-macos, build-*, CI helpers
 docs/                # product, visual behavior, cross-platform contract, design/plans
-assets/              # banner / icons for docs and packaging
+assets/              # app icon (png/icns/ico), README banner, packaging icons
 outputs/             # local build artifacts (not source of truth for releases)
 ```
 

@@ -1,7 +1,7 @@
 <a id="readme-top"></a>
 
 <div align="center">
-  <img src="assets/agent-halo-readme-banner.png" alt="Agent Halo Banner" width="760"/>
+  <img src="assets/agent-halo-app-icon.png" alt="Agent Halo" width="160" style="border-radius: 22%;"/>
 </div>
 
 <h1 align="center">Agent Halo</h1>
@@ -23,6 +23,10 @@
   </p>
   <p>Know when your coding agent is thinking, working, done, blocked, or waiting for you—without switching windows.</p>
   <p>English | <a href="README.zh-CN.md">Simplified Chinese</a></p>
+</div>
+
+<div align="center">
+  <img src="assets/agent-halo-readme-banner.png" alt="Agent Halo screenshot" width="760"/>
 </div>
 
 ---

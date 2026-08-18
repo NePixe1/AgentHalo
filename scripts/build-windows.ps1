@@ -35,30 +35,10 @@ $references = @(
     (Join-Path $framework "System.Xaml.dll")
 )
 
-$iconPath = Join-Path $env:TEMP "AgentHalo-build.ico"
-Add-Type -AssemblyName System.Drawing
-$bitmap = New-Object System.Drawing.Bitmap 64, 64
-$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-$graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-$graphics.Clear([System.Drawing.Color]::Transparent)
-$glow = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(80, 43, 200, 255)), 11
-$ring = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(255, 43, 200, 255)), 6
-$glow.StartCap = $glow.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
-$ring.StartCap = $ring.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
-foreach ($pen in @($glow, $ring)) {
-    $graphics.DrawArc($pen, 10, 10, 44, 44, -52, 140)
-    $graphics.DrawArc($pen, 10, 10, 44, 44, 106, 194)
+$iconPath = Join-Path $root "assets\agent-halo-app-icon.ico"
+if (-not (Test-Path -LiteralPath $iconPath)) {
+    throw "Missing app icon: $iconPath`nRegenerate with: python3 scripts/generate_app_icons.py"
 }
-$handle = $bitmap.GetHicon()
-$icon = [System.Drawing.Icon]::FromHandle($handle)
-$stream = [System.IO.File]::Create($iconPath)
-$icon.Save($stream)
-$stream.Dispose()
-$icon.Dispose()
-$glow.Dispose()
-$ring.Dispose()
-$graphics.Dispose()
-$bitmap.Dispose()
 
 $referenceArgs = $references | ForEach-Object { "/reference:$_" }
 $resourceArgs = @(
@@ -80,6 +60,10 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Copy-Item -LiteralPath "$root\README.md" -Destination "$output\README.md" -Force
+$packageAssets = Join-Path $output "assets"
+New-Item -ItemType Directory -Force -Path $packageAssets | Out-Null
+Copy-Item -LiteralPath (Join-Path $root "assets\agent-halo-app-icon.png") -Destination (Join-Path $packageAssets "agent-halo-app-icon.png") -Force
+Copy-Item -LiteralPath (Join-Path $root "assets\agent-halo-readme-banner.png") -Destination (Join-Path $packageAssets "agent-halo-readme-banner.png") -Force
 Remove-Item -LiteralPath "$output\locales" -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $output "AgentHalo.pdb") -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $output "sqlite3.exe") -ErrorAction SilentlyContinue

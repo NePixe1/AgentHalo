@@ -45,6 +45,24 @@ verify_packaged_locales() {
   done
 }
 
+verify_packaged_app_icon() {
+  packaged_icon="$app_bundle/Contents/Resources/AppIcon.icns"
+  source_icon="$root_dir/assets/agent-halo-app-icon.icns"
+  if [[ ! -r "$packaged_icon" ]]; then
+    echo "Missing packaged app icon: $packaged_icon" >&2
+    return 1
+  fi
+  if ! /usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' \
+      "$app_bundle/Contents/Info.plist" | grep -qx 'AppIcon'; then
+    echo "Info.plist CFBundleIconFile is not AppIcon" >&2
+    return 1
+  fi
+  if [[ -r "$source_icon" ]] && ! cmp -s "$source_icon" "$packaged_icon"; then
+    echo "Packaged app icon differs from assets/agent-halo-app-icon.icns" >&2
+    return 1
+  fi
+}
+
 stop_verify_process() {
   [[ -n "$verify_pid" ]] || return 0
   if kill -0 "$verify_pid" 2>/dev/null; then
@@ -102,6 +120,7 @@ case "$mode" in
     ;;
   --verify|verify)
     verify_packaged_locales
+    verify_packaged_app_icon
     verify_temp_dir="$(mktemp -d /tmp/agenthalo-verify.XXXXXX)"
     trap cleanup_verify EXIT
     trap 'exit 130' INT

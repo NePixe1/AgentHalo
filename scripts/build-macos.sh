@@ -9,8 +9,15 @@ app_dir="$output_root/AgentHalo.app"
 binary="$mac_root/.build/release/AgentHaloMac"
 core_resource_bundle="$mac_root/.build/release/AgentHaloMac_AgentHaloCore.bundle"
 agent_icon_assets="$repo_root/src/shared/assets/agent-switch"
+app_icon="$repo_root/assets/agent-halo-app-icon.icns"
 shared_locales="$repo_root/src/shared/locales"
 mac_locales="$mac_root/Sources/AgentHaloCore/locales"
+
+if [ ! -f "$app_icon" ]; then
+    echo "Missing app icon: $app_icon" >&2
+    echo "Regenerate with: python3 scripts/generate_app_icons.py" >&2
+    exit 1
+fi
 
 # Sync shared locale JSON into the AgentHaloCore target so SwiftPM bundles
 # real file contents (resource declarations are scoped per-target and can't
@@ -45,6 +52,7 @@ cp "$binary" "$app_dir/Contents/MacOS/AgentHaloMac"
 cp -R "$core_resource_bundle" "$app_dir/AgentHaloMac_AgentHaloCore.bundle"
 cp "$mac_root/.build/release/ClaudeCodeStatusHook" "$app_dir/Contents/Resources/claude-code-status-hook"
 cp "$mac_root/.build/release/ClaudeCodeStatusLineProxy" "$app_dir/Contents/Resources/claude-code-statusline-proxy"
+cp "$app_icon" "$app_dir/Contents/Resources/AppIcon.icns"
 cp "$agent_icon_assets"/*.svg "$app_dir/Contents/Resources/agent-switch/"
 
 cat > "$app_dir/Contents/Info.plist" <<'PLIST'
@@ -57,6 +65,8 @@ cat > "$app_dir/Contents/Info.plist" <<'PLIST'
   <string>en</string>
   <key>CFBundleExecutable</key>
   <string>AgentHaloMac</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundleIdentifier</key>
   <string>local.agenthalo.mac.v2</string>
   <key>CFBundleInfoDictionaryVersion</key>
