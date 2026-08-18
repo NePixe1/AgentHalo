@@ -113,6 +113,9 @@ func runHaloInteractionChecks() {
     testGrokPollingIsThrottledWhenNotFocused()
     testPiActivityFiltersDeadLifecycleAndAddsRuntimeFallback()
     testGrokPresencePrefersActiveSessionsFile()
+    testAntigravityPresenceUsesHookSnapshotOrAgyNotLanguageServer()
+    testAntigravityPresenceCountsDesktopAppAndAgyNotHelpers()
+    testAntigravityAppDetectorMatchesDesktopAppNotHelpers()
     testGrokActivityDropsEndedAttention()
     testGrokLiveStandbyUsesStableGreenAggregate()
     testClaudeLiveSessionsRefreshIsThrottled()
@@ -2444,6 +2447,7 @@ private func testUsageMonitoringLifecycleWiring() {
         source.contains("case .codex:") && source.contains("return .codex")
             && source.contains("case .claudeCode:") && source.contains("return .claude")
             && source.contains("case .grok:") && source.contains("return .grok")
+            && source.contains("case .antigravity:") && source.contains("return .antigravity")
             && source.contains("case .pi:") && source.contains("return nil"),
         "AgentKind should map to its Usage Provider (Pi is session-only)"
     )
@@ -3302,6 +3306,123 @@ private func testGrokPresencePrefersActiveSessionsFile() {
     )
 }
 
+private func testAntigravityPresenceUsesHookSnapshotOrAgyNotLanguageServer() {
+    let now = Date()
+    func snapshot(active: Bool, age: TimeInterval, state: HaloState) -> SessionSnapshot {
+        SessionSnapshot(
+            threadId: "ag-1",
+            projectName: "AgentHalo",
+            workingDirectory: "/tmp/AgentHalo",
+            state: state,
+            action: "test",
+            lastEventAt: now.addingTimeInterval(-age),
+            completedAt: state == .done ? now.addingTimeInterval(-age) : nil,
+            active: active,
+            agent: .antigravity
+        )
+    }
+
+    expect(
+        AntigravityActivityMonitor.isPresent(
+            sessions: [snapshot(active: true, age: 30, state: .thinking)],
+            now: now,
+            processPresenceProbe: { false }
+        ),
+        "recent retained hook snapshot should report presence"
+    )
+    expect(
+        AntigravityActivityMonitor.isPresent(
+            sessions: [snapshot(active: false, age: 400, state: .done)],
+            now: now,
+            processPresenceProbe: { true }
+        ),
+        "processPresenceProbe true should report presence without a live agy process"
+    )
+    expect(
+        !AntigravityActivityMonitor.isPresent(
+            sessions: [snapshot(active: false, age: 400, state: .done)],
+            now: now,
+            processPresenceProbe: { false }
+        ),
+        "language_server must not count as present when probe is false and snapshot is not retained"
+    )
+    expect(
+        !AntigravityActivityMonitor.isPresent(
+            sessions: [],
+            now: now,
+            processPresenceProbe: { false }
+        ),
+        "no hook snapshot and no agy probe is absent"
+    )
+}
+
+private func testAntigravityPresenceCountsDesktopAppAndAgyNotHelpers() {
+    expect(
+        AntigravityActivityMonitor.countsAsPresentProcess(comm: "agy", name: "agy"),
+        "agy CLI should count as present"
+    )
+    expect(
+        AntigravityActivityMonitor.countsAsPresentProcess(comm: "Antigravity", name: "Antigravity"),
+        "Antigravity desktop app should count as present"
+    )
+    expect(
+        AntigravityActivityMonitor.countsAsPresentProcess(
+            comm: "Antigravity",
+            name: "/Applications/Antigravity.app/Contents/MacOS/Antigravity"
+        ),
+        "Antigravity executable path should count as present"
+    )
+    expect(
+        !AntigravityActivityMonitor.countsAsPresentProcess(
+            comm: "language_server",
+            name: "language_server"
+        ),
+        "language_server must not count as present on its own"
+    )
+    expect(
+        !AntigravityActivityMonitor.countsAsPresentProcess(
+            comm: "Antigravity Hel",
+            name: "Antigravity Helper"
+        ),
+        "Antigravity Helper must not count as the desktop app"
+    )
+}
+
+private func testAntigravityAppDetectorMatchesDesktopAppNotHelpers() {
+    expect(
+        AntigravityAppDetector.matchesPrimaryApp(
+            bundleIdentifier: "com.google.antigravity",
+            executableName: "Antigravity",
+            activationPolicy: .regular
+        ),
+        "Antigravity 2.0 desktop app should count as present"
+    )
+    expect(
+        AntigravityAppDetector.matchesPrimaryApp(
+            bundleIdentifier: "com.google.antigravity",
+            executableName: nil,
+            activationPolicy: .regular
+        ),
+        "bundle id com.google.antigravity should count as present"
+    )
+    expect(
+        !AntigravityAppDetector.matchesPrimaryApp(
+            bundleIdentifier: "com.google.antigravity.helper",
+            executableName: "Antigravity Helper",
+            activationPolicy: .accessory
+        ),
+        "helper processes must not count as the desktop app"
+    )
+    expect(
+        !AntigravityAppDetector.matchesPrimaryApp(
+            bundleIdentifier: nil,
+            executableName: "language_server",
+            activationPolicy: .prohibited
+        ),
+        "language_server must not count as the desktop app"
+    )
+}
+
 private func testGrokActivityDropsEndedAttention() {
     let now = Date()
     let attention = SessionSnapshot(
@@ -3880,6 +4001,7 @@ private func testUsageProviderMappingIsTotal() {
     expect(AppDelegate.usageProviderID(for: .codex), .codex, "Codex Provider mapping")
     expect(AppDelegate.usageProviderID(for: .claudeCode), .claude, "Claude Provider mapping")
     expect(AppDelegate.usageProviderID(for: .grok), .grok, "grok focus maps to grok usage")
+    expect(AppDelegate.usageProviderID(for: .antigravity), .antigravity, "Antigravity Provider mapping")
     expect(AppDelegate.usageProviderID(for: .pi) == nil, true, "Pi has no official usage provider")
 }
 
@@ -3900,10 +4022,12 @@ private func testAgentToggleUsesSharedSVGAssets() {
         .appendingPathComponent("scripts/build-macos.sh")
 
     let piURL = assetDirectory.appendingPathComponent("pi.svg")
+    let antigravityURL = assetDirectory.appendingPathComponent("antigravity.svg")
     expect(FileManager.default.fileExists(atPath: codexURL.path), "Codex SVG should live in shared assets")
     expect(FileManager.default.fileExists(atPath: claudeURL.path), "Claude SVG should live in shared assets")
     expect(FileManager.default.fileExists(atPath: grokURL.path), "Grok SVG should live in shared assets")
     expect(FileManager.default.fileExists(atPath: piURL.path), "Pi SVG should live in shared assets")
+    expect(FileManager.default.fileExists(atPath: antigravityURL.path), "Antigravity SVG should live in shared assets")
     let piImage = (try? Data(contentsOf: piURL)).flatMap(NSImage.init(data:))
     expect(piImage?.size.width ?? 0, 24, "Pi SVG should use the shared 24pt intrinsic width")
     expect(piImage?.size.height ?? 0, 24, "Pi SVG should use the shared 24pt intrinsic height")
@@ -3932,6 +4056,27 @@ private func testAgentToggleUsesSharedSVGAssets() {
             || detailsSource?.contains("assetName: \"pi\"") == true,
         "details panel should load the Pi agent icon"
     )
+    expect(detailsSource?.contains("assetName: \"antigravity\"") == true, "details panel loads AG icon")
+
+    let appDelegateSource = (try? String(
+        contentsOf: sourceDirectory.appendingPathComponent("AppDelegate.swift"),
+        encoding: .utf8
+    )) ?? ""
+    expect(appDelegateSource.contains("case .antigravity"), "AppDelegate handles AG focus")
+    expect(
+        appDelegateSource.contains("usageProviderID") &&
+        appDelegateSource.contains("case .antigravity:") &&
+        appDelegateSource.contains("return .antigravity"),
+        "usageProviderID maps antigravity"
+    )
+    expect(
+        appDelegateSource.contains("UsageMonitorState.unresolved(for: providerID)"),
+        "details fallback must use the provider-aware unresolved state, not a universal API key placeholder"
+    )
+    let five = AgentToggleView(frame: .zero)
+    five.setEnabledAgents([.codex, .claudeCode, .grok, .pi, .antigravity], focused: .antigravity)
+    five.layoutSubtreeIfNeeded()
+    expect(five.bounds.width, 180, "five enabled agents = 36pt × 5; slot width stays 36")
 
     let buildScript = try? String(contentsOf: buildScriptURL, encoding: .utf8)
     expect(
@@ -3959,7 +4104,7 @@ private func testAgentToggleUsesCodexAndClaudeIcons() {
     expect(!visibleLabels.contains("CC"), "agent toggle should replace the CC text with an icon")
     expect(!visibleLabels.contains("Grok"), "agent toggle should replace the Grok text with an icon")
     expect(!visibleLabels.contains("Pi"), "agent toggle should replace the Pi text with an icon")
-    expect(icons.count == 4, "agent toggle should render one icon for each agent")
+    expect(icons.count == AgentKind.allCases.count, "agent toggle should render one icon for each agent")
     expect(icons.allSatisfy { $0.image != nil }, "agent toggle should load all shared SVG images")
 }
 
@@ -3968,13 +4113,13 @@ private func testAgentToggleDimsInactiveIconMoreStrongly() {
     let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 144, height: 24))
     let icons = allDescendants(of: toggle).compactMap { $0 as? NSImageView }
 
-    expect(icons.count == 4, "agent toggle should expose all agent icons for opacity checks")
-    guard icons.count == 4 else { return }
+    expect(icons.count == AgentKind.allCases.count, "agent toggle should expose all agent icons for opacity checks")
 
     expect(icons[0].alphaValue, 1, "selected Codex icon should remain fully opaque")
     expect(icons[1].alphaValue, 0.40, "inactive Claude Code icon should use stronger dimming")
     expect(icons[2].alphaValue, 0.40, "inactive Grok icon should use stronger dimming")
     expect(icons[3].alphaValue, 0.40, "inactive Pi icon should use stronger dimming")
+    expect(icons[4].alphaValue, 0.40, "inactive Antigravity icon should use stronger dimming")
 
     toggle.setAgent(.claudeCode)
 
@@ -3982,6 +4127,7 @@ private func testAgentToggleDimsInactiveIconMoreStrongly() {
     expect(icons[1].alphaValue, 1, "selected Claude Code icon should remain fully opaque")
     expect(icons[2].alphaValue, 0.40, "inactive Grok icon should stay dimmed")
     expect(icons[3].alphaValue, 0.40, "inactive Pi icon should stay dimmed")
+    expect(icons[4].alphaValue, 0.40, "inactive Antigravity icon should stay dimmed")
 
     toggle.setAgent(.grok)
 
@@ -3989,6 +4135,7 @@ private func testAgentToggleDimsInactiveIconMoreStrongly() {
     expect(icons[1].alphaValue, 0.40, "inactive Claude Code icon should stay dimmed")
     expect(icons[2].alphaValue, 1, "selected Grok icon should remain fully opaque")
     expect(icons[3].alphaValue, 0.40, "inactive Pi icon should stay dimmed")
+    expect(icons[4].alphaValue, 0.40, "inactive Antigravity icon should stay dimmed")
 
     toggle.setAgent(.pi)
 
@@ -3996,6 +4143,15 @@ private func testAgentToggleDimsInactiveIconMoreStrongly() {
     expect(icons[1].alphaValue, 0.40, "inactive Claude Code icon should stay dimmed")
     expect(icons[2].alphaValue, 0.40, "inactive Grok icon should stay dimmed")
     expect(icons[3].alphaValue, 1, "selected Pi icon should remain fully opaque")
+    expect(icons[4].alphaValue, 0.40, "inactive Antigravity icon should stay dimmed")
+
+    toggle.setAgent(.antigravity)
+
+    expect(icons[0].alphaValue, 0.40, "inactive Codex icon should stay dimmed")
+    expect(icons[1].alphaValue, 0.40, "inactive Claude Code icon should stay dimmed")
+    expect(icons[2].alphaValue, 0.40, "inactive Grok icon should stay dimmed")
+    expect(icons[3].alphaValue, 0.40, "inactive Pi icon should stay dimmed")
+    expect(icons[4].alphaValue, 1, "selected Antigravity icon should remain fully opaque")
 }
 
 @MainActor
@@ -4032,7 +4188,11 @@ private func testAgentToggleSupportsThreeAgentsIncludingGrok() {
     toggle.setEnabledAgents(AgentKind.allCases, focused: .codex)
     toggle.layoutSubtreeIfNeeded()
 
-    expect(toggle.bounds.width, 144, "four-way agent toggle should use a wider control")
+    expect(
+        toggle.bounds.width,
+        AgentToggleView.slotWidth * CGFloat(AgentKind.allCases.count),
+        "allCases agent toggle width is slotWidth times the catalog size"
+    )
 
     toggle.setAgent(.grok)
     expect(toggle.selectedAgent, .grok, "setAgent(.grok) should select Grok")
@@ -4045,7 +4205,7 @@ private func testAgentToggleSupportsThreeAgentsIncludingGrok() {
 
     var selected: AgentKind?
     toggle.onAgentSelected = { selected = $0 }
-    // slots: 0-36 Codex, 36-72 Claude, 72-108 Grok, 108-144 Pi
+    // slots: 0-36 Codex, 36-72 Claude, 72-108 Grok, 108-144 Pi, 144-180 AG
     toggle.selectAgentAtXForTesting(90)
     expect(toggle.selectedAgent, .grok, "clicking the Grok slot should select Grok")
     expect(selected, .grok, "Grok-slot click should emit Grok")
@@ -4053,6 +4213,10 @@ private func testAgentToggleSupportsThreeAgentsIncludingGrok() {
     toggle.selectAgentAtXForTesting(126)
     expect(toggle.selectedAgent, .pi, "clicking the Pi slot should select Pi")
     expect(selected, .pi, "Pi-slot click should emit Pi")
+
+    toggle.selectAgentAtXForTesting(162)
+    expect(toggle.selectedAgent, .antigravity, "clicking the AG slot should select Antigravity")
+    expect(selected, .antigravity, "AG-slot click should emit Antigravity")
 
     toggle.selectAgentAtXForTesting(18)
     expect(toggle.selectedAgent, .codex, "clicking the left slot should select Codex")
@@ -4077,7 +4241,11 @@ private func testAgentToggleWidthScalesWithEnabledCount() {
 
     toggle.setEnabledAgents(AgentKind.allCases, focused: .codex)
     toggle.layoutSubtreeIfNeeded()
-    expect(toggle.bounds.width, 144, "all agents keep the current 144pt control")
+    expect(
+        toggle.bounds.width,
+        36 * CGFloat(AgentKind.allCases.count),
+        "allCases width is slotWidth times the catalog size"
+    )
 }
 
 @MainActor

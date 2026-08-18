@@ -40,7 +40,7 @@
 | 平台 | 支持的 Agent | 系统要求 |
 | --- | --- | --- |
 | Windows | Codex、Claude Code、Grok Build、Pi | Windows 10 或 11；.NET Framework 4.8（通常已自带） |
-| macOS | Codex、Claude Code、Grok Build、Pi | macOS 13 及以上 |
+| macOS | Codex、Claude Code、Grok Build、Pi；可选 Antigravity（`agy`，默认关闭） | macOS 13 及以上 |
 
 使用前请至少安装并登录一种受支持的 Agent。
 

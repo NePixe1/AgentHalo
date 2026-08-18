@@ -186,7 +186,7 @@ public actor UsageMonitoringCoordinator {
 
     public func state(for providerID: UsageProviderID) -> UsageMonitorState {
         guard var state = states[providerID] else {
-            return UsageMonitorState(providerID: providerID, accessMode: .apiKey)
+            return UsageMonitorState.unresolved(for: providerID)
         }
         guard state.accessMode == .oauth,
               state.status != .signInAgain,
@@ -278,10 +278,21 @@ public actor UsageMonitoringCoordinator {
             usageClient: GrokUsageClient(http: http),
             focusController: focusController
         )
+        let antigravityAuthStore = AntigravityAuthStore(
+            homeDirectory: homeDirectory,
+            keychain: keychain,
+            files: files
+        )
+        let antigravityProvider = AntigravityUsageProvider(
+            authStore: antigravityAuthStore,
+            usageClient: AntigravityUsageClient(http: http),
+            discovery: AntigravityLanguageServerDiscovery(),
+            focusController: focusController
+        )
         let cacheURL = AgentHaloPaths(homeDirectory: homeDirectory).usageSnapshots
         let cache = UsageSnapshotCache(cacheURL: cacheURL, files: files)
         return UsageMonitoringCoordinator(
-            providers: [codexProvider, claudeProvider, grokProvider],
+            providers: [codexProvider, claudeProvider, grokProvider, antigravityProvider],
             cache: cache,
             focusController: focusController
         )
@@ -405,11 +416,13 @@ public actor UsageMonitoringCoordinator {
             context.state.isRefreshing = false
             return context
         }
-        let state = UsageMonitorState(providerID: providerID, accessMode: .apiKey)
+        let state = UsageMonitorState.unresolved(for: providerID)
+        let access: ResolvedProviderAccess =
+            providerID == .antigravity ? .oauthNeedsSignIn(accountKey: nil) : .apiKey
         return PrepareContext(
             state: state,
-            access: .apiKey,
-            signature: Self.signature(for: .apiKey),
+            access: access,
+            signature: Self.signature(for: access),
             generation: generationCounters[providerID] ?? 0,
             prepareSequence: prepareSequences[providerID] ?? 0,
             cancellationGeneration: cancellationGeneration

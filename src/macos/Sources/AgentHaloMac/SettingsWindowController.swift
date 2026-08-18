@@ -460,6 +460,7 @@ private final class SettingsAgentChip: NSView {
         case .claudeCode: assetName = "claude-code"
         case .grok: assetName = "grok"
         case .pi: assetName = "pi"
+        case .antigravity: assetName = "antigravity"
         }
         iconView.image = AgentIconAssets.image(named: assetName)
         iconView.imageScaling = .scaleProportionallyDown

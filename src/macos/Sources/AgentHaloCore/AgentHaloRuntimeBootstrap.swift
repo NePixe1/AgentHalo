@@ -78,6 +78,12 @@ public enum AgentHaloRuntimeBootstrap {
         if enabledAgents.contains(.pi) {
             PiExtensionConfigurator.configure(homeDirectory: homeDirectory)
         }
+        if enabledAgents.contains(.antigravity) {
+            AntigravityHookConfigurator.configure(
+                homeDirectory: homeDirectory,
+                bundledHookBinary: hook
+            )
+        }
 
         // Settings now point at bin/* — drop root-level legacy binaries that
         // nothing references anymore (claude-code-status-hook, etc.).

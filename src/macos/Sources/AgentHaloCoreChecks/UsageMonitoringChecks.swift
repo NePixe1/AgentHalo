@@ -26,6 +26,9 @@ func runUsageModelChecks() async {
     testDetailsContentResolverSeparatesOAuthUsageAndAPISessionDetails()
     testDetailsContentResolverKeepsOfflineAndContextDataIndependent()
     testDetailsContentResolverWarningPriorityAndRedaction()
+    testAntigravityDetailsResolverUsesUsageBodyAndSignInCopy()
+    testAntigravityDetailsResolverNeverUsesAPIKeySessionBody()
+    testUnresolvedUsageMonitorStateDefaultsAntigravityToOAuth()
 
     do {
         try testFilesystemUsageFilesWritesEmptyAndNonEmptyDataWithMode0600()
@@ -51,6 +54,7 @@ func runUsageModelChecks() async {
     await runCodexUsageChecks()
     await runClaudeUsageChecks()
     await runGrokUsageChecks()
+    await runAntigravityUsageChecks()
 }
 
 func testUsageProviderFocusControllerInvalidatesOldAuthorizations() {
@@ -271,6 +275,81 @@ func testDetailsContentResolverSeparatesOAuthUsageAndAPISessionDetails() {
         expect(api.contextUsedPercent, 37, "API mode keeps exact context")
         expect(api.body, .session(exactSession), "API mode keeps session fields independent")
     }
+}
+
+func testAntigravityDetailsResolverUsesUsageBodyAndSignInCopy() {
+    let state = UsageMonitorState(
+        providerID: .antigravity,
+        accessMode: .oauth,
+        snapshot: nil,
+        status: .signInAgain,
+        lastFailure: .signInAgain,
+        isRefreshing: false
+    )
+    let model = DetailsContentResolver.resolve(
+        providerID: .antigravity,
+        monitorState: state,
+        isOffline: false,
+        sessionDetails: SessionDetailsSnapshot(),
+        contextUsedPercent: 12,
+        now: Date()
+    )
+    expect(model.providerName, "Antigravity", "AG provider name")
+    expect(model.usageWarning, L10n.shared["usage.warning.sign_in_antigravity"], "AG sign-in copy")
+    if case .usage = model.body {} else {
+        fatalError("antigravity oauth must stay on usage body, not session card")
+    }
+}
+
+func testAntigravityDetailsResolverNeverUsesAPIKeySessionBody() {
+    let session = SessionDetailsSnapshot(
+        projectName: "should-not-surface",
+        sessionTitle: "API key card",
+        modelName: "gemini",
+        inputTokens: 1,
+        outputTokens: 2
+    )
+    let model = DetailsContentResolver.resolve(
+        providerID: .antigravity,
+        monitorState: UsageMonitorState(providerID: .antigravity, accessMode: .apiKey),
+        isOffline: false,
+        sessionDetails: session,
+        contextUsedPercent: 12,
+        now: Date()
+    )
+    expect(model.providerName, "Antigravity", "AG provider name")
+    expect(model.planName == nil, "unresolved AG has no plan")
+    expect(model.usageWarning == nil, "unresolved AG should not invent a warning")
+    expect(model.contextUsedPercent, 12, "AG context stays independent of access placeholder")
+    expect(
+        model.body,
+        .usage(UsageDetailsModel(windows: [], status: .noData)),
+        "AG must keep the OAuth usage panel even when the monitor placeholder is API key"
+    )
+}
+
+func testUnresolvedUsageMonitorStateDefaultsAntigravityToOAuth() {
+    let antigravity = UsageMonitorState.unresolved(for: .antigravity)
+    expect(antigravity.providerID, .antigravity, "unresolved AG provider")
+    expect(antigravity.accessMode, .oauth, "unresolved AG must not default to API key")
+    expect(antigravity.status == nil, "unresolved AG has no usage status yet")
+    expect(antigravity.snapshot == nil, "unresolved AG has no snapshot")
+
+    expect(
+        UsageMonitorState.unresolved(for: .codex).accessMode,
+        .apiKey,
+        "Codex placeholder stays API key until resolveAccess runs"
+    )
+    expect(
+        UsageMonitorState.unresolved(for: .claude).accessMode,
+        .apiKey,
+        "Claude placeholder stays API key until resolveAccess runs"
+    )
+    expect(
+        UsageMonitorState.unresolved(for: .grok).accessMode,
+        .apiKey,
+        "Grok placeholder stays API key until resolveAccess runs"
+    )
 }
 
 func testDetailsContentResolverKeepsOfflineAndContextDataIndependent() {
@@ -725,6 +804,7 @@ private actor BlockingSnapshotCache: UsageSnapshotCaching {
 }
 
 func runUsageMonitoringCoordinatorChecks() async {
+    await testCoordinatorUnresolvedAntigravityStateIsOAuth()
     await testCoordinatorAPIKeyModeSkipsRefresh()
     await testCoordinatorDiskSnapshotIsExactStaleAndDoesNotSuppressRefresh()
     await testCoordinatorCurrentRunFreshnessAndTenMinuteStaleness()
@@ -746,6 +826,20 @@ func runUsageMonitoringCoordinatorChecks() async {
     await testCoordinatorCancelAllAwaitsPrepareQuiescence()
     await testCoordinatorCancelAllTracksBlockedCacheSnapshotThroughCommitBoundary()
     await testCoordinatorCancellationAndCacheWriteFailure()
+}
+
+func testCoordinatorUnresolvedAntigravityStateIsOAuth() async {
+    let now = LockedBox(Date(timeIntervalSince1970: 2_100_000_000))
+    let cache = coordinatorCache(
+        files: FakeUsageFiles(),
+        path: "/tmp/agent-halo-coordinator-ag-unresolved.json",
+        now: now
+    )
+    let coordinator = UsageMonitoringCoordinator(providers: [], cache: cache, now: { now.value })
+    let state = await coordinator.state(for: .antigravity)
+    expect(state.providerID, .antigravity, "unresolved AG provider")
+    expect(state.accessMode, .oauth, "unresolved AG must not publish API key mode")
+    expect(state.status == nil, "unresolved AG has no usage status yet")
 }
 
 func testCoordinatorAPIKeyModeSkipsRefresh() async {

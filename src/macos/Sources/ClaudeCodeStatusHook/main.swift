@@ -45,7 +45,6 @@ func normalizeEventName(_ raw: String) -> String {
         "pre_tool_use": "PreToolUse",
         "post_tool_use": "PostToolUse",
         "post_tool_use_failure": "PostToolUseFailure",
-        "permission_denied": "PermissionDenied",
         "notification": "Notification",
         "stop": "Stop",
         "stop_failure": "StopFailure",
@@ -53,6 +52,10 @@ func normalizeEventName(_ raw: String) -> String {
         "session_end": "SessionEnd",
         "pre_compact": "PreCompact",
         "post_compact": "PostCompact",
+        "pre_invocation": "PreInvocation",
+        "post_invocation": "PostInvocation",
+        "permission_request": "PermissionRequest",
+        "permission_denied": "PermissionDenied",
     ]
     if let mapped = mapping[raw] {
         return mapped
@@ -63,9 +66,45 @@ func normalizeEventName(_ raw: String) -> String {
     return raw
 }
 
+func firstWorkspacePath(_ payload: [String: Any]) -> String {
+    let raw = payload["workspacePaths"] ?? payload["workspace_paths"]
+    if let paths = raw as? [String], let first = paths.first, !first.isEmpty {
+        return first
+    }
+    if let paths = raw as? [Any] {
+        for item in paths {
+            if let s = item as? String, !s.isEmpty {
+                return s
+            }
+        }
+    }
+    return ""
+}
+
+/// CLI uses `.../antigravity-cli/`. Antigravity 2.0 desktop uses `.../antigravity/`.
+/// The IDE uses `.../antigravity-ide/` and must not match.
+func antigravityTranscriptMatch(_ transcript: String) -> Bool {
+    if transcript.contains("/antigravity-ide/") {
+        return false
+    }
+    return transcript.contains("/antigravity-cli/") || transcript.contains("/antigravity/")
+}
+
+func antigravityHookMatch(env: [String: String], payload: [String: Any]) -> Bool {
+    if !(env["ANTIGRAVITY_AGENT"] ?? "").isEmpty { return true }
+    if !(env["ANTIGRAVITY_TRAJECTORY_ID"] ?? "").isEmpty { return true }
+    if !(env["ANTIGRAVITY_CONVERSATION_ID"] ?? "").isEmpty { return true }
+    let transcript = firstString(
+        payload["transcript_path"], payload["transcriptPath"],
+        env["ANTIGRAVITY_TRANSCRIPT_PATH"]
+    )
+    return antigravityTranscriptMatch(transcript)
+}
+
 let env = ProcessInfo.processInfo.environment
 let isGrok = !(env["GROK_SESSION_ID"] ?? "").isEmpty
     || !(env["GROK_HOOK_EVENT"] ?? "").isEmpty
+let isAntigravity = !isGrok && antigravityHookMatch(env: env, payload: payload)
 
 let rawEventName = firstString(
     event,
@@ -86,21 +125,36 @@ let cwd = firstString(
     payload["cwd"],
     nestedGet(payload, path: ["workspace", "current_dir"]),
     nestedGet(payload, path: ["workspace", "cwd"]),
+    firstWorkspacePath(payload),
     FileManager.default.currentDirectoryPath
 )
 
-let sessionId = firstString(
-    payload["session_id"],
-    payload["sessionId"],
-    payload["conversation_id"],
-    env["GROK_SESSION_ID"],
-    isGrok ? "grok-build" : "claude-code"
-)
+let sessionId: String
+if isAntigravity {
+    sessionId = firstString(
+        env["ANTIGRAVITY_TRAJECTORY_ID"],
+        env["ANTIGRAVITY_CONVERSATION_ID"],
+        payload["session_id"],
+        payload["sessionId"],
+        payload["conversation_id"],
+        payload["conversationId"],
+        "antigravity"
+    )
+} else {
+    sessionId = firstString(
+        payload["session_id"],
+        payload["sessionId"],
+        payload["conversation_id"],
+        env["GROK_SESSION_ID"],
+        isGrok ? "grok-build" : "claude-code"
+    )
+}
 
 let toolName = firstString(
     payload["tool_name"],
     payload["toolName"],
-    nestedGet(payload, path: ["tool", "name"])
+    nestedGet(payload, path: ["tool", "name"]),
+    nestedGet(payload, path: ["toolCall", "name"])
 )
 
 let notificationType: String
@@ -114,8 +168,14 @@ if eventName == "Notification" {
     notificationType = ""
 }
 
+// Claude/Grok only emit dedicated *Failure events. Antigravity registers
+// Stop / PostToolUse and puts errorText / fatal on those events.
+let capturesFailureFields = eventName == "StopFailure"
+    || eventName == "PostToolUseFailure"
+    || (isAntigravity && (eventName == "Stop" || eventName == "PostToolUse"))
+
 let errorText: String
-if eventName == "StopFailure" || eventName == "PostToolUseFailure" {
+if capturesFailureFields {
     errorText = firstString(
         payload["error"],
         payload["error_text"],
@@ -124,6 +184,25 @@ if eventName == "StopFailure" || eventName == "PostToolUseFailure" {
     )
 } else {
     errorText = ""
+}
+
+let fatal: Bool
+if isAntigravity && (eventName == "Stop" || eventName == "PostToolUse") {
+    let value = payload["fatal"]
+    if let value = value as? Bool {
+        fatal = value
+    } else if let value = value as? NSNumber {
+        fatal = value != 0
+    } else {
+        switch firstString(value).lowercased() {
+        case "true", "1", "yes":
+            fatal = true
+        default:
+            fatal = false
+        }
+    }
+} else {
+    fatal = false
 }
 
 // Grok: default | auto | plan | bypassPermissions (every hook event).
@@ -167,25 +246,26 @@ let timestamp = firstString(
 
 // MARK: - Build record
 
-let source = isGrok ? "grok-hook" : "claude-hook"
+let source = isGrok ? "grok-hook" : isAntigravity ? "antigravity-hook" : "claude-hook"
 
 
-var record: [String: Any?] = [
+var record: [String: Any] = [
     "timestamp": timestamp,
     "event": eventName,
     "sessionId": sessionId,
     "cwd": cwd,
-    "toolName": toolName.isEmpty ? nil : toolName,
-    "notificationType": notificationType.isEmpty ? nil : notificationType,
-    "errorText": errorText.isEmpty ? nil : errorText,
-    "permissionMode": permissionMode.isEmpty ? nil : permissionMode,
-    "promptId": promptId.isEmpty ? nil : promptId,
-    "subagentType": subagentType.isEmpty ? nil : subagentType,
-    "reason": reason.isEmpty ? nil : reason,
-    "cancelledBy": cancelledBy.isEmpty ? nil : cancelledBy,
-    "cancelTrigger": cancelTrigger.isEmpty ? nil : cancelTrigger,
     "source": source,
 ]
+if !toolName.isEmpty { record["toolName"] = toolName }
+if !notificationType.isEmpty { record["notificationType"] = notificationType }
+if !errorText.isEmpty { record["errorText"] = errorText }
+if fatal { record["fatal"] = true }
+if !permissionMode.isEmpty { record["permissionMode"] = permissionMode }
+if !promptId.isEmpty { record["promptId"] = promptId }
+if !subagentType.isEmpty { record["subagentType"] = subagentType }
+if !reason.isEmpty { record["reason"] = reason }
+if !cancelledBy.isEmpty { record["cancelledBy"] = cancelledBy }
+if !cancelTrigger.isEmpty { record["cancelTrigger"] = cancelTrigger }
 
 let recordData = try! JSONSerialization.data(
     withJSONObject: record,
@@ -205,7 +285,7 @@ let homeURL: URL = {
 }()
 
 let paths = AgentHaloPaths(homeDirectory: homeURL)
-let statusURL = isGrok ? paths.grokStatusLog : paths.claudeStatusLog
+let statusURL = isGrok ? paths.grokStatusLog : isAntigravity ? paths.antigravityStatusLog : paths.claudeStatusLog
 
 // Create logs directory with 0o700
 try? FileManager.default.createDirectory(

@@ -48,8 +48,11 @@ public enum DetailsContentResolver {
     ) -> DetailsPanelViewModel {
         let providerName = providerName(for: providerID)
         let resolvedContext = isOffline ? nil : contextUsedPercent
+        // Antigravity is OAuth-only. The monitor may still publish the shared
+        // API-key placeholder before resolveAccess finishes; keep the usage panel.
+        let usesUsageBody = monitorState.accessMode == .oauth || providerID == .antigravity
 
-        guard monitorState.accessMode == .oauth else {
+        guard usesUsageBody else {
             return DetailsPanelViewModel(
                 providerName: providerName,
                 planName: nil,
@@ -87,6 +90,8 @@ public enum DetailsContentResolver {
             return "Claude Code"
         case .grok:
             return "Grok"
+        case .antigravity:
+            return "Antigravity"
         }
     }
 
@@ -104,6 +109,8 @@ public enum DetailsContentResolver {
                 return L10n.shared["usage.warning.sign_in_claude"]
             case .grok:
                 return L10n.shared["usage.warning.sign_in_grok"]
+            case .antigravity:
+                return L10n.shared["usage.warning.sign_in_antigravity"]
             }
         }
 

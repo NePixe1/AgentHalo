@@ -124,6 +124,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var grokActivitySnapshot = GrokActivitySnapshot.empty
     private let piActivityMonitor = PiActivityMonitor()
     private var piActivitySnapshot = PiActivitySnapshot.empty
+    private let antigravityActivityMonitor = AntigravityActivityMonitor()
+    private var antigravityActivitySnapshot = AntigravityActivitySnapshot.empty
     private var nextStatusLineReconciliationAt = Date.distantPast
     private let statusLineReconciliationInterval: TimeInterval = 2
     private var selectedPreview = PreviewPayload.live
@@ -226,6 +228,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.piActivityDidChange(snapshot)
             }
         }
+        antigravityActivitySnapshot = antigravityActivityMonitor.snapshot()
+        antigravityActivityMonitor.start { [weak self] snapshot in
+            Task { @MainActor in
+                self?.antigravityActivityDidChange(snapshot)
+            }
+        }
         // Initialize L10n with user's saved preference
         L10n.shared.setLanguage(settings.language)
         currentLanguage = L10n.shared.currentLanguage
@@ -290,6 +298,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         claudeActivityMonitor.stop()
         grokActivityMonitor.stop()
         piActivityMonitor.stop()
+        antigravityActivityMonitor.stop()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         settingsSaveTimer?.invalidate()
         if placementState.shouldPersistCurrentFrame, let panel {
@@ -344,6 +353,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             detailsPanelVisible: detailsPanel.isVisible,
             enabled: settings.isAgentEnabled(.pi)
         )
+        antigravityActivityMonitor.updatePollingContext(
+            focusedAgent: settings.focusedAgent,
+            detailsPanelVisible: detailsPanel.isVisible,
+            enabled: settings.isAgentEnabled(.antigravity)
+        )
         refreshAggregateAndUI(now: now, codexRunning: codexRunning)
     }
 
@@ -377,6 +391,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshAggregateAndUI(now: Date(), codexRunning: codexRunning)
     }
 
+    private func antigravityActivityDidChange(_ snapshot: AntigravityActivitySnapshot) {
+        guard haloView?.isDragging != true else {
+            antigravityActivitySnapshot = snapshot
+            return
+        }
+        antigravityActivitySnapshot = snapshot
+        let codexRunning = CodexAppDetector.isCodexRunning()
+        refreshAggregateAndUI(now: Date(), codexRunning: codexRunning)
+    }
+
     private func codexActivityDidChange(_ snapshot: CodexActivitySnapshot) {
         guard haloView?.isDragging != true else {
             codexActivitySnapshot = snapshot
@@ -402,6 +426,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return grokActivitySnapshot.isPresent
         case .pi:
             return piActivitySnapshot.isPresent
+        case .antigravity:
+            return antigravityActivitySnapshot.isPresent
+                || AntigravityAppDetector.isAntigravityRunning()
         }
     }
 
@@ -543,14 +570,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func workspaceApplicationDidLaunch(_ notification: Notification) {
         let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-        if CodexAppDetector.noteApplicationDidLaunch(app) {
+        let launchedCodex = CodexAppDetector.noteApplicationDidLaunch(app)
+        let launchedAntigravity = app.map(AntigravityAppDetector.isPrimaryApp) ?? false
+        if launchedCodex || launchedAntigravity {
             tick()
         }
     }
 
     @objc private func workspaceApplicationDidTerminate(_ notification: Notification) {
         let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-        guard CodexAppDetector.noteApplicationDidTerminate(app) else { return }
+        let terminatedCodex = CodexAppDetector.noteApplicationDidTerminate(app)
+        let terminatedAntigravity = app.map(AntigravityAppDetector.isPrimaryApp) ?? false
+        guard terminatedCodex || terminatedAntigravity else { return }
         updateFrontmostApplication(NSWorkspace.shared.frontmostApplication)
         tick()
     }
@@ -766,6 +797,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             grokActivityMonitor.requestRefresh()
         case .pi:
             piActivityMonitor.requestRefresh()
+        case .antigravity:
+            antigravityActivityMonitor.requestRefresh()
         case .codex:
             break
         }
@@ -920,6 +953,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         piActivitySnapshot.sessions
     }
 
+    private func antigravitySnapshots() -> [SessionSnapshot] {
+        antigravityActivitySnapshot.sessions
+    }
+
     static func standbyAggregate(
         aggregate: AggregateSnapshot,
         hasLiveSession: Bool
@@ -1064,12 +1101,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 standbySession: piActivitySnapshot.preferredStandbySession,
                 isStandby: displayedAggregate.label == "STANDBY"
             )
+        case .antigravity:
+            exactSessionDetails = SessionDetailsSnapshot()
+            exactContextUsedPercent = nil
         }
 
         let model: DetailsPanelViewModel
         if let providerID = Self.usageProviderID(for: settings.focusedAgent) {
             let monitorState = usageStates[providerID]
-                ?? UsageMonitorState(providerID: providerID, accessMode: .apiKey)
+                ?? UsageMonitorState.unresolved(for: providerID)
             model = DetailsContentResolver.resolve(
                 providerID: providerID,
                 monitorState: monitorState,
@@ -1209,6 +1249,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return .claude
         case .grok:
             return .grok
+        case .antigravity:
+            return .antigravity
         case .pi:
             return nil
         }
@@ -1448,7 +1490,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func allSnapshots() -> [SessionSnapshot] {
-        codexActivitySnapshot.sessions + claudeSnapshots() + grokSnapshots() + piSnapshots()
+        codexActivitySnapshot.sessions + claudeSnapshots() + grokSnapshots() + piSnapshots() + antigravitySnapshots()
     }
 
     private func addMenuItem(
@@ -1594,21 +1636,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             settings.focusedAgent = previous.focusedAgent
             setFocusedAgent(target)
         }
+        applyEnabledAgents(previous: previous)
+        lastStatusMenuSignature = nil
+        tick()
+        settingsWindowController?.refresh(settings: settings, launchAtLogin: StartupManager.isEnabled())
+    }
+
+    /// Enable: configure hooks (AG only) and refresh. Disable AG: stop polling
+    /// and clear the snapshot; do not delete the `hooks.json` group.
+    private func applyEnabledAgents(previous: HaloSettings) {
         for agent in AgentKind.allCases {
             let nowOn = settings.isAgentEnabled(agent)
             let wasOn = previous.isAgentEnabled(agent)
             if nowOn && !wasOn {
                 switch agent {
-                case .claudeCode: claudeActivityMonitor.requestRefresh()
-                case .grok: grokActivityMonitor.requestRefresh()
-                case .pi: piActivityMonitor.requestRefresh()
-                case .codex: break
+                case .claudeCode:
+                    claudeActivityMonitor.requestRefresh()
+                case .grok:
+                    grokActivityMonitor.requestRefresh()
+                case .pi:
+                    piActivityMonitor.requestRefresh()
+                case .antigravity:
+                    AntigravityHookConfigurator.configure()
+                    antigravityActivityMonitor.updatePollingContext(
+                        focusedAgent: settings.focusedAgent,
+                        detailsPanelVisible: detailsPanel.isVisible,
+                        enabled: true
+                    )
+                    antigravityActivityMonitor.requestRefresh()
+                case .codex:
+                    break
                 }
+            } else if !nowOn && wasOn, agent == .antigravity {
+                antigravityActivityMonitor.updatePollingContext(
+                    focusedAgent: settings.focusedAgent,
+                    detailsPanelVisible: detailsPanel.isVisible,
+                    enabled: false
+                )
+                antigravityActivitySnapshot = .empty
             }
         }
-        lastStatusMenuSignature = nil
-        tick()
-        settingsWindowController?.refresh(settings: settings, launchAtLogin: StartupManager.isEnabled())
     }
 
     static func haloWindowLevel(alwaysOnTop: Bool) -> NSWindow.Level {

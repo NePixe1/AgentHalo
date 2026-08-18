@@ -131,13 +131,18 @@ final class FakeUsageKeychain: UsageKeychainAccessing, @unchecked Sendable {
     }
 
     private let store: LockedBox<[Key: String]>
+    private let reads: LockedBox<Int>
 
     init() {
         self.store = LockedBox([:])
+        self.reads = LockedBox(0)
     }
 
+    var readCount: Int { reads.value }
+
     func read(service: String, account: String?) throws -> String? {
-        store.value[Key(service: service, account: account)]
+        reads.withValue { $0 += 1 }
+        return store.value[Key(service: service, account: account)]
     }
 
     func readFirstMatching(service: String) throws -> UsageKeychainItem? {

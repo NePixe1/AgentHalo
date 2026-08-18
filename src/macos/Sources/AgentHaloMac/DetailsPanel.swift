@@ -415,7 +415,7 @@ class DetailsPanel: NSPanel {
                 focusedAgent: .codex,
                 now: now
             )
-        case .grok, .claudeCode, .pi:
+        case .grok, .claudeCode, .pi, .antigravity:
             // Grok/Claude/Pi context is disk-, statusline-, or extension-backed on
             // full content refresh. Only STANDBY/OFFLINE status ticks should touch
             // the pill: STANDBY soft-holds the last live percent; OFFLINE clears
@@ -1226,6 +1226,7 @@ final class AgentToggleView: NSView {
     private let claudeIcon = NSImageView()
     private let grokIcon = NSImageView()
     private let piIcon = NSImageView()
+    private let antigravityIcon = NSImageView()
     private var activeBgConstraints: [NSLayoutConstraint] = []
     private var iconLayoutConstraints: [NSLayoutConstraint] = []
     private var widthConstraint: NSLayoutConstraint!
@@ -1267,10 +1268,12 @@ final class AgentToggleView: NSView {
         configureIcon(claudeIcon, assetName: "claude-code", accessibilityLabel: "Claude Code")
         configureIcon(grokIcon, assetName: "grok", accessibilityLabel: "Grok")
         configureIcon(piIcon, assetName: "pi", accessibilityLabel: "Pi")
+        configureIcon(antigravityIcon, assetName: "antigravity", accessibilityLabel: "Antigravity")
         bgView.addSubview(codexIcon)
         bgView.addSubview(claudeIcon)
         bgView.addSubview(grokIcon)
         bgView.addSubview(piIcon)
+        bgView.addSubview(antigravityIcon)
 
         widthConstraint = widthAnchor.constraint(
             equalToConstant: Self.slotWidth * CGFloat(HaloSettings.defaultEnabledAgents.count)
@@ -1384,6 +1387,7 @@ final class AgentToggleView: NSView {
         claudeIcon.alphaValue = selectedAgent == .claudeCode ? 1 : 0.40
         grokIcon.alphaValue = selectedAgent == .grok ? 1 : 0.40
         piIcon.alphaValue = selectedAgent == .pi ? 1 : 0.40
+        antigravityIcon.alphaValue = selectedAgent == .antigravity ? 1 : 0.40
     }
 
     private func icon(for agent: AgentKind) -> NSImageView {
@@ -1392,6 +1396,7 @@ final class AgentToggleView: NSView {
         case .claudeCode: return claudeIcon
         case .grok: return grokIcon
         case .pi: return piIcon
+        case .antigravity: return antigravityIcon
         }
     }
 

@@ -5,6 +5,7 @@ public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
     case claudeCode
     case grok
     case pi
+    case antigravity
 
     public var menuTitle: String {
         switch self {
@@ -12,6 +13,7 @@ public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
         case .claudeCode: return "Claude Code"
         case .grok: return "Grok"
         case .pi: return "Pi"
+        case .antigravity: return "Antigravity"
         }
     }
 
@@ -21,6 +23,7 @@ public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
         case .claudeCode: return "CC"
         case .grok: return "Grok"
         case .pi: return "Pi"
+        case .antigravity: return "AG"
         }
     }
 
@@ -30,6 +33,7 @@ public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
         case .claudeCode: return "Claude Code is standing by"
         case .grok: return "Grok is standing by"
         case .pi: return "Pi is standing by"
+        case .antigravity: return "Antigravity is standing by"
         }
     }
 
@@ -39,6 +43,7 @@ public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
         case .claudeCode: return L10n.shared["status.standby_claude"]
         case .grok: return L10n.shared["status.standby_grok"]
         case .pi: return L10n.shared["status.standby_pi"]
+        case .antigravity: return L10n.shared["status.standby_antigravity"]
         }
     }
 
@@ -48,6 +53,7 @@ public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
         case .claudeCode: return "Claude Code is not running"
         case .grok: return "Grok is not running"
         case .pi: return "Pi is not running"
+        case .antigravity: return "Antigravity is not running"
         }
     }
 
@@ -57,6 +63,7 @@ public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
         case .claudeCode: return L10n.shared["status.offline_claude"]
         case .grok: return L10n.shared["status.offline_grok"]
         case .pi: return L10n.shared["status.offline_pi"]
+        case .antigravity: return L10n.shared["status.offline_antigravity"]
         }
     }
 }

@@ -7,6 +7,7 @@ public enum UsageProviderID: String, Codable, Sendable {
     case codex
     case claude
     case grok
+    case antigravity
 }
 
 /// How a provider's credentials are accessed. Drives the access-mode badge
@@ -121,6 +122,17 @@ public struct UsageMonitorState: Equatable, Sendable {
         self.status = status
         self.lastFailure = lastFailure
         self.isRefreshing = isRefreshing
+    }
+
+    /// Placeholder published before `resolveAccess` commits. Antigravity is
+    /// OAuth-only, so the details panel must not flash the API-key session card.
+    public static func unresolved(for providerID: UsageProviderID) -> UsageMonitorState {
+        switch providerID {
+        case .antigravity:
+            return UsageMonitorState(providerID: providerID, accessMode: .oauth)
+        case .codex, .claude, .grok:
+            return UsageMonitorState(providerID: providerID, accessMode: .apiKey)
+        }
     }
 }
 
