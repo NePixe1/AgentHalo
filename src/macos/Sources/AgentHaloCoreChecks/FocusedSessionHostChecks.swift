@@ -8,6 +8,241 @@ func runFocusedSessionHostChecks() {
     testProcessTreeWalkerRejectsSshdAndConhostOnly()
     testProcessTreeWalkerRejectsCyclesAndDepth()
     testProcessTreeWalkerSkipsSelfProcess()
+    testResolverUsesVisibleClaudePid()
+    testResolverUsesPreferredClaudeStandby()
+    testResolverMatchesGrokWorkspaceWhenIdsDiffer()
+    testResolverIgnoresGrokEntryWithoutPid()
+    testResolverUsesPreferredPiStandby()
+    testResolverAntigravityRequiresExactlyOnePresentPid()
+    testResolverReturnsNilWhenPausedOfflineOrCodex()
+}
+
+private func session(
+    _ threadId: String,
+    agent: AgentKind,
+    state: HaloState = .thinking,
+    active: Bool = true,
+    cwd: String = "/tmp/proj",
+    lastEventAt: Date = Date()
+) -> SessionSnapshot {
+    SessionSnapshot(
+        threadId: threadId,
+        projectName: "proj",
+        workingDirectory: cwd,
+        state: state,
+        action: "Thinking",
+        lastEventAt: lastEventAt,
+        completedAt: nil,
+        active: active,
+        agent: agent
+    )
+}
+
+func testResolverUsesVisibleClaudePid() {
+    let visible = [session("s-visible", agent: .claudeCode)]
+    let evidence = FocusedSessionLiveEvidence(
+        claude: [
+            ClaudeLiveSessionSnapshot(
+                sessionId: "s-other",
+                workingDirectory: "/tmp/other",
+                processId: 111,
+                status: "idle",
+                updatedAt: Date()
+            ),
+            ClaudeLiveSessionSnapshot(
+                sessionId: "s-visible",
+                workingDirectory: "/tmp/proj",
+                processId: 222,
+                status: "busy",
+                updatedAt: Date()
+            )
+        ]
+    )
+    expect(
+        FocusedSessionHostResolver.resolveProcessId(
+            focusedAgent: .claudeCode,
+            visibleSessions: visible,
+            hookSnapshots: visible,
+            paused: false,
+            evidence: evidence
+        ),
+        222,
+        "visible Claude session wins over another live pid"
+    )
+}
+
+func testResolverUsesPreferredClaudeStandby() {
+    let newer = Date()
+    let older = newer.addingTimeInterval(-60)
+    let hooks = [
+        session("s-old", agent: .claudeCode, state: .idle, active: false, lastEventAt: older),
+        session("s-new", agent: .claudeCode, state: .idle, active: false, lastEventAt: newer)
+    ]
+    let evidence = FocusedSessionLiveEvidence(
+        claude: [
+            ClaudeLiveSessionSnapshot(
+                sessionId: "s-old", workingDirectory: "/tmp/a",
+                processId: 301, status: "idle", updatedAt: older
+            ),
+            ClaudeLiveSessionSnapshot(
+                sessionId: "s-new", workingDirectory: "/tmp/b",
+                processId: 302, status: "idle", updatedAt: newer
+            )
+        ]
+    )
+    expect(
+        FocusedSessionHostResolver.resolveProcessId(
+            focusedAgent: .claudeCode,
+            visibleSessions: [],
+            hookSnapshots: hooks,
+            paused: false,
+            evidence: evidence
+        ),
+        302,
+        "STANDBY uses Claude preferred live session"
+    )
+}
+
+func testResolverMatchesGrokWorkspaceWhenIdsDiffer() {
+    let visible = [session("hook-id", agent: .grok, cwd: "/tmp/ws")]
+    let evidence = FocusedSessionLiveEvidence(
+        grok: [
+            GrokActiveSessionRef(sessionId: "live-id", cwd: "/tmp/ws", processId: 404)
+        ]
+    )
+    expect(
+        FocusedSessionHostResolver.resolveProcessId(
+            focusedAgent: .grok,
+            visibleSessions: visible,
+            hookSnapshots: visible,
+            paused: false,
+            evidence: evidence
+        ),
+        404,
+        "Grok workspace match supplies the live pid"
+    )
+}
+
+func testResolverIgnoresGrokEntryWithoutPid() {
+    let visible = [session("abc", agent: .grok)]
+    let evidence = FocusedSessionLiveEvidence(
+        grok: [GrokActiveSessionRef(sessionId: "abc", cwd: "/tmp/ws", processId: nil)]
+    )
+    expect(
+        FocusedSessionHostResolver.resolveProcessId(
+            focusedAgent: .grok,
+            visibleSessions: visible,
+            hookSnapshots: visible,
+            paused: false,
+            evidence: evidence
+        ),
+        nil,
+        "Grok entry without pid does not activate"
+    )
+}
+
+func testResolverUsesPreferredPiStandby() {
+    let hooks = [
+        session("pi-old", agent: .pi, state: .idle, active: false, lastEventAt: Date().addingTimeInterval(-30)),
+        session("pi-new", agent: .pi, state: .idle, active: false, lastEventAt: Date())
+    ]
+    let evidence = FocusedSessionLiveEvidence(
+        pi: [
+            PiLivePid(sessionId: "pi-old", processId: 501),
+            PiLivePid(sessionId: "pi-new", processId: 502)
+        ]
+    )
+    expect(
+        FocusedSessionHostResolver.resolveProcessId(
+            focusedAgent: .pi,
+            visibleSessions: [],
+            hookSnapshots: hooks,
+            paused: false,
+            evidence: evidence
+        ),
+        502,
+        "STANDBY Pi uses newest live record"
+    )
+}
+
+func testResolverAntigravityRequiresExactlyOnePresentPid() {
+    expect(
+        FocusedSessionHostResolver.resolveProcessId(
+            focusedAgent: .antigravity,
+            visibleSessions: [session("ag", agent: .antigravity)],
+            hookSnapshots: [],
+            paused: false,
+            evidence: FocusedSessionLiveEvidence(antigravityPresentPids: [701])
+        ),
+        701,
+        "exactly one Antigravity present pid"
+    )
+    expect(
+        FocusedSessionHostResolver.resolveProcessId(
+            focusedAgent: .antigravity,
+            visibleSessions: [session("ag", agent: .antigravity)],
+            hookSnapshots: [],
+            paused: false,
+            evidence: FocusedSessionLiveEvidence(antigravityPresentPids: [701, 702])
+        ),
+        nil,
+        "multiple Antigravity pids are ambiguous"
+    )
+    expect(
+        FocusedSessionHostResolver.resolveProcessId(
+            focusedAgent: .antigravity,
+            visibleSessions: [],
+            hookSnapshots: [],
+            paused: false,
+            evidence: FocusedSessionLiveEvidence(antigravityPresentPids: [])
+        ),
+        nil,
+        "zero Antigravity pids"
+    )
+}
+
+func testResolverReturnsNilWhenPausedOfflineOrCodex() {
+    let evidence = FocusedSessionLiveEvidence(
+        claude: [
+            ClaudeLiveSessionSnapshot(
+                sessionId: "s1", workingDirectory: "/tmp",
+                processId: 1, status: "busy", updatedAt: Date()
+            )
+        ]
+    )
+    expect(
+        FocusedSessionHostResolver.resolveProcessId(
+            focusedAgent: .claudeCode,
+            visibleSessions: [session("s1", agent: .claudeCode)],
+            hookSnapshots: [],
+            paused: true,
+            evidence: evidence
+        ),
+        nil,
+        "paused does not activate"
+    )
+    expect(
+        FocusedSessionHostResolver.resolveProcessId(
+            focusedAgent: .claudeCode,
+            visibleSessions: [],
+            hookSnapshots: [],
+            paused: false,
+            evidence: .empty
+        ),
+        nil,
+        "offline Claude has no pid"
+    )
+    expect(
+        FocusedSessionHostResolver.resolveProcessId(
+            focusedAgent: .codex,
+            visibleSessions: [session("c", agent: .codex)],
+            hookSnapshots: [],
+            paused: false,
+            evidence: .empty
+        ),
+        nil,
+        "Codex is not resolved via session pid"
+    )
 }
 
 private func proc(
