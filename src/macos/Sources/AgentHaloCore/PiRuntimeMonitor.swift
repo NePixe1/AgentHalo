@@ -79,6 +79,7 @@ public final class PiRuntimeMonitor: @unchecked Sendable {
     private let processReader: @Sendable () -> [PiRuntimeProcess]
     private var nextCheckAt = Date.distantPast
     private var running = false
+    private var runningProcessId: Int32 = 0
     private var latestSession: PiRuntimeSessionEvidence?
 
     public init(
@@ -93,6 +94,10 @@ public final class PiRuntimeMonitor: @unchecked Sendable {
         running
     }
 
+    public var processId: Int32 {
+        runningProcessId
+    }
+
     @discardableResult
     public func refresh(now: Date = Date()) -> Bool {
         guard now >= nextCheckAt else { return false }
@@ -103,11 +108,13 @@ public final class PiRuntimeMonitor: @unchecked Sendable {
             previous: latestSession,
             now: now
         )
-        running = Self.isRunning(
+        let match = Self.matchingProcess(
             session: latestSession,
             now: now,
             processes: processReader()
         )
+        running = match != nil
+        runningProcessId = match?.processId ?? 0
         return before != fingerprint()
     }
 
@@ -144,11 +151,19 @@ public final class PiRuntimeMonitor: @unchecked Sendable {
         now: Date,
         processes: [PiRuntimeProcess]
     ) -> Bool {
+        matchingProcess(session: session, now: now, processes: processes) != nil
+    }
+
+    private static func matchingProcess(
+        session: PiRuntimeSessionEvidence?,
+        now: Date,
+        processes: [PiRuntimeProcess]
+    ) -> PiRuntimeProcess? {
         guard let session,
               session.lastModified <= now.addingTimeInterval(futureTolerance),
               now.timeIntervalSince(session.lastModified) <= evidenceLifetime
         else {
-            return false
+            return nil
         }
 
         let byId = Dictionary(
@@ -168,10 +183,10 @@ public final class PiRuntimeMonitor: @unchecked Sendable {
             }
             if process.startedAt == nil
                 || process.startedAt! <= session.lastModified.addingTimeInterval(processStartTolerance) {
-                return true
+                return process
             }
         }
-        return false
+        return nil
     }
 
     public static func readLatestSession(
@@ -416,6 +431,7 @@ public final class PiRuntimeMonitor: @unchecked Sendable {
         guard let latestSession else { return running ? "1" : "0" }
         return [
             running ? "1" : "0",
+            String(runningProcessId),
             latestSession.sessionId,
             String(latestSession.lastModified.timeIntervalSince1970),
             String(latestSession.length),

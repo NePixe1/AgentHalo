@@ -7,12 +7,15 @@ struct PiActivitySnapshot: Equatable, Sendable {
     var sessions: [SessionSnapshot]
     /// Session ids whose extension record still has a live PID.
     var liveSessionIds: Set<String>
+    /// Live extension / runtime pids used for focused-session host activation.
+    var livePids: [PiLivePid]
     /// True when an extension PID or runtime fallback confirms Pi is live.
     var isPresent: Bool
 
     static let empty = PiActivitySnapshot(
         sessions: [],
         liveSessionIds: [],
+        livePids: [],
         isPresent: false
     )
 
@@ -222,6 +225,10 @@ final class PiActivityMonitor: @unchecked Sendable {
         _ = statusMonitor.refresh()
         _ = runtimeMonitor.refresh()
         let liveIds = statusMonitor.liveSessionIds()
+        let livePids = Self.collectLivePids(
+            statusRecords: statusMonitor.allRecords(),
+            runtimeMonitor: runtimeMonitor
+        )
         let sessions = Self.projectSessions(
             statusSessions: statusMonitor.snapshots(),
             liveSessionIds: liveIds,
@@ -230,6 +237,7 @@ final class PiActivityMonitor: @unchecked Sendable {
         let nextSnapshot = PiActivitySnapshot(
             sessions: sessions,
             liveSessionIds: liveIds,
+            livePids: livePids,
             isPresent: !liveIds.isEmpty || runtimeMonitor.isRunning
         )
         stateLock.lock()
@@ -268,6 +276,30 @@ final class PiActivityMonitor: @unchecked Sendable {
             result.append(runtimeSession)
         }
         return result
+    }
+
+    /// Live pids come from status records and the runtime monitor only.
+    /// SessionSnapshot never supplies a pid.
+    private static func collectLivePids(
+        statusRecords: [PiStatusRecord],
+        runtimeMonitor: PiRuntimeMonitor
+    ) -> [PiLivePid] {
+        var livePids: [PiLivePid] = []
+        var seen = Set<Int32>()
+        for record in statusRecords {
+            guard PiStatusMonitor.isLive(record), record.processId > 0 else { continue }
+            guard seen.insert(record.processId).inserted else { continue }
+            livePids.append(PiLivePid(sessionId: record.sessionId, processId: record.processId))
+        }
+        let runtimePid = runtimeMonitor.processId
+        if runtimeMonitor.isRunning,
+           runtimePid > 0,
+           seen.insert(runtimePid).inserted,
+           let sessionId = runtimeMonitor.snapshot()?.threadId,
+           !sessionId.isEmpty {
+            livePids.append(PiLivePid(sessionId: sessionId, processId: runtimePid))
+        }
+        return livePids
     }
 
     private func scheduleDispatch(

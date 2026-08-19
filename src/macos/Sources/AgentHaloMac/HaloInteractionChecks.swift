@@ -56,6 +56,8 @@ func runHaloInteractionChecks() {
     testFocusSubmenuMarksCodexInitially()
     testFocusSubmenuSwitchesToClaudeCode()
     testSingleClickDoesNotActivateCodexWhenClaudeCodeFocused()
+    testDoubleClickActivatesClaudeSessionHost()
+    testDoubleClickActivatesCodexDesktopPath()
     testClaudeLiveStandbyUsesStableGreenAggregate()
     testCodexRunningIdleUsesStableGreenAggregate()
     testPausedAgentDoesNotUseStableGreenStandby()
@@ -805,6 +807,53 @@ private func testSingleClickDoesNotActivateCodexWhenClaudeCodeFocused() {
     delegate.handleHaloPrimaryClick()
 
     expect(activations == 0, "single click should not activate Codex when Claude Code is focused")
+}
+
+@MainActor
+private func testDoubleClickActivatesClaudeSessionHost() {
+    var hostPids: [Int32] = []
+    let delegate = AppDelegate(
+        settingsStore: SettingsStore(settingsURL: temporarySettingsURL()),
+        sessionHostActivator: { hostPids.append($0) }
+    )
+    delegate.setFocusedAgent(.claudeCode)
+    delegate.focusedSessionEvidenceProvider = {
+        FocusedSessionLiveEvidence(
+            claude: [
+                ClaudeLiveSessionSnapshot(
+                    sessionId: "s1",
+                    workingDirectory: "/tmp/proj",
+                    processId: 12,
+                    status: "busy",
+                    updatedAt: Date()
+                )
+            ]
+        )
+    }
+    delegate.hostProcessTableProvider = {
+        [
+            10: HostProcessRecord(processId: 10, parentProcessId: 1, name: "iTerm2", isRegularApp: true),
+            12: HostProcessRecord(processId: 12, parentProcessId: 10, name: "claude", isRegularApp: false)
+        ]
+    }
+    delegate.activateFocusedAgent()
+    expect(hostPids, [10], "Claude focus double-click activates iTerm")
+    delegate.handleHaloPrimaryClick()
+    expect(hostPids, [10], "single click still does not activate")
+}
+
+@MainActor
+private func testDoubleClickActivatesCodexDesktopPath() {
+    var codex = 0
+    var hosts: [Int32] = []
+    let delegate = AppDelegate(
+        settingsStore: SettingsStore(settingsURL: temporarySettingsURL()),
+        codexActivator: { codex += 1 },
+        sessionHostActivator: { hosts.append($0) }
+    )
+    delegate.activateFocusedAgent()
+    expect(codex, 1, "Codex focus still uses desktop activator")
+    expect(hosts.isEmpty, true, "Codex focus does not walk a session host")
 }
 
 @MainActor
@@ -3182,7 +3231,14 @@ private func testGrokPollingIsThrottledWhenNotFocused() {
     expect(appDelegateSource.contains("case .grok:"), "AppDelegate standby/live-session path should handle Grok focus")
     expect(appDelegateSource.contains("case .pi:"), "AppDelegate standby/live-session path should handle Pi focus")
     expect(appDelegateSource.contains("piActivityMonitor"), "AppDelegate should delegate Pi polling to a background monitor")
-    expect(!appDelegateSource.contains("activateGrok"), "Grok must not gain a click-to-activate terminal path")
+    expect(
+        appDelegateSource.contains("activateFocusedAgent()"),
+        "double-click should activate the focused session host"
+    )
+    expect(
+        !appDelegateSource.contains("handleHaloPrimaryClick() {"),
+        "single-click handler must remain a named empty method"
+    )
 }
 
 private func testPiActivityFiltersDeadLifecycleAndAddsRuntimeFallback() {
@@ -3224,6 +3280,7 @@ private func testPiActivityFiltersDeadLifecycleAndAddsRuntimeFallback() {
     let activity = PiActivitySnapshot(
         sessions: [runtime, snapshot("dead-failed", .error, active: false)],
         liveSessionIds: [],
+        livePids: [],
         isPresent: true
     )
     expect(activity.preferredStandbySession?.threadId, "runtime", "standby details prefer runtime idle session")

@@ -15,6 +15,8 @@ func runFocusedSessionHostChecks() {
     testResolverUsesPreferredPiStandby()
     testResolverAntigravityRequiresExactlyOnePresentPid()
     testResolverReturnsNilWhenPausedOfflineOrCodex()
+    testActivatorWalksResolvedPidAndSkipsCodexResolver()
+    testActivatorSilentWhenHostMissing()
 }
 
 private func session(
@@ -391,4 +393,64 @@ func testProcessTreeWalkerSkipsSelfProcess() {
     expect(ProcessTreeHostWalker.shouldSkipName("Code Helper"), true, "Helper suffix")
     expect(ProcessTreeHostWalker.shouldSkipName("language_server"), true, "language_server")
     expect(ProcessTreeHostWalker.shouldSkipName("iTerm2"), false, "iTerm is not skipped")
+}
+
+func testActivatorWalksResolvedPidAndSkipsCodexResolver() {
+    var hostPids: [Int32] = []
+    var codexCalls = 0
+    let processes = table([
+        proc(10, parent: 1, "iTerm2", regular: true),
+        proc(12, parent: 10, "claude", regular: false)
+    ])
+    let evidence = FocusedSessionLiveEvidence(
+        claude: [
+            ClaudeLiveSessionSnapshot(
+                sessionId: "s1", workingDirectory: "/tmp/proj",
+                processId: 12, status: "busy", updatedAt: Date()
+            )
+        ]
+    )
+    FocusedAgentActivator.activate(
+        focusedAgent: .claudeCode,
+        visibleSessions: [session("s1", agent: .claudeCode)],
+        hookSnapshots: [],
+        paused: false,
+        evidence: evidence,
+        processes: processes,
+        selfProcessId: 99,
+        activateCodex: { codexCalls += 1 },
+        activateHost: { hostPids.append($0) }
+    )
+    expect(hostPids, [10], "activator walks Claude pid to iTerm")
+    expect(codexCalls, 0, "non-Codex focus must not call Codex activator")
+
+    FocusedAgentActivator.activate(
+        focusedAgent: .codex,
+        visibleSessions: [],
+        hookSnapshots: [],
+        paused: false,
+        evidence: .empty,
+        processes: processes,
+        selfProcessId: 99,
+        activateCodex: { codexCalls += 1 },
+        activateHost: { hostPids.append($0) }
+    )
+    expect(codexCalls, 1, "Codex focus uses the desktop-app activator")
+    expect(hostPids, [10], "Codex focus does not walk a session pid")
+}
+
+func testActivatorSilentWhenHostMissing() {
+    var calls = 0
+    FocusedAgentActivator.activate(
+        focusedAgent: .pi,
+        visibleSessions: [],
+        hookSnapshots: [],
+        paused: false,
+        evidence: .empty,
+        processes: [:],
+        selfProcessId: 1,
+        activateCodex: { calls += 1 },
+        activateHost: { _ in calls += 1 }
+    )
+    expect(calls, 0, "missing pid is silent")
 }
