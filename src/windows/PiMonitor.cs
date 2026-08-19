@@ -885,6 +885,24 @@ namespace CodexHalo
                 StringComparer.OrdinalIgnoreCase);
         }
 
+        public List<PiLivePid> LivePids()
+        {
+            List<PiLivePid> result = new List<PiLivePid>();
+            foreach (PiStatusRecord record in records.Values)
+            {
+                if (!IsLive(record) || record.ProcessId <= 0)
+                {
+                    continue;
+                }
+                result.Add(new PiLivePid
+                {
+                    SessionId = record.SessionId,
+                    ProcessId = record.ProcessId
+                });
+            }
+            return result;
+        }
+
         private static Dictionary<string, PiStatusRecord> ReadLatest(string file)
         {
             Dictionary<string, PiStatusRecord> result =

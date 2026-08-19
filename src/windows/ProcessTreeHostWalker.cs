@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 
 namespace CodexHalo
 {
@@ -50,7 +52,7 @@ namespace CodexHalo
 
         public static int ResolveHost(
             int startingProcessId,
-            Dictionary<int, HostProcessRecord> processes,
+            IDictionary<int, HostProcessRecord> processes,
             int selfProcessId)
         {
             if (processes == null)
@@ -96,5 +98,87 @@ namespace CodexHalo
             }
             return value;
         }
+    }
+
+    public static class HostProcessTable
+    {
+        public static Dictionary<int, HostProcessRecord> Live()
+        {
+            Dictionary<int, HostProcessRecord> result =
+                new Dictionary<int, HostProcessRecord>();
+            IntPtr snapshot = CreateToolhelp32Snapshot(2, 0);
+            if (snapshot == new IntPtr(-1))
+            {
+                return result;
+            }
+            try
+            {
+                ProcessEntry entry = new ProcessEntry();
+                entry.Size = (uint)Marshal.SizeOf(typeof(ProcessEntry));
+                if (!Process32First(snapshot, ref entry))
+                {
+                    return result;
+                }
+                do
+                {
+                    int processId = (int)entry.ProcessId;
+                    string name = entry.ExecutableFile;
+                    bool hasMainWindow = false;
+                    try
+                    {
+                        using (Process process = Process.GetProcessById(processId))
+                        {
+                            hasMainWindow = process.MainWindowHandle != IntPtr.Zero;
+                        }
+                    }
+                    catch
+                    {
+                    }
+                    result[processId] = new HostProcessRecord
+                    {
+                        ProcessId = processId,
+                        ParentProcessId = (int)entry.ParentProcessId,
+                        Name = name,
+                        IsRegularApp = hasMainWindow ||
+                            ProcessTreeHostWalker.IsKnownGuiName(name)
+                    };
+                    entry.Size = (uint)Marshal.SizeOf(typeof(ProcessEntry));
+                }
+                while (Process32Next(snapshot, ref entry));
+            }
+            finally
+            {
+                CloseHandle(snapshot);
+            }
+            return result;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct ProcessEntry
+        {
+            public uint Size;
+            public uint Usage;
+            public uint ProcessId;
+            public IntPtr DefaultHeapId;
+            public uint ModuleId;
+            public uint Threads;
+            public uint ParentProcessId;
+            public int BasePriority;
+            public uint Flags;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+            public string ExecutableFile;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool Process32First(IntPtr snapshot, ref ProcessEntry entry);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool Process32Next(IntPtr snapshot, ref ProcessEntry entry);
+
+        [DllImport("kernel32.dll")]
+        private static extern bool CloseHandle(IntPtr handle);
     }
 }

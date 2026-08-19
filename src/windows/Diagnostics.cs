@@ -3814,6 +3814,49 @@ public static class Diagnostics
             Assert(FocusedSessionHostResolver.ResolveProcessId(
                 AgentKind.Pi, new List<SessionSnapshot>(), piHooks, false, piEvidence) == 502,
                 "STANDBY Pi uses newest live record");
+
+            int host = 0;
+            int codex = 0;
+            Dictionary<int, HostProcessRecord> processes = Map(new HostProcessRecord[]
+            {
+                Rec(10, 1, "WindowsTerminal", true),
+                Rec(12, 10, "claude", false)
+            });
+            evidence = new FocusedSessionLiveEvidence();
+            evidence.Claude = new List<ClaudeLiveSessionRef>
+            {
+                new ClaudeLiveSessionRef
+                {
+                    SessionId = "s1",
+                    ProcessId = 12,
+                    WorkingDirectory = "C:\\p",
+                    UpdatedAtUtc = DateTime.UtcNow
+                }
+            };
+            FocusedAgentActivator.Activate(
+                AgentKind.ClaudeCode,
+                List(ClaudeSnap("s1")),
+                new List<SessionSnapshot>(),
+                false,
+                evidence,
+                processes,
+                99,
+                delegate { codex++; },
+                delegate(int pid) { host = pid; });
+            Assert(host == 10 && codex == 0, "Windows activator walks Claude pid to terminal");
+
+            host = 0;
+            FocusedAgentActivator.Activate(
+                AgentKind.Codex,
+                new List<SessionSnapshot>(),
+                new List<SessionSnapshot>(),
+                false,
+                new FocusedSessionLiveEvidence(),
+                processes,
+                99,
+                delegate { codex++; },
+                delegate(int pid) { host = pid; });
+            Assert(codex == 1 && host == 0, "Codex focus uses desktop activator only");
         }
 
         private static HostProcessRecord Rec(int processId, int parentProcessId,

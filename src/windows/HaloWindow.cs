@@ -720,11 +720,84 @@ public sealed class HaloWindow : Window
 
         private void OnDoubleClick(object sender, MouseButtonEventArgs e)
         {
-            if (settings.GetFocusedAgent() == AgentKind.Codex)
-            {
-                BringCodexForward();
-            }
+            ActivateFocusedAgent();
             e.Handled = true;
+        }
+
+        private void ActivateFocusedAgent()
+        {
+            AgentKind focused = settings.GetFocusedAgent();
+            FocusedAgentActivator.Activate(
+                focused,
+                aggregate != null && aggregate.Sessions != null
+                    ? aggregate.Sessions
+                    : new List<SessionSnapshot>(),
+                HookSnapshots(focused),
+                settings.Paused,
+                CollectLiveEvidence(focused),
+                HostProcessTable.Live(),
+                Process.GetCurrentProcess().Id,
+                BringCodexForward,
+                ActivateHostProcess);
+        }
+
+        private IList<SessionSnapshot> HookSnapshots(AgentKind focused)
+        {
+            if (focused == AgentKind.ClaudeCode)
+            {
+                return ClaudeStatusSourceMerger.Merge(
+                    claudeMonitor.Snapshots(), claudeTranscriptMonitor.Snapshots());
+            }
+            if (focused == AgentKind.Grok)
+            {
+                return grokMonitor.Snapshots();
+            }
+            if (focused == AgentKind.Pi)
+            {
+                return piMonitor.Snapshots();
+            }
+            return new List<SessionSnapshot>();
+        }
+
+        private FocusedSessionLiveEvidence CollectLiveEvidence(AgentKind focused)
+        {
+            FocusedSessionLiveEvidence evidence = new FocusedSessionLiveEvidence();
+            if (focused == AgentKind.ClaudeCode)
+            {
+                evidence.Claude = ClaudeLiveSessionReader.LiveSessions();
+            }
+            else if (focused == AgentKind.Grok)
+            {
+                evidence.Grok = GrokActiveSessionsReader.LiveSessions(
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+            }
+            else if (focused == AgentKind.Pi)
+            {
+                evidence.Pi = piMonitor.LivePids();
+            }
+            return evidence;
+        }
+
+        private void ActivateHostProcess(int processId)
+        {
+            try
+            {
+                using (Process process = Process.GetProcessById(processId))
+                {
+                    if (process.MainWindowHandle != IntPtr.Zero)
+                    {
+                        ShowWindow(process.MainWindowHandle, 9);
+                        SetForegroundWindow(process.MainWindowHandle);
+                        return;
+                    }
+                }
+                // Known GUI with no MainWindowHandle yet: reuse title/process scan
+                // only for this pid — do not fall back to unrelated windows.
+            }
+            catch (Exception ex)
+            {
+                SettingsStorage.Log("Bring session host forward failed: " + ex.Message);
+            }
         }
 
         private void ToggleDetails()
