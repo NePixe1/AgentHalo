@@ -38,6 +38,7 @@ python scripts/generate_shared.py
 python scripts/generate_shared.py --check
 python scripts/check_shared.py
 python scripts/generate_app_icons.py   # regenerate .icns / .ico from assets/agent-halo-app-icon.png
+# README mark is assets/agent-halo-readme-mark.png (pre-rounded; GitHub strips CSS radius)
 ```
 
 CI installs `scripts/requirements-ci.in` and validates the schema. Fixtures under `src/shared/fixtures/` and `src/shared/expected/` cover lifecycle reduction, failure classification, rate limits, and deterministic animation samples.

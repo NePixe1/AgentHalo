@@ -1,12 +1,13 @@
 <a id="readme-top"></a>
 
 <div align="center">
-  <img src="assets/agent-halo-app-icon.png" alt="Agent Halo" width="160" style="border-radius: 22%;"/>
+  <img src="assets/agent-halo-readme-mark.png" alt="Agent Halo" width="88"/>
 </div>
 
 <h1 align="center">Agent Halo</h1>
 
 <div align="center">
+  <p>无需切换窗口，随时知道编码 Agent 正在思考、执行、完成、受阻，还是等待你。</p>
   <p>
     <a href="https://github.com/NePixe1/AgentHalo/releases/latest">
       <img src="https://img.shields.io/github/downloads/NePixe1/AgentHalo/latest/total?style=flat&label=%E6%9C%80%E6%96%B0%E4%B8%8B%E8%BD%BD%20%40latest&labelColor=444&logo=github&logoColor=white&cacheSeconds=600" alt="最新下载">
@@ -14,14 +15,11 @@
     <a href="https://github.com/NePixe1/AgentHalo/releases">
       <img src="https://img.shields.io/github/downloads/NePixe1/AgentHalo/total?label=%E6%80%BB%E4%B8%8B%E8%BD%BD%E9%87%8F" alt="总下载量">
     </a>
+    <img src="https://img.shields.io/badge/macOS-13%2B-000000?style=flat&logo=apple&logoColor=white" alt="macOS 13+"/>
+    <img src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?style=flat&logo=windows&logoColor=white" alt="Windows 10 / 11"/>
+    <img src="https://img.shields.io/badge/local--first-0F172A?style=flat" alt="本地优先"/>
+    <img src="https://img.shields.io/badge/license-MIT-14B8A6?style=flat" alt="MIT 许可证"/>
   </p>
-  <p>
-    <img src="https://img.shields.io/badge/macOS-13%2B-000000?style=for-the-badge&logo=apple&logoColor=white" alt="macOS 13+"/>
-    <img src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 10 / 11"/>
-    <img src="https://img.shields.io/badge/local--first-0F172A?style=for-the-badge" alt="本地优先"/>
-    <img src="https://img.shields.io/badge/license-MIT-14B8A6?style=for-the-badge" alt="MIT 许可证"/>
-  </p>
-  <p>无需切换窗口，随时知道编码 Agent 正在思考、执行、完成、受阻，还是等待你。</p>
   <p><a href="README.md">English</a> | 简体中文</p>
 </div>
 

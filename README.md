@@ -1,12 +1,13 @@
 <a id="readme-top"></a>
 
 <div align="center">
-  <img src="assets/agent-halo-app-icon.png" alt="Agent Halo" width="160" style="border-radius: 22%;"/>
+  <img src="assets/agent-halo-readme-mark.png" alt="Agent Halo" width="88"/>
 </div>
 
 <h1 align="center">Agent Halo</h1>
 
 <div align="center">
+  <p>Know when your coding agent is thinking, working, done, blocked, or waiting for you—without switching windows.</p>
   <p>
     <a href="https://github.com/NePixe1/AgentHalo/releases/latest">
       <img src="https://img.shields.io/github/downloads/NePixe1/AgentHalo/latest/total?style=flat&label=Downloads%20%40latest&labelColor=444&logo=github&logoColor=white&cacheSeconds=600" alt="Latest downloads">
@@ -14,14 +15,11 @@
     <a href="https://github.com/NePixe1/AgentHalo/releases">
       <img src="https://img.shields.io/github/downloads/NePixe1/AgentHalo/total?label=Total%20Downloads" alt="Total downloads">
     </a>
+    <img src="https://img.shields.io/badge/macOS-13%2B-000000?style=flat&logo=apple&logoColor=white" alt="macOS 13+"/>
+    <img src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?style=flat&logo=windows&logoColor=white" alt="Windows 10 / 11"/>
+    <img src="https://img.shields.io/badge/local--first-0F172A?style=flat" alt="Local First"/>
+    <img src="https://img.shields.io/badge/license-MIT-14B8A6?style=flat" alt="MIT License"/>
   </p>
-  <p>
-    <img src="https://img.shields.io/badge/macOS-13%2B-000000?style=for-the-badge&logo=apple&logoColor=white" alt="macOS 13+"/>
-    <img src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 10 / 11"/>
-    <img src="https://img.shields.io/badge/local--first-0F172A?style=for-the-badge" alt="Local First"/>
-    <img src="https://img.shields.io/badge/license-MIT-14B8A6?style=for-the-badge" alt="MIT License"/>
-  </p>
-  <p>Know when your coding agent is thinking, working, done, blocked, or waiting for you—without switching windows.</p>
   <p>English | <a href="README.zh-CN.md">Simplified Chinese</a></p>
 </div>
 

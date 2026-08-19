@@ -63,6 +63,7 @@ Copy-Item -LiteralPath "$root\README.md" -Destination "$output\README.md" -Force
 $packageAssets = Join-Path $output "assets"
 New-Item -ItemType Directory -Force -Path $packageAssets | Out-Null
 Copy-Item -LiteralPath (Join-Path $root "assets\agent-halo-app-icon.png") -Destination (Join-Path $packageAssets "agent-halo-app-icon.png") -Force
+Copy-Item -LiteralPath (Join-Path $root "assets\agent-halo-readme-mark.png") -Destination (Join-Path $packageAssets "agent-halo-readme-mark.png") -Force
 Copy-Item -LiteralPath (Join-Path $root "assets\agent-halo-readme-banner.png") -Destination (Join-Path $packageAssets "agent-halo-readme-banner.png") -Force
 Remove-Item -LiteralPath "$output\locales" -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $output "AgentHalo.pdb") -ErrorAction SilentlyContinue
