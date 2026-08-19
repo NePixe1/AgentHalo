@@ -154,7 +154,7 @@ Related scripts: `scripts/build-macos.sh`, `scripts/create-dmg.sh`. Packaged app
 
 - Hover details: focus switch + usage vs session detail modes by credential type.
 - Context pill: Codex quota-based context; Claude via status line proxy; Grok prefers live `totalTokens` from session `updates.jsonl` (fallback end-of-turn `signals.json`).
-- Click halo: bring Codex window forward when relevant (Claude focus does not invent a Claude desktop app activate path).
+- Click / double-click halo: double-click brings the focused agent's session host forward (Codex desktop app, or the GUI host of the live Claude / Grok / Pi / Antigravity session). Single-click does not activate. No tab targeting and no app launch.
 - Halo size submenu: `75% / 100% / 125%`, persisted.
 - No pets, chat body content, cost meter, or cloud backend for lifecycle.
 
