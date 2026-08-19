@@ -1,7 +1,7 @@
 <a id="readme-top"></a>
 
 <div align="center">
-  <img src="assets/agent-halo-readme-mark.png" alt="Agent Halo" width="88"/>
+  <img src="assets/agent-halo-readme-mark.png" alt="Agent Halo" width="112"/>
 </div>
 
 <h1 align="center">Agent Halo</h1>
@@ -24,7 +24,7 @@
 </div>
 
 <div align="center">
-  <img src="assets/agent-halo-readme-banner.png" alt="Agent Halo 截图" width="760"/>
+  <img src="assets/agent-halo-readme-banner-hd.png" alt="Agent Halo 截图" width="760"/>
 </div>
 
 ---
