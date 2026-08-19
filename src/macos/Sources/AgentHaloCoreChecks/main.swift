@@ -6397,6 +6397,7 @@ testNonPlanTaskCompleteStillTurnsGreen()
 testPlanModeWithoutFinalAnswerStillTurnsGreen()
 testPlanModeFlagResetsAfterFatalTurn()
 testAggregateFiltersInactiveAndTimedOutSessions()
+runFocusedSessionHostChecks()
 await runUsageModelChecks()
 print("PASS AgentHaloCore checks")
 
