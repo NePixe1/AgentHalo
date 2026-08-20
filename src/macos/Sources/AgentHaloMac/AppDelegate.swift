@@ -780,11 +780,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func activateFocusedAgent() {
+        let focusedAgent = settings.focusedAgent
+        if focusedAgent == .codex {
+            codexActivator()
+            return
+        }
         let displayed = displayAggregate()
         FocusedAgentActivator.activate(
-            focusedAgent: settings.focusedAgent,
+            focusedAgent: focusedAgent,
             visibleSessions: displayed.sessions,
-            hookSnapshots: hookSnapshots(for: settings.focusedAgent),
+            hookSnapshots: hookSnapshots(for: focusedAgent),
             paused: settings.paused,
             evidence: focusedSessionEvidenceProvider(),
             processes: hostProcessTableProvider(),

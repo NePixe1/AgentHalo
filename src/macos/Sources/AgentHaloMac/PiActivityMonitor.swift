@@ -284,22 +284,36 @@ final class PiActivityMonitor: @unchecked Sendable {
         statusRecords: [PiStatusRecord],
         runtimeMonitor: PiRuntimeMonitor
     ) -> [PiLivePid] {
-        var livePids: [PiLivePid] = []
-        var seen = Set<Int32>()
-        for record in statusRecords {
-            guard PiStatusMonitor.isLive(record), record.processId > 0 else { continue }
-            guard seen.insert(record.processId).inserted else { continue }
-            livePids.append(PiLivePid(sessionId: record.sessionId, processId: record.processId))
+        let statusPids = statusRecords.compactMap { record -> PiLivePid? in
+            guard PiStatusMonitor.isLive(record), record.processId > 0 else { return nil }
+            return PiLivePid(sessionId: record.sessionId, processId: record.processId)
         }
         let runtimePid = runtimeMonitor.processId
-        if runtimeMonitor.isRunning,
-           runtimePid > 0,
-           seen.insert(runtimePid).inserted,
-           let sessionId = runtimeMonitor.snapshot()?.threadId,
-           !sessionId.isEmpty {
-            livePids.append(PiLivePid(sessionId: sessionId, processId: runtimePid))
+        return mergeLivePids(
+            statusPids: statusPids,
+            runtimeProcessId: runtimeMonitor.isRunning ? runtimePid : 0,
+            runtimeSessionId: runtimeMonitor.snapshot()?.threadId
+        )
+    }
+
+    static func mergeLivePids(
+        statusPids: [PiLivePid],
+        runtimeProcessId: Int32,
+        runtimeSessionId: String?
+    ) -> [PiLivePid] {
+        var result: [PiLivePid] = []
+        var seenSessionIds = Set<String>()
+        for item in statusPids where item.processId > 0 && !item.sessionId.isEmpty {
+            guard seenSessionIds.insert(item.sessionId).inserted else { continue }
+            result.append(item)
         }
-        return livePids
+        if runtimeProcessId > 0,
+           let runtimeSessionId,
+           !runtimeSessionId.isEmpty,
+           seenSessionIds.insert(runtimeSessionId).inserted {
+            result.append(PiLivePid(sessionId: runtimeSessionId, processId: runtimeProcessId))
+        }
+        return result
     }
 
     private func scheduleDispatch(

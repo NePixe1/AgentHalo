@@ -114,6 +114,7 @@ func runHaloInteractionChecks() {
     testClaudePollingIsThrottledWhenCodexFocused()
     testGrokPollingIsThrottledWhenNotFocused()
     testPiActivityFiltersDeadLifecycleAndAddsRuntimeFallback()
+    testPiLivePidMergeKeepsStatusEvidenceAuthoritative()
     testGrokPresencePrefersActiveSessionsFile()
     testAntigravityPresenceUsesHookSnapshotOrAgyNotLanguageServer()
     testAntigravityPresenceCountsDesktopAppAndAgyNotHelpers()
@@ -846,14 +847,26 @@ private func testDoubleClickActivatesClaudeSessionHost() {
 private func testDoubleClickActivatesCodexDesktopPath() {
     var codex = 0
     var hosts: [Int32] = []
+    var evidenceReads = 0
+    var processTableReads = 0
     let delegate = AppDelegate(
         settingsStore: SettingsStore(settingsURL: temporarySettingsURL()),
         codexActivator: { codex += 1 },
         sessionHostActivator: { hosts.append($0) }
     )
+    delegate.focusedSessionEvidenceProvider = {
+        evidenceReads += 1
+        return .empty
+    }
+    delegate.hostProcessTableProvider = {
+        processTableReads += 1
+        return [:]
+    }
     delegate.activateFocusedAgent()
     expect(codex, 1, "Codex focus still uses desktop activator")
     expect(hosts.isEmpty, true, "Codex focus does not walk a session host")
+    expect(evidenceReads, 0, "Codex focus does not read session evidence")
+    expect(processTableReads, 0, "Codex focus does not scan the session host process table")
 }
 
 @MainActor
@@ -3292,6 +3305,37 @@ private func testPiActivityFiltersDeadLifecycleAndAddsRuntimeFallback() {
     )
     expect(deduplicated.count, 1, "runtime fallback must not duplicate a hook session")
     expect(deduplicated.first?.state, HaloState.thinking, "hook lifecycle remains authoritative")
+}
+
+private func testPiLivePidMergeKeepsStatusEvidenceAuthoritative() {
+    let merged = PiActivityMonitor.mergeLivePids(
+        statusPids: [
+            PiLivePid(sessionId: "status", processId: 101),
+            PiLivePid(sessionId: "shared-process", processId: 101),
+        ],
+        runtimeProcessId: 202,
+        runtimeSessionId: "runtime"
+    )
+    expect(
+        merged,
+        [
+            PiLivePid(sessionId: "status", processId: 101),
+            PiLivePid(sessionId: "shared-process", processId: 101),
+            PiLivePid(sessionId: "runtime", processId: 202),
+        ],
+        "distinct status sessions sharing a pid and runtime fallback should all remain addressable"
+    )
+
+    let duplicate = PiActivityMonitor.mergeLivePids(
+        statusPids: [PiLivePid(sessionId: "same", processId: 303)],
+        runtimeProcessId: 404,
+        runtimeSessionId: "same"
+    )
+    expect(
+        duplicate,
+        [PiLivePid(sessionId: "same", processId: 303)],
+        "status pid should remain authoritative for a duplicate runtime session"
+    )
 }
 
 private func testGrokPresencePrefersActiveSessionsFile() {

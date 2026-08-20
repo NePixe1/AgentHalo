@@ -727,6 +727,11 @@ public sealed class HaloWindow : Window
         private void ActivateFocusedAgent()
         {
             AgentKind focused = settings.GetFocusedAgent();
+            if (focused == AgentKind.Codex)
+            {
+                BringCodexForward();
+                return;
+            }
             FocusedAgentActivator.Activate(
                 focused,
                 aggregate != null && aggregate.Sessions != null
@@ -773,31 +778,81 @@ public sealed class HaloWindow : Window
             }
             else if (focused == AgentKind.Pi)
             {
-                evidence.Pi = piMonitor.LivePids();
+                evidence.Pi = MergePiLivePidsForTest(
+                    piMonitor.LivePids(),
+                    piRuntimeMonitor.ProcessId,
+                    piRuntimeMonitor.Snapshot());
             }
             return evidence;
+        }
+
+        internal static List<PiLivePid> MergePiLivePidsForTest(
+            IList<PiLivePid> statusPids, int runtimePid, SessionSnapshot runtimeSession)
+        {
+            List<PiLivePid> result = statusPids == null
+                ? new List<PiLivePid>()
+                : statusPids.Where(delegate(PiLivePid item)
+                {
+                    return item != null;
+                }).ToList();
+            if (runtimePid <= 0 || runtimeSession == null ||
+                String.IsNullOrEmpty(runtimeSession.ThreadId) ||
+                result.Any(delegate(PiLivePid item)
+                {
+                    return String.Equals(item.SessionId, runtimeSession.ThreadId,
+                        StringComparison.OrdinalIgnoreCase);
+                }))
+            {
+                return result;
+            }
+            result.Add(new PiLivePid
+            {
+                SessionId = runtimeSession.ThreadId,
+                ProcessId = runtimePid
+            });
+            return result;
         }
 
         private void ActivateHostProcess(int processId)
         {
             try
             {
+                IntPtr windowHandle = IntPtr.Zero;
                 using (Process process = Process.GetProcessById(processId))
                 {
-                    if (process.MainWindowHandle != IntPtr.Zero)
-                    {
-                        ShowWindow(process.MainWindowHandle, 9);
-                        SetForegroundWindow(process.MainWindowHandle);
-                        return;
-                    }
+                    windowHandle = process.MainWindowHandle;
                 }
-                // Known GUI with no MainWindowHandle yet: reuse title/process scan
-                // only for this pid — do not fall back to unrelated windows.
+                if (windowHandle == IntPtr.Zero)
+                {
+                    windowHandle = FindTopLevelWindowForProcess(processId);
+                }
+                if (windowHandle != IntPtr.Zero)
+                {
+                    ShowWindow(windowHandle, 9);
+                    SetForegroundWindow(windowHandle);
+                }
             }
             catch (Exception ex)
             {
                 SettingsStorage.Log("Bring session host forward failed: " + ex.Message);
             }
+        }
+
+        private static IntPtr FindTopLevelWindowForProcess(int processId)
+        {
+            IntPtr result = IntPtr.Zero;
+            EnumWindows(delegate(IntPtr candidate, IntPtr parameter)
+            {
+                uint ownerProcessId;
+                GetWindowThreadProcessId(candidate, out ownerProcessId);
+                if (ownerProcessId == (uint)processId && IsWindowVisible(candidate))
+                {
+                    result = candidate;
+                    return false;
+                }
+                return true;
+            }, IntPtr.Zero);
+            return result;
         }
 
         private void ToggleDetails()
@@ -1887,6 +1942,14 @@ public sealed class HaloWindow : Window
 
         [DllImport("user32.dll")]
         private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool IsWindowVisible(IntPtr hWnd);
 
         [DllImport("user32.dll")]
         private static extern IntPtr GetForegroundWindow();

@@ -1823,6 +1823,22 @@ public static class Diagnostics
                 Assert(PiRuntimeMonitor.IsRunningForTest(piRuntimeEvidence,
                     piRuntimeNow, piRuntimeProcesses),
                     "Pi runtime fallback recognizes a shell-hosted Node session");
+                Assert(PiRuntimeMonitor.UniqueProcessIdForTest(piRuntimeEvidence,
+                    piRuntimeNow, piRuntimeProcesses) == 101,
+                    "Pi runtime fallback exposes its unique process id");
+                piRuntimeProcesses.Add(new PiRuntimeProcess
+                {
+                    ProcessId = 102,
+                    ParentProcessId = 100,
+                    Name = "node.exe",
+                    StartedUtc = piRuntimeNow.AddMinutes(-30)
+                });
+                Assert(PiRuntimeMonitor.IsRunningForTest(piRuntimeEvidence,
+                    piRuntimeNow, piRuntimeProcesses),
+                    "multiple Pi runtime processes still prove presence");
+                Assert(PiRuntimeMonitor.UniqueProcessIdForTest(piRuntimeEvidence,
+                    piRuntimeNow, piRuntimeProcesses) == 0,
+                    "multiple Pi runtime processes do not expose an activation pid");
                 Assert(!PiRuntimeMonitor.IsRunningForTest(new PiSessionEvidence
                 {
                     SessionId = "stale",
@@ -3814,6 +3830,28 @@ public static class Diagnostics
             Assert(FocusedSessionHostResolver.ResolveProcessId(
                 AgentKind.Pi, new List<SessionSnapshot>(), piHooks, false, piEvidence) == 502,
                 "STANDBY Pi uses newest live record");
+
+            SessionSnapshot runtimePi = new SessionSnapshot
+            {
+                ThreadId = "pi-runtime",
+                Agent = AgentKind.Pi,
+                State = HaloState.Idle
+            };
+            List<PiLivePid> mergedPiPids = HaloWindow.MergePiLivePidsForTest(
+                piEvidence.Pi, 503, runtimePi);
+            Assert(mergedPiPids.Count == 3 &&
+                mergedPiPids.Any(delegate(PiLivePid item)
+                {
+                    return item.SessionId == "pi-runtime" && item.ProcessId == 503;
+                }), "Pi runtime fallback pid joins activation evidence");
+            runtimePi.ThreadId = "pi-new";
+            mergedPiPids = HaloWindow.MergePiLivePidsForTest(
+                piEvidence.Pi, 999, runtimePi);
+            Assert(mergedPiPids.Count == 2 &&
+                mergedPiPids.Any(delegate(PiLivePid item)
+                {
+                    return item.SessionId == "pi-new" && item.ProcessId == 502;
+                }), "Pi extension pid remains authoritative over runtime fallback");
 
             int host = 0;
             int codex = 0;

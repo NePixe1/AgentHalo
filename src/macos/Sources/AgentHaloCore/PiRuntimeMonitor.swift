@@ -108,13 +108,13 @@ public final class PiRuntimeMonitor: @unchecked Sendable {
             previous: latestSession,
             now: now
         )
-        let match = Self.matchingProcess(
+        let matches = Self.matchingProcesses(
             session: latestSession,
             now: now,
             processes: processReader()
         )
-        running = match != nil
-        runningProcessId = match?.processId ?? 0
+        running = !matches.isEmpty
+        runningProcessId = matches.count == 1 ? matches[0].processId : 0
         return before != fingerprint()
     }
 
@@ -151,25 +151,26 @@ public final class PiRuntimeMonitor: @unchecked Sendable {
         now: Date,
         processes: [PiRuntimeProcess]
     ) -> Bool {
-        matchingProcess(session: session, now: now, processes: processes) != nil
+        !matchingProcesses(session: session, now: now, processes: processes).isEmpty
     }
 
-    private static func matchingProcess(
+    private static func matchingProcesses(
         session: PiRuntimeSessionEvidence?,
         now: Date,
         processes: [PiRuntimeProcess]
-    ) -> PiRuntimeProcess? {
+    ) -> [PiRuntimeProcess] {
         guard let session,
               session.lastModified <= now.addingTimeInterval(futureTolerance),
               now.timeIntervalSince(session.lastModified) <= evidenceLifetime
         else {
-            return nil
+            return []
         }
 
         let byId = Dictionary(
             processes.filter { $0.processId > 0 }.map { ($0.processId, $0) },
             uniquingKeysWith: { first, _ in first }
         )
+        var matches: [PiRuntimeProcess] = []
         for process in byId.values where isPiProcess(process.name) {
             let name = executableName(process.name)
             // Modern Pi exposes its process title as `pi`. Older Node-based
@@ -183,10 +184,10 @@ public final class PiRuntimeMonitor: @unchecked Sendable {
             }
             if process.startedAt == nil
                 || process.startedAt! <= session.lastModified.addingTimeInterval(processStartTolerance) {
-                return process
+                matches.append(process)
             }
         }
-        return nil
+        return matches
     }
 
     public static func readLatestSession(
