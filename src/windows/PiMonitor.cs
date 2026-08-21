@@ -137,6 +137,7 @@ namespace CodexHalo
         private readonly string agentRoot;
         private DateTime nextCheckUtc = DateTime.MinValue;
         private bool running;
+        private int runningProcessId;
         private PiSessionEvidence latestSession;
 
         public PiRuntimeMonitor()
@@ -154,6 +155,11 @@ namespace CodexHalo
             get { return running; }
         }
 
+        public int ProcessId
+        {
+            get { return runningProcessId; }
+        }
+
         public bool Refresh()
         {
             DateTime now = DateTime.UtcNow;
@@ -162,19 +168,24 @@ namespace CodexHalo
                 return false;
             }
             nextCheckUtc = now.Add(CheckInterval);
-            string before = RuntimeFingerprint(running, latestSession);
+            string before = RuntimeFingerprint(running, runningProcessId, latestSession);
             try
             {
                 latestSession = ReadLatestSession(agentRoot, latestSession);
-                running = IsRunningForTest(latestSession, now, ReadProcesses());
+                List<PiRuntimeProcess> matches = MatchingProcesses(
+                    latestSession, now, ReadProcesses());
+                running = matches.Count > 0;
+                runningProcessId = matches.Count == 1 ? matches[0].ProcessId : 0;
             }
             catch (Exception ex)
             {
                 SettingsStorage.Log("Pi runtime detection failed: " + ex.Message);
                 running = false;
+                runningProcessId = 0;
                 latestSession = null;
             }
-            return !String.Equals(before, RuntimeFingerprint(running, latestSession),
+            return !String.Equals(before,
+                RuntimeFingerprint(running, runningProcessId, latestSession),
                 StringComparison.Ordinal);
         }
 
@@ -213,12 +224,26 @@ namespace CodexHalo
         internal static bool IsRunningForTest(PiSessionEvidence session,
             DateTime nowUtc, IList<PiRuntimeProcess> processes)
         {
+            return MatchingProcesses(session, nowUtc, processes).Count > 0;
+        }
+
+        internal static int UniqueProcessIdForTest(PiSessionEvidence session,
+            DateTime nowUtc, IList<PiRuntimeProcess> processes)
+        {
+            List<PiRuntimeProcess> matches = MatchingProcesses(session, nowUtc, processes);
+            return matches.Count == 1 ? matches[0].ProcessId : 0;
+        }
+
+        private static List<PiRuntimeProcess> MatchingProcesses(
+            PiSessionEvidence session, DateTime nowUtc, IList<PiRuntimeProcess> processes)
+        {
+            List<PiRuntimeProcess> matches = new List<PiRuntimeProcess>();
             if (session == null || processes == null ||
                 session.LastWriteUtc == DateTime.MinValue ||
                 session.LastWriteUtc > nowUtc.AddMinutes(5) ||
                 nowUtc - session.LastWriteUtc > SessionEvidenceLifetime)
             {
-                return false;
+                return matches;
             }
             Dictionary<int, PiRuntimeProcess> byId = processes
                 .Where(delegate(PiRuntimeProcess item)
@@ -251,10 +276,10 @@ namespace CodexHalo
                 if (process.StartedUtc == DateTime.MinValue ||
                     process.StartedUtc <= session.LastWriteUtc.AddSeconds(5))
                 {
-                    return true;
+                    matches.Add(process);
                 }
             }
-            return false;
+            return matches;
         }
 
         internal static PiSessionEvidence ReadLatestSession(string root)
@@ -678,14 +703,16 @@ namespace CodexHalo
                 ? result : 0;
         }
 
-        private static string RuntimeFingerprint(bool isRunning,
+        private static string RuntimeFingerprint(bool isRunning, int processId,
             PiSessionEvidence session)
         {
             if (session == null)
             {
-                return isRunning ? "1" : "0";
+                return (isRunning ? "1" : "0") + "|" +
+                    processId.ToString(CultureInfo.InvariantCulture);
             }
-            return (isRunning ? "1" : "0") + "|" + session.SessionId + "|" +
+            return (isRunning ? "1" : "0") + "|" +
+                processId.ToString(CultureInfo.InvariantCulture) + "|" + session.SessionId + "|" +
                 session.LastWriteUtc.Ticks.ToString(CultureInfo.InvariantCulture) + "|" +
                 session.Length.ToString(CultureInfo.InvariantCulture) + "|" +
                 session.SessionTitle + "|" + session.Model + "|" +
@@ -883,6 +910,24 @@ namespace CodexHalo
                 .Where(IsLive)
                 .Select(delegate(PiStatusRecord record) { return record.SessionId; }),
                 StringComparer.OrdinalIgnoreCase);
+        }
+
+        public List<PiLivePid> LivePids()
+        {
+            List<PiLivePid> result = new List<PiLivePid>();
+            foreach (PiStatusRecord record in records.Values)
+            {
+                if (!IsLive(record) || record.ProcessId <= 0)
+                {
+                    continue;
+                }
+                result.Add(new PiLivePid
+                {
+                    SessionId = record.SessionId,
+                    ProcessId = record.ProcessId
+                });
+            }
+            return result;
         }
 
         private static Dictionary<string, PiStatusRecord> ReadLatest(string file)

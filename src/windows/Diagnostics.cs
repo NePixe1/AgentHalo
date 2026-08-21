@@ -1126,6 +1126,55 @@ public static class Diagnostics
                     "Claude live session reader detects live CLI");
                 Assert(ClaudeLiveSessionReader.LiveSessionIds(liveHome).Contains("live"),
                     "Claude live session reader exposes the live session id");
+                List<ClaudeLiveSessionRef> liveRefs =
+                    ClaudeLiveSessionReader.LiveSessions(liveHome);
+                Assert(liveRefs.Count == 1 && liveRefs[0].SessionId == "live" &&
+                    liveRefs[0].ProcessId == Process.GetCurrentProcess().Id,
+                    "Claude live session reader exposes pid");
+                string livePidText = Process.GetCurrentProcess().Id.ToString(
+                    CultureInfo.InvariantCulture);
+                File.WriteAllText(Path.Combine(liveSessions, "older.json"),
+                    "{\"status\":\"idle\",\"pid\":" + livePidText +
+                    ",\"sessionId\":\"s-old\",\"cwd\":\"C:\\\\a\",\"updatedAt\":1000}",
+                    Encoding.UTF8);
+                File.WriteAllText(Path.Combine(liveSessions, "newer.json"),
+                    "{\"status\":\"idle\",\"pid\":" + livePidText +
+                    ",\"sessionId\":\"s-new\",\"cwd\":\"C:\\\\b\",\"updatedAt\":2000}",
+                    Encoding.UTF8);
+                DateTime olderHookUtc = DateTime.UtcNow.AddMinutes(-1);
+                DateTime newerHookUtc = DateTime.UtcNow;
+                List<SessionSnapshot> idleHooks = new List<SessionSnapshot>();
+                idleHooks.Add(new SessionSnapshot
+                {
+                    ThreadId = "s-old",
+                    WorkingDirectory = "C:\\a",
+                    Agent = AgentKind.ClaudeCode,
+                    State = HaloState.Idle,
+                    Active = false,
+                    LastEventUtc = olderHookUtc,
+                    ProjectName = "a",
+                    Action = "Idle"
+                });
+                idleHooks.Add(new SessionSnapshot
+                {
+                    ThreadId = "s-new",
+                    WorkingDirectory = "C:\\b",
+                    Agent = AgentKind.ClaudeCode,
+                    State = HaloState.Idle,
+                    Active = false,
+                    LastEventUtc = newerHookUtc,
+                    ProjectName = "b",
+                    Action = "Idle"
+                });
+                ClaudeLiveSessionRef preferredStandby =
+                    ClaudeLiveSessionReader.PreferredStandbySession(
+                        ClaudeLiveSessionReader.LiveSessions(liveHome), idleHooks);
+                Assert(preferredStandby != null &&
+                    preferredStandby.SessionId == "s-new" &&
+                    preferredStandby.ProcessId == Process.GetCurrentProcess().Id,
+                    "PreferredStandbySession uses the newer hook pid");
+                File.Delete(Path.Combine(liveSessions, "older.json"));
+                File.Delete(Path.Combine(liveSessions, "newer.json"));
                 File.WriteAllText(Path.Combine(liveSessions, "live.json"),
                     "{\"status\":\"waiting\",\"pid\":999999,\"sessionId\":\"dead\"}",
                     Encoding.UTF8);
@@ -1774,6 +1823,22 @@ public static class Diagnostics
                 Assert(PiRuntimeMonitor.IsRunningForTest(piRuntimeEvidence,
                     piRuntimeNow, piRuntimeProcesses),
                     "Pi runtime fallback recognizes a shell-hosted Node session");
+                Assert(PiRuntimeMonitor.UniqueProcessIdForTest(piRuntimeEvidence,
+                    piRuntimeNow, piRuntimeProcesses) == 101,
+                    "Pi runtime fallback exposes its unique process id");
+                piRuntimeProcesses.Add(new PiRuntimeProcess
+                {
+                    ProcessId = 102,
+                    ParentProcessId = 100,
+                    Name = "node.exe",
+                    StartedUtc = piRuntimeNow.AddMinutes(-30)
+                });
+                Assert(PiRuntimeMonitor.IsRunningForTest(piRuntimeEvidence,
+                    piRuntimeNow, piRuntimeProcesses),
+                    "multiple Pi runtime processes still prove presence");
+                Assert(PiRuntimeMonitor.UniqueProcessIdForTest(piRuntimeEvidence,
+                    piRuntimeNow, piRuntimeProcesses) == 0,
+                    "multiple Pi runtime processes do not expose an activation pid");
                 Assert(!PiRuntimeMonitor.IsRunningForTest(new PiSessionEvidence
                 {
                     SessionId = "stale",
@@ -3330,6 +3395,7 @@ public static class Diagnostics
                 Directory.Delete(failedLayoutHome, true);
 
                 File.Delete(temp);
+                TestFocusedSessionHostActivation();
                 File.WriteAllText(outputPath,
                     "PASS\nLifecycle, usage metrics, panel formatting, and animation checks passed.\n",
                     Encoding.UTF8);
@@ -3550,6 +3616,328 @@ public static class Diagnostics
                     written += paddingLine.Length;
                 }
             }
+        }
+
+        private static void TestFocusedSessionHostActivation()
+        {
+            HostProcessRecord[] iterm = new HostProcessRecord[]
+            {
+                Rec(10, 1, "WindowsTerminal", true),
+                Rec(11, 10, "zsh", false),
+                Rec(12, 11, "claude", false)
+            };
+            Assert(ProcessTreeHostWalker.ResolveHost(12, Map(iterm), 99) == 10,
+                "claude → zsh → WindowsTerminal");
+
+            Assert(ProcessTreeHostWalker.ResolveHost(22, Map(new HostProcessRecord[]
+            {
+                Rec(20, 1, "Code", true),
+                Rec(21, 20, "Code Helper", false),
+                Rec(22, 21, "node", false)
+            }), 99) == 20, "node → Code Helper → Code");
+
+            Assert(ProcessTreeHostWalker.ResolveHost(30, Map(new HostProcessRecord[]
+            {
+                Rec(30, 1, "WindowsTerminal", true)
+            }), 99) == 30, "regular start pid is the host");
+
+            Assert(ProcessTreeHostWalker.ResolveHost(41, Map(new HostProcessRecord[]
+            {
+                Rec(40, 1, "sshd", false),
+                Rec(41, 40, "agy", false)
+            }), 99) == 0, "agy under sshd has no GUI host");
+
+            Assert(ProcessTreeHostWalker.ResolveHost(51, Map(new HostProcessRecord[]
+            {
+                Rec(50, 1, "conhost", false),
+                Rec(51, 50, "grok", false)
+            }), 99) == 0, "conhost-only chain is not a host");
+
+            Assert(ProcessTreeHostWalker.ResolveHost(61, Map(new HostProcessRecord[]
+            {
+                Rec(60, 61, "zsh", false),
+                Rec(61, 60, "claude", false)
+            }), 99) == 0, "cycle returns none");
+
+            List<HostProcessRecord> deep = new List<HostProcessRecord>();
+            deep.Add(Rec(1, 0, "launchd", false));
+            for (int pid = 70; pid <= 70 + ProcessTreeHostWalker.MaxDepth; pid++)
+            {
+                deep.Add(Rec(pid, pid == 70 ? 1 : pid - 1, "zsh", false));
+            }
+            int last = 70 + ProcessTreeHostWalker.MaxDepth;
+            Assert(ProcessTreeHostWalker.ResolveHost(last, Map(deep.ToArray()), 99) == 0,
+                "depth beyond maxDepth returns none");
+
+            Assert(ProcessTreeHostWalker.ResolveHost(81, Map(new HostProcessRecord[]
+            {
+                Rec(80, 1, "AgentHalo", true),
+                Rec(81, 80, "claude", false)
+            }), 80) == 0, "must not activate Agent Halo itself");
+
+            Assert(ProcessTreeHostWalker.ShouldSkipName("Code Helper"),
+                "Helper suffix");
+            Assert(ProcessTreeHostWalker.ShouldSkipName("language_server"),
+                "language_server");
+            Assert(!ProcessTreeHostWalker.ShouldSkipName("WindowsTerminal"),
+                "WindowsTerminal is not skipped");
+
+            SessionSnapshot visible = ClaudeSnap("s-visible");
+            FocusedSessionLiveEvidence evidence = new FocusedSessionLiveEvidence();
+            evidence.Claude = new List<ClaudeLiveSessionRef>
+            {
+                new ClaudeLiveSessionRef { SessionId = "s-other", ProcessId = 111, WorkingDirectory = "C:\\o", UpdatedAtUtc = DateTime.UtcNow },
+                new ClaudeLiveSessionRef { SessionId = "s-visible", ProcessId = 222, WorkingDirectory = "C:\\p", UpdatedAtUtc = DateTime.UtcNow }
+            };
+            Assert(FocusedSessionHostResolver.ResolveProcessId(
+                AgentKind.ClaudeCode, List(visible), List(visible), false, evidence) == 222,
+                "visible Claude session wins");
+
+            DateTime newer = DateTime.UtcNow;
+            DateTime older = newer.AddMinutes(-1);
+            List<SessionSnapshot> standbyHooks = List(
+                new SessionSnapshot
+                {
+                    ThreadId = "s-old",
+                    WorkingDirectory = "C:\\a",
+                    Agent = AgentKind.ClaudeCode,
+                    State = HaloState.Idle,
+                    Active = false,
+                    LastEventUtc = older,
+                    ProjectName = "a",
+                    Action = "Idle"
+                },
+                new SessionSnapshot
+                {
+                    ThreadId = "s-new",
+                    WorkingDirectory = "C:\\b",
+                    Agent = AgentKind.ClaudeCode,
+                    State = HaloState.Idle,
+                    Active = false,
+                    LastEventUtc = newer,
+                    ProjectName = "b",
+                    Action = "Idle"
+                });
+            FocusedSessionLiveEvidence standbyEvidence = new FocusedSessionLiveEvidence();
+            standbyEvidence.Claude = new List<ClaudeLiveSessionRef>
+            {
+                new ClaudeLiveSessionRef
+                {
+                    SessionId = "s-old", ProcessId = 301,
+                    WorkingDirectory = "C:\\a", UpdatedAtUtc = older
+                },
+                new ClaudeLiveSessionRef
+                {
+                    SessionId = "s-new", ProcessId = 302,
+                    WorkingDirectory = "C:\\b", UpdatedAtUtc = newer
+                }
+            };
+            Assert(FocusedSessionHostResolver.ResolveProcessId(
+                AgentKind.ClaudeCode, new List<SessionSnapshot>(), standbyHooks,
+                false, standbyEvidence) == 302,
+                "STANDBY uses Claude preferred live session");
+
+            Assert(FocusedSessionHostResolver.ResolveProcessId(
+                AgentKind.Codex, new List<SessionSnapshot>(), new List<SessionSnapshot>(),
+                false, new FocusedSessionLiveEvidence()) == 0,
+                "Codex is not resolved via session pid");
+
+            Assert(FocusedSessionHostResolver.ResolveProcessId(
+                AgentKind.ClaudeCode, List(visible), List(visible), true, evidence) == 0,
+                "paused does not activate");
+
+            Assert(FocusedSessionHostResolver.ResolveProcessId(
+                AgentKind.ClaudeCode, new List<SessionSnapshot>(),
+                new List<SessionSnapshot>(), false, new FocusedSessionLiveEvidence()) == 0,
+                "offline Claude has no pid");
+
+            GrokActiveSessionRef grok = new GrokActiveSessionRef
+            {
+                SessionId = "live-id",
+                WorkingDirectory = "C:\\ws",
+                ProcessId = 404
+            };
+            evidence = new FocusedSessionLiveEvidence();
+            evidence.Grok = new List<GrokActiveSessionRef> { grok };
+            SessionSnapshot grokHook = new SessionSnapshot
+            {
+                ThreadId = "hook-id",
+                WorkingDirectory = "C:\\ws",
+                Agent = AgentKind.Grok,
+                State = HaloState.Thinking,
+                Active = true,
+                LastEventUtc = DateTime.UtcNow,
+                ProjectName = "ws",
+                Action = "Thinking"
+            };
+            Assert(FocusedSessionHostResolver.ResolveProcessId(
+                AgentKind.Grok, List(grokHook), List(grokHook), false, evidence) == 404,
+                "Grok workspace match supplies the live pid");
+
+            GrokActiveSessionRef noPid = new GrokActiveSessionRef
+            {
+                SessionId = "abc",
+                WorkingDirectory = "C:\\ws",
+                ProcessId = 0
+            };
+            evidence.Grok = new List<GrokActiveSessionRef> { noPid };
+            SessionSnapshot grokExact = new SessionSnapshot
+            {
+                ThreadId = "abc",
+                WorkingDirectory = "C:\\ws",
+                Agent = AgentKind.Grok,
+                State = HaloState.Thinking,
+                Active = true,
+                LastEventUtc = DateTime.UtcNow,
+                ProjectName = "ws",
+                Action = "Thinking"
+            };
+            Assert(FocusedSessionHostResolver.ResolveProcessId(
+                AgentKind.Grok, List(grokExact), List(grokExact), false, evidence) == 0,
+                "Grok entry without pid does not activate");
+
+            DateTime piOlder = DateTime.UtcNow.AddSeconds(-30);
+            DateTime piNewer = DateTime.UtcNow;
+            List<SessionSnapshot> piHooks = List(
+                new SessionSnapshot
+                {
+                    ThreadId = "pi-old",
+                    WorkingDirectory = "C:\\ws",
+                    Agent = AgentKind.Pi,
+                    State = HaloState.Idle,
+                    Active = false,
+                    LastEventUtc = piOlder,
+                    ProjectName = "ws",
+                    Action = "Idle"
+                },
+                new SessionSnapshot
+                {
+                    ThreadId = "pi-new",
+                    WorkingDirectory = "C:\\ws",
+                    Agent = AgentKind.Pi,
+                    State = HaloState.Idle,
+                    Active = false,
+                    LastEventUtc = piNewer,
+                    ProjectName = "ws",
+                    Action = "Idle"
+                });
+            FocusedSessionLiveEvidence piEvidence = new FocusedSessionLiveEvidence();
+            piEvidence.Pi = new List<PiLivePid>
+            {
+                new PiLivePid { SessionId = "pi-old", ProcessId = 501 },
+                new PiLivePid { SessionId = "pi-new", ProcessId = 502 }
+            };
+            Assert(FocusedSessionHostResolver.ResolveProcessId(
+                AgentKind.Pi, new List<SessionSnapshot>(), piHooks, false, piEvidence) == 502,
+                "STANDBY Pi uses newest live record");
+
+            SessionSnapshot runtimePi = new SessionSnapshot
+            {
+                ThreadId = "pi-runtime",
+                Agent = AgentKind.Pi,
+                State = HaloState.Idle
+            };
+            List<PiLivePid> mergedPiPids = HaloWindow.MergePiLivePidsForTest(
+                piEvidence.Pi, 503, runtimePi);
+            Assert(mergedPiPids.Count == 3 &&
+                mergedPiPids.Any(delegate(PiLivePid item)
+                {
+                    return item.SessionId == "pi-runtime" && item.ProcessId == 503;
+                }), "Pi runtime fallback pid joins activation evidence");
+            runtimePi.ThreadId = "pi-new";
+            mergedPiPids = HaloWindow.MergePiLivePidsForTest(
+                piEvidence.Pi, 999, runtimePi);
+            Assert(mergedPiPids.Count == 2 &&
+                mergedPiPids.Any(delegate(PiLivePid item)
+                {
+                    return item.SessionId == "pi-new" && item.ProcessId == 502;
+                }), "Pi extension pid remains authoritative over runtime fallback");
+
+            int host = 0;
+            int codex = 0;
+            Dictionary<int, HostProcessRecord> processes = Map(new HostProcessRecord[]
+            {
+                Rec(10, 1, "WindowsTerminal", true),
+                Rec(12, 10, "claude", false)
+            });
+            evidence = new FocusedSessionLiveEvidence();
+            evidence.Claude = new List<ClaudeLiveSessionRef>
+            {
+                new ClaudeLiveSessionRef
+                {
+                    SessionId = "s1",
+                    ProcessId = 12,
+                    WorkingDirectory = "C:\\p",
+                    UpdatedAtUtc = DateTime.UtcNow
+                }
+            };
+            FocusedAgentActivator.Activate(
+                AgentKind.ClaudeCode,
+                List(ClaudeSnap("s1")),
+                new List<SessionSnapshot>(),
+                false,
+                evidence,
+                processes,
+                99,
+                delegate { codex++; },
+                delegate(int pid) { host = pid; });
+            Assert(host == 10 && codex == 0, "Windows activator walks Claude pid to terminal");
+
+            host = 0;
+            FocusedAgentActivator.Activate(
+                AgentKind.Codex,
+                new List<SessionSnapshot>(),
+                new List<SessionSnapshot>(),
+                false,
+                new FocusedSessionLiveEvidence(),
+                processes,
+                99,
+                delegate { codex++; },
+                delegate(int pid) { host = pid; });
+            Assert(codex == 1 && host == 0, "Codex focus uses desktop activator only");
+        }
+
+        private static HostProcessRecord Rec(int processId, int parentProcessId,
+            string name, bool isRegularApp)
+        {
+            return new HostProcessRecord
+            {
+                ProcessId = processId,
+                ParentProcessId = parentProcessId,
+                Name = name,
+                IsRegularApp = isRegularApp
+            };
+        }
+
+        private static Dictionary<int, HostProcessRecord> Map(HostProcessRecord[] records)
+        {
+            Dictionary<int, HostProcessRecord> map =
+                new Dictionary<int, HostProcessRecord>();
+            foreach (HostProcessRecord record in records)
+            {
+                map[record.ProcessId] = record;
+            }
+            return map;
+        }
+
+        private static List<SessionSnapshot> List(params SessionSnapshot[] items)
+        {
+            return new List<SessionSnapshot>(items);
+        }
+
+        private static SessionSnapshot ClaudeSnap(string threadId)
+        {
+            return new SessionSnapshot
+            {
+                ThreadId = threadId,
+                WorkingDirectory = "C:\\p",
+                Agent = AgentKind.ClaudeCode,
+                State = HaloState.Thinking,
+                Active = true,
+                LastEventUtc = DateTime.UtcNow,
+                ProjectName = "p",
+                Action = "Thinking"
+            };
         }
 
         private static void Assert(bool condition, string name)

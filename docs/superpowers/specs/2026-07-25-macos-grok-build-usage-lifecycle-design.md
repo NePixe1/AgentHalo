@@ -31,7 +31,7 @@
 - Pay-as-you-go / on-demand cap / prepaid balance / 货币余额 / 本地消费估算。
 - Grok API Key 模式的 console 额度或 credits 曲线。
 - context pill 精细化、会话标题深挖、subagent 树可视化。
-- 点击光环 foreground Grok 终端窗口。
+- 点击光环 foreground Grok 终端窗口。（已被 [2026-08-18-focused-agent-host-activation-design.md](./2026-08-18-focused-agent-host-activation-design.md) 取代。）
 - 修改跨平台视觉 spec（`agent-halo.v2.json` 动画参数）。
 - 清理历史已写入 `claude-code-status.jsonl` 的 Grok 旧事件（新事件停止混入即可）。
 

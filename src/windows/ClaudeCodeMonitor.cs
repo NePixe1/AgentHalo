@@ -1961,10 +1961,20 @@ public static class ClaudeStatusSourceMerger
         }
     }
 
+public sealed class ClaudeLiveSessionRef
+    {
+        public string SessionId;
+        public int ProcessId;
+        public string WorkingDirectory;
+        public DateTime UpdatedAtUtc;
+    }
+
 public static class ClaudeLiveSessionReader
     {
         private static readonly JavaScriptSerializer Serializer =
             new JavaScriptSerializer();
+        private static readonly DateTime UnixEpochUtc =
+            new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
         public static bool HasStandbySession()
         {
@@ -1987,6 +1997,22 @@ public static class ClaudeLiveSessionReader
         {
             HashSet<string> result = new HashSet<string>(
                 StringComparer.OrdinalIgnoreCase);
+            foreach (ClaudeLiveSessionRef session in LiveSessions(home))
+            {
+                result.Add(session.SessionId);
+            }
+            return result;
+        }
+
+        public static List<ClaudeLiveSessionRef> LiveSessions()
+        {
+            return LiveSessions(Environment.GetFolderPath(
+                Environment.SpecialFolder.UserProfile));
+        }
+
+        public static List<ClaudeLiveSessionRef> LiveSessions(string home)
+        {
+            List<ClaudeLiveSessionRef> result = new List<ClaudeLiveSessionRef>();
             try
             {
                 string sessionsDir = Path.Combine(home, ".claude", "sessions");
@@ -1996,10 +2022,10 @@ public static class ClaudeLiveSessionReader
                 }
                 foreach (string path in Directory.GetFiles(sessionsDir, "*.json"))
                 {
-                    string sessionId;
-                    if (TryReadLiveSessionId(path, out sessionId))
+                    ClaudeLiveSessionRef session;
+                    if (TryReadLiveSession(path, out session))
                     {
-                        result.Add(sessionId);
+                        result.Add(session);
                     }
                 }
             }
@@ -2009,9 +2035,78 @@ public static class ClaudeLiveSessionReader
             return result;
         }
 
-        private static bool TryReadLiveSessionId(string path, out string sessionId)
+        public static ClaudeLiveSessionRef PreferredStandbySession(
+            List<ClaudeLiveSessionRef> sessions,
+            IList<SessionSnapshot> hookSnapshots)
         {
-            sessionId = String.Empty;
+            if (sessions == null || sessions.Count == 0)
+            {
+                return null;
+            }
+            Dictionary<string, SessionSnapshot> hooksBySession =
+                new Dictionary<string, SessionSnapshot>(StringComparer.Ordinal);
+            if (hookSnapshots != null)
+            {
+                foreach (SessionSnapshot snapshot in hookSnapshots)
+                {
+                    if (snapshot == null || String.IsNullOrEmpty(snapshot.ThreadId))
+                    {
+                        continue;
+                    }
+                    SessionSnapshot previous;
+                    if (!hooksBySession.TryGetValue(snapshot.ThreadId, out previous) ||
+                        snapshot.LastEventUtc > previous.LastEventUtc)
+                    {
+                        hooksBySession[snapshot.ThreadId] = snapshot;
+                    }
+                }
+            }
+            ClaudeLiveSessionRef preferred = null;
+            DateTime preferredHookUtc = DateTime.MinValue;
+            DateTime preferredUpdated = DateTime.MinValue;
+            bool haveMatch = false;
+            foreach (ClaudeLiveSessionRef session in sessions)
+            {
+                SessionSnapshot hook;
+                if (session == null || String.IsNullOrEmpty(session.SessionId) ||
+                    !hooksBySession.TryGetValue(session.SessionId, out hook))
+                {
+                    continue;
+                }
+                if (!haveMatch ||
+                    hook.LastEventUtc > preferredHookUtc ||
+                    (hook.LastEventUtc == preferredHookUtc &&
+                     session.UpdatedAtUtc > preferredUpdated))
+                {
+                    preferred = session;
+                    preferredHookUtc = hook.LastEventUtc;
+                    preferredUpdated = session.UpdatedAtUtc;
+                    haveMatch = true;
+                }
+            }
+            if (haveMatch)
+            {
+                return preferred;
+            }
+            ClaudeLiveSessionRef newest = null;
+            foreach (ClaudeLiveSessionRef session in sessions)
+            {
+                if (session == null)
+                {
+                    continue;
+                }
+                if (newest == null || session.UpdatedAtUtc > newest.UpdatedAtUtc)
+                {
+                    newest = session;
+                }
+            }
+            return newest;
+        }
+
+        private static bool TryReadLiveSession(string path,
+            out ClaudeLiveSessionRef session)
+        {
+            session = null;
             try
             {
                 Dictionary<string, object> json = Serializer.DeserializeObject(
@@ -2020,26 +2115,65 @@ public static class ClaudeLiveSessionReader
                 {
                     return false;
                 }
+                string status = StringValue(json, "status").ToLowerInvariant();
+                if (status != "busy" && status != "waiting" && status != "idle")
+                {
+                    return false;
+                }
                 int pid;
                 if (!Int32.TryParse(Convert.ToString(Value(json, "pid"),
                     CultureInfo.InvariantCulture), NumberStyles.Integer,
-                    CultureInfo.InvariantCulture, out pid))
+                    CultureInfo.InvariantCulture, out pid) || pid <= 0)
                 {
                     return false;
                 }
                 using (Process process = Process.GetProcessById(pid))
                 {
                 }
-                sessionId = StringValue(json, "sessionId");
+                string sessionId = StringValue(json, "sessionId");
                 if (String.IsNullOrEmpty(sessionId))
                 {
                     sessionId = "claude-code";
                 }
+                session = new ClaudeLiveSessionRef
+                {
+                    SessionId = sessionId,
+                    ProcessId = pid,
+                    WorkingDirectory = StringValue(json, "cwd"),
+                    UpdatedAtUtc = ReadUpdatedAtUtc(json)
+                };
                 return true;
             }
             catch
             {
                 return false;
+            }
+        }
+
+        private static DateTime ReadUpdatedAtUtc(Dictionary<string, object> json)
+        {
+            object value = Value(json, "updatedAt");
+            if (value == null)
+            {
+                value = Value(json, "statusUpdatedAt");
+            }
+            double milliseconds = 0;
+            if (value != null)
+            {
+                Double.TryParse(Convert.ToString(value, CultureInfo.InvariantCulture),
+                    NumberStyles.Float, CultureInfo.InvariantCulture, out milliseconds);
+            }
+            if (milliseconds <= 0)
+            {
+                return UnixEpochUtc;
+            }
+            try
+            {
+                return UnixEpochUtc.AddMilliseconds(milliseconds);
+            }
+            catch
+            {
+                return UnixEpochUtc;
             }
         }
 

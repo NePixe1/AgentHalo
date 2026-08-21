@@ -56,6 +56,8 @@ func runHaloInteractionChecks() {
     testFocusSubmenuMarksCodexInitially()
     testFocusSubmenuSwitchesToClaudeCode()
     testSingleClickDoesNotActivateCodexWhenClaudeCodeFocused()
+    testDoubleClickActivatesClaudeSessionHost()
+    testDoubleClickActivatesCodexDesktopPath()
     testClaudeLiveStandbyUsesStableGreenAggregate()
     testCodexRunningIdleUsesStableGreenAggregate()
     testPausedAgentDoesNotUseStableGreenStandby()
@@ -112,6 +114,7 @@ func runHaloInteractionChecks() {
     testClaudePollingIsThrottledWhenCodexFocused()
     testGrokPollingIsThrottledWhenNotFocused()
     testPiActivityFiltersDeadLifecycleAndAddsRuntimeFallback()
+    testPiLivePidMergeKeepsStatusEvidenceAuthoritative()
     testGrokPresencePrefersActiveSessionsFile()
     testAntigravityPresenceUsesHookSnapshotOrAgyNotLanguageServer()
     testAntigravityPresenceCountsDesktopAppAndAgyNotHelpers()
@@ -805,6 +808,65 @@ private func testSingleClickDoesNotActivateCodexWhenClaudeCodeFocused() {
     delegate.handleHaloPrimaryClick()
 
     expect(activations == 0, "single click should not activate Codex when Claude Code is focused")
+}
+
+@MainActor
+private func testDoubleClickActivatesClaudeSessionHost() {
+    var hostPids: [Int32] = []
+    let delegate = AppDelegate(
+        settingsStore: SettingsStore(settingsURL: temporarySettingsURL()),
+        sessionHostActivator: { hostPids.append($0) }
+    )
+    delegate.setFocusedAgent(.claudeCode)
+    delegate.focusedSessionEvidenceProvider = {
+        FocusedSessionLiveEvidence(
+            claude: [
+                ClaudeLiveSessionSnapshot(
+                    sessionId: "s1",
+                    workingDirectory: "/tmp/proj",
+                    processId: 12,
+                    status: "busy",
+                    updatedAt: Date()
+                )
+            ]
+        )
+    }
+    delegate.hostProcessTableProvider = {
+        [
+            10: HostProcessRecord(processId: 10, parentProcessId: 1, name: "iTerm2", isRegularApp: true),
+            12: HostProcessRecord(processId: 12, parentProcessId: 10, name: "claude", isRegularApp: false)
+        ]
+    }
+    delegate.activateFocusedAgent()
+    expect(hostPids, [10], "Claude focus double-click activates iTerm")
+    delegate.handleHaloPrimaryClick()
+    expect(hostPids, [10], "single click still does not activate")
+}
+
+@MainActor
+private func testDoubleClickActivatesCodexDesktopPath() {
+    var codex = 0
+    var hosts: [Int32] = []
+    var evidenceReads = 0
+    var processTableReads = 0
+    let delegate = AppDelegate(
+        settingsStore: SettingsStore(settingsURL: temporarySettingsURL()),
+        codexActivator: { codex += 1 },
+        sessionHostActivator: { hosts.append($0) }
+    )
+    delegate.focusedSessionEvidenceProvider = {
+        evidenceReads += 1
+        return .empty
+    }
+    delegate.hostProcessTableProvider = {
+        processTableReads += 1
+        return [:]
+    }
+    delegate.activateFocusedAgent()
+    expect(codex, 1, "Codex focus still uses desktop activator")
+    expect(hosts.isEmpty, true, "Codex focus does not walk a session host")
+    expect(evidenceReads, 0, "Codex focus does not read session evidence")
+    expect(processTableReads, 0, "Codex focus does not scan the session host process table")
 }
 
 @MainActor
@@ -3182,7 +3244,14 @@ private func testGrokPollingIsThrottledWhenNotFocused() {
     expect(appDelegateSource.contains("case .grok:"), "AppDelegate standby/live-session path should handle Grok focus")
     expect(appDelegateSource.contains("case .pi:"), "AppDelegate standby/live-session path should handle Pi focus")
     expect(appDelegateSource.contains("piActivityMonitor"), "AppDelegate should delegate Pi polling to a background monitor")
-    expect(!appDelegateSource.contains("activateGrok"), "Grok must not gain a click-to-activate terminal path")
+    expect(
+        appDelegateSource.contains("activateFocusedAgent()"),
+        "double-click should activate the focused session host"
+    )
+    expect(
+        !appDelegateSource.contains("handleHaloPrimaryClick() {"),
+        "single-click handler must remain a named empty method"
+    )
 }
 
 private func testPiActivityFiltersDeadLifecycleAndAddsRuntimeFallback() {
@@ -3224,6 +3293,7 @@ private func testPiActivityFiltersDeadLifecycleAndAddsRuntimeFallback() {
     let activity = PiActivitySnapshot(
         sessions: [runtime, snapshot("dead-failed", .error, active: false)],
         liveSessionIds: [],
+        livePids: [],
         isPresent: true
     )
     expect(activity.preferredStandbySession?.threadId, "runtime", "standby details prefer runtime idle session")
@@ -3235,6 +3305,37 @@ private func testPiActivityFiltersDeadLifecycleAndAddsRuntimeFallback() {
     )
     expect(deduplicated.count, 1, "runtime fallback must not duplicate a hook session")
     expect(deduplicated.first?.state, HaloState.thinking, "hook lifecycle remains authoritative")
+}
+
+private func testPiLivePidMergeKeepsStatusEvidenceAuthoritative() {
+    let merged = PiActivityMonitor.mergeLivePids(
+        statusPids: [
+            PiLivePid(sessionId: "status", processId: 101),
+            PiLivePid(sessionId: "shared-process", processId: 101),
+        ],
+        runtimeProcessId: 202,
+        runtimeSessionId: "runtime"
+    )
+    expect(
+        merged,
+        [
+            PiLivePid(sessionId: "status", processId: 101),
+            PiLivePid(sessionId: "shared-process", processId: 101),
+            PiLivePid(sessionId: "runtime", processId: 202),
+        ],
+        "distinct status sessions sharing a pid and runtime fallback should all remain addressable"
+    )
+
+    let duplicate = PiActivityMonitor.mergeLivePids(
+        statusPids: [PiLivePid(sessionId: "same", processId: 303)],
+        runtimeProcessId: 404,
+        runtimeSessionId: "same"
+    )
+    expect(
+        duplicate,
+        [PiLivePid(sessionId: "same", processId: 303)],
+        "status pid should remain authoritative for a duplicate runtime session"
+    )
 }
 
 private func testGrokPresencePrefersActiveSessionsFile() {

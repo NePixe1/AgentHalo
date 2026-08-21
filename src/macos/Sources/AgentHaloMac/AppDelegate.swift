@@ -158,6 +158,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastGrokContextRefreshAt = Date.distantPast
     private let instanceLock = InstanceLock()
     private let codexActivator: @MainActor () -> Void
+    private let sessionHostActivator: @MainActor (Int32) -> Void
+    var focusedSessionEvidenceProvider: () -> FocusedSessionLiveEvidence
+    var hostProcessTableProvider: () -> [Int32: HostProcessRecord]
     private var liveErrorPresentationState = LiveErrorPresentationState()
     private var codexIsForeground = false
     private var codexWasForeground = false
@@ -175,10 +178,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     init(
         settingsStore: SettingsStore,
         codexActivator: @escaping @MainActor () -> Void = CodexAppDetector.activateCodex,
+        sessionHostActivator: @escaping @MainActor (Int32) -> Void = { pid in
+            NSRunningApplication(processIdentifier: pid)?
+                .activate(options: [.activateIgnoringOtherApps])
+        },
         usageCoordinator: UsageMonitoringCoordinator = .live()
     ) {
         self.settingsStore = settingsStore
         self.codexActivator = codexActivator
+        self.sessionHostActivator = sessionHostActivator
+        self.focusedSessionEvidenceProvider = { .empty }
+        self.hostProcessTableProvider = { [:] }
         self.usageCoordinator = usageCoordinator
         self.settings = settingsStore.load()
         self.aggregate = SessionAggregator.aggregate(
@@ -234,6 +244,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.antigravityActivityDidChange(snapshot)
             }
         }
+        focusedSessionEvidenceProvider = { [weak self] in
+            self?.makeFocusedSessionEvidence() ?? .empty
+        }
+        hostProcessTableProvider = HostProcessTable.live
         // Initialize L10n with user's saved preference
         L10n.shared.setLanguage(settings.language)
         currentLanguage = L10n.shared.currentLanguage
@@ -511,7 +525,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let haloSize = currentHaloSize
         haloView = HaloView(frame: NSRect(x: 0, y: 0, width: haloSize, height: haloSize))
         haloView.onDoubleClick = { [weak self] in
-            self?.bringCodexForward()
+            self?.activateFocusedAgent()
         }
         haloView.onMoved = { [weak self] frame in
             self?.commitPreferredPlacement(frame: frame)
@@ -765,16 +779,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         placementState.didUseTemporaryFallback()
     }
 
-    @objc private func bringCodexForward() {
-        guard settings.focusedAgent == .codex else {
+    func activateFocusedAgent() {
+        let focusedAgent = settings.focusedAgent
+        if focusedAgent == .codex {
+            codexActivator()
             return
         }
-        codexActivator()
+        let displayed = displayAggregate()
+        FocusedAgentActivator.activate(
+            focusedAgent: focusedAgent,
+            visibleSessions: displayed.sessions,
+            hookSnapshots: hookSnapshots(for: focusedAgent),
+            paused: settings.paused,
+            evidence: focusedSessionEvidenceProvider(),
+            processes: hostProcessTableProvider(),
+            selfProcessId: ProcessInfo.processInfo.processIdentifier,
+            activateCodex: { [codexActivator] in codexActivator() },
+            activateHost: { [sessionHostActivator] pid in sessionHostActivator(pid) }
+        )
     }
 
-    func handleHaloPrimaryClick() {
-        // Keep single-click non-activating. Double-click remains the explicit
-        // path for bringing Codex forward.
+    private func hookSnapshots(for agent: AgentKind) -> [SessionSnapshot] {
+        switch agent {
+        case .codex: return codexActivitySnapshot.sessions
+        case .claudeCode: return claudeActivitySnapshot.mergedClaudeSnapshots
+        case .grok: return grokActivitySnapshot.sessions
+        case .pi: return piActivitySnapshot.sessions
+        case .antigravity: return antigravityActivitySnapshot.sessions
+        }
+    }
+
+    private func makeFocusedSessionEvidence() -> FocusedSessionLiveEvidence {
+        FocusedSessionLiveEvidence(
+            claude: claudeActivitySnapshot.liveSessions,
+            grok: GrokActiveSessionsReader.liveSessions(),
+            pi: piActivitySnapshot.livePids,
+            antigravityPresentPids: AntigravityActivityMonitor.presentProcessIds()
+        )
+    }
+
+    func handleHaloPrimaryClick()
+    {
+        // Keep single-click non-activating. Double-click activates the focused
+        // session host.
     }
 
     func setFocusedAgent(_ agent: AgentKind) {
