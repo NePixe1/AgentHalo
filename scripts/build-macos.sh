@@ -49,7 +49,7 @@ swift build -c release --product ClaudeCodeStatusLineProxy
 rm -rf "$app_dir"
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources/agent-switch"
 cp "$binary" "$app_dir/Contents/MacOS/AgentHaloMac"
-cp -R "$core_resource_bundle" "$app_dir/AgentHaloMac_AgentHaloCore.bundle"
+cp -R "$core_resource_bundle" "$app_dir/Contents/Resources/AgentHaloMac_AgentHaloCore.bundle"
 cp "$mac_root/.build/release/ClaudeCodeStatusHook" "$app_dir/Contents/Resources/claude-code-status-hook"
 cp "$mac_root/.build/release/ClaudeCodeStatusLineProxy" "$app_dir/Contents/Resources/claude-code-statusline-proxy"
 cp "$app_icon" "$app_dir/Contents/Resources/AppIcon.icns"
@@ -92,6 +92,8 @@ cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 PLIST
 
 chmod +x "$app_dir/Contents/MacOS/AgentHaloMac"
+codesign --force --sign - "$app_dir"
+bash "$repo_root/scripts/check-macos-distribution.sh" "$app_dir"
 
 echo "Built $app_dir"
 echo "Run with: open \"$app_dir\""

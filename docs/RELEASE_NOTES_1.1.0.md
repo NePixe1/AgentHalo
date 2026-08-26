@@ -24,9 +24,12 @@ macOS 原生客户端、共享行为规范和本地优先的监控方式。
 
 - Windows：完整解压 `AgentHalo-Windows-v1.1.0.zip`，运行 `AgentHalo.exe`。
 - macOS：打开 `AgentHalo-macOS-1.1.0.dmg`，将 Agent Halo 拖入“应用程序”。
+  首次启动若被 macOS 拦截，请前往“系统设置 → 隐私与安全性”，点按
+  “仍要打开”并确认。
 
 ## 说明
 
 - 应用仍为本地优先，生命周期和会话内容不会上传到 Agent Halo 服务。
 - Windows 需要 .NET Framework 4.8；macOS 需要 macOS 13 或更高版本。
-- 未签名的个人构建可能触发系统安全提示；Windows ZIP 包含 SHA-256 校验值。
+- macOS DMG 使用 ad-hoc 签名且未经 Apple 公证，首次启动需要手动批准。
+- Windows 个人构建可能触发 SmartScreen；ZIP 包含 SHA-256 校验值。

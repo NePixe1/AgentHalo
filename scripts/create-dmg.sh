@@ -23,6 +23,8 @@ if [ ! -f "$app_icon" ]; then
     exit 1
 fi
 
+bash "$repo_root/scripts/check-macos-distribution.sh" "$app_dir"
+
 # 清理旧的 staging 目录和 DMG 文件
 rm -rf "$dmg_staging"
 rm -f "$dmg_output" "$dmg_rw"
@@ -76,6 +78,8 @@ device=""
 hdiutil convert "$dmg_rw" -format UDZO -imagekey zlib-level=9 -o "$dmg_output"
 trap - EXIT
 rm -f "$dmg_rw"
+
+bash "$repo_root/scripts/check-macos-distribution.sh" "$dmg_output"
 
 # 清理 staging 目录
 rm -rf "$dmg_staging"

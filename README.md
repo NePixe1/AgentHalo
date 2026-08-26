@@ -60,7 +60,9 @@ Download the [latest GitHub release](https://github.com/NePixe1/AgentHalo/releas
 
 1. Download `AgentHalo-macOS-*.dmg`.
 2. Open the DMG and drag Agent Halo to Applications.
-3. Launch it from Applications. Agent Halo is a menu bar app and does not show a Dock icon.
+3. If macOS blocks the first launch, open System Settings > Privacy & Security,
+   click Open Anyway, and confirm.
+4. Launch it from Applications. Agent Halo is a menu bar app and does not show a Dock icon.
 
 Official accounts do not need an OpenAI API key. When available, usage refresh reuses the provider login you already use.
 
