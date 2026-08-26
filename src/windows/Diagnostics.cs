@@ -1632,6 +1632,16 @@ public static class Diagnostics
                     filteredAgents.IsAgentEnabled(AgentKind.Pi),
                     "settings keep at least one monitored agent");
 
+                Assert(Math.Abs(
+                    DetailsWindow.ResolveAgentSwitchThumbOffsetForTest(
+                        HaloSettings.SupportedAgents(), AgentKind.Pi) - 138) < 0.01,
+                    "Pi initially uses the fourth slot in the full switch");
+                Assert(Math.Abs(
+                    DetailsWindow.ResolveAgentSwitchThumbOffsetForTest(
+                        new[] { AgentKind.Codex, AgentKind.Pi }, AgentKind.Pi) -
+                    46) < 0.01,
+                    "agent filtering resets Pi thumb to its visible slot");
+
                 HaloSettings monitorSettings = new HaloSettings();
                 Assert(HaloWindow.ShouldRunCodexMonitor(monitorSettings),
                     "Codex monitor runs while Codex is focused");
@@ -1929,7 +1939,9 @@ public static class Diagnostics
                                 ThreadId = "pi-runtime-file",
                                 ProjectName = "runtime",
                                 Agent = AgentKind.Pi,
-                                State = HaloState.Working
+                                State = HaloState.Working,
+                                Active = true,
+                                EvidenceKind = "tool_execution_start"
                             }
                         };
                     HaloWindow.MergePiRuntimeSnapshot(piMergeSnapshots,
@@ -1938,13 +1950,71 @@ public static class Diagnostics
                             ThreadId = "pi-runtime-file",
                             ProjectName = "How do I monitor Pi sessions?",
                             Agent = AgentKind.Pi,
-                            State = HaloState.Idle
+                            State = HaloState.Idle,
+                            ModelName = "test-model",
+                            TurnInputTokens = 1200,
+                            TurnOutputTokens = 80,
+                            ContextInputTokens = 23280,
+                            ContextWindowTokens = 120000,
+                            EvidenceKind = "runtime-session"
                         });
                     Assert(piMergeSnapshots.Count == 1 &&
                         piMergeSnapshots[0].ProjectName ==
                             "How do I monitor Pi sessions?" &&
-                        piMergeSnapshots[0].State == HaloState.Working,
+                        piMergeSnapshots[0].State == HaloState.Working &&
+                        piMergeSnapshots[0].Active &&
+                        piMergeSnapshots[0].ModelName == "test-model" &&
+                        piMergeSnapshots[0].ContextWindowTokens == 120000 &&
+                        piMergeSnapshots[0].EvidenceKind == "tool_execution_start",
                         "Pi runtime title enriches hook state without replacing activity");
+
+                    List<SessionSnapshot> settledPiSnapshots =
+                        new List<SessionSnapshot>
+                        {
+                            new SessionSnapshot
+                            {
+                                ThreadId = "pi-runtime-file",
+                                ProjectName = "old title",
+                                Agent = AgentKind.Pi,
+                                State = HaloState.Done,
+                                Action = "Complete",
+                                CompletedUtc = piRuntimeNow.AddHours(-1),
+                                Active = false,
+                                EvidenceKind = "agent_end"
+                            }
+                        };
+                    SessionSnapshot settledRuntime = new SessionSnapshot
+                    {
+                        ThreadId = "pi-runtime-file",
+                        ProjectName = "Current resumed session",
+                        WorkingDirectory = "C:\\work\\runtime",
+                        Agent = AgentKind.Pi,
+                        State = HaloState.Idle,
+                        Action = "Ready",
+                        LastEventUtc = piRuntimeNow.AddMinutes(-1),
+                        Active = false,
+                        EvidenceSource = AgentEvidenceSource.PiExtension,
+                        EvidenceKind = "runtime-session",
+                        ModelName = "test-model",
+                        TurnInputTokens = 1200,
+                        TurnOutputTokens = 80,
+                        ContextInputTokens = 23280,
+                        ContextWindowTokens = 120000
+                    };
+                    HaloWindow.MergePiRuntimeSnapshot(settledPiSnapshots,
+                        settledRuntime);
+                    AggregateSnapshot settledPiAggregate =
+                        HaloWindow.BuildPiAggregateForTest(settledPiSnapshots,
+                            false, new HashSet<string>(
+                                StringComparer.OrdinalIgnoreCase), true,
+                            piRuntimeNow);
+                    Assert(settledPiSnapshots[0].State == HaloState.Idle &&
+                        settledPiSnapshots[0].CompletedUtc == DateTime.MinValue &&
+                        settledPiSnapshots[0].EvidenceKind == "runtime-session" &&
+                        settledPiAggregate.Sessions.Count == 1 &&
+                        settledPiAggregate.Sessions[0].ProjectName ==
+                            "Current resumed session",
+                        "Pi runtime replaces settled hook state for a resumed session");
                 }
                 finally
                 {

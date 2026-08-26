@@ -155,6 +155,7 @@ public sealed class DetailsWindow : Window
         private readonly Border piSwitch;
         private readonly Border switchThumb;
         private readonly TranslateTransform switchThumbTransform;
+        private double switchThumbTarget;
         private readonly System.Windows.Shapes.Path codexSwitchIcon;
         private readonly Canvas claudeSwitchIcon;
         private readonly System.Windows.Shapes.Path grokSwitchIcon;
@@ -931,6 +932,7 @@ public sealed class DetailsWindow : Window
                 agentSwitchHitLayer.ColumnDefinitions[i].Width = new GridLength(46);
             }
             agentSwitcher.Width = 46 * enabledAgents.Count;
+            ResetSwitchThumbPosition(currentAgent);
         }
 
         private void UpdateAgentSwitch()
@@ -948,21 +950,56 @@ public sealed class DetailsWindow : Window
 
         private void MoveSwitchThumb(AgentKind agent)
         {
-            int index = enabledAgents.IndexOf(agent);
-            double target = Math.Max(0, index) * 46;
+            double target = ResolveAgentSwitchThumbOffset(enabledAgents, agent);
             if (!IsVisible)
             {
-                switchThumbTransform.X = target;
+                ResetSwitchThumbPosition(agent);
+                return;
+            }
+            if (Math.Abs(switchThumbTarget - target) < 0.01)
+            {
+                return;
+            }
+
+            double from = switchThumbTransform.X;
+            switchThumbTransform.BeginAnimation(TranslateTransform.XProperty, null);
+            switchThumbTransform.X = target;
+            switchThumbTarget = target;
+            if (Math.Abs(from - target) < 0.01)
+            {
                 return;
             }
             DoubleAnimation animation = new DoubleAnimation
             {
+                From = from,
                 To = target,
                 Duration = TimeSpan.FromMilliseconds(180),
-                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+                FillBehavior = FillBehavior.Stop
             };
             switchThumbTransform.BeginAnimation(TranslateTransform.XProperty,
                 animation, HandoffBehavior.SnapshotAndReplace);
+        }
+
+        private void ResetSwitchThumbPosition(AgentKind agent)
+        {
+            double target = ResolveAgentSwitchThumbOffset(enabledAgents, agent);
+            switchThumbTransform.BeginAnimation(TranslateTransform.XProperty, null);
+            switchThumbTransform.X = target;
+            switchThumbTarget = target;
+        }
+
+        private static double ResolveAgentSwitchThumbOffset(
+            IList<AgentKind> visibleAgents, AgentKind agent)
+        {
+            int index = visibleAgents == null ? -1 : visibleAgents.IndexOf(agent);
+            return Math.Max(0, index) * 46;
+        }
+
+        internal static double ResolveAgentSwitchThumbOffsetForTest(
+            IList<AgentKind> visibleAgents, AgentKind agent)
+        {
+            return ResolveAgentSwitchThumbOffset(visibleAgents, agent);
         }
 
         private static void StyleCodexSwitch(Border border,

@@ -1203,9 +1203,49 @@ public sealed class HaloWindow : Window
                 snapshots.Add(runtimeSnapshot);
                 return;
             }
+
             if (!String.IsNullOrWhiteSpace(runtimeSnapshot.ProjectName))
             {
                 matching.ProjectName = runtimeSnapshot.ProjectName;
+            }
+            if (!String.IsNullOrWhiteSpace(runtimeSnapshot.WorkingDirectory))
+            {
+                matching.WorkingDirectory = runtimeSnapshot.WorkingDirectory;
+            }
+            if (!String.IsNullOrWhiteSpace(runtimeSnapshot.ModelName))
+            {
+                matching.ModelName = runtimeSnapshot.ModelName;
+            }
+            if (!String.IsNullOrWhiteSpace(runtimeSnapshot.ModelProvider))
+            {
+                matching.ModelProvider = runtimeSnapshot.ModelProvider;
+            }
+            matching.TurnInputTokens = runtimeSnapshot.TurnInputTokens;
+            matching.TurnCachedInputTokens = runtimeSnapshot.TurnCachedInputTokens;
+            matching.TurnOutputTokens = runtimeSnapshot.TurnOutputTokens;
+            if (runtimeSnapshot.ContextWindowTokens > 0)
+            {
+                matching.ContextInputTokens = runtimeSnapshot.ContextInputTokens;
+                matching.ContextWindowTokens = runtimeSnapshot.ContextWindowTokens;
+            }
+
+            // Keep authoritative hook activity while it is live. Once that
+            // record has settled, the runtime session becomes the current idle
+            // evidence; otherwise an old Done row hides a resumed Pi session.
+            bool activeHook = matching.Active &&
+                matching.State != HaloState.Idle &&
+                matching.State != HaloState.Done;
+            if (!activeHook)
+            {
+                matching.State = runtimeSnapshot.State;
+                matching.Action = runtimeSnapshot.Action;
+                matching.LastEventUtc = runtimeSnapshot.LastEventUtc;
+                matching.CompletedUtc = DateTime.MinValue;
+                matching.Active = runtimeSnapshot.Active;
+                matching.TurnPhase = runtimeSnapshot.TurnPhase;
+                matching.Activity = runtimeSnapshot.Activity;
+                matching.EvidenceSource = runtimeSnapshot.EvidenceSource;
+                matching.EvidenceKind = runtimeSnapshot.EvidenceKind;
             }
         }
 
