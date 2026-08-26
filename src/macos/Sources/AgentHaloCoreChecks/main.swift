@@ -984,6 +984,7 @@ func testPiRuntimeMonitorDetectsPreexistingSession() throws {
     let monitor = PiRuntimeMonitor(agentRoot: root, processReader: { [process] })
     expect(monitor.refresh(now: now), true, "runtime monitor refreshes")
     expect(monitor.isRunning, true, "preexisting Pi process is detected")
+    expect(monitor.processId, process.processId, "unique runtime Pi pid is exposed")
     let snapshot = monitor.snapshot()
     expect(snapshot?.threadId, "pi-existing", "runtime session id")
     expect(snapshot?.projectName, "AgentHalo", "runtime project")
@@ -992,6 +993,20 @@ func testPiRuntimeMonitorDetectsPreexistingSession() throws {
     expect(snapshot?.inputTokens, Int64(20), "runtime input tokens")
     expect(snapshot?.outputTokens, Int64(5), "runtime output tokens")
     expectAlmost(snapshot?.contextUsedPercent ?? -1, 25, tolerance: 0.01, "runtime context")
+
+    let otherProcess = PiRuntimeProcess(
+        processId: 12004,
+        parentProcessId: 1,
+        name: "pi",
+        startedAt: now.addingTimeInterval(-30)
+    )
+    let ambiguousMonitor = PiRuntimeMonitor(
+        agentRoot: root,
+        processReader: { [process, otherProcess] }
+    )
+    expect(ambiguousMonitor.refresh(now: now), true, "ambiguous runtime monitor refreshes")
+    expect(ambiguousMonitor.isRunning, true, "multiple Pi processes still prove presence")
+    expect(ambiguousMonitor.processId, 0, "ambiguous Pi processes do not expose an activation pid")
 
     let evidence = PiRuntimeMonitor.readLatestSession(agentRoot: root, now: now)
     let shell = PiRuntimeProcess(
@@ -6397,6 +6412,7 @@ testNonPlanTaskCompleteStillTurnsGreen()
 testPlanModeWithoutFinalAnswerStillTurnsGreen()
 testPlanModeFlagResetsAfterFatalTurn()
 testAggregateFiltersInactiveAndTimedOutSessions()
+runFocusedSessionHostChecks()
 await runUsageModelChecks()
 print("PASS AgentHaloCore checks")
 

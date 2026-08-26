@@ -7,12 +7,15 @@ struct PiActivitySnapshot: Equatable, Sendable {
     var sessions: [SessionSnapshot]
     /// Session ids whose extension record still has a live PID.
     var liveSessionIds: Set<String>
+    /// Live extension / runtime pids used for focused-session host activation.
+    var livePids: [PiLivePid]
     /// True when an extension PID or runtime fallback confirms Pi is live.
     var isPresent: Bool
 
     static let empty = PiActivitySnapshot(
         sessions: [],
         liveSessionIds: [],
+        livePids: [],
         isPresent: false
     )
 
@@ -222,6 +225,10 @@ final class PiActivityMonitor: @unchecked Sendable {
         _ = statusMonitor.refresh()
         _ = runtimeMonitor.refresh()
         let liveIds = statusMonitor.liveSessionIds()
+        let livePids = Self.collectLivePids(
+            statusRecords: statusMonitor.allRecords(),
+            runtimeMonitor: runtimeMonitor
+        )
         let sessions = Self.projectSessions(
             statusSessions: statusMonitor.snapshots(),
             liveSessionIds: liveIds,
@@ -230,6 +237,7 @@ final class PiActivityMonitor: @unchecked Sendable {
         let nextSnapshot = PiActivitySnapshot(
             sessions: sessions,
             liveSessionIds: liveIds,
+            livePids: livePids,
             isPresent: !liveIds.isEmpty || runtimeMonitor.isRunning
         )
         stateLock.lock()
@@ -266,6 +274,44 @@ final class PiActivityMonitor: @unchecked Sendable {
         if let runtimeSession,
            !result.contains(where: { $0.threadId == runtimeSession.threadId }) {
             result.append(runtimeSession)
+        }
+        return result
+    }
+
+    /// Live pids come from status records and the runtime monitor only.
+    /// SessionSnapshot never supplies a pid.
+    private static func collectLivePids(
+        statusRecords: [PiStatusRecord],
+        runtimeMonitor: PiRuntimeMonitor
+    ) -> [PiLivePid] {
+        let statusPids = statusRecords.compactMap { record -> PiLivePid? in
+            guard PiStatusMonitor.isLive(record), record.processId > 0 else { return nil }
+            return PiLivePid(sessionId: record.sessionId, processId: record.processId)
+        }
+        let runtimePid = runtimeMonitor.processId
+        return mergeLivePids(
+            statusPids: statusPids,
+            runtimeProcessId: runtimeMonitor.isRunning ? runtimePid : 0,
+            runtimeSessionId: runtimeMonitor.snapshot()?.threadId
+        )
+    }
+
+    static func mergeLivePids(
+        statusPids: [PiLivePid],
+        runtimeProcessId: Int32,
+        runtimeSessionId: String?
+    ) -> [PiLivePid] {
+        var result: [PiLivePid] = []
+        var seenSessionIds = Set<String>()
+        for item in statusPids where item.processId > 0 && !item.sessionId.isEmpty {
+            guard seenSessionIds.insert(item.sessionId).inserted else { continue }
+            result.append(item)
+        }
+        if runtimeProcessId > 0,
+           let runtimeSessionId,
+           !runtimeSessionId.isEmpty,
+           seenSessionIds.insert(runtimeSessionId).inserted {
+            result.append(PiLivePid(sessionId: runtimeSessionId, processId: runtimeProcessId))
         }
         return result
     }

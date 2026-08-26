@@ -3,7 +3,7 @@
 ## 文档状态
 
 - 日期：2026-08-18
-- 状态：设计已确认；待写实施计划
+- 状态：实施计划见 [2026-08-19-focused-agent-host-activation.md](../plans/2026-08-19-focused-agent-host-activation.md)
 - 实现范围：AgentHalo **Windows + macOS**（Antigravity 仍只在 macOS）
 - 产品原则：见 [PRODUCT.md](../../PRODUCT.md)
 - 相关先例：

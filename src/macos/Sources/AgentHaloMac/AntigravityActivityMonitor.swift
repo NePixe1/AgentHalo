@@ -324,14 +324,15 @@ final class AntigravityActivityMonitor: @unchecked Sendable {
 
     /// Exact process-name match via libproc. Does not spawn `/bin/ps`, and
     /// never treats `language_server` or Helper processes as present.
-    private static func hasPresentProcess() -> Bool {
+    static func presentProcessIds() -> [Int32] {
         let requested = proc_listallpids(nil, 0)
-        guard requested > 0 else { return false }
+        guard requested > 0 else { return [] }
         var pids = [pid_t](repeating: 0, count: Int(requested) + 64)
         let count = pids.withUnsafeMutableBytes { buffer in
             proc_listallpids(buffer.baseAddress, Int32(buffer.count))
         }
-        guard count > 0 else { return false }
+        guard count > 0 else { return [] }
+        var matches: [Int32] = []
         for pid in pids.prefix(Int(count)) where pid > 0 {
             var info = proc_bsdinfo()
             let size = Int32(MemoryLayout<proc_bsdinfo>.size)
@@ -342,10 +343,14 @@ final class AntigravityActivityMonitor: @unchecked Sendable {
             let comm = processCString(info.pbi_comm)
             let name = processCString(info.pbi_name)
             if countsAsPresentProcess(comm: comm, name: name) {
-                return true
+                matches.append(pid)
             }
         }
-        return false
+        return matches
+    }
+
+    private static func hasPresentProcess() -> Bool {
+        !presentProcessIds().isEmpty
     }
 
     private static func processCString<T>(_ value: T) -> String {

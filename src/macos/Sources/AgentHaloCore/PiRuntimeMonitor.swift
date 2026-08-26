@@ -79,6 +79,7 @@ public final class PiRuntimeMonitor: @unchecked Sendable {
     private let processReader: @Sendable () -> [PiRuntimeProcess]
     private var nextCheckAt = Date.distantPast
     private var running = false
+    private var runningProcessId: Int32 = 0
     private var latestSession: PiRuntimeSessionEvidence?
 
     public init(
@@ -93,6 +94,10 @@ public final class PiRuntimeMonitor: @unchecked Sendable {
         running
     }
 
+    public var processId: Int32 {
+        runningProcessId
+    }
+
     @discardableResult
     public func refresh(now: Date = Date()) -> Bool {
         guard now >= nextCheckAt else { return false }
@@ -103,11 +108,13 @@ public final class PiRuntimeMonitor: @unchecked Sendable {
             previous: latestSession,
             now: now
         )
-        running = Self.isRunning(
+        let matches = Self.matchingProcesses(
             session: latestSession,
             now: now,
             processes: processReader()
         )
+        running = !matches.isEmpty
+        runningProcessId = matches.count == 1 ? matches[0].processId : 0
         return before != fingerprint()
     }
 
@@ -144,17 +151,26 @@ public final class PiRuntimeMonitor: @unchecked Sendable {
         now: Date,
         processes: [PiRuntimeProcess]
     ) -> Bool {
+        !matchingProcesses(session: session, now: now, processes: processes).isEmpty
+    }
+
+    private static func matchingProcesses(
+        session: PiRuntimeSessionEvidence?,
+        now: Date,
+        processes: [PiRuntimeProcess]
+    ) -> [PiRuntimeProcess] {
         guard let session,
               session.lastModified <= now.addingTimeInterval(futureTolerance),
               now.timeIntervalSince(session.lastModified) <= evidenceLifetime
         else {
-            return false
+            return []
         }
 
         let byId = Dictionary(
             processes.filter { $0.processId > 0 }.map { ($0.processId, $0) },
             uniquingKeysWith: { first, _ in first }
         )
+        var matches: [PiRuntimeProcess] = []
         for process in byId.values where isPiProcess(process.name) {
             let name = executableName(process.name)
             // Modern Pi exposes its process title as `pi`. Older Node-based
@@ -168,10 +184,10 @@ public final class PiRuntimeMonitor: @unchecked Sendable {
             }
             if process.startedAt == nil
                 || process.startedAt! <= session.lastModified.addingTimeInterval(processStartTolerance) {
-                return true
+                matches.append(process)
             }
         }
-        return false
+        return matches
     }
 
     public static func readLatestSession(
@@ -416,6 +432,7 @@ public final class PiRuntimeMonitor: @unchecked Sendable {
         guard let latestSession else { return running ? "1" : "0" }
         return [
             running ? "1" : "0",
+            String(runningProcessId),
             latestSession.sessionId,
             String(latestSession.lastModified.timeIntervalSince1970),
             String(latestSession.length),

@@ -37,7 +37,7 @@
 - 从会话文件（`conversations/` / `.pb`）推断 thinking / working / done。桌面应用走与 CLI 同一套 `~/.gemini/config/hooks.json`；IDE（`/antigravity-ide/`）仍排除。
 - 非 Gemini 池（`3p-5h` / `3p-weekly`，OpenUsage 里的 Claude / Claude Weekly）。
 - API Key 会话卡、context pill、会话标题深挖。
-- 点击光环唤起 Antigravity 窗口或终端。
+- 点击光环唤起 Antigravity 窗口或终端。（已被 [2026-08-18-focused-agent-host-activation-design.md](./2026-08-18-focused-agent-host-activation-design.md) 取代。）
 - cost meter、本地 token 日统计、历史图表。
 - 修改跨平台视觉 spec（`agent-halo.v2.json` 动画参数）。
 - 新 `AgentKind` 自动加入已安装用户的启用列表。
@@ -363,7 +363,7 @@ JSONL 滚动策略与 Claude/Grok 相同（同一体积上限与截断常量）�
 - 详情面板额度两行不改高度、不改标题文案（仍用 `quota.5h` / `quota.weekly`）
 - context pill 不显示数值（空 / `--`，与「无 context 源」一致）。`DetailsPanel.update` 里 `switch focusedAgent` 必须加 `.antigravity`，不得误入 Claude/Grok context 分支。
 - `DetailsContentResolver.providerName` / `warning` 的 `UsageProviderID` switch 补 `.antigravity`（编译器也会逼改）。
-- 点击光环：不激活任何 Antigravity 窗口（与 Claude 相同）
+- 点击光环：不激活任何 Antigravity 窗口（与 Claude 相同）（已被 [2026-08-18-focused-agent-host-activation-design.md](./2026-08-18-focused-agent-host-activation-design.md) 取代。）
 - 其它写死 `switch AgentKind` 的地方（`AppDelegate`、`SettingsWindowController` 图标、`HaloInteractionChecks` 源码断言）一并补 case；能改成 `allCases` 的检查不要再写死四个。
 
 切换条：启用后多一个 36pt 槽；图标 `antigravity.svg`。视觉保持克制，单色标记，与现有 `codex.svg` / `grok.svg` 密度一致。

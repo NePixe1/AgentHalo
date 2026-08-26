@@ -68,7 +68,7 @@ Official accounts do not need an OpenAI API key. When available, usage refresh r
 
 - **Drag** the halo to move it; it snaps lightly to screen edges.
 - **Hover** for status and usage / session details; switch **Codex / CC / Grok / Pi** from the agent toggle.
-- **Click** the halo to bring the Codex window forward when relevant.
+- **Double-click** the halo to bring the focused agent's session host forward (Codex app, or the terminal / desktop app hosting Claude, Grok, Pi, or Antigravity). Nothing happens if that host cannot be found.
 - **Right-click** to choose **Monitored Agents** and the **Current Agent**, or access state previews, temporary pause, startup, always-on-top behavior, halo size (`75% / 100% / 125%`), **Reset Position**, and quit. At least one agent remains enabled; pause clears on the next launch.
 - After a display change, an off-screen halo recovers to the primary display. On macOS, it can also return to its remembered display when that display reconnects.
 
