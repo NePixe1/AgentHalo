@@ -8,7 +8,7 @@ app_dir="$output_root/AgentHalo.app"
 app_icon="$repo_root/assets/agent-halo-app-icon.icns"
 dmg_staging="$output_root/dmg-staging"
 dmg_rw="$output_root/AgentHalo-rw.dmg"
-dmg_output="$repo_root/outputs/AgentHalo-macOS-1.0.0.dmg"
+dmg_output="$repo_root/outputs/AgentHalo-macOS-1.1.0.dmg"
 
 # 检查 .app 是否存在
 if [ ! -d "$app_dir" ]; then
@@ -88,6 +88,6 @@ echo "File size:"
 ls -lh "$dmg_output" | awk '{print $5, $9}'
 echo ""
 echo "To create a GitHub release:"
-echo "  1. Create a new tag: git tag v1.0.0 && git push origin v1.0.0"
-echo "  2. Use GitHub CLI: gh release create v1.0.0 \"$dmg_output\" --title \"AgentHalo v1.0.0\" --notes-file docs/RELEASE_NOTES_1.0.0.md"
+echo "  1. Create a new tag: git tag v1.1.0 && git push origin v1.1.0"
+echo "  2. Use GitHub CLI: gh release create v1.1.0 \"$dmg_output\" --title \"Agent Halo v1.1.0\" --notes-file docs/RELEASE_NOTES_1.1.0.md"
 echo "  Or upload manually at: https://github.com/YOUR_USERNAME/AgentHalo/releases/new"
