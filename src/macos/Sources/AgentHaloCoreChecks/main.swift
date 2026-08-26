@@ -5952,11 +5952,20 @@ func testAgentHaloResourcesPrefersPackagedResourceBundle() throws {
     )
     try infoData.write(to: resourceBundle.appendingPathComponent("Info.plist"))
 
+    var fallbackEvaluated = false
     let resolved = AgentHaloResources.resolve(
         packagedResourcesDirectory: root,
-        fallback: Bundle.main
+        fallback: {
+            fallbackEvaluated = true
+            return Bundle.main
+        }()
     )
 
+    expect(
+        fallbackEvaluated,
+        false,
+        "packaged resource resolution should not evaluate the development fallback"
+    )
     expect(
         resolved.bundleURL.standardizedFileURL,
         resourceBundle.standardizedFileURL,

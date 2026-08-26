@@ -12,7 +12,7 @@ public enum AgentHaloResources {
 
     public static func resolve(
         packagedResourcesDirectory: URL?,
-        fallback: Bundle
+        fallback: @autoclosure () -> Bundle
     ) -> Bundle {
         guard let packagedResourcesDirectory,
               let packaged = Bundle(
@@ -21,7 +21,7 @@ public enum AgentHaloResources {
                     isDirectory: true
                 )
               ) else {
-            return fallback
+            return fallback()
         }
         return packaged
     }
