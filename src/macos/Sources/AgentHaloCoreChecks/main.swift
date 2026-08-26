@@ -5931,6 +5931,39 @@ func testStartupExecutablePathUsesAppBundleRoot() {
     expect(path, "/tmp/AgentHalo.app/Contents/MacOS/AgentHaloMac", "startup executable path")
 }
 
+func testAgentHaloResourcesPrefersPackagedResourceBundle() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("agent-halo-packaged-resources-\(UUID().uuidString)", isDirectory: true)
+    defer {
+        try? FileManager.default.removeItem(at: root)
+    }
+    let resourceBundle = root
+        .appendingPathComponent("AgentHaloMac_AgentHaloCore.bundle", isDirectory: true)
+    try FileManager.default.createDirectory(at: resourceBundle, withIntermediateDirectories: true)
+    let info: [String: Any] = [
+        "CFBundleIdentifier": "local.agenthalo.tests.resources",
+        "CFBundleName": "AgentHaloMac_AgentHaloCore",
+        "CFBundlePackageType": "BNDL",
+    ]
+    let infoData = try PropertyListSerialization.data(
+        fromPropertyList: info,
+        format: .xml,
+        options: 0
+    )
+    try infoData.write(to: resourceBundle.appendingPathComponent("Info.plist"))
+
+    let resolved = AgentHaloResources.resolve(
+        packagedResourcesDirectory: root,
+        fallback: Bundle.main
+    )
+
+    expect(
+        resolved.bundleURL.standardizedFileURL,
+        resourceBundle.standardizedFileURL,
+        "packaged app should load SwiftPM resources from Contents/Resources"
+    )
+}
+
 // MARK: - Plan Mode 收尾保持等待用户确认
 
 func testPlanModePlainFinalAnswerDoesNotHoldAttentionAtTaskComplete() {
@@ -6395,6 +6428,11 @@ testClaudeSessionReducerReadsCustomTitleFromRename()
 testClaudeSessionReducerCustomTitleOverridesAITitle()
 testClaudeHookStopShowsDoneThenReadyWhileWaitingForInput()
 testStartupExecutablePathUsesAppBundleRoot()
+do {
+    try testAgentHaloResourcesPrefersPackagedResourceBundle()
+} catch {
+    fatalError("\(error)")
+}
 do {
     try testDiagnosticsCreatesParentDirectoryForOutput()
 } catch {

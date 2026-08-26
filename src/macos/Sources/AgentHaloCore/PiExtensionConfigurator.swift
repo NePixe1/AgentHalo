@@ -61,7 +61,7 @@ public enum PiExtensionConfigurator {
     }
 
     public static func readEmbeddedSource() -> String? {
-        if let bundled = Bundle.module.url(
+        if let bundled = AgentHaloResources.bundle.url(
             forResource: "agent-halo-status",
             withExtension: "ts",
             subdirectory: "integrations/pi"

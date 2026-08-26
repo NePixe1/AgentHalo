@@ -10,7 +10,7 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 build_script="$root_dir/scripts/build-macos.sh"
 app_bundle="$root_dir/outputs/AgentHalo-macOS/$bundle_name"
 app_binary="$app_bundle/Contents/MacOS/$app_name"
-core_resource_bundle="$app_bundle/AgentHaloMac_AgentHaloCore.bundle"
+core_resource_bundle="$app_bundle/Contents/Resources/AgentHaloMac_AgentHaloCore.bundle"
 shared_locales="$root_dir/src/shared/locales"
 verify_pid=""
 verify_temp_dir=""
@@ -204,6 +204,11 @@ case "$mode" in
     done
     test -f "$readiness_lock"
     /usr/bin/grep -q '^PACKAGED_VERIFICATION_KEYCHAIN_DISABLED$' "$verify_diagnostics/app.log"
+    if ! /usr/bin/grep -q '^PACKAGED_VERIFICATION_RESOURCES_OK$' "$verify_diagnostics/app.log"; then
+      echo "Packaged resource verification marker missing" >&2
+      sed -n '1,120p' "$verify_diagnostics/app.log" >&2
+      false
+    fi
 
     if [[ "${AGENTHALO_VERIFY_FORCE_READINESS_FAILURE:-0}" == "1" ]]; then
       echo "Forced isolated readiness failure" >&2

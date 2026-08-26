@@ -104,14 +104,14 @@ public final class L10n: @unchecked Sendable {
     }
 
     private func loadTranslations() {
-        guard let url = Bundle.module.url(
+        guard let url = AgentHaloResources.bundle.url(
             forResource: _currentLanguage,
             withExtension: "json",
             subdirectory: "locales"
         ) else {
             // Fallback: try loading the fallback language
             if _currentLanguage != Self.fallbackLanguage,
-               let fallbackURL = Bundle.module.url(
+               let fallbackURL = AgentHaloResources.bundle.url(
                 forResource: Self.fallbackLanguage,
                 withExtension: "json",
                 subdirectory: "locales"

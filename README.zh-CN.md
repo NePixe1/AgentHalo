@@ -60,7 +60,9 @@
 
 1. 下载 `AgentHalo-macOS-*.dmg`。
 2. 打开 DMG，将 Agent Halo 拖入「应用程序」。
-3. 从「应用程序」启动。Agent Halo 为菜单栏应用，不显示 Dock 图标。
+3. 首次启动若被 macOS 拦截，请前往「系统设置 → 隐私与安全性」，点按
+   「仍要打开」并确认。
+4. 从「应用程序」启动。Agent Halo 为菜单栏应用，不显示 Dock 图标。
 
 官方账号不需要 OpenAI API Key。可用时，额度刷新会复用你已有的提供商登录。
 
