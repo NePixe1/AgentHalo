@@ -14,6 +14,34 @@ private func expect<T: Equatable>(_ actual: T, _ expected: T, _ message: String)
 }
 
 @MainActor
+private func textField(in root: NSView?, matching text: String) -> NSTextField? {
+    guard let root else { return nil }
+    if let field = root as? NSTextField, field.stringValue == text {
+        return field
+    }
+    for subview in root.subviews {
+        if let match = textField(in: subview, matching: text) {
+            return match
+        }
+    }
+    return nil
+}
+
+@MainActor
+private func view(in root: NSView?, identifier: String) -> NSView? {
+    guard let root else { return nil }
+    if root.identifier?.rawValue == identifier {
+        return root
+    }
+    for subview in root.subviews {
+        if let match = view(in: subview, identifier: identifier) {
+            return match
+        }
+    }
+    return nil
+}
+
+@MainActor
 func runHaloInteractionChecks() {
     L10n.shared.setLanguage("zh")
     testDetailsPanelUsesEvenPointHeight()
@@ -77,6 +105,8 @@ func runHaloInteractionChecks() {
     testDetailsPanelClearsContextAndSessionRowsOffline()
     testDetailsPanelAPIKeyOfflineAndOnlineShareHeight()
     testDetailsPanelKeepsFixedWidthForLongProviderContent()
+    testDetailsPanelTrimsProjectPrefixAndKeepsStatusTextInsideContentBounds()
+    testDetailsPanelUsesBackdropMaterialWithRestrainedTint()
     testDetailsPanelResizesHeightWithoutAnimation()
     testDetailsPanelMovesTitleGapIntoBodySpacing()
     testDetailsPanelShowsCodexStandbyCopy()
@@ -1466,6 +1496,67 @@ private func testDetailsPanelKeepsFixedWidthForLongProviderContent() {
     expect(panel.frameWidthForTesting, initialWidth, "long provider content should not widen the panel")
     expect(panel.frameWidthForTesting, 278, "details panel should keep the expanded fixed width")
     expect((panel.contentView?.fittingSize.width ?? 0) <= 278.5, "content should fit the expanded fixed width")
+}
+
+@MainActor
+private func testDetailsPanelTrimsProjectPrefixAndKeepsStatusTextInsideContentBounds() {
+    let panel = DetailsPanel()
+    let title = "INTERRUPTED STATUS THAT MUST TRUNCATE"
+    let action = "Antigravity stopped with an error"
+    let aggregate = AggregateSnapshot(
+        state: .error,
+        label: title,
+        detail: "AgentHalo - \(action)",
+        sessions: [
+            SessionSnapshot(
+                threadId: "antigravity-error",
+                projectName: "AgentHalo",
+                workingDirectory: "/tmp/AgentHalo",
+                state: .error,
+                action: action,
+                lastEventAt: Date(),
+                completedAt: nil,
+                active: false,
+                agent: .antigravity
+            )
+        ],
+        focusedAgent: .antigravity
+    )
+
+    panel.render(aggregate: aggregate, model: usageDetailsModel())
+    panel.contentView?.layoutSubtreeIfNeeded()
+
+    expect(panel.detailTextForTesting, action, "error detail should omit the project prefix")
+    let contentBounds = panel.contentView?.bounds ?? .zero
+    for text in [title, action] {
+        guard let field = textField(in: panel.contentView, matching: text) else {
+            fatalError("missing status text field: \(text)")
+        }
+        let frame = field.convert(field.alignmentRect(forFrame: field.bounds), to: panel.contentView)
+        expect(
+            frame.minX >= 16.5,
+            "status text should respect the 17pt leading inset (frame: \(frame))"
+        )
+        expect(
+            frame.maxX <= contentBounds.maxX - 16.5,
+            "status text should respect the 17pt trailing inset (frame: \(frame), content: \(contentBounds))"
+        )
+    }
+}
+
+@MainActor
+private func testDetailsPanelUsesBackdropMaterialWithRestrainedTint() {
+    let panel = DetailsPanel()
+    guard let surface = view(in: panel.contentView, identifier: "details-panel-surface"),
+          let backgroundColor = surface.layer?.backgroundColor,
+          let color = NSColor(cgColor: backgroundColor)?.usingColorSpace(.deviceRGB) else {
+        fatalError("details panel should provide a restrained material tint")
+    }
+
+    let alpha = color.alphaComponent
+    expect(surface.superview is NSVisualEffectView, true, "tint should sit above the live backdrop material")
+    expect(alpha >= 0.30, true, "details panel should retain a light readability tint")
+    expect(alpha <= 0.40, true, "details panel tint should not hide the backdrop material")
 }
 
 @MainActor

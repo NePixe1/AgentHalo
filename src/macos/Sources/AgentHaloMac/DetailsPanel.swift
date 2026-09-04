@@ -74,14 +74,27 @@ class DetailsPanel: NSPanel {
 
         let container = NSVisualEffectView(frame: contentView?.bounds ?? .zero)
         container.material = .popover
+        container.blendingMode = .behindWindow
         container.state = .active
         container.wantsLayer = true
         container.layer?.cornerRadius = 18
+        container.layer?.masksToBounds = true
         container.layer?.borderWidth = 1
         container.layer?.borderColor = NSColor(calibratedRed: 0.70, green: 0.78, blue: 0.82, alpha: 0.35).cgColor
-        // Higher opacity so muted secondary text (e.g. "Resets …") stays readable over dark desktops.
-        container.layer?.backgroundColor = NSColor(calibratedRed: 0.98, green: 0.99, blue: 1.0, alpha: 0.96).cgColor
         container.translatesAutoresizingMaskIntoConstraints = false
+
+        // Let the live backdrop material remain visible while adding only a
+        // restrained light tint for readability on very dark desktops.
+        let surface = NSView()
+        surface.identifier = NSUserInterfaceItemIdentifier("details-panel-surface")
+        surface.wantsLayer = true
+        surface.layer?.backgroundColor = NSColor(
+            calibratedRed: 0.98,
+            green: 0.99,
+            blue: 1.0,
+            alpha: 0.35
+        ).cgColor
+        surface.translatesAutoresizingMaskIntoConstraints = false
 
         stack.orientation = .vertical
         stack.spacing = 0
@@ -96,10 +109,18 @@ class DetailsPanel: NSPanel {
 
         titleField.font = .systemFont(ofSize: 22, weight: .bold)
         titleField.lineBreakMode = .byTruncatingTail
+        titleField.maximumNumberOfLines = 1
+        titleField.usesSingleLineMode = true
+        titleField.cell?.truncatesLastVisibleLine = true
+        titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         titleField.alignment = .left
         detailField.font = .systemFont(ofSize: 12)
         detailField.textColor = NSColor(calibratedRed: 0.38, green: 0.45, blue: 0.50, alpha: 1)
         detailField.lineBreakMode = .byTruncatingTail
+        detailField.maximumNumberOfLines = 1
+        detailField.usesSingleLineMode = true
+        detailField.cell?.truncatesLastVisibleLine = true
+        detailField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         detailField.alignment = .left
         stack.addArrangedSubview(titleField)
         stack.setCustomSpacing(2, after: titleField)
@@ -143,6 +164,7 @@ class DetailsPanel: NSPanel {
         rootView.owner = self
         contentView = rootView
         contentView?.addSubview(container)
+        container.addSubview(surface)
         container.addSubview(stack)
         NSLayoutConstraint.activate([
             contentView!.widthAnchor.constraint(equalToConstant: Self.panelWidth),
@@ -150,13 +172,19 @@ class DetailsPanel: NSPanel {
             container.trailingAnchor.constraint(equalTo: contentView!.trailingAnchor),
             container.topAnchor.constraint(equalTo: contentView!.topAnchor),
             container.bottomAnchor.constraint(equalTo: contentView!.bottomAnchor),
+            surface.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            surface.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            surface.topAnchor.constraint(equalTo: container.topAnchor),
+            surface.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             stack.topAnchor.constraint(equalTo: container.topAnchor),
             stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
 
             topRow.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
+            titleField.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 17),
             titleField.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
+            detailField.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 17),
             detailField.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
             quotaGroup.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 17),
             quotaGroup.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
@@ -533,7 +561,12 @@ class DetailsPanel: NSPanel {
         case .working: return L10n.shared["status.working"]
         case .done: return L10n.shared["status.done"]
         case .attention: return L10n.shared["status.attention"]
-        case .error: return aggregate.detail.isEmpty ? L10n.shared["status.error"] : aggregate.detail
+        case .error:
+            if let action = aggregate.sessions.first?.action,
+               !action.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return action
+            }
+            return aggregate.detail.isEmpty ? L10n.shared["status.error"] : aggregate.detail
         case .idle: return aggregate.focusedAgent.localizedOfflineDetail
         }
     }
