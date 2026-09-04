@@ -97,6 +97,7 @@ func runHaloInteractionChecks() {
     testQuotaMeterRendersApprovedSoftFadeOutput()
     testDetailsPanelShowsMissingAndExpiredUsageWindows()
     testDetailsPanelShowsSessionCardForAPIKey()
+    testDetailsPanelAPIKeyTokensAreCompactAndSymmetric()
     testDetailsPanelLeavesMissingSessionTitleEmpty()
     testDetailsPanelBlankStandbyUsesSoftEmptyNotDashCard()
     testDetailsPanelPartialSessionStillUsesCard()
@@ -1342,6 +1343,51 @@ private func testDetailsPanelShowsSessionCardForAPIKey() {
     expect(panel.sessionCardTitleToolTipForTesting, "Redesign details", "title tooltip")
     expect(panel.sessionBodySlotHeightForTesting, 68, "body slot height constant")
     expect(panel.sessionCardHeightForTesting, 68, "card matches body slot height")
+}
+
+@MainActor
+private func testDetailsPanelAPIKeyTokensAreCompactAndSymmetric() {
+    let panel = DetailsPanel()
+    panel.render(
+        aggregate: detailsAggregate(),
+        model: sessionDetailsModel(session: SessionDetailsSnapshot(
+            sessionTitle: "Compact token metrics",
+            modelName: "gpt-5.5",
+            inputTokens: 38_000,
+            outputTokens: 1_200
+        ))
+    )
+    panel.contentView?.layoutSubtreeIfNeeded()
+
+    guard
+        let modelField = textField(in: panel.contentView, matching: "gpt-5.5"),
+        let modelChip = modelField.superview,
+        let sessionCard = modelChip.superview,
+        let tokenField = textField(in: panel.contentView, matching: "↑ 38k  ·  ↓ 1.2k"),
+        tokenField.superview === sessionCard
+    else {
+        fatalError("API Key session card should expose model and token fields")
+    }
+
+    let tokenFont = tokenField.attributedStringValue.attribute(
+        .font,
+        at: 0,
+        effectiveRange: nil
+    ) as? NSFont
+    expect(
+        abs((tokenFont?.pointSize ?? 0) - 10.5) < 0.01,
+        "API Key token metrics should use the compact 10.5pt font"
+    )
+
+    let modelAlignmentFrame = modelChip.alignmentRect(forFrame: modelChip.frame)
+    let tokenAlignmentFrame = tokenField.alignmentRect(forFrame: tokenField.frame)
+    let modelLeadingInset = modelAlignmentFrame.minX
+    let tokenTrailingInset = sessionCard.bounds.maxX - tokenAlignmentFrame.maxX
+    expect(
+        abs(modelLeadingInset - tokenTrailingInset) < 0.5,
+        "model chip and token metrics should be symmetric within the session card "
+            + "(model: \(modelLeadingInset), tokens: \(tokenTrailingInset))"
+    )
 }
 
 @MainActor

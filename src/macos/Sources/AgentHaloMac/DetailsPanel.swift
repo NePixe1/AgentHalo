@@ -498,7 +498,7 @@ class DetailsPanel: NSPanel {
         let inputStr = compactTokenCount(input)
         let outputStr = compactTokenCount(output)
         
-        let font = NSFont.systemFont(ofSize: 11.5, weight: .medium)
+        let font = NSFont.systemFont(ofSize: 10.5, weight: .medium)
         // 莫兰迪蓝灰色：输入 (In)
         let inColor = NSColor(calibratedRed: 0.25, green: 0.45, blue: 0.65, alpha: 1)
         // 莫兰迪绿灰色：输出 (Out)
@@ -964,7 +964,7 @@ private final class SessionCardView: NSView {
         modelLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         modelLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        tokenLabel.font = .systemFont(ofSize: 11.5, weight: .medium)
+        tokenLabel.font = .systemFont(ofSize: 10.5, weight: .medium)
         tokenLabel.alignment = .right
         tokenLabel.lineBreakMode = .byTruncatingTail
         tokenLabel.maximumNumberOfLines = 1
