@@ -150,7 +150,6 @@ public enum SessionAggregator {
         }
         return snapshots.contains { candidate in
             candidate.agent == snapshot.agent
-                && candidate.threadId != snapshot.threadId
                 && isMeaningful(candidate)
                 && candidate.lastEventAt > snapshot.lastEventAt
         }

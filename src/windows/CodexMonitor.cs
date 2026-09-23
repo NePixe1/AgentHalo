@@ -1313,8 +1313,6 @@ public sealed class CodexSessionMonitor : IDisposable
                         candidate.State == HaloState.Done ||
                         candidate.State == HaloState.Error;
                     return candidate.Agent == snapshot.Agent &&
-                        !String.Equals(candidate.ThreadId, snapshot.ThreadId,
-                            StringComparison.OrdinalIgnoreCase) &&
                         meaningful && candidate.LastEventUtc > snapshot.LastEventUtc;
                 });
             }).ToList();
@@ -1324,7 +1322,7 @@ public sealed class CodexSessionMonitor : IDisposable
         {
             lock (sync)
             {
-                return trackers.Values.Select(delegate(SessionTracker tracker)
+                List<SessionSnapshot> recent = trackers.Values.Select(delegate(SessionTracker tracker)
                 {
                     return CloneSnapshot(tracker.Snapshot);
                 })
@@ -1332,6 +1330,8 @@ public sealed class CodexSessionMonitor : IDisposable
                 {
                     return snapshot.LastEventUtc >= DateTime.UtcNow.AddHours(-24);
                 })
+                .ToList();
+                return WithoutSupersededErrors(recent)
                 .OrderBy(delegate(SessionSnapshot snapshot) { return StatePriority(snapshot.State); })
                 .ThenByDescending(delegate(SessionSnapshot snapshot) { return snapshot.LastEventUtc; })
                 .Take(8)

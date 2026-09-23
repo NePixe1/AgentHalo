@@ -1356,6 +1356,82 @@ public static class Diagnostics
                     return snapshot.ThreadId == "old-error";
                 }), "metadata-only Windows session does not suppress old error");
 
+                string sameThread = "01a0cbf2-2fb4-7db2-a316-edd1d50c2c7a";
+                SessionSnapshot sameThreadError = new SessionSnapshot
+                {
+                    ThreadId = sameThread,
+                    ProjectName = "nanobuild",
+                    State = HaloState.Error,
+                    Action = "Interrupted",
+                    LastEventUtc = supersessionNow.AddSeconds(-30),
+                    Active = false,
+                    Agent = AgentKind.Codex
+                };
+                SessionSnapshot sameThreadWorking = new SessionSnapshot
+                {
+                    ThreadId = sameThread,
+                    ProjectName = "nanobuild",
+                    State = HaloState.Working,
+                    Action = "Running command",
+                    LastEventUtc = supersessionNow,
+                    Active = true,
+                    Agent = AgentKind.Codex
+                };
+                List<SessionSnapshot> continuedDisplay =
+                    CodexSessionMonitor.WithoutSupersededErrors(
+                        new[] { sameThreadError, sameThreadWorking });
+                Assert(continuedDisplay.Count == 1 &&
+                    continuedDisplay[0].State == HaloState.Working,
+                    "same-thread continuation replaces Windows interrupt");
+
+                SessionSnapshot sameThreadIdle = new SessionSnapshot
+                {
+                    ThreadId = "old-error",
+                    ProjectName = "OldProject",
+                    State = HaloState.Idle,
+                    Action = "Ready",
+                    LastEventUtc = supersessionNow,
+                    Active = false,
+                    Agent = AgentKind.Codex
+                };
+                List<SessionSnapshot> idleContinuationDisplay =
+                    CodexSessionMonitor.WithoutSupersededErrors(
+                        new[] { oldError, sameThreadIdle });
+                Assert(idleContinuationDisplay.Any(delegate(SessionSnapshot snapshot)
+                {
+                    return snapshot.ThreadId == "old-error" &&
+                        snapshot.State == HaloState.Error;
+                }), "same-thread metadata does not clear Windows interrupt");
+
+                SessionSnapshot sameThreadOlderWorking = new SessionSnapshot
+                {
+                    ThreadId = sameThread,
+                    ProjectName = "nanobuild",
+                    State = HaloState.Working,
+                    Action = "Running command",
+                    LastEventUtc = supersessionNow.AddSeconds(-30),
+                    Active = true,
+                    Agent = AgentKind.Codex
+                };
+                SessionSnapshot sameThreadNewerError = new SessionSnapshot
+                {
+                    ThreadId = sameThread,
+                    ProjectName = "nanobuild",
+                    State = HaloState.Error,
+                    Action = "Interrupted",
+                    LastEventUtc = supersessionNow,
+                    Active = false,
+                    Agent = AgentKind.Codex
+                };
+                List<SessionSnapshot> reinterruptedDisplay =
+                    CodexSessionMonitor.WithoutSupersededErrors(
+                        new[] { sameThreadOlderWorking, sameThreadNewerError });
+                Assert(reinterruptedDisplay.Count == 2 &&
+                    reinterruptedDisplay.Any(delegate(SessionSnapshot snapshot)
+                    {
+                        return snapshot.State == HaloState.Error;
+                    }), "newer same-thread Windows interrupt stays visible");
+
                 HaloSettings presenceSettings = new HaloSettings
                 {
                     InstalledAt = supersessionNow.AddHours(-1).ToString("o")

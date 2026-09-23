@@ -369,6 +369,85 @@ func testAggregateRemovesSupersededSessionErrors() {
     )
     expect(unchanged.state, .error, "metadata-only session does not suppress error")
     expect(unchanged.sessions.map(\.threadId), ["old-error"], "metadata-only session stays invisible")
+
+    let sameThread = "01a0cbf2-2fb4-7db2-a316-edd1d50c2c7a"
+    let continued = SessionAggregator.aggregate(
+        snapshots: [
+            SessionSnapshot(
+                threadId: sameThread,
+                projectName: "nanobuild",
+                workingDirectory: "/tmp/nanobuild",
+                state: .error,
+                action: "Interrupted",
+                lastEventAt: now.addingTimeInterval(-30),
+                completedAt: nil,
+                active: false
+            ),
+            SessionSnapshot(
+                threadId: sameThread,
+                projectName: "nanobuild",
+                workingDirectory: "/tmp/nanobuild",
+                state: .working,
+                action: "Running command",
+                lastEventAt: now,
+                completedAt: nil,
+                active: true
+            ),
+        ],
+        settings: settings,
+        now: now
+    )
+    expect(continued.state, .working, "same-thread continuation replaces interrupt")
+    expect(continued.sessions.map(\.threadId), [sameThread], "stale same-thread interrupt is hidden")
+
+    let continuationIdle = SessionAggregator.aggregate(
+        snapshots: [
+            oldError,
+            SessionSnapshot(
+                threadId: "old-error",
+                projectName: "OldProject",
+                workingDirectory: "/tmp/old",
+                state: .idle,
+                action: "Ready",
+                lastEventAt: now,
+                completedAt: nil,
+                active: false
+            ),
+        ],
+        settings: settings,
+        now: now
+    )
+    expect(continuationIdle.state, .error, "same-thread metadata does not clear interrupt")
+    expect(continuationIdle.sessions.map(\.threadId), ["old-error"], "idle continuation stays hidden")
+
+    let reinterrupted = SessionAggregator.aggregate(
+        snapshots: [
+            SessionSnapshot(
+                threadId: sameThread,
+                projectName: "nanobuild",
+                workingDirectory: "/tmp/nanobuild",
+                state: .working,
+                action: "Running command",
+                lastEventAt: now.addingTimeInterval(-30),
+                completedAt: nil,
+                active: true
+            ),
+            SessionSnapshot(
+                threadId: sameThread,
+                projectName: "nanobuild",
+                workingDirectory: "/tmp/nanobuild",
+                state: .error,
+                action: "Interrupted",
+                lastEventAt: now,
+                completedAt: nil,
+                active: false
+            ),
+        ],
+        settings: settings,
+        now: now
+    )
+    expect(reinterrupted.state, .error, "newer same-thread interrupt stays primary")
+    expect(reinterrupted.sessions.map(\.threadId), [sameThread, sameThread], "older working remains behind the new interrupt")
 }
 
 func testAcknowledgingCompletedSessionsStoresLatestVisibleCompletionOnly() {
