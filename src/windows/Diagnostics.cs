@@ -631,7 +631,7 @@ public static class Diagnostics
                 PiLivenessChecks.Run();
                 Assert(GeneratedHaloSpec.ContractVersion == 2,
                     "generated shared contract version");
-                Assert(GeneratedHaloSpec.ReleaseVersion == "1.1.0",
+                Assert(GeneratedHaloSpec.ReleaseVersion == "1.2.0",
                     "generated shared release version");
                 Assert(GeneratedHaloSpec.State(HaloState.Attention).Label == "NEEDS YOU",
                     "generated state labels");
