@@ -4,7 +4,8 @@
 
 Agent Halo is a quiet, always-visible desktop vital sign for coding agents. The
 current release monitors Codex, Claude Code, Grok Build, and Pi on Windows and
-macOS, plus an optional Antigravity agent on macOS only (default off; `agy` CLI
+macOS. OpenCode and WorkBuddy are optional on both platforms (default off).
+macOS also offers an optional Antigravity agent (default off; `agy` CLI
 lifecycle only; Gemini 5h/Weekly quotas only). It answers one question without
 making the user return to the agent window: "What needs me right now?"
 
@@ -31,7 +32,7 @@ making the user return to the agent window: "What needs me right now?"
 
 - Native Windows (WPF) and macOS (Swift) apps, transparent and always on top.
 - Smooth composition-clock animation.
-- Local lifecycle monitoring for Codex, Claude Code, Grok Build, and Pi on both Windows and macOS; optional Antigravity (`agy`) on macOS only.
+- Local lifecycle monitoring for Codex, Claude Code, Grok Build, and Pi on both Windows and macOS. Optional OpenCode and WorkBuddy on both platforms. Optional Antigravity (`agy`) on macOS only.
 - Multiple-session aggregation with priority ordering.
 - Configurable agent visibility with focused polling on Windows to limit background overhead.
 - Hover-to-inspect usage, context, or session details.
@@ -45,7 +46,7 @@ making the user return to the agent window: "What needs me right now?"
 
 Agent Halo renders one focused agent at a time. On Windows, users choose the visible agents from `监控的 Agent`; only the focused agent is actively polled, and it can be changed from the hover switch or `当前显示`. Existing settings default to all supported agents, and at least one agent remains enabled.
 
-The details panel exposes two modes selected from the focused session's endpoint and credentials: official OAuth mode shows usage, while API-key mode shows a session summary card (title, model, tokens; empty state when offline) and includes custom or third-party endpoints. Synthetic Codex failure surfacing stays scoped to Codex focus. Double-clicking the halo brings the focused agent's session host forward: Codex still uses its desktop-app scan; Claude, Grok, Pi, and Antigravity walk the live session pid to the hosting terminal or desktop app, and do nothing when no pid or host exists.
+The details panel exposes two modes selected from the focused session's endpoint and credentials: official OAuth mode shows usage, while API-key mode shows a session summary card (title, model, tokens; empty state when offline) and includes custom or third-party endpoints. Synthetic Codex failure surfacing stays scoped to Codex focus. Double-clicking the halo brings the focused agent's session host forward: Codex still uses its desktop-app scan; WorkBuddy activates its own app process; Claude, Grok, Pi, OpenCode, and Antigravity walk the live session pid to the hosting terminal or desktop app, and do nothing when no pid or host exists.
 
 ## Visual language
 

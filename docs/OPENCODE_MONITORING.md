@@ -2,7 +2,7 @@
 
 ## 调研与取舍
 
-2026-09-11 调研，Windows 首版实现。macOS 可复用插件与快照协议，本轮不改其手写监控代码。
+2026-09-11 调研，Windows 首版实现。macOS 复用同一插件与快照协议，安装到 `~/.config/opencode/plugins/agent-halo-status.js`（尊重 `OPENCODE_CONFIG_DIR` 和 `XDG_CONFIG_HOME`），并在选中 OpenCode 时读取 `~/.agent-halo/cache/opencode`。
 
 | 来源 | 借鉴的经验 | Agent Halo 的选择 |
 | --- | --- | --- |
@@ -31,12 +31,12 @@
 
 ## 安装与使用
 
-1. 在 Windows 右键菜单“监控对象”中勾选 OpenCode。保留原有 Agent 勾选，不自动更改已保存的选择。
-2. Agent Halo 将内嵌插件安装到 `~/.config/opencode/plugins/agent-halo-status.js`；尊重 `OPENCODE_CONFIG_DIR` 和 `XDG_CONFIG_HOME`。
+1. 在监控对象中勾选 OpenCode。保留原有 Agent 勾选，不自动更改已保存的选择。
+2. Agent Halo 将内嵌插件安装到 `~/.config/opencode/plugins/agent-halo-status.js`；尊重 `OPENCODE_CONFIG_DIR` 和 `XDG_CONFIG_HOME`。Windows 与 macOS 使用同一份插件。
 3. 重启已经打开的 OpenCode，让插件加载。无需修改 API 配置，也无需安装第二个 EXE。
 4. 切换到 OpenCode 图标，复用现有会话卡片：标题、模型、输入/输出、右上角上下文。OpenCode 不显示 ChatGPT 官方额度。
 
-插件每个实例维护一个 `~/.agent-halo/cache/opencode/<pid>-<instance>.json` 原子快照。事件合并窗口 50ms，心跳 3s。Windows 后台每 500ms 读取，15s 无心跳则视为不可用；只在选中 OpenCode 时轮询，不在 WPF 渲染线程做文件或进程检查。
+插件每个实例维护一个 `~/.agent-halo/cache/opencode/<pid>-<instance>.json` 原子快照。事件合并窗口 50ms，心跳 3s。Windows 与 macOS 都在选中 OpenCode 时约每 500ms 读取，15s 无心跳则视为不可用；文件和进程检查不放在界面线程。macOS 用 `proc_pidinfo` 读取进程启动时间。
 
 没有消息用量时不伪造数字；上下文为最近 assistant 的 input + cache read/write + output，除以模型上下文上限，不保证等同于服务端下一请求的实际占用。会话首次加载会补读近期消息元数据。
 

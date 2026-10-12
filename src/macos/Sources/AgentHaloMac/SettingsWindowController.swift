@@ -441,6 +441,8 @@ private final class SettingsAgentChip: NSView {
     let agent: AgentKind
     private let iconView = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "")
+    private var colorImage: NSImage?
+    private var grayImage: NSImage?
     private var selected = false
     private var isLastEnabled = false
 
@@ -461,8 +463,12 @@ private final class SettingsAgentChip: NSView {
         case .grok: assetName = "grok"
         case .pi: assetName = "pi"
         case .antigravity: assetName = "antigravity"
+        case .opencode: assetName = "opencode"
+        case .workbuddy: assetName = "workbuddy"
         }
-        iconView.image = AgentIconAssets.image(named: assetName)
+        colorImage = AgentIconAssets.image(named: assetName)
+        grayImage = agent == .workbuddy ? colorImage.flatMap(AgentIconAssets.grayscale) : nil
+        iconView.image = colorImage
         iconView.imageScaling = .scaleProportionallyDown
         iconView.translatesAutoresizingMaskIntoConstraints = false
 
@@ -533,6 +539,9 @@ private final class SettingsAgentChip: NSView {
             ).cgColor
             titleLabel.textColor = .secondaryLabelColor
             alphaValue = 1.0
+        }
+        if agent == .workbuddy {
+            iconView.image = selected ? colorImage : (grayImage ?? colorImage)
         }
     }
 

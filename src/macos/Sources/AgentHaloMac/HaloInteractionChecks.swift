@@ -180,6 +180,8 @@ func runHaloInteractionChecks() {
     testAgentToggleSupportsThreeAgentsIncludingGrok()
     testAgentToggleWidthScalesWithEnabledCount()
     testAgentToggleClickMapsEnabledSlotsOnly()
+    testCompressedAgentToggleClickMatchesTheIcon()
+    testOpenCodeAndWorkBuddyPollOnlyWhileFocused()
     testFocusSubmenuIncludesGrok()
     testDetailsPanelSwitchCallbackSelectsClaudeCode()
 }
@@ -4496,6 +4498,85 @@ private func testAgentToggleClickMapsEnabledSlotsOnly() {
     toggle.selectAgentAtXForTesting(54) // second of two 36pt slots
     expect(toggle.selectedAgent, .pi, "second visible slot is Pi, not Claude")
     expect(selected, .pi, "click emits Pi")
+}
+
+@MainActor
+private func testCompressedAgentToggleClickMatchesTheIcon() {
+    let toggle = AgentToggleView(frame: .zero)
+    toggle.setEnabledAgents(AgentKind.allCases, focused: .codex, maximumWidth: 192)
+    toggle.layoutSubtreeIfNeeded()
+    expect(toggle.bounds.width, 192, "seven agents compress into the panel maximum")
+
+    let icons = allDescendants(of: toggle)
+        .compactMap { $0 as? NSImageView }
+        .filter { !$0.isHidden }
+    expect(icons.count, AgentKind.allCases.count, "compressed toggle still shows every enabled icon")
+    guard let last = icons.last else {
+        fatalError("compressed toggle should have a last icon")
+    }
+    let slot = toggle.bounds.width / CGFloat(AgentKind.allCases.count)
+    let lastSlotStart = slot * CGFloat(AgentKind.allCases.count - 1)
+    expect(
+        last.frame.minX >= lastSlotStart - 0.5,
+        "last compressed icon starts inside its own hit slot (minX \(last.frame.minX), slot \(lastSlotStart))"
+    )
+    expect(
+        last.frame.maxX <= toggle.bounds.width + 0.5,
+        "last compressed icon stays inside the toggle"
+    )
+
+    var selected: AgentKind?
+    toggle.onAgentSelected = { selected = $0 }
+    toggle.selectAgentAtXForTesting(last.frame.minX + 0.5)
+    expect(toggle.selectedAgent, .workbuddy, "the left edge of the last icon selects WorkBuddy")
+    expect(selected, .workbuddy, "compressed click emits WorkBuddy")
+}
+
+private func testOpenCodeAndWorkBuddyPollOnlyWhileFocused() {
+    expect(
+        SnapshotActivityMonitor<OpenCodeObservation>.shouldPoll(
+            activeAgent: .opencode,
+            focusedAgent: .opencode,
+            paused: true,
+            pauseStopsPolling: false,
+            enabled: true
+        ),
+        true,
+        "focused OpenCode still scans while monitoring is paused"
+    )
+    expect(
+        SnapshotActivityMonitor<OpenCodeObservation>.shouldPoll(
+            activeAgent: .opencode,
+            focusedAgent: .pi,
+            paused: false,
+            pauseStopsPolling: false,
+            enabled: true
+        ),
+        false,
+        "OpenCode does not scan while another agent is focused"
+    )
+    expect(
+        SnapshotActivityMonitor<WorkBuddyObservation>.shouldPoll(
+            activeAgent: .workbuddy,
+            focusedAgent: .workbuddy,
+            paused: true,
+            pauseStopsPolling: true,
+            enabled: true
+        ),
+        false,
+        "paused WorkBuddy does not read its database"
+    )
+    expect(
+        SnapshotActivityMonitor<WorkBuddyObservation>.shouldPoll(
+            activeAgent: .workbuddy,
+            focusedAgent: .workbuddy,
+            paused: false,
+            pauseStopsPolling: true,
+            enabled: true
+        ),
+        true,
+        "focused WorkBuddy scans while monitoring is active"
+    )
 }
 
 @MainActor

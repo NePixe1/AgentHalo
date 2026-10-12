@@ -15,6 +15,8 @@ public struct FocusedSessionLiveEvidence: Equatable, Sendable {
     public var grok: [GrokActiveSessionRef]
     public var pi: [PiLivePid]
     public var antigravityPresentPids: [Int32]
+    public var opencodeHostPid: Int32
+    public var workbuddyHostPid: Int32
 
     public static let empty = FocusedSessionLiveEvidence()
 
@@ -22,12 +24,16 @@ public struct FocusedSessionLiveEvidence: Equatable, Sendable {
         claude: [ClaudeLiveSessionSnapshot] = [],
         grok: [GrokActiveSessionRef] = [],
         pi: [PiLivePid] = [],
-        antigravityPresentPids: [Int32] = []
+        antigravityPresentPids: [Int32] = [],
+        opencodeHostPid: Int32 = 0,
+        workbuddyHostPid: Int32 = 0
     ) {
         self.claude = claude
         self.grok = grok
         self.pi = pi
         self.antigravityPresentPids = antigravityPresentPids
+        self.opencodeHostPid = opencodeHostPid
+        self.workbuddyHostPid = workbuddyHostPid
     }
 }
 
@@ -60,6 +66,10 @@ public enum FocusedSessionHostResolver {
         case .antigravity:
             let unique = Array(Set(evidence.antigravityPresentPids.filter { $0 > 0 }))
             return unique.count == 1 ? unique[0] : nil
+        case .opencode:
+            return evidence.opencodeHostPid > 0 ? evidence.opencodeHostPid : nil
+        case .workbuddy:
+            return evidence.workbuddyHostPid > 0 ? evidence.workbuddyHostPid : nil
         }
     }
 

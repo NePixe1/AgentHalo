@@ -33,6 +33,11 @@ mac_pi_dir="$mac_root/Sources/AgentHaloCore/integrations/pi"
 mkdir -p "$mac_pi_dir"
 cp "$shared_pi_extension" "$mac_pi_dir/agent-halo-status.ts"
 
+shared_opencode_plugin="$repo_root/src/shared/integrations/opencode/agent-halo-status.js"
+mac_opencode_dir="$mac_root/Sources/AgentHaloCore/integrations/opencode"
+mkdir -p "$mac_opencode_dir"
+cp "$shared_opencode_plugin" "$mac_opencode_dir/agent-halo-status.js"
+
 cd "$mac_root"
 # Rebuild hook/proxy before CoreChecks so isolation tests do not run stale
 # binaries that still write legacy ~/.agent-halo/* paths.
@@ -54,6 +59,10 @@ cp "$mac_root/.build/release/ClaudeCodeStatusHook" "$app_dir/Contents/Resources/
 cp "$mac_root/.build/release/ClaudeCodeStatusLineProxy" "$app_dir/Contents/Resources/claude-code-statusline-proxy"
 cp "$app_icon" "$app_dir/Contents/Resources/AppIcon.icns"
 cp "$agent_icon_assets"/*.svg "$app_dir/Contents/Resources/agent-switch/"
+workbuddy_icon="$repo_root/docs/assets/agent-switch/workbuddy.png"
+if [ -f "$workbuddy_icon" ]; then
+    cp "$workbuddy_icon" "$app_dir/Contents/Resources/agent-switch/workbuddy.png"
+fi
 
 cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
