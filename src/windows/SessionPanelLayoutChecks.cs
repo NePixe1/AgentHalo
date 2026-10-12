@@ -35,9 +35,10 @@ namespace CodexHalo
                 "output chip aligns with content right edge");
             Check(modelChip.ActualHeight == 22 && inputChip.ActualHeight == 22 && outputChip.ActualHeight == 22,
                 "all metadata chips have identical height");
-            Check(Y(title, slot) - Y(divider, slot) == 11 && title.Margin.Bottom == 8,
+            Check(Y(title, slot) - Y(divider, slot) == 8 && title.Margin.Bottom == 8,
                 "tight divider-to-title and title-to-metadata spacing");
-            Check(Y(footer, slot) + footer.ActualHeight <= 72, "metadata fits fixed body height");
+            Check(Math.Abs(Y(footer, slot) + footer.ActualHeight - 59) < 0.01,
+                "metadata ends at the slot bottom without hidden trailing space");
             var inputColor = ((SolidColorBrush)input.Foreground).Color;
             var outputColor = ((SolidColorBrush)output.Foreground).Color;
             Check(inputColor != outputColor && inputChip.Background != null && outputChip.Background != null,
@@ -55,7 +56,7 @@ namespace CodexHalo
             Layout(slot);
             Check(divider.Visibility == Visibility.Visible && Y(divider, slot) == dividerY,
                 "empty state keeps the same divider");
-            Check(X(emptyText, slot) == 0 && Y(emptyText, slot) == titleY && slot.ActualHeight == 72,
+            Check(X(emptyText, slot) == 0 && Y(emptyText, slot) == titleY && slot.ActualHeight == 59,
                 "empty state shares populated text origin and height");
             Check(empty.Background == null && empty.BorderThickness == new Thickness(0) &&
                 ((Grid)empty.Child).Children.Count == 1, "empty state has no legacy dashed frame");
@@ -64,8 +65,8 @@ namespace CodexHalo
         }
         private static void Layout(FrameworkElement element)
         {
-            element.Measure(new Size(266, 72));
-            element.Arrange(new Rect(0, 0, 266, 72));
+            element.Measure(new Size(266, 59));
+            element.Arrange(new Rect(0, 0, 266, 59));
             element.UpdateLayout();
         }
         private static double X(FrameworkElement element, FrameworkElement root)

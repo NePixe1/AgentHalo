@@ -171,7 +171,7 @@ public sealed class DetailsWindow : Window
         private readonly List<AgentKind> enabledAgents;
         private readonly StackPanel quotaGroup;
         private readonly Grid dataLayer;
-        /// <summary>Fixed-height session body host (Scheme B). Mirrors macOS H_body ≈ 72.</summary>
+        /// <summary>Shared fixed-height session body host for populated and empty states.</summary>
         private readonly Grid sessionBodySlot;
         private readonly Border emptyBody;
         private readonly TextBlock emptyBodyText;
@@ -183,8 +183,8 @@ public sealed class DetailsWindow : Window
         private readonly Grid sessionCardFooter;
         private readonly RoundedMeter fiveHourBar;
         private readonly RoundedMeter weekBar;
-        /// <summary>Session body slot height; keep dataLayer (80) so OAuth/session heights match.</summary>
-        private const double SessionBodyHeight = 72;
+        /// <summary>Keep the same 8px height difference to the data layer across all agents.</summary>
+        private const double SessionBodyHeight = 59;
         private readonly DispatcherTimer quotaTimer;
         private UsageMetrics previewMetrics;
         private ClaudeCodeMetrics previewClaudeMetrics;
@@ -229,7 +229,7 @@ public sealed class DetailsWindow : Window
 
             shell = new Border();
             shell.CornerRadius = new CornerRadius(16);
-            shell.Padding = new Thickness(17, 13, 17, 10);
+            shell.Padding = new Thickness(17, 13, 17, 4);
             shell.Background = CreateFallbackGlassBrush();
             shell.BorderBrush = new SolidColorBrush(
                 MediaColor.FromArgb(46, 183, 199, 207));
@@ -266,7 +266,7 @@ public sealed class DetailsWindow : Window
             };
             Grid.SetColumn(contextMeter, 2);
             top.Children.Add(contextMeter);
-            top.Margin = new Thickness(0, 0, 0, 7);
+            top.Margin = new Thickness(0, 0, 0, 13);
             content.Children.Add(top);
 
             headline = NewText("OFFLINE", 20, MediaColor.FromRgb(40, 52, 60),
@@ -278,7 +278,7 @@ public sealed class DetailsWindow : Window
             body.Children.Add(headline);
             subtitle = NewText(L10n.Instance["status.offline_codex"], 13,
                 MediaColor.FromRgb(103, 117, 126), FontWeights.Normal, true);
-            subtitle.Margin = new Thickness(0, 1, 0, 13);
+            subtitle.Margin = new Thickness(0, 1, 0, 7);
             body.Children.Add(subtitle);
             statusTextTransition = new StatusTextTransition(headline, subtitle);
             IsVisibleChanged += delegate { statusTextTransition.Settle(); };
@@ -300,7 +300,7 @@ public sealed class DetailsWindow : Window
             sessionBodySlot.Visibility = Visibility.Collapsed;
 
             dataLayer = new Grid();
-            dataLayer.Height = 80;
+            dataLayer.Height = SessionBodyHeight + 8;
             dataLayer.VerticalAlignment = VerticalAlignment.Top;
             dataLayer.Children.Add(quotaGroup);
             dataLayer.Children.Add(sessionBodySlot);
@@ -1271,12 +1271,12 @@ public sealed class DetailsWindow : Window
             };
 
             // Both populated and empty states share the divider and content origin.
-            slot.RowDefinitions.Add(new RowDefinition { Height = new GridLength(18) });
+            slot.RowDefinitions.Add(new RowDefinition { Height = new GridLength(11) });
             slot.RowDefinitions.Add(new RowDefinition());
             slot.Children.Add(new Border { Name = "SessionDivider", Height = 1,
                 VerticalAlignment = VerticalAlignment.Top,
                 Background = new SolidColorBrush(MediaColor.FromRgb(190, 205, 215)),
-                Margin = new Thickness(0, 7, 0, 10) });
+                Margin = new Thickness(0, 3, 0, 7) });
             Grid emptyInner = new Grid();
             emptyText = NewText(String.Empty, 12,
                 MediaColor.FromRgb(109, 129, 144), FontWeights.Normal, true);
@@ -1296,6 +1296,7 @@ public sealed class DetailsWindow : Window
             title = NewText("--", 13, MediaColor.FromRgb(30, 44, 54),
                 FontWeights.SemiBold, true);
             title.TextTrimming = TextTrimming.CharacterEllipsis;
+            title.Height = 18;
             title.Margin = new Thickness(0, 0, 0, 8);
 
             model = NewText("--", 11, MediaColor.FromRgb(77, 97, 112),
