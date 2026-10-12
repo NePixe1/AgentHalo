@@ -15,6 +15,7 @@ internal sealed class CodexSQLiteLogStore : IDisposable
         private readonly string databasePath;
         private IntPtr connection;
         private bool nativeUnavailable;
+        internal bool LastQuerySucceeded { get; private set; }
 
         public static readonly CodexSQLiteLogStore Shared =
             new CodexSQLiteLogStore(Path.Combine(
@@ -28,7 +29,15 @@ internal sealed class CodexSQLiteLogStore : IDisposable
 
         public List<string> QueryText(string query)
         {
-            List<string> rows = new List<string>();
+            List<string> result = new List<string>();
+            foreach (string[] row in QueryRows(query, 1)) result.Add(row[0]);
+            return result;
+        }
+
+        internal List<string[]> QueryRows(string query, int columns)
+        {
+            LastQuerySucceeded = false;
+            List<string[]> rows = new List<string[]>();
             if (nativeUnavailable || !File.Exists(databasePath))
             {
                 return rows;
@@ -51,17 +60,16 @@ internal sealed class CodexSQLiteLogStore : IDisposable
                     int step;
                     while ((step = sqlite3_step(statement)) == SqliteRow)
                     {
-                        string value = ReadUtf8Column(statement, 0);
-                        if (!String.IsNullOrEmpty(value))
-                        {
-                            rows.Add(value);
-                        }
+                        string[] values = new string[columns];
+                        for (int i = 0; i < columns; i++) values[i] = ReadUtf8Column(statement, i);
+                        if (!String.IsNullOrEmpty(values[0])) rows.Add(values);
                     }
                     if (step != SqliteDone)
                     {
                         ResetConnectionAfter(statement);
                         statement = IntPtr.Zero;
                     }
+                    else LastQuerySucceeded = true;
                 }
                 catch (DllNotFoundException)
                 {

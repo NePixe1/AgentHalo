@@ -21,7 +21,7 @@ namespace CodexHalo
         private static readonly HashSet<string> SkipNames = new HashSet<string>(
             StringComparer.Ordinal)
         {
-            "claude", "grok", "pi", "agy", "node", "bun",
+            "claude", "grok", "pi", "agy", "opencode", "node", "bun",
             "conhost", "openconsole", "wslrelay", "wslhost",
             "language_server", "agenthalo", "agenthalomac"
         };

@@ -44,7 +44,9 @@ $referenceArgs = $references | ForEach-Object { "/reference:$_" }
 $resourceArgs = @(
     "/resource:$(Join-Path $windowsLocales "zh.json"),CodexHalo.locales.zh.json",
     "/resource:$(Join-Path $windowsLocales "en.json"),CodexHalo.locales.en.json",
-    "/resource:$(Join-Path $root "src\shared\integrations\pi\agent-halo-status.ts"),AgentHalo.PiStatusExtension"
+    "/resource:$(Join-Path $root "src\shared\integrations\pi\agent-halo-status.ts"),AgentHalo.PiStatusExtension",
+    "/resource:$(Join-Path $root "src\shared\integrations\opencode\agent-halo-status.js"),AgentHalo.OpenCodeStatusPlugin",
+    "/resource:$(Join-Path $root "docs\assets\agent-switch\workbuddy.png"),AgentHalo.WorkBuddyIcon"
 )
 $exe = Join-Path $output "AgentHalo.exe"
 $sources = Get-ChildItem -LiteralPath $windows -Filter *.cs |

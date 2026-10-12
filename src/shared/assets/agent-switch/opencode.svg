@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 20" fill="none">
+  <title>OpenCode</title>
+  <!-- Official Mark: anomalyco/opencode packages/ui/src/components/logo.tsx -->
+  <path d="M12 16H4V8H12V16Z" fill="#adbec7"/>
+  <path d="M12 4H4V16H12V4ZM16 20H0V0H16V20Z" fill="#406984" fill-rule="evenodd"/>
+</svg>

@@ -35,6 +35,8 @@ jobs:
       - run: python scripts/validate_schema.py
       - run: python scripts/generate_shared.py --check
       - run: python scripts/check_shared.py
+      - name: OpenCode plugin lifecycle tests
+        run: node scripts/test-opencode-plugin.mjs
 
   windows:
     runs-on: windows-latest

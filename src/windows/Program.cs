@@ -42,6 +42,10 @@ public static class Program
         public static int Main()
         {
             string[] args = Environment.GetCommandLineArgs();
+            if (args.Length >= 3 && args[1] == "--workbuddy-snapshot")
+            {
+                return WorkBuddyChecks.WriteSnapshot(args[2]);
+            }
             if (args.Length >= 3 && args[1] == "--claude-hook")
             {
                 return ClaudeHookStatusWriter.WriteFromStandardInput(args[2]);

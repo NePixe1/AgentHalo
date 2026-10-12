@@ -906,7 +906,7 @@ namespace CodexHalo
 
         public HashSet<string> LiveSessionIds()
         {
-            return new HashSet<string>(records.Values
+            return new HashSet<string>(CurrentProcessSessions()
                 .Where(IsLive)
                 .Select(delegate(PiStatusRecord record) { return record.SessionId; }),
                 StringComparer.OrdinalIgnoreCase);
@@ -915,7 +915,7 @@ namespace CodexHalo
         public List<PiLivePid> LivePids()
         {
             List<PiLivePid> result = new List<PiLivePid>();
-            foreach (PiStatusRecord record in records.Values)
+            foreach (PiStatusRecord record in CurrentProcessSessions())
             {
                 if (!IsLive(record) || record.ProcessId <= 0)
                 {
@@ -928,6 +928,14 @@ namespace CodexHalo
                 });
             }
             return result;
+        }
+
+        private IEnumerable<PiStatusRecord> CurrentProcessSessions()
+        {
+            // A resumed/new session replaces the previous session in the same Pi process.
+            // Select before filtering offline, so shutdown cannot resurrect an older session.
+            return records.Values.GroupBy(record => record.ProcessId)
+                .Select(group => group.OrderByDescending(record => record.TimestampUtc).First());
         }
 
         private static Dictionary<string, PiStatusRecord> ReadLatest(string file)
@@ -1087,18 +1095,9 @@ namespace CodexHalo
             {
                 return false;
             }
-            try
-            {
-                using (Process process = Process.GetProcessById(record.ProcessId))
-                {
-                    return !process.HasExited &&
-                        process.StartTime.ToUniversalTime() <= record.TimestampUtc.AddSeconds(5);
-                }
-            }
-            catch
-            {
-                return false;
-            }
+            DateTime started;
+            return WindowsProcessProbe.TryGetLiveStartTime(record.ProcessId, out started) &&
+                started <= record.TimestampUtc.AddSeconds(5);
         }
 
         private static string ProjectName(string workingDirectory)

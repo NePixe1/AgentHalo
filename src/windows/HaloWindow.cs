@@ -38,6 +38,12 @@ public sealed class HaloWindow : Window
         private readonly ClaudeTranscriptSessionMonitor claudeTranscriptMonitor;
         private readonly GrokHookStatusMonitor grokMonitor;
         private readonly PiStatusMonitor piMonitor;
+        private readonly OpenCodeMonitor openCodeMonitor = new OpenCodeMonitor();
+        private readonly WorkBuddyMonitor workBuddyMonitor = new WorkBuddyMonitor();
+        private Forms.ToolStripMenuItem workBuddyAgentItem;
+        private Forms.ToolStripMenuItem enabledWorkBuddyAgentItem;
+        private Forms.ToolStripMenuItem openCodeAgentItem;
+        private Forms.ToolStripMenuItem enabledOpenCodeAgentItem;
         private readonly PiRuntimeMonitor piRuntimeMonitor;
         private readonly HaloVisual visual;
         private readonly DetailsWindow details;
@@ -287,6 +293,11 @@ public sealed class HaloWindow : Window
                 {
                     RefreshState();
                 }
+                return;
+            }
+            if (focusedAgent == AgentKind.OpenCode || focusedAgent == AgentKind.WorkBuddy)
+            {
+                RefreshState();
                 return;
             }
             // Re-evaluate presence on every tick so offline becomes visible as
@@ -546,6 +557,26 @@ public sealed class HaloWindow : Window
                 return;
             }
 
+            if (settings.GetFocusedAgent() == AgentKind.OpenCode || settings.GetFocusedAgent() == AgentKind.WorkBuddy)
+            {
+                aggregate = settings.GetFocusedAgent() == AgentKind.WorkBuddy
+                    ? workBuddyMonitor.Aggregate(settings.Paused) : openCodeMonitor.Aggregate(settings.Paused);
+                if (demoState.HasValue)
+                {
+                    aggregate.State = demoState.Value;
+                    aggregate.Label = CodexSessionMonitor.StateLabel(demoState.Value);
+                    aggregate.Detail = "Preview mode";
+                }
+                visual.SetSteadyDone(aggregate.Label == "STANDBY");
+                visual.SetErrorPresentation(demoErrorPresentation ?? ErrorPresentation.Flashing);
+                visual.SetState(aggregate.State, aggregate.Label, aggregate.Sessions.Count);
+                visual.SetAnswerStreaming(false);
+                displayAggregate = aggregate;
+                tray.Text = "Agent Halo · " + aggregate.Label;
+                details.UpdateContent(aggregate, aggregate.Sessions);
+                UpdateAgentMenuChecks();
+                return;
+            }
             aggregate = monitor.GetAggregate(settings);
             bool codexRunning = CodexRuntimeReader.IsRunning();
             string appFailure;
@@ -726,6 +757,23 @@ public sealed class HaloWindow : Window
 
         private void ActivateFocusedAgent()
         {
+            if (settings.GetFocusedAgent() == AgentKind.WorkBuddy)
+            {
+                int pid = workBuddyMonitor.HostPid();
+                if (!settings.Paused && pid > 0) ActivateHostProcess(pid);
+                return;
+            }
+            if (settings.GetFocusedAgent() == AgentKind.OpenCode)
+            {
+                if (!settings.Paused)
+                {
+                    openCodeMonitor.Refresh();
+                    int host = ProcessTreeHostWalker.ResolveHost(openCodeMonitor.HostPid(),
+                        HostProcessTable.Live(), Process.GetCurrentProcess().Id);
+                    if (host > 0) ActivateHostProcess(host);
+                }
+                return;
+            }
             AgentKind focused = settings.GetFocusedAgent();
             if (focused == AgentKind.Codex)
             {
@@ -906,7 +954,7 @@ public sealed class HaloWindow : Window
         {
             AgentKind focused = settings.GetFocusedAgent();
             if (focused == AgentKind.ClaudeCode || focused == AgentKind.Grok ||
-                focused == AgentKind.Pi)
+                focused == AgentKind.Pi || focused == AgentKind.OpenCode || focused == AgentKind.WorkBuddy)
             {
                 return detailsAggregate == null || detailsAggregate.Sessions == null
                     ? new List<SessionSnapshot>() : detailsAggregate.Sessions;
@@ -1380,6 +1428,12 @@ public sealed class HaloWindow : Window
             {
                 return snapshot.LastEventUtc >= now.AddHours(-1);
             }
+            if (snapshot.Agent == AgentKind.Pi)
+            {
+                // Pi emits state boundaries rather than every streamed token. Long tools/thinking
+                // remain active until their next lifecycle event or the current process exits.
+                return sessionLive && snapshot.Active;
+            }
             return sessionLive && snapshot.Active &&
                 snapshot.LastEventUtc >= now.AddMinutes(-10);
         }
@@ -1630,6 +1684,10 @@ public sealed class HaloWindow : Window
             enabledAgentMenu.DropDownItems.Add(enabledClaudeAgentItem);
             enabledAgentMenu.DropDownItems.Add(enabledGrokAgentItem);
             enabledAgentMenu.DropDownItems.Add(enabledPiAgentItem);
+            enabledOpenCodeAgentItem = CreateEnabledAgentItem(AgentKind.OpenCode, "OpenCode");
+            enabledAgentMenu.DropDownItems.Add(enabledOpenCodeAgentItem);
+            enabledWorkBuddyAgentItem = CreateEnabledAgentItem(AgentKind.WorkBuddy, "WorkBuddy");
+            enabledAgentMenu.DropDownItems.Add(enabledWorkBuddyAgentItem);
             menu.Items.Add(enabledAgentMenu);
 
             Forms.ToolStripMenuItem agentMenu =
@@ -1670,6 +1728,12 @@ public sealed class HaloWindow : Window
             agentMenu.DropDownItems.Add(claudeAgentItem);
             agentMenu.DropDownItems.Add(grokAgentItem);
             agentMenu.DropDownItems.Add(piAgentItem);
+            openCodeAgentItem = new Forms.ToolStripMenuItem("OpenCode");
+            openCodeAgentItem.Click += delegate { Dispatcher.BeginInvoke(new Action(delegate { SetFocusedAgent(AgentKind.OpenCode); })); };
+            agentMenu.DropDownItems.Add(openCodeAgentItem);
+            workBuddyAgentItem = new Forms.ToolStripMenuItem("WorkBuddy");
+            workBuddyAgentItem.Click += delegate { Dispatcher.BeginInvoke(new Action(delegate { SetFocusedAgent(AgentKind.WorkBuddy); })); };
+            agentMenu.DropDownItems.Add(workBuddyAgentItem);
             menu.Items.Add(agentMenu);
 
             // Language submenu
@@ -1739,7 +1803,7 @@ public sealed class HaloWindow : Window
 
         private void SetFocusedAgent(AgentKind agent)
         {
-            if (!settings.IsAgentEnabled(agent))
+            if (!settings.IsAgentEnabled(agent) || settings.GetFocusedAgent() == agent)
             {
                 return;
             }
@@ -1754,8 +1818,6 @@ public sealed class HaloWindow : Window
             RefreshState();
             if (details.IsVisible)
             {
-                AggregateSnapshot detailsAggregate = displayAggregate ?? aggregate;
-                details.UpdateContent(detailsAggregate, DetailsSessions(detailsAggregate));
                 PositionDetails();
             }
         }
@@ -1776,6 +1838,12 @@ public sealed class HaloWindow : Window
             claudeAgentItem.Visible = settings.IsAgentEnabled(AgentKind.ClaudeCode);
             grokAgentItem.Visible = settings.IsAgentEnabled(AgentKind.Grok);
             piAgentItem.Visible = settings.IsAgentEnabled(AgentKind.Pi);
+            openCodeAgentItem.Checked = focused == AgentKind.OpenCode;
+            openCodeAgentItem.Visible = settings.IsAgentEnabled(AgentKind.OpenCode);
+            enabledOpenCodeAgentItem.Checked = settings.IsAgentEnabled(AgentKind.OpenCode);
+            workBuddyAgentItem.Checked = focused == AgentKind.WorkBuddy;
+            workBuddyAgentItem.Visible = settings.IsAgentEnabled(AgentKind.WorkBuddy);
+            enabledWorkBuddyAgentItem.Checked = settings.IsAgentEnabled(AgentKind.WorkBuddy);
 
             if (enabledCodexAgentItem != null)
             {
@@ -1825,8 +1893,14 @@ public sealed class HaloWindow : Window
             return item;
         }
 
+        private bool openCodePluginConfigured;
         private void UpdateFocusedAgentMonitoring()
         {
+            if (!openCodePluginConfigured && settings.IsAgentEnabled(AgentKind.OpenCode) && !settings.Paused)
+            {
+                openCodePluginConfigured = true;
+                System.Threading.ThreadPool.QueueUserWorkItem(delegate { OpenCodePluginConfigurator.Configure(); });
+            }
             if (ShouldRunCodexMonitor(settings))
             {
                 monitor.Start();
