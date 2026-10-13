@@ -10,6 +10,10 @@ export const AgentHaloStatus = async ({ client, directory }) => {
   const file = join(root, `${process.pid}-${instance}.json`)
   const startedAt = new Date(Date.now() - process.uptime() * 1000).toISOString()
   const sessions = new Map()
+  // Startup SDK reads may finish after a deletion event. Keep tombstones only
+  // until both startup reads settle; explicit new events can still recreate IDs.
+  const startupDeleted = new Set()
+  let startupHydrating = true
   let closed = false, timer, pending, writing = Promise.resolve()
   let models = new Map()
   let modelsLoading = false, modelsCheckedAt = 0
@@ -49,15 +53,18 @@ export const AgentHaloStatus = async ({ client, directory }) => {
     if (!closed && !pending) { pending = setTimeout(flush, 50); pending.unref?.() }
   }
   async function metadata(id) {
+    const s = sessions.get(id)
+    if (!s || closed) return
     const revision = usageRevision.get(id) || 0
+    const isCurrent = () => !closed && sessions.get(id) === s
     try {
       const { data } = await client.session.get({ path: { id } })
-      const s = session(id)
-      if (s && data) { s.title = data.title || s.title; s.parentID = data.parentID || ""; schedule() }
+      if (!isCurrent() || !data) return
+      if (data) { s.title = data.title || s.title; s.parentID = data.parentID || ""; schedule() }
       if (s) {
         const messages = await client.session.messages({ path: { id }, query: { directory, limit: 20 } })
         const latest = [...(messages.data || [])].reverse().find(m => m.info?.role === "assistant" && usableUsage(m.info))
-        if (latest && revision === (usageRevision.get(id) || 0)) { modelInfo(s, latest.info); schedule() }
+        if (isCurrent() && latest && revision === (usageRevision.get(id) || 0)) { modelInfo(s, latest.info); schedule() }
       }
     } catch {}
   }
@@ -112,10 +119,13 @@ export const AgentHaloStatus = async ({ client, directory }) => {
     const id = p.sessionID || info.sessionID || part.sessionID ||
       (event.type.startsWith("session.") ? info.id : null)
     if (!id) return
+    if (event.type === "session.deleted") {
+      if (startupHydrating) startupDeleted.add(id)
+      sessions.delete(id); usageRevision.delete(id); schedule(); return
+    }
     const isNew = !sessions.has(id)
     const s = session(id)
     if (isNew) void metadata(id)
-    if (event.type === "session.deleted") { sessions.delete(id); schedule(); return }
     if (event.type === "session.created" || event.type === "session.updated") {
       s.title = info.title || s.title; s.parentID = info.parentID || s.parentID
     } else if (event.type === "session.status" && p.status?.type !== "idle") {
@@ -163,7 +173,7 @@ export const AgentHaloStatus = async ({ client, directory }) => {
     try {
       const { data } = await client.session.status()
       for (const [id, status] of Object.entries(data || {})) {
-        if (sessions.has(id)) continue
+        if (closed || startupDeleted.has(id) || sessions.has(id)) continue
         const s = session(id)
         if (status.type !== "idle") { s.active = true; activeState(s) }
         void metadata(id)
@@ -173,10 +183,12 @@ export const AgentHaloStatus = async ({ client, directory }) => {
       const { data } = await client.session.list({ query: { directory, limit: 1 } })
       const latest = (data || []).filter(s => !s.parentID && (!s.directory || s.directory === directory))
         .sort((a, b) => (b.time?.updated || 0) - (a.time?.updated || 0))[0]
-      if (latest && !sessions.has(latest.id)) {
+      if (!closed && latest && !startupDeleted.has(latest.id) && !sessions.has(latest.id)) {
         const s = session(latest.id); s.title = latest.title || ""; void metadata(s.id)
       }
     } catch {}
+    startupHydrating = false
+    startupDeleted.clear()
     schedule()
   })()
   return {

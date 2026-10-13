@@ -77,3 +77,6 @@ jobs:
           fi
       - working-directory: src/macos
         run: swift build -c release --product AgentHaloMac
+      - name: Snapshot monitor publication races
+        working-directory: src/macos
+        run: swift run AgentHaloMac --snapshot-monitor-check

@@ -18,6 +18,8 @@ final class SnapshotActivityMonitor<Snapshot: Equatable & Sendable>: @unchecked 
     private let empty: Snapshot
     private let scan: @Sendable () -> Snapshot
     private var timer: DispatchSourceTimer?
+    private var lastDelivered: Snapshot
+    private let callbackDispatch: @Sendable (@escaping @Sendable () -> Void) -> Void
     private var latest: Snapshot
     private var context = PollingContext()
     private var contextGeneration: UInt64 = 0
@@ -28,6 +30,9 @@ final class SnapshotActivityMonitor<Snapshot: Equatable & Sendable>: @unchecked 
         activeAgent: AgentKind,
         pauseStopsPolling: Bool = false,
         empty: Snapshot,
+        callbackDispatch: @escaping @Sendable (@escaping @Sendable () -> Void) -> Void = {
+            DispatchQueue.main.async(execute: $0)
+        },
         scan: @escaping @Sendable () -> Snapshot
     ) {
         self.queue = DispatchQueue(label: queueLabel, qos: .utility)
@@ -36,6 +41,8 @@ final class SnapshotActivityMonitor<Snapshot: Equatable & Sendable>: @unchecked 
         self.empty = empty
         self.scan = scan
         self.latest = empty
+        self.lastDelivered = empty
+        self.callbackDispatch = callbackDispatch
     }
 
     static func shouldPoll(
@@ -73,13 +80,12 @@ final class SnapshotActivityMonitor<Snapshot: Equatable & Sendable>: @unchecked 
             enabled: enabled
         )
         stateLock.lock()
-        let wasEnabled = context.enabled
         if context != next {
             context = next
             contextGeneration &+= 1
         }
         let generation = contextGeneration
-        let shouldPublishEmpty = !enabled && (wasEnabled || latest != empty)
+        let shouldPublishEmpty = !enabled && lastDelivered != empty
         if !enabled {
             latest = empty
         }
@@ -164,19 +170,26 @@ final class SnapshotActivityMonitor<Snapshot: Equatable & Sendable>: @unchecked 
         next.resume()
     }
 
+    func synchronizePollingForChecks() {
+        queue.sync {}
+    }
+
     private func poll() {
         stateLock.lock()
-        let enabled = context.enabled
+        let canPoll = Self.shouldPoll(
+            activeAgent: activeAgent, focusedAgent: context.focusedAgent,
+            paused: context.paused, pauseStopsPolling: pauseStopsPolling, enabled: context.enabled
+        )
         let generation = contextGeneration
         stateLock.unlock()
-        guard enabled else { return }
+        guard canPoll else { return }
         let scanned = scan()
         stateLock.lock()
         guard contextGeneration == generation, context.enabled else {
             stateLock.unlock()
             return
         }
-        let changed = latest != scanned
+        let changed = lastDelivered != scanned
         latest = scanned
         stateLock.unlock()
         if changed {
@@ -185,16 +198,21 @@ final class SnapshotActivityMonitor<Snapshot: Equatable & Sendable>: @unchecked 
     }
 
     private func publish(_ snapshot: Snapshot, generation: UInt64, enabled: Bool) {
-        DispatchQueue.main.async { [weak self] in
+        callbackDispatch { [weak self] in
             guard let self else { return }
             self.stateLock.lock()
             guard self.contextGeneration == generation,
                   self.context.enabled == enabled,
+                  self.latest == snapshot,
+                  self.lastDelivered != snapshot,
                   let onChange = self.onChange
             else {
                 self.stateLock.unlock()
                 return
             }
+            // A scan is not a delivered notification. Commit this watermark
+            // only when the current callback is actually about to be invoked.
+            self.lastDelivered = snapshot
             self.stateLock.unlock()
             onChange(snapshot)
         }

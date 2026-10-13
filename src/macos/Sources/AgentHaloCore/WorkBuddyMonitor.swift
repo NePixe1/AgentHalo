@@ -65,15 +65,30 @@ public enum WorkBuddyMonitor {
     public static let processNames: Set<String> = ["WorkBuddy", "workbuddy"]
     private static let sessionFileLimit = 65_536
     private static let transcriptChunk = 512 * 1024
-    private static let sessionQuery = """
+    private static let sessionQueryTemplate = """
     SELECT s.id, s.status, coalesce(s.custom_title, s.title), s.cwd, s.model, s.updated_at,
            coalesce(u.used, 0), coalesce(u.size, 0)
     FROM sessions s
     LEFT JOIN session_usage u ON u.session_id = s.id
-    WHERE s.deleted_at IS NULL
+    WHERE s.deleted_at IS NULL AND (
+        s.id IN ({0}) OR s.id IN (
+            SELECT id FROM sessions
+            WHERE deleted_at IS NULL AND id NOT IN ({0})
+            ORDER BY updated_at DESC LIMIT 64
+        )
+    )
     ORDER BY s.updated_at DESC
-    LIMIT 64
     """
+
+    private static func sessionQuery(liveIDs: Set<String>) -> String {
+        // Only hex digits enter the SQL; registration IDs remain UTF-8 data.
+        let ids = liveIDs.sorted().map { id in
+            "CAST(X'" + id.utf8.map { String(format: "%02x", $0) }.joined() + "' AS TEXT)"
+        }.joined(separator: ",")
+        return sessionQueryTemplate.replacingOccurrences(
+            of: "{0}", with: ids.isEmpty ? "SELECT NULL WHERE 0" : ids
+        )
+    }
 
     public static func rootDirectory(homeDirectory: URL) -> URL {
         homeDirectory.appendingPathComponent(".workbuddy", isDirectory: true)
@@ -104,7 +119,7 @@ public enum WorkBuddyMonitor {
             appStart: appStart,
             fileManager: fileManager
         )
-        let queried = querySessions(database: root.appendingPathComponent("workbuddy.db"))
+        let queried = querySessions(database: root.appendingPathComponent("workbuddy.db"), liveIDs: liveIDs)
         guard queried.connected else {
             return WorkBuddyObservation(present: true, connected: false, hostPid: host.processId, sessions: [])
         }
@@ -327,7 +342,7 @@ public enum WorkBuddyMonitor {
         return ids
     }
 
-    private static func querySessions(database url: URL) -> (connected: Bool, rows: [[String]]) {
+    private static func querySessions(database url: URL, liveIDs: Set<String>) -> (connected: Bool, rows: [[String]]) {
         guard FileManager.default.fileExists(atPath: url.path) else {
             return (false, [])
         }
@@ -342,7 +357,7 @@ public enum WorkBuddyMonitor {
         defer { sqlite3_close(handle) }
         sqlite3_busy_timeout(handle, 80)
         var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(handle, sessionQuery, -1, &statement, nil) == SQLITE_OK, let statement else {
+        guard sqlite3_prepare_v2(handle, sessionQuery(liveIDs: liveIDs), -1, &statement, nil) == SQLITE_OK, let statement else {
             if statement != nil { sqlite3_finalize(statement) }
             return (false, [])
         }

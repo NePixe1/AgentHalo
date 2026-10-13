@@ -446,6 +446,22 @@ func testWorkBuddyScanReadsDatabaseAndIgnoresPrewarm() throws {
     expect(observation.sessions[0].threadId, "live", "live interactive session")
     expect(observation.sessions[0].contextUsedPercent, Optional(12.0), "usage join")
 
+    // More recent history must never evict an older registered live task.
+    let history = Process()
+    history.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+    history.arguments = [database.path, (0..<80).map { index in
+        "INSERT INTO sessions VALUES ('history-\(index)', 'completed', NULL, 'History', '/work', 'model', \(updated + Int64(index) + 1), NULL);"
+    }.joined()]
+    try history.run()
+    history.waitUntilExit()
+    expect(history.terminationStatus, 0, "history fixture")
+    let crowded = WorkBuddyMonitor.scan(
+        homeDirectory: home, processes: processes, transcripts: &transcripts, launched: started
+    )
+    expect(crowded.sessions.contains { $0.threadId == "live" && $0.state == .working }, true,
+           "80 newer completed tasks cannot hide a registered live task")
+    expect(crowded.sessions.count, 65, "only historical rows are capped at 64")
+
     let offline = WorkBuddyMonitor.scan(
         homeDirectory: home,
         processes: [],
