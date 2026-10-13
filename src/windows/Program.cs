@@ -29,8 +29,8 @@ using MediaPoint = System.Windows.Point;
 [assembly: System.Reflection.AssemblyDescription("Ambient desktop status light for coding agents")]
 [assembly: System.Reflection.AssemblyCompany("Agent Halo")]
 [assembly: System.Reflection.AssemblyProduct("Agent Halo")]
-[assembly: System.Reflection.AssemblyVersion("1.1.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.1.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.2.0.0")]
 
 namespace CodexHalo
 {
@@ -42,6 +42,10 @@ public static class Program
         public static int Main()
         {
             string[] args = Environment.GetCommandLineArgs();
+            if (args.Length >= 3 && args[1] == "--workbuddy-snapshot")
+            {
+                return WorkBuddyChecks.WriteSnapshot(args[2]);
+            }
             if (args.Length >= 3 && args[1] == "--claude-hook")
             {
                 return ClaudeHookStatusWriter.WriteFromStandardInput(args[2]);

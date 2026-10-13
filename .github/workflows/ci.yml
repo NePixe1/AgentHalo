@@ -35,6 +35,10 @@ jobs:
       - run: python scripts/validate_schema.py
       - run: python scripts/generate_shared.py --check
       - run: python scripts/check_shared.py
+      - name: WorkBuddy SQL selection regression
+        run: python scripts/test-workbuddy-query.py
+      - name: OpenCode plugin lifecycle tests
+        run: node scripts/test-opencode-plugin.mjs
 
   windows:
     runs-on: windows-latest
@@ -47,9 +51,8 @@ jobs:
       - shell: powershell
         run: |
           ./scripts/build-windows.ps1
-          Start-Process -FilePath ./outputs/AgentHalo/AgentHalo.exe `
-            -ArgumentList "--self-test", "./outputs/windows-self-test.txt" -Wait
-          Get-Content ./outputs/windows-self-test.txt
+          ./scripts/test-windows-self-test-runner.ps1
+          ./scripts/run-windows-self-test.ps1
 
   macos:
     runs-on: macos-15

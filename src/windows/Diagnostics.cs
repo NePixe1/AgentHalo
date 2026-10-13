@@ -623,9 +623,15 @@ public static class Diagnostics
                 tracker.Refresh();
                 Assert(tracker.Snapshot.State == HaloState.Done,
                     "fatal turn clears plan flag");
+                OpenCodeChecks.Run();
+                WorkBuddyChecks.Run();
+                SessionPanelLayoutChecks.Run();
+                StatusTextTransitionChecks.Run();
+                SwitchContentionChecks.Run();
+                PiLivenessChecks.Run();
                 Assert(GeneratedHaloSpec.ContractVersion == 2,
                     "generated shared contract version");
-                Assert(GeneratedHaloSpec.ReleaseVersion == "1.1.0",
+                Assert(GeneratedHaloSpec.ReleaseVersion == "1.2.0",
                     "generated shared release version");
                 Assert(GeneratedHaloSpec.State(HaloState.Attention).Label == "NEEDS YOU",
                     "generated state labels");
@@ -1686,7 +1692,7 @@ public static class Diagnostics
                 HaloSettings legacyAgents = settingsSerializer.Deserialize<HaloSettings>(
                     "{\"FocusedAgent\":\"grok\"}");
                 legacyAgents.NormalizeEnabledAgents();
-                Assert(legacyAgents.GetEnabledAgents().Count == 4 &&
+                Assert(legacyAgents.GetEnabledAgents().Count == 6 &&
                     legacyAgents.GetFocusedAgent() == AgentKind.Grok,
                     "legacy settings enable every supported agent");
 
@@ -1710,7 +1716,7 @@ public static class Diagnostics
 
                 Assert(Math.Abs(
                     DetailsWindow.ResolveAgentSwitchThumbOffsetForTest(
-                        HaloSettings.SupportedAgents(), AgentKind.Pi) - 138) < 0.01,
+                        HaloSettings.SupportedAgents(), AgentKind.Pi) - 108) < 0.01,
                     "Pi initially uses the fourth slot in the full switch");
                 Assert(Math.Abs(
                     DetailsWindow.ResolveAgentSwitchThumbOffsetForTest(
@@ -3296,7 +3302,9 @@ public static class Diagnostics
                     "agent-halo-grok-ctx-" + Guid.NewGuid().ToString("N"));
                 try
                 {
-                    string cwd = Path.Combine(ctxRoot, "proj");
+                    // cwd is an encoded lookup key, not a directory this fixture uses.
+                    // Do not embed TEMP twice in the on-disk fixture path.
+                    string cwd = @"C:\grok-tests\proj";
                     string sessionId = "sess-1";
                     string enc = GrokSessionContextReader.EncodeWorkspaceDirectory(cwd);
                     string sessionDir = Path.Combine(ctxRoot, ".grok", "sessions",
@@ -3391,11 +3399,13 @@ public static class Diagnostics
                     // Brand-new session: updates.jsonl streams totalTokens before
                     // the first end-of-turn signals.json exists (macOS parity).
                     string firstTurnId = "session-first-turn";
-                    string firstTurnCwd = Path.Combine(ctxRoot, "first-proj");
+                    string firstTurnCwd = @"C:\grok-tests\first-proj";
                     string firstTurnDir = Path.Combine(ctxRoot, ".grok", "sessions",
                         GrokSessionContextReader.EncodeWorkspaceDirectory(
                             firstTurnCwd),
                         firstTurnId);
+                    Assert(Path.Combine(firstTurnDir, "updates.jsonl").Length < 260,
+                        "Grok fixture path must stay below legacy MAX_PATH: " + firstTurnDir);
                     Directory.CreateDirectory(firstTurnDir);
                     File.WriteAllText(Path.Combine(firstTurnDir, "updates.jsonl"),
                         "{\"timestamp\":1,\"method\":\"session/update\",\"params\":" +
@@ -3543,7 +3553,8 @@ public static class Diagnostics
                 File.Delete(temp);
                 TestFocusedSessionHostActivation();
                 File.WriteAllText(outputPath,
-                    "PASS\nLifecycle, usage metrics, panel formatting, and animation checks passed.\n",
+                    "PASS\nLifecycle, usage metrics, panel formatting, and animation checks passed.\n" +
+                    "Switch operations under scan lock: " + SwitchContentionChecks.ElapsedMilliseconds.ToString("F2", CultureInfo.InvariantCulture) + " ms\n",
                     Encoding.UTF8);
                 return 0;
             }
@@ -4395,34 +4406,45 @@ public static class Diagnostics
             }
             claudePanel.Close();
 
+            foreach (AgentKind previewAgent in new[] { AgentKind.Pi, AgentKind.OpenCode, AgentKind.WorkBuddy })
+            {
+            foreach (bool emptyPreview in new[] { false, true })
+            {
             List<SessionSnapshot> piSessions = new List<SessionSnapshot>();
             piSessions.Add(new SessionSnapshot
             {
                 ThreadId = "preview-pi",
-                ProjectName = "How do I monitor Pi sessions?",
+                ProjectName = previewAgent == AgentKind.Pi ? @"D:\workFile\02_测试与交付\测试项…" : "How do I monitor " + previewAgent + " sessions?",
                 WorkingDirectory = @"C:\work\AgentHalo",
-                State = HaloState.Thinking,
-                Action = "Thinking",
-                Active = true,
+                State = previewAgent == AgentKind.Pi ? HaloState.Done : HaloState.Thinking,
+                Action = previewAgent == AgentKind.Pi ? "Ready" : "Thinking",
+                Active = previewAgent != AgentKind.Pi,
                 LastEventUtc = now,
-                Agent = AgentKind.Pi,
+                Agent = previewAgent,
                 ModelProvider = "openai",
-                ModelName = "gpt-5.4",
-                TurnInputTokens = 24500,
-                TurnOutputTokens = 920,
-                ContextInputTokens = 64000,
+                ModelName = previewAgent == AgentKind.Pi ? "DeepSeek-V4.1-Flash" : "gpt-5.4",
+                TurnInputTokens = previewAgent == AgentKind.Pi ? 1500 : 24500,
+                TurnOutputTokens = previewAgent == AgentKind.Pi ? 2200 : 920,
+                ContextInputTokens = previewAgent == AgentKind.Pi ? 26000 : 64000,
                 ContextWindowTokens = 200000
             });
             AggregateSnapshot piAggregate = new AggregateSnapshot
             {
-                State = HaloState.Thinking,
-                Label = "THINKING",
-                Detail = "AgentHalo · Thinking",
+                State = previewAgent == AgentKind.Pi ? HaloState.Done : HaloState.Thinking,
+                Label = previewAgent == AgentKind.Pi ? "STANDBY" : "THINKING",
+                Detail = previewAgent == AgentKind.Pi ? L10n.Instance["status.standby_pi"] : "AgentHalo · Thinking",
                 Sessions = piSessions,
-                FocusedAgent = AgentKind.Pi
+                FocusedAgent = previewAgent
             };
             DetailsWindow piPanel = new DetailsWindow();
-            piPanel.SetEnabledAgents(new[] { AgentKind.Codex, AgentKind.Pi });
+            if (emptyPreview)
+            {
+                piSessions.Clear();
+                piAggregate.State = HaloState.Idle;
+                piAggregate.Label = "OFFLINE";
+            }
+            piPanel.SetEnabledAgents(previewAgent == AgentKind.Pi
+                ? new[] { AgentKind.Codex, AgentKind.Pi, AgentKind.OpenCode, AgentKind.WorkBuddy } : HaloSettings.SupportedAgents());
             piPanel.UpdateContent(piAggregate, piSessions);
             FrameworkElement piContent = piPanel.Content as FrameworkElement;
             piPanel.Content = null;
@@ -4450,11 +4472,13 @@ public static class Diagnostics
             PngBitmapEncoder piEncoder = new PngBitmapEncoder();
             piEncoder.Frames.Add(BitmapFrame.Create(piBitmap));
             using (FileStream stream = File.Create(Path.Combine(outputDirectory,
-                "panel-pi.png")))
+                "panel-" + HaloSettings.AgentKey(previewAgent) + (emptyPreview ? "-empty" : "") + ".png")))
             {
                 piEncoder.Save(stream);
             }
             piPanel.Close();
+            }
+            }
         }
 
         private static void RenderMenuPreview(string outputDirectory)

@@ -56,6 +56,8 @@ public sealed class HaloSettings
 
         public AgentKind GetFocusedAgent()
         {
+            if (String.Equals(FocusedAgent, "workbuddy", StringComparison.OrdinalIgnoreCase)) return AgentKind.WorkBuddy;
+            if (String.Equals(FocusedAgent, "opencode", StringComparison.OrdinalIgnoreCase)) return AgentKind.OpenCode;
             if (String.Equals(FocusedAgent, "claudeCode", StringComparison.OrdinalIgnoreCase))
             {
                 return AgentKind.ClaudeCode;
@@ -78,12 +80,16 @@ public sealed class HaloSettings
                 AgentKind.Codex,
                 AgentKind.ClaudeCode,
                 AgentKind.Grok,
-                AgentKind.Pi
+                AgentKind.Pi,
+                AgentKind.OpenCode,
+                AgentKind.WorkBuddy
             };
         }
 
         public static string AgentKey(AgentKind agent)
         {
+            if (agent == AgentKind.WorkBuddy) return "workbuddy";
+            if (agent == AgentKind.OpenCode) return "opencode";
             if (agent == AgentKind.ClaudeCode)
             {
                 return "claudeCode";
@@ -101,6 +107,16 @@ public sealed class HaloSettings
 
         public static bool TryParseAgentKey(string value, out AgentKind agent)
         {
+            if (String.Equals(value, "workbuddy", StringComparison.OrdinalIgnoreCase))
+            {
+                agent = AgentKind.WorkBuddy;
+                return true;
+            }
+            if (String.Equals(value, "opencode", StringComparison.OrdinalIgnoreCase))
+            {
+                agent = AgentKind.OpenCode;
+                return true;
+            }
             if (String.Equals(value, "codex", StringComparison.OrdinalIgnoreCase))
             {
                 agent = AgentKind.Codex;

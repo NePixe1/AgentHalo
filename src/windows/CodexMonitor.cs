@@ -846,6 +846,31 @@ public sealed class CodexSessionMonitor : IDisposable
         private bool realtimeAnswerStreaming;
         private bool hasRealtimeActivity;
         private int pollInProgress;
+        private int monitoringEnabled;
+        private volatile ReadSnapshot published = new ReadSnapshot();
+        private sealed class ReadSnapshot
+        {
+            internal List<SessionSnapshot> Sessions = new List<SessionSnapshot>();
+            internal bool Active, Streaming;
+            internal HaloState State;
+            internal string Action = "", ThreadId = "";
+        }
+        private ReadSnapshot ReadWithoutWaiting()
+        {
+            if (!Monitor.TryEnter(sync)) return published;
+            try { return PublishSnapshot(); }
+            finally { Monitor.Exit(sync); }
+        }
+        private ReadSnapshot PublishSnapshot()
+        {
+            var snapshot = new ReadSnapshot {
+                Sessions = trackers.Values.Select(t => CloneSnapshot(t.Snapshot)).ToList(),
+                Active = hasRealtimeActivity, Streaming = realtimeAnswerStreaming,
+                State = realtimeState, Action = realtimeAction, ThreadId = realtimeThreadId
+            };
+            published = snapshot;
+            return snapshot;
+        }
         private FileSystemWatcher sessionWatcher;
 
         public event EventHandler Changed;
@@ -873,28 +898,23 @@ public sealed class CodexSessionMonitor : IDisposable
 
         public void Start()
         {
-            lock (sync)
-            {
-                EnsureSessionWatcher();
-                if (sessionWatcher != null)
-                {
-                    sessionWatcher.EnableRaisingEvents = true;
-                }
-            }
+            if (Interlocked.Exchange(ref monitoringEnabled, 1) == 1) return;
             timer.Change(0, 220);
         }
 
         public void Stop()
         {
+            if (Interlocked.Exchange(ref monitoringEnabled, 0) == 0) return;
             timer.Change(Timeout.Infinite, Timeout.Infinite);
-            lock (sync)
+            ThreadPool.QueueUserWorkItem(delegate
             {
-                if (sessionWatcher != null)
+                lock (sync)
                 {
-                    sessionWatcher.EnableRaisingEvents = false;
+                    if (monitoringEnabled != 0) return;
+                    if (sessionWatcher != null) sessionWatcher.EnableRaisingEvents = false;
+                    pendingSessionPaths.Clear();
                 }
-                pendingSessionPaths.Clear();
-            }
+            });
         }
 
         private void OnTick(object state)
@@ -908,7 +928,9 @@ public sealed class CodexSessionMonitor : IDisposable
             {
                 lock (sync)
                 {
+                    if (monitoringEnabled == 0) return;
                     EnsureSessionWatcher();
+                    if (sessionWatcher != null) sessionWatcher.EnableRaisingEvents = true;
                     if (DrainPendingSessions())
                     {
                         changed = true;
@@ -949,6 +971,7 @@ public sealed class CodexSessionMonitor : IDisposable
                             changed = true;
                         }
                     }
+                    PublishSnapshot();
                 }
             }
             finally
@@ -1107,15 +1130,14 @@ public sealed class CodexSessionMonitor : IDisposable
         internal AggregateSnapshot GetAggregate(HaloSettings settings,
             bool codexRunning, DateTime? codexStartedAtUtc)
         {
-            lock (sync)
+            var read = ReadWithoutWaiting();
+            bool hasRealtimeActivity = read.Active;
+            bool realtimeAnswerStreaming = read.Streaming;
+            HaloState realtimeState = read.State;
+            string realtimeAction = read.Action, realtimeThreadId = read.ThreadId;
             {
                 DateTime now = DateTime.UtcNow;
-                List<SessionSnapshot> rawSessions = trackers.Values
-                .Select(delegate(SessionTracker tracker)
-                {
-                    return CloneSnapshot(tracker.Snapshot);
-                })
-                .ToList();
+                List<SessionSnapshot> rawSessions = read.Sessions.Select(CloneSnapshot).ToList();
                 List<SessionSnapshot> sessions = WithoutSupersededErrors(rawSessions)
                 .Where(delegate(SessionSnapshot snapshot)
                 {
@@ -1320,12 +1342,9 @@ public sealed class CodexSessionMonitor : IDisposable
 
         public List<SessionSnapshot> GetAllRecent()
         {
-            lock (sync)
+            var read = ReadWithoutWaiting();
             {
-                List<SessionSnapshot> recent = trackers.Values.Select(delegate(SessionTracker tracker)
-                {
-                    return CloneSnapshot(tracker.Snapshot);
-                })
+                List<SessionSnapshot> recent = read.Sessions.Select(CloneSnapshot)
                 .Where(delegate(SessionSnapshot snapshot)
                 {
                     return snapshot.LastEventUtc >= DateTime.UtcNow.AddHours(-24);
@@ -1381,6 +1400,7 @@ public sealed class CodexSessionMonitor : IDisposable
 
         public void Dispose()
         {
+            Interlocked.Exchange(ref monitoringEnabled, 0);
             timer.Dispose();
             FileSystemWatcher watcher;
             lock (sync)

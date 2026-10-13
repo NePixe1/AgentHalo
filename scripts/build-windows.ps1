@@ -44,7 +44,9 @@ $referenceArgs = $references | ForEach-Object { "/reference:$_" }
 $resourceArgs = @(
     "/resource:$(Join-Path $windowsLocales "zh.json"),CodexHalo.locales.zh.json",
     "/resource:$(Join-Path $windowsLocales "en.json"),CodexHalo.locales.en.json",
-    "/resource:$(Join-Path $root "src\shared\integrations\pi\agent-halo-status.ts"),AgentHalo.PiStatusExtension"
+    "/resource:$(Join-Path $root "src\shared\integrations\pi\agent-halo-status.ts"),AgentHalo.PiStatusExtension",
+    "/resource:$(Join-Path $root "src\shared\integrations\opencode\agent-halo-status.js"),AgentHalo.OpenCodeStatusPlugin",
+    "/resource:$(Join-Path $root "docs\assets\agent-switch\workbuddy.png"),AgentHalo.WorkBuddyIcon"
 )
 $exe = Join-Path $output "AgentHalo.exe"
 $sources = Get-ChildItem -LiteralPath $windows -Filter *.cs |
@@ -75,7 +77,7 @@ $hashLine = "$hash  AgentHalo.exe"
 Set-Content -LiteralPath (Join-Path $output "SHA256.txt") -Value $hashLine `
     -Encoding ascii -NoNewline
 
-$archive = Join-Path (Split-Path -Parent $output) "AgentHalo-Windows-v1.1.0.zip"
+$archive = Join-Path (Split-Path -Parent $output) "AgentHalo-Windows-v1.2.0.zip"
 Remove-Item -LiteralPath $archive -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $output "*") -DestinationPath $archive `
     -CompressionLevel Optimal

@@ -33,7 +33,9 @@ public enum AgentKind
         Codex,
         ClaudeCode,
         Grok,
-        Pi
+        Pi,
+        OpenCode,
+        WorkBuddy
     }
 
 public enum AgentPresenceState
@@ -76,7 +78,9 @@ public enum AgentEvidenceSource
         DiagnosticSqlite,
         ClaudeHook,
         GrokHook,
-        PiExtension
+        PiExtension,
+        OpenCodePlugin,
+        WorkBuddyStore
     }
 
 public enum AgentAttentionReason

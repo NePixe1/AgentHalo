@@ -153,6 +153,12 @@ public sealed class DetailsWindow : Window
         private readonly Border claudeSwitch;
         private readonly Border grokSwitch;
         private readonly Border piSwitch;
+        private Border openCodeSwitch;
+        private Border workBuddySwitch;
+        private System.Windows.Controls.Image workBuddySwitchImage;
+        private BitmapSource workBuddyColorIcon;
+        private BitmapSource workBuddyGrayIcon;
+        private System.Windows.Shapes.Path openCodeSwitchIcon;
         private readonly Border switchThumb;
         private readonly TranslateTransform switchThumbTransform;
         private double switchThumbTarget;
@@ -165,23 +171,27 @@ public sealed class DetailsWindow : Window
         private readonly List<AgentKind> enabledAgents;
         private readonly StackPanel quotaGroup;
         private readonly Grid dataLayer;
-        /// <summary>Fixed-height session body host (Scheme B). Mirrors macOS H_body ≈ 72.</summary>
+        /// <summary>Shared fixed-height session body host for populated and empty states.</summary>
         private readonly Grid sessionBodySlot;
         private readonly Border emptyBody;
         private readonly TextBlock emptyBodyText;
         private readonly Border sessionCard;
         private readonly TextBlock sessionCardTitle;
         private readonly TextBlock sessionCardModel;
-        private readonly TextBlock sessionCardTokens;
+        private readonly TextBlock sessionCardInput;
+        private readonly TextBlock sessionCardOutput;
+        private readonly Grid sessionCardFooter;
         private readonly RoundedMeter fiveHourBar;
         private readonly RoundedMeter weekBar;
-        /// <summary>Session body slot height; keep dataLayer (80) so OAuth/session heights match.</summary>
-        private const double SessionBodyHeight = 72;
+        /// <summary>Keep the same 8px height difference to the data layer across all agents.</summary>
+        private const double SessionBodyHeight = 59;
         private readonly DispatcherTimer quotaTimer;
         private UsageMetrics previewMetrics;
         private ClaudeCodeMetrics previewClaudeMetrics;
         private CodexCustomApiMetrics previewCodexCustomMetrics;
         private AgentKind currentAgent;
+        private readonly StatusTextTransition statusTextTransition;
+        private readonly AgentContentTransition agentContentTransition;
         private AggregateSnapshot currentAggregate;
         private List<SessionSnapshot> currentSessions;
         /// <summary>
@@ -219,7 +229,7 @@ public sealed class DetailsWindow : Window
 
             shell = new Border();
             shell.CornerRadius = new CornerRadius(16);
-            shell.Padding = new Thickness(17, 13, 17, 10);
+            shell.Padding = new Thickness(17, 13, 17, 4);
             shell.Background = CreateFallbackGlassBrush();
             shell.BorderBrush = new SolidColorBrush(
                 MediaColor.FromArgb(46, 183, 199, 207));
@@ -256,16 +266,22 @@ public sealed class DetailsWindow : Window
             };
             Grid.SetColumn(contextMeter, 2);
             top.Children.Add(contextMeter);
-            top.Margin = new Thickness(0, 0, 0, 7);
+            top.Margin = new Thickness(0, 0, 0, 13);
             content.Children.Add(top);
 
             headline = NewText("OFFLINE", 20, MediaColor.FromRgb(40, 52, 60),
                 FontWeights.Bold);
-            content.Children.Add(headline);
+            var body = new StackPanel();
+            var bodyStage = new Grid();
+            bodyStage.Children.Add(body);
+            content.Children.Add(bodyStage);
+            body.Children.Add(headline);
             subtitle = NewText(L10n.Instance["status.offline_codex"], 13,
                 MediaColor.FromRgb(103, 117, 126), FontWeights.Normal, true);
-            subtitle.Margin = new Thickness(0, 1, 0, 13);
-            content.Children.Add(subtitle);
+            subtitle.Margin = new Thickness(0, 1, 0, 7);
+            body.Children.Add(subtitle);
+            statusTextTransition = new StatusTextTransition(headline, subtitle);
+            IsVisibleChanged += delegate { statusTextTransition.Settle(); };
 
             quotaGroup = new StackPanel();
             fiveHourRow = CreateQuotaRow(L10n.Instance["quota.5h"], out fiveHourLabel,
@@ -279,15 +295,20 @@ public sealed class DetailsWindow : Window
             sessionBodySlot = CreateSessionBodySlot(
                 out emptyBody, out emptyBodyText,
                 out sessionCard, out sessionCardTitle,
-                out sessionCardModel, out sessionCardTokens);
+                out sessionCardModel, out sessionCardInput, out sessionCardOutput,
+                out sessionCardFooter);
             sessionBodySlot.Visibility = Visibility.Collapsed;
 
             dataLayer = new Grid();
-            dataLayer.Height = 80;
+            dataLayer.Height = SessionBodyHeight + 8;
             dataLayer.VerticalAlignment = VerticalAlignment.Top;
             dataLayer.Children.Add(quotaGroup);
             dataLayer.Children.Add(sessionBodySlot);
-            content.Children.Add(dataLayer);
+            body.Children.Add(dataLayer);
+            agentContentTransition = new AgentContentTransition(bodyStage, body,
+                headline, subtitle, sessionCardTitle, sessionCardFooter,
+                fiveHourLabel, fiveHourReset, fiveHourValue, weekLabel, weekReset, weekValue);
+            IsVisibleChanged += delegate { agentContentTransition.Settle(); };
 
             Grid layers = new Grid();
             layers.Children.Add(content);
@@ -295,6 +316,8 @@ public sealed class DetailsWindow : Window
             Content = shell;
             Closed += delegate
             {
+                statusTextTransition.Settle();
+                agentContentTransition.Settle();
                 quotaTimer.Stop();
                 CodexUsageMonitor.Instance.Updated -= OnCodexUsageUpdated;
                 GrokUsageMonitor.Instance.Updated -= OnGrokUsageUpdated;
@@ -327,14 +350,28 @@ public sealed class DetailsWindow : Window
 
         public void UpdateContent(AggregateSnapshot aggregate, List<SessionSnapshot> sessions)
         {
+            bool changedAgent = currentAggregate != null && currentAgent != aggregate.FocusedAgent;
+            int direction = Array.IndexOf(HaloSettings.SupportedAgents(), aggregate.FocusedAgent) -
+                Array.IndexOf(HaloSettings.SupportedAgents(), currentAgent);
+            if (changedAgent)
+            {
+                agentContentTransition.Switch(delegate { ApplyContent(aggregate, sessions, false); },
+                    direction, IsVisible && SystemParameters.ClientAreaAnimation);
+                return;
+            }
+            ApplyContent(aggregate, sessions, IsVisible && SystemParameters.ClientAreaAnimation &&
+                !agentContentTransition.IsRunning);
+        }
+
+        private void ApplyContent(AggregateSnapshot aggregate, List<SessionSnapshot> sessions, bool animateStatus)
+        {
             currentAggregate = aggregate;
             currentSessions = sessions ?? new List<SessionSnapshot>();
             currentAgent = aggregate.FocusedAgent;
             UpdateAgentSwitch();
-            headline.Text = aggregate.Label;
             MediaColor accent = HaloVisual.StateColor(aggregate.State);
-            headline.Foreground = new SolidColorBrush(accent);
-            subtitle.Text = FriendlyStatusDetail(aggregate, sessions);
+            statusTextTransition.Update(aggregate.Label, FriendlyStatusDetail(aggregate, sessions),
+                accent, animateStatus);
             RefreshSupplementalData();
         }
 
@@ -343,6 +380,10 @@ public sealed class DetailsWindow : Window
         {
             if (aggregate.State == HaloState.Idle)
             {
+                if (aggregate.FocusedAgent == AgentKind.OpenCode && aggregate.Label == "CONNECTING")
+                    return L10n.Instance["status.connecting_opencode"];
+                if (aggregate.FocusedAgent == AgentKind.WorkBuddy && aggregate.Label == "CONNECTING")
+                    return L10n.Instance["status.connecting_workbuddy"];
                 if (String.Equals(aggregate.Label, "PAUSED",
                     StringComparison.OrdinalIgnoreCase))
                 {
@@ -360,6 +401,8 @@ public sealed class DetailsWindow : Window
                 {
                     return L10n.Instance["status.offline_pi"];
                 }
+                if (aggregate.FocusedAgent == AgentKind.OpenCode) return L10n.Instance["status.offline_opencode"];
+                if (aggregate.FocusedAgent == AgentKind.WorkBuddy) return L10n.Instance["status.offline_workbuddy"];
                 return L10n.Instance["status.offline_codex"];
             }
             if (String.Equals(aggregate.Label, "STANDBY",
@@ -446,7 +489,7 @@ public sealed class DetailsWindow : Window
             {
                 RefreshGrokDetails();
             }
-            else if (currentAgent == AgentKind.Pi)
+            else if (currentAgent == AgentKind.Pi || currentAgent == AgentKind.OpenCode || currentAgent == AgentKind.WorkBuddy)
             {
                 RefreshPiDetails();
             }
@@ -482,16 +525,16 @@ public sealed class DetailsWindow : Window
                 ? ReadCodexCustomMetrics() : null;
             if (currentAgent == AgentKind.ClaudeCode)
             {
-                // Scheme B: offline empty rectangle — never three rows of "--".
-                ShowSessionBody(true, null, null, null);
+                // Use the shared empty session area instead of placeholder metadata.
+                ShowSessionBody(true, null, null);
             }
-            else if (currentAgent == AgentKind.Pi)
+            else if (currentAgent == AgentKind.Pi || currentAgent == AgentKind.OpenCode || currentAgent == AgentKind.WorkBuddy)
             {
-                ShowSessionBody(true, null, null, null);
+                ShowSessionBody(true, null, null);
             }
             else if (codexMetrics != null && codexMetrics.IsCustomApi)
             {
-                ShowSessionBody(true, null, null, null);
+                ShowSessionBody(true, null, null);
             }
             else if (currentAgent == AgentKind.Grok)
             {
@@ -518,9 +561,8 @@ public sealed class DetailsWindow : Window
             ClaudeCodeMetrics metrics = previewClaudeMetrics ?? ClaudeCodeMetricsReader.Read();
             string title = metrics.HasSessionTitle ? metrics.SessionTitle : null;
             string model = metrics.HasModel ? metrics.Model : null;
-            string tokens = FormatTokenPair(metrics.HasTokenUsage,
+            ShowSessionBody(false, title, model, metrics.HasTokenUsage,
                 metrics.InputTokens, metrics.OutputTokens);
-            ShowSessionBody(false, title, model, tokens);
             SetContextPercent(metrics.HasContext, metrics.ContextUsedPercent);
         }
 
@@ -529,25 +571,27 @@ public sealed class DetailsWindow : Window
             SessionSnapshot primary = currentSessions == null ? null :
                 currentSessions.Where(delegate(SessionSnapshot session)
                 {
-                    return session != null && session.Agent == AgentKind.Pi;
-                }).OrderByDescending(delegate(SessionSnapshot session)
+                    return session != null && session.Agent == currentAgent;
+                }).OrderBy(delegate(SessionSnapshot session)
+                {
+                    return currentAgent == AgentKind.OpenCode || currentAgent == AgentKind.WorkBuddy
+                        ? CodexSessionMonitor.StatePriority(session.State) : 0;
+                }).ThenByDescending(delegate(SessionSnapshot session)
                 {
                     return session.LastEventUtc;
                 }).FirstOrDefault();
             string title = primary == null ? null
                 : (!String.IsNullOrWhiteSpace(primary.ProjectName)
                     ? primary.ProjectName
-                    : ProjectLeaf(primary.WorkingDirectory) ?? "Pi");
+                    : ProjectLeaf(primary.WorkingDirectory) ?? currentAgent.ToString());
             string model = primary == null ||
                 String.IsNullOrWhiteSpace(primary.ModelName)
                 ? null : primary.ModelName;
             bool hasTokens = primary != null &&
                 (primary.TurnInputTokens > 0 || primary.TurnOutputTokens > 0);
-            string tokens = hasTokens
-                ? FormatTokenPair(true, primary.TurnInputTokens,
-                    primary.TurnOutputTokens)
-                : null;
-            ShowSessionBody(false, title, model, tokens);
+            ShowSessionBody(false, title, model, hasTokens,
+                primary == null ? 0 : primary.TurnInputTokens,
+                primary == null ? 0 : primary.TurnOutputTokens);
             bool hasContext = primary != null && primary.ContextInputTokens >= 0 &&
                 primary.ContextWindowTokens > 0;
             SetContextPercent(hasContext, hasContext
@@ -659,9 +703,8 @@ public sealed class DetailsWindow : Window
             // available session label — custom Codex currently surfaces project leaf.
             string title = metrics.HasProject ? metrics.ProjectName : null;
             string model = metrics.HasModel ? metrics.Model : null;
-            string tokens = FormatTokenPair(metrics.HasTokenUsage,
+            ShowSessionBody(false, title, model, metrics.HasTokenUsage,
                 metrics.InputTokens, metrics.OutputTokens);
-            ShowSessionBody(false, title, model, tokens);
             SetContextPercent(metrics.HasContext, metrics.ContextUsedPercent);
         }
 
@@ -800,7 +843,7 @@ public sealed class DetailsWindow : Window
             bool isStandby)
         {
             if (isOffline) return null;
-            if (isStandby && agent != AgentKind.Pi) return null;
+            if (isStandby && agent != AgentKind.Pi && agent != AgentKind.OpenCode && agent != AgentKind.WorkBuddy) return null;
             return sourcePercent;
         }
 
@@ -914,7 +957,7 @@ public sealed class DetailsWindow : Window
             {
                 return;
             }
-            Border[] borders = { codexSwitch, claudeSwitch, grokSwitch, piSwitch };
+            Border[] borders = { codexSwitch, claudeSwitch, grokSwitch, piSwitch, openCodeSwitch, workBuddySwitch };
             AgentKind[] agents = HaloSettings.SupportedAgents();
             for (int i = 0; i < borders.Length; i++)
             {
@@ -928,10 +971,11 @@ public sealed class DetailsWindow : Window
                 Border border = borders[sourceIndex];
                 border.Visibility = Visibility.Visible;
                 Grid.SetColumn(border, i);
-                agentSwitcher.ColumnDefinitions[i].Width = new GridLength(46);
-                agentSwitchHitLayer.ColumnDefinitions[i].Width = new GridLength(46);
+                agentSwitcher.ColumnDefinitions[i].Width = new GridLength(AgentSlotWidth(enabledAgents));
+                agentSwitchHitLayer.ColumnDefinitions[i].Width = new GridLength(AgentSlotWidth(enabledAgents));
             }
-            agentSwitcher.Width = 46 * enabledAgents.Count;
+            agentSwitcher.Width = AgentSlotWidth(enabledAgents) * enabledAgents.Count;
+            switchThumb.Width = AgentSlotWidth(enabledAgents) - 2;
             ResetSwitchThumbPosition(currentAgent);
         }
 
@@ -945,6 +989,11 @@ public sealed class DetailsWindow : Window
                 currentAgent == AgentKind.Grok);
             StylePiSwitch(piSwitch, piSwitchIcon,
                 currentAgent == AgentKind.Pi);
+            StylePiSwitch(openCodeSwitch, openCodeSwitchIcon,
+                currentAgent == AgentKind.OpenCode);
+            bool workBuddySelected = currentAgent == AgentKind.WorkBuddy;
+            workBuddySwitch.Opacity = workBuddySelected ? 1.0 : 0.58;
+            workBuddySwitchImage.Source = workBuddySelected ? workBuddyColorIcon : workBuddyGrayIcon;
             MoveSwitchThumb(currentAgent);
         }
 
@@ -993,7 +1042,12 @@ public sealed class DetailsWindow : Window
             IList<AgentKind> visibleAgents, AgentKind agent)
         {
             int index = visibleAgents == null ? -1 : visibleAgents.IndexOf(agent);
-            return Math.Max(0, index) * 46;
+            return Math.Max(0, index) * AgentSlotWidth(visibleAgents);
+        }
+
+        private static double AgentSlotWidth(IList<AgentKind> agents)
+        {
+            return agents != null && agents.Count > 5 ? 36 : 46;
         }
 
         internal static double ResolveAgentSwitchThumbOffsetForTest(
@@ -1145,28 +1199,30 @@ public sealed class DetailsWindow : Window
         }
 
         /// <summary>
-        /// Scheme B session body: fixed-height empty XOR card.
+        /// Fixed-height session area, shared by every non-quota agent panel.
         /// </summary>
         private void ShowSessionBody(bool offline, string title, string model,
-            string tokens)
+            bool hasUsage = false, long inputTokens = 0, long outputTokens = 0)
         {
             quotaGroup.Visibility = Visibility.Hidden;
             sessionBodySlot.Visibility = Visibility.Visible;
 
             // Soft empty for OFFLINE and online-with-no-fields — never a card of
-            // "--". Same copy for offline and blank/standby: "○ No session".
-            bool blank = !HasSessionCardContent(title, model, tokens);
+            // "--". Offline and blank/standby share the same empty copy.
+            bool blank = !HasSessionCardContent(title, model, hasUsage);
             if (offline || blank)
             {
                 emptyBody.Visibility = Visibility.Visible;
                 sessionCard.Visibility = Visibility.Collapsed;
-                emptyBodyText.Text = "○ " + L10n.Instance["session.empty.api_key"];
+                emptyBodyText.Text = L10n.Instance["session.empty.api_key"];
                 // Clear hidden card fields so a11y / subsequent reads do not
                 // leak the previous session title, model, or tokens.
                 sessionCardTitle.Text = "--";
                 sessionCardTitle.ToolTip = null;
                 sessionCardModel.Text = "--";
-                sessionCardTokens.Text = "↑ --  ·  ↓ --";
+                sessionCardModel.ToolTip = null;
+                sessionCardInput.Text = "↑ --";
+                sessionCardOutput.Text = "↓ --";
                 return;
             }
             emptyBody.Visibility = Visibility.Collapsed;
@@ -1174,26 +1230,22 @@ public sealed class DetailsWindow : Window
             sessionCardTitle.Text = String.IsNullOrEmpty(title) ? "--" : title;
             sessionCardTitle.ToolTip = String.IsNullOrEmpty(title) ? null : title;
             sessionCardModel.Text = String.IsNullOrEmpty(model) ? "--" : model;
-            sessionCardTokens.Text = String.IsNullOrEmpty(tokens)
-                ? "↑ --  ·  ↓ --" : tokens;
+            sessionCardModel.ToolTip = String.IsNullOrEmpty(model) ? null : model;
+            sessionCardInput.Text = FormatTokenChip(true, hasUsage, inputTokens);
+            sessionCardOutput.Text = FormatTokenChip(false, hasUsage, outputTokens);
         }
 
         /// <summary>
         /// Card is only worth showing when at least one painted field has data.
         /// </summary>
         internal static bool HasSessionCardContent(
-            string title, string model, string tokens)
+            string title, string model, bool hasUsage)
         {
             if (!String.IsNullOrEmpty(title) || !String.IsNullOrEmpty(model))
             {
                 return true;
             }
-            if (String.IsNullOrEmpty(tokens))
-            {
-                return false;
-            }
-            // FormatTokenPair uses this placeholder when usage is missing.
-            return !String.Equals(tokens, "↑ --  ·  ↓ --", StringComparison.Ordinal);
+            return hasUsage;
         }
 
         private void HideSessionBody()
@@ -1201,21 +1253,16 @@ public sealed class DetailsWindow : Window
             sessionBodySlot.Visibility = Visibility.Collapsed;
         }
 
-        private static string FormatTokenPair(bool hasUsage, long inputTokens,
-            long outputTokens)
+        internal static string FormatTokenChip(bool input, bool hasUsage, long value)
         {
-            if (!hasUsage)
-            {
-                return "↑ --  ·  ↓ --";
-            }
-            return "↑ " + FormatCompactNumber(inputTokens) +
-                "  ·  ↓ " + FormatCompactNumber(outputTokens);
+            return (input ? "↑ " : "↓ ") + (hasUsage ? FormatCompactNumber(value) : "--");
         }
 
-        private static Grid CreateSessionBodySlot(
+        internal static Grid CreateSessionBodySlot(
             out Border emptyHost, out TextBlock emptyText,
             out Border card, out TextBlock title,
-            out TextBlock model, out TextBlock tokens)
+            out TextBlock model, out TextBlock input, out TextBlock output,
+            out Grid footer)
         {
             Grid slot = new Grid
             {
@@ -1223,64 +1270,56 @@ public sealed class DetailsWindow : Window
                 VerticalAlignment = VerticalAlignment.Center
             };
 
-            // Empty: dashed rounded rect + centered copy.
+            // Both populated and empty states share the divider and content origin.
+            slot.RowDefinitions.Add(new RowDefinition { Height = new GridLength(11) });
+            slot.RowDefinitions.Add(new RowDefinition());
+            slot.Children.Add(new Border { Name = "SessionDivider", Height = 1,
+                VerticalAlignment = VerticalAlignment.Top,
+                Background = new SolidColorBrush(MediaColor.FromRgb(190, 205, 215)),
+                Margin = new Thickness(0, 3, 0, 7) });
             Grid emptyInner = new Grid();
-            System.Windows.Shapes.Rectangle dash = new System.Windows.Shapes.Rectangle
-            {
-                RadiusX = 12,
-                RadiusY = 12,
-                Stroke = new SolidColorBrush(
-                    MediaColor.FromArgb(72, 130, 150, 165)),
-                StrokeThickness = 1,
-                StrokeDashArray = new DoubleCollection { 4, 3 },
-                Fill = new SolidColorBrush(MediaColor.FromArgb(115, 255, 255, 255))
-            };
             emptyText = NewText(String.Empty, 12,
                 MediaColor.FromRgb(109, 129, 144), FontWeights.Normal, true);
-            emptyText.HorizontalAlignment = HorizontalAlignment.Center;
-            emptyText.VerticalAlignment = VerticalAlignment.Center;
-            emptyText.TextAlignment = TextAlignment.Center;
-            emptyInner.Children.Add(dash);
+            emptyText.HorizontalAlignment = HorizontalAlignment.Left;
+            emptyText.VerticalAlignment = VerticalAlignment.Top;
+            emptyText.TextAlignment = TextAlignment.Left;
             emptyInner.Children.Add(emptyText);
             emptyHost = new Border
             {
                 Child = emptyInner,
                 Visibility = Visibility.Collapsed
             };
+            Grid.SetRow(emptyHost, 1);
             slot.Children.Add(emptyHost);
 
-            // Session card: title + model chip + tokens, vertically centered.
+            // The divider groups the title and metadata without nesting their left edge.
             title = NewText("--", 13, MediaColor.FromRgb(30, 44, 54),
                 FontWeights.SemiBold, true);
             title.TextTrimming = TextTrimming.CharacterEllipsis;
+            title.Height = 18;
             title.Margin = new Thickness(0, 0, 0, 8);
 
             model = NewText("--", 11, MediaColor.FromRgb(77, 97, 112),
                 FontWeights.Medium, true);
             model.VerticalAlignment = VerticalAlignment.Center;
             model.TextTrimming = TextTrimming.CharacterEllipsis;
-            Border modelChip = new Border
-            {
-                CornerRadius = new CornerRadius(6),
-                Padding = new Thickness(7, 2, 7, 2),
-                Background = new SolidColorBrush(
-                    MediaColor.FromArgb(15, 30, 44, 54)),
-                BorderBrush = new SolidColorBrush(
-                    MediaColor.FromArgb(20, 30, 44, 54)),
-                BorderThickness = new Thickness(0.5),
-                HorizontalAlignment = HorizontalAlignment.Left,
-                VerticalAlignment = VerticalAlignment.Center,
-                MaxWidth = 160,
-                Child = model
-            };
+            Border modelChip = CreateMetadataChip(model, MediaColor.FromRgb(238, 241, 244));
+            modelChip.MaxWidth = 160;
+            modelChip.Margin = new Thickness(0, 0, 8, 0);
 
-            tokens = NewText("↑ --  ·  ↓ --", 11.5,
-                MediaColor.FromRgb(64, 90, 110), FontWeights.Medium, true);
-            tokens.HorizontalAlignment = HorizontalAlignment.Right;
-            tokens.VerticalAlignment = VerticalAlignment.Center;
-            tokens.TextAlignment = TextAlignment.Right;
+            input = NewText("↑ --", 11, MediaColor.FromRgb(51, 119, 160), FontWeights.Medium, true);
+            output = NewText("↓ --", 11, MediaColor.FromRgb(35, 133, 112), FontWeights.Medium, true);
+            Border inputChip = CreateMetadataChip(input, MediaColor.FromRgb(228, 242, 252));
+            Border outputChip = CreateMetadataChip(output, MediaColor.FromRgb(228, 246, 238));
+            inputChip.Margin = new Thickness(0, 0, 5, 0);
+            inputChip.MaxWidth = 75;
+            outputChip.MaxWidth = 75;
+            var tokenGroup = new StackPanel { Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Right };
+            tokenGroup.Children.Add(inputChip);
+            tokenGroup.Children.Add(outputChip);
 
-            Grid footer = new Grid();
+            footer = new Grid { Height = 22 };
             footer.ColumnDefinitions.Add(new ColumnDefinition
             {
                 Width = new GridLength(1, GridUnitType.Star)
@@ -1290,30 +1329,35 @@ public sealed class DetailsWindow : Window
                 Width = GridLength.Auto
             });
             footer.Children.Add(modelChip);
-            Grid.SetColumn(tokens, 1);
-            footer.Children.Add(tokens);
+            Grid.SetColumn(tokenGroup, 1);
+            footer.Children.Add(tokenGroup);
 
             StackPanel cardContent = new StackPanel
             {
-                VerticalAlignment = VerticalAlignment.Center
+                VerticalAlignment = VerticalAlignment.Top
             };
             cardContent.Children.Add(title);
             cardContent.Children.Add(footer);
 
             card = new Border
             {
-                CornerRadius = new CornerRadius(12),
-                Background = new SolidColorBrush(
-                    MediaColor.FromArgb(158, 255, 255, 255)),
-                BorderBrush = new SolidColorBrush(
-                    MediaColor.FromArgb(46, 140, 160, 175)),
-                BorderThickness = new Thickness(1),
-                Padding = new Thickness(12, 0, 12, 0),
                 Child = cardContent,
                 Visibility = Visibility.Collapsed
             };
+            Grid.SetRow(card, 1);
             slot.Children.Add(card);
             return slot;
+        }
+
+        private static Border CreateMetadataChip(TextBlock text, MediaColor background)
+        {
+            text.VerticalAlignment = VerticalAlignment.Center;
+            text.TextTrimming = TextTrimming.CharacterEllipsis;
+            return new Border { Height = 22, CornerRadius = new CornerRadius(5),
+                Padding = new Thickness(7, 0, 7, 0),
+                Background = new SolidColorBrush(background),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Center, Child = text };
         }
 
         private const string OpenAiBlossomIconPath =
@@ -1344,7 +1388,7 @@ public sealed class DetailsWindow : Window
         {
             Grid shell = new Grid();
             agentSwitcher = shell;
-            shell.Width = 184;
+            shell.Width = 230;
             shell.Height = 32;
             shell.ColumnDefinitions.Add(new ColumnDefinition());
             shell.ColumnDefinitions.Add(new ColumnDefinition());
@@ -1357,7 +1401,9 @@ public sealed class DetailsWindow : Window
                 BorderBrush = new SolidColorBrush(MediaColor.FromRgb(221, 233, 238)),
                 BorderThickness = new Thickness(1)
             };
-            Grid.SetColumnSpan(background, 4);
+            shell.ColumnDefinitions.Add(new ColumnDefinition());
+            shell.ColumnDefinitions.Add(new ColumnDefinition());
+            Grid.SetColumnSpan(background, 6);
             shell.Children.Add(background);
 
             thumbTransform = new TranslateTransform();
@@ -1381,7 +1427,7 @@ public sealed class DetailsWindow : Window
                     Color = MediaColor.FromRgb(66, 178, 205)
                 }
             };
-            Grid.SetColumnSpan(thumb, 4);
+            Grid.SetColumnSpan(thumb, 6);
             shell.Children.Add(thumb);
 
             Grid hitLayer = new Grid();
@@ -1390,7 +1436,9 @@ public sealed class DetailsWindow : Window
             hitLayer.ColumnDefinitions.Add(new ColumnDefinition());
             hitLayer.ColumnDefinitions.Add(new ColumnDefinition());
             hitLayer.ColumnDefinitions.Add(new ColumnDefinition());
-            Grid.SetColumnSpan(hitLayer, 4);
+            hitLayer.ColumnDefinitions.Add(new ColumnDefinition());
+            hitLayer.ColumnDefinitions.Add(new ColumnDefinition());
+            Grid.SetColumnSpan(hitLayer, 6);
 
             Viewbox codexIconBox = CreateSwitchIcon(OpenAiBlossomIconPath, 18,
                 out codexIcon);
@@ -1445,8 +1493,55 @@ public sealed class DetailsWindow : Window
             piBorder.MouseLeftButtonUp += delegate { SelectAgent(AgentKind.Pi); };
             Grid.SetColumn(piBorder, 3);
             hitLayer.Children.Add(piBorder);
+            // Official OpenCode Mark, packages/ui/src/components/logo.tsx.
+            Viewbox openCodeBox = CreateSwitchIcon(
+                "M12 4H4V16H12V4ZM16 20H0V0H16V20Z", 17, out openCodeSwitchIcon);
+            SetGeometryFillRule(openCodeSwitchIcon.Data, FillRule.EvenOdd);
+            Canvas mark = (Canvas)openCodeBox.Child;
+            mark.Children.Insert(0, new System.Windows.Shapes.Path {
+                Data = Geometry.Parse("M12 16H4V8H12V16Z"),
+                Fill = new SolidColorBrush(MediaColor.FromRgb(173, 190, 199)) });
+            openCodeSwitch = new Border { Background = System.Windows.Media.Brushes.Transparent,
+                Child = openCodeBox, Cursor = System.Windows.Input.Cursors.Hand };
+            openCodeSwitch.MouseLeftButtonUp += delegate { SelectAgent(AgentKind.OpenCode); };
+            Grid.SetColumn(openCodeSwitch, 4);
+            hitLayer.Children.Add(openCodeSwitch);
+            workBuddySwitchImage = new System.Windows.Controls.Image { Width = 20, Height = 20,
+                HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+            using (Stream resource = System.Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream("AgentHalo.WorkBuddyIcon"))
+            {
+                var bitmap = new BitmapImage();
+                bitmap.BeginInit(); bitmap.CacheOption = BitmapCacheOption.OnLoad;
+                bitmap.StreamSource = resource; bitmap.DecodePixelWidth = 60;
+                bitmap.EndInit(); bitmap.Freeze();
+                workBuddyColorIcon = bitmap;
+                workBuddyGrayIcon = CreateGrayscaleIcon(bitmap);
+                workBuddySwitchImage.Source = workBuddyGrayIcon;
+            }
+            workBuddySwitch = new Border { Background = System.Windows.Media.Brushes.Transparent,
+                Child = workBuddySwitchImage, Cursor = System.Windows.Input.Cursors.Hand };
+            workBuddySwitch.MouseLeftButtonUp += delegate { SelectAgent(AgentKind.WorkBuddy); };
+            Grid.SetColumn(workBuddySwitch, 5);
+            hitLayer.Children.Add(workBuddySwitch);
             shell.Children.Add(hitLayer);
             return shell;
+        }
+
+        internal static BitmapSource CreateGrayscaleIcon(BitmapSource source)
+        {
+            var converted = new FormatConvertedBitmap(source, PixelFormats.Bgra32, null, 0);
+            int stride = converted.PixelWidth * 4;
+            byte[] pixels = new byte[stride * converted.PixelHeight];
+            converted.CopyPixels(pixels, stride, 0);
+            for (int i = 0; i < pixels.Length; i += 4)
+            {
+                byte gray = (byte)((pixels[i] * 114 + pixels[i + 1] * 587 + pixels[i + 2] * 299 + 500) / 1000);
+                pixels[i] = pixels[i + 1] = pixels[i + 2] = gray;
+            }
+            var result = BitmapSource.Create(converted.PixelWidth, converted.PixelHeight,
+                source.DpiX, source.DpiY, PixelFormats.Bgra32, null, pixels, stride);
+            result.Freeze();
+            return result;
         }
 
         private static Viewbox CreateSwitchIcon(string pathData, double displaySize,
