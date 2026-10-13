@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Web.Script.Serialization;
 
@@ -44,6 +45,7 @@ namespace CodexHalo
             working.LastEventUtc = now.AddHours(-2);
             Check(WorkBuddyMonitor.IsSessionEligible(working, true, now), "long live tool is not timed out");
             Check(!WorkBuddyMonitor.IsSessionEligible(observation.Sessions[0], false, now.AddMinutes(1)), "completion before app launch is stale");
+            CheckLiveSessionQuery();
             CheckTranscript();
             byte[] pixels = { 20, 190, 10, 255, 20, 190, 10, 0 };
             var icon = System.Windows.Media.Imaging.BitmapSource.Create(2, 1, 96, 96,
@@ -53,6 +55,41 @@ namespace CodexHalo
             Check(gray.IsFrozen && pixels[0] == pixels[1] && pixels[1] == pixels[2], "inactive icon has no color tint");
             Check(pixels[3] == 255 && pixels[7] == 0, "inactive icon preserves transparency");
         }
+        private static void CheckLiveSessionQuery()
+        {
+            string path = Path.Combine(Path.GetTempPath(), "ah-wb-" + Guid.NewGuid().ToString("N") + ".db");
+            IntPtr handle;
+            Check(sqlite3_open(path, out handle) == 0, "create query fixture");
+            try
+            {
+                string sql = "CREATE TABLE sessions (id TEXT PRIMARY KEY,status TEXT,custom_title TEXT,title TEXT,cwd TEXT,model TEXT,updated_at INTEGER,deleted_at INTEGER);" +
+                    "CREATE TABLE session_usage (session_id TEXT,used INTEGER,size INTEGER);" +
+                    "INSERT INTO sessions VALUES ('live','working',NULL,'Live','/work','model',1000,NULL);" +
+                    "INSERT INTO sessions VALUES ('waiting','waiting_permission',NULL,'Wait','/work','model',1000,NULL);" +
+                    "INSERT INTO sessions VALUES ('deleted','working',NULL,'Gone','/work','model',3000,1);";
+                for (int i = 0; i < 80; i++) sql += "INSERT INTO sessions VALUES ('history-" + i +
+                    "','completed',NULL,'History','/work','model'," + (2000 + i) + ",NULL);";
+                Check(sqlite3_exec(handle, sql, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero) == 0, "seed query fixture");
+                using (var db = new CodexSQLiteLogStore(path))
+                {
+                    var rows = db.QueryRows(WorkBuddyMonitor.SessionQuery(new[] { "live", "waiting", "deleted", "quote'\u96ea" }), 8);
+                    Check(db.LastQuerySucceeded, "live IDs are SQL data, including quotes and Unicode");
+                    Check(rows.Count == 66, "cap only historical rows at 64");
+                    Check(rows.Any(row => row[0] == "live" && WorkBuddyMonitor.ParseRow(row).State == HaloState.Working), "80 newer histories cannot hide live work");
+                    Check(rows.Any(row => row[0] == "waiting" && WorkBuddyMonitor.ParseRow(row).State == HaloState.Attention), "80 newer histories cannot hide live waiting");
+                    Check(!rows.Any(row => row[0] == "deleted"), "deleted registrations stay excluded");
+                    Check(db.QueryRows(WorkBuddyMonitor.SessionQuery(new string[0]), 8).Count == 64, "empty registration set keeps historical cap");
+                }
+            }
+            finally { sqlite3_close(handle); File.Delete(path); }
+        }
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+        private static extern int sqlite3_open(string path, out IntPtr db);
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+        private static extern int sqlite3_exec(IntPtr db, string sql, IntPtr callback, IntPtr context, IntPtr error);
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int sqlite3_close(IntPtr db);
+
         private static void CheckTranscript()
         {
             string home = Path.Combine(Path.GetTempPath(), "agent-halo-workbuddy-test-" + Guid.NewGuid().ToString("N"));

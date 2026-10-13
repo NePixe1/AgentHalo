@@ -13,6 +13,28 @@ namespace CodexHalo
     // Read-only integration: WorkBuddy's own state machine owns lifecycle decisions.
     internal sealed class WorkBuddyMonitor
     {
+        // Cap historical display rows only. Live registrations are never aged out.
+        internal const string SessionQueryTemplate = @"SELECT s.id, s.status, coalesce(s.custom_title, s.title), s.cwd, s.model, s.updated_at,
+       coalesce(u.used, 0), coalesce(u.size, 0)
+FROM sessions s
+LEFT JOIN session_usage u ON u.session_id = s.id
+WHERE s.deleted_at IS NULL AND (
+    s.id IN ({0}) OR s.id IN (
+        SELECT id FROM sessions
+        WHERE deleted_at IS NULL AND id NOT IN ({0})
+        ORDER BY updated_at DESC LIMIT 64
+    )
+)
+ORDER BY s.updated_at DESC";
+        internal static string SessionQuery(IEnumerable<string> liveIds)
+        {
+            // Hex-encoded UTF-8 literals safely preserve quotes, Unicode and NULs
+            // without interpolating registration contents as SQL syntax.
+            string ids = String.Join(",", liveIds.Select(id => "CAST(X'" +
+                BitConverter.ToString(Encoding.UTF8.GetBytes(id)).Replace("-", "") + "' AS TEXT)"));
+            return String.Format(CultureInfo.InvariantCulture, SessionQueryTemplate,
+                ids.Length == 0 ? "SELECT NULL WHERE 0" : ids);
+        }
         private readonly string root;
         private readonly DateTime launched = DateTime.UtcNow;
         private DateTime nextPoll;
@@ -86,9 +108,7 @@ namespace CodexHalo
             using (var db = new CodexSQLiteLogStore(Path.Combine(root, "workbuddy.db")))
             {
                 // No credentials, prompts or account metadata are read from settings.
-                var rows = db.QueryRows("SELECT s.id,s.status,coalesce(s.custom_title,s.title),s.cwd,s.model,s.updated_at," +
-                    "coalesce(u.used,0),coalesce(u.size,0) FROM sessions s LEFT JOIN session_usage u ON u.session_id=s.id " +
-                    "WHERE s.deleted_at IS NULL ORDER BY s.updated_at DESC LIMIT 64", 8);
+                var rows = db.QueryRows(SessionQuery(liveIds), 8);
                 observation.Connected = db.LastQuerySucceeded;
                 foreach (string[] row in rows)
                 {

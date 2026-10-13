@@ -77,8 +77,83 @@ try {
   assert.equal((await read()).state, 'error', 'idle does not erase terminal error')
   await event('session.error', { error: { name: 'MessageAbortedError' } })
   assert.equal((await read()).state, 'idle', 'user cancellation is not a red fault')
+  const deferred = () => {
+    let resolve
+    const promise = new Promise(done => { resolve = done })
+    return { promise, resolve }
+  }
+  // Both successful and SDK-shaped 404 responses can arrive after deletion.
+  for (const response of [{ data: { title: 'Late title' } }, { error: { name: 'NotFoundError' }, response: { status: 404 } }]) {
+    const pending = deferred()
+    client.session.get = () => pending.promise
+    await event('session.created', { sessionID: 'deleted' })
+    await event('session.deleted', { sessionID: 'deleted' })
+    pending.resolve(response)
+    assert.equal(await read('deleted'), undefined, 'late metadata cannot resurrect a deleted session')
+  }
+  let unknownFetches = 0
+  client.session.get = async () => { unknownFetches++; return { data: { title: 'Unknown' } } }
+  await event('session.deleted', { sessionID: 'unknown' })
+  assert.equal(await read('unknown'), undefined, 'deleting an unknown id must not create it')
+  assert.equal(unknownFetches, 0, 'deletion never fetches metadata')
+
+  const oldMetadata = deferred()
+  client.session.get = () => oldMetadata.promise
+  await event('session.created', { sessionID: 'reused' })
+  await event('session.deleted', { sessionID: 'reused' })
+  client.session.get = async () => ({ data: { title: 'New generation', parentID: 'new-parent' } })
+  await event('session.created', { sessionID: 'reused' })
+  await read('reused')
+  oldMetadata.resolve({ data: { title: 'Old generation', parentID: 'old-parent' } })
+  assert.equal((await read('reused')).title, 'New generation', 'old metadata cannot mutate a recreated id')
+  assert.equal((await read('reused')).parentID, 'new-parent')
+
+  const oldMessages = deferred()
+  const messagesStarted = deferred()
+  client.session.messages = () => { messagesStarted.resolve(); return oldMessages.promise }
+  await event('session.created', { sessionID: 'usage-reused' })
+  await messagesStarted.promise
+  await event('session.deleted', { sessionID: 'usage-reused' })
+  const newMessages = deferred()
+  const newMessagesStarted = deferred()
+  client.session.messages = () => { newMessagesStarted.resolve(); return newMessages.promise }
+  await event('session.created', { sessionID: 'usage-reused' })
+  await newMessagesStarted.promise
+  oldMessages.resolve({ data: [{ info: { role: 'assistant', tokens: { input: 999, output: 1 } } }] })
+  assert.equal((await read('usage-reused')).input, 0, 'late usage cannot mutate a recreated session')
+  newMessages.resolve({ data: [{ info: { role: 'assistant', tokens: { input: 123, output: 4 } } }] })
+  assert.equal((await read('usage-reused')).input, 123, 'stale usage must not bump the new generation revision and suppress hydration')
   await plugin.dispose()
   assert.equal((await readdir(join(home, '.agent-halo', 'cache', 'opencode'))).filter(f => f.endsWith('.json')).length, 0)
+  for (const phase of ['status', 'list']) {
+    const startup = deferred()
+    const started = deferred()
+    const startupClient = {
+      provider: { list: async () => ({ data: { all: [] } }) },
+      session: {
+        get: async () => ({ data: { title: 'Fresh session' } }),
+        messages: async () => ({ data: [] }),
+        status: async () => {
+          if (phase !== 'status') return { data: {} }
+          started.resolve(); return startup.promise
+        },
+        list: async () => {
+          if (phase !== 'list') return { data: [] }
+          started.resolve(); return startup.promise
+        },
+      },
+    }
+    plugin = await AgentHaloStatus({ client: startupClient, directory: home })
+    await started.promise
+    await event('session.deleted', { sessionID: 'startup-deleted' })
+    startup.resolve(phase === 'status'
+      ? { data: { 'startup-deleted': { type: 'busy' } } }
+      : { data: [{ id: 'startup-deleted', title: 'Stale startup', directory: home, time: { updated: 1 } }] })
+    assert.equal(await read('startup-deleted'), undefined, `late startup ${phase} must not resurrect a deleted id`)
+    await plugin['chat.message']({ sessionID: 'startup-deleted' })
+    assert.equal((await read('startup-deleted')).state, 'thinking', 'a real subsequent event can recreate the id')
+    await plugin.dispose()
+  }
   console.log('PASS: OpenCode lifecycle, parallel tools, permissions, retries, compaction, metrics, children and cleanup')
 } finally {
   await plugin?.dispose()

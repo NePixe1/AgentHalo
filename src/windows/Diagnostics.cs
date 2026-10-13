@@ -3302,7 +3302,9 @@ public static class Diagnostics
                     "agent-halo-grok-ctx-" + Guid.NewGuid().ToString("N"));
                 try
                 {
-                    string cwd = Path.Combine(ctxRoot, "proj");
+                    // cwd is an encoded lookup key, not a directory this fixture uses.
+                    // Do not embed TEMP twice in the on-disk fixture path.
+                    string cwd = @"C:\grok-tests\proj";
                     string sessionId = "sess-1";
                     string enc = GrokSessionContextReader.EncodeWorkspaceDirectory(cwd);
                     string sessionDir = Path.Combine(ctxRoot, ".grok", "sessions",
@@ -3397,11 +3399,13 @@ public static class Diagnostics
                     // Brand-new session: updates.jsonl streams totalTokens before
                     // the first end-of-turn signals.json exists (macOS parity).
                     string firstTurnId = "session-first-turn";
-                    string firstTurnCwd = Path.Combine(ctxRoot, "first-proj");
+                    string firstTurnCwd = @"C:\grok-tests\first-proj";
                     string firstTurnDir = Path.Combine(ctxRoot, ".grok", "sessions",
                         GrokSessionContextReader.EncodeWorkspaceDirectory(
                             firstTurnCwd),
                         firstTurnId);
+                    Assert(Path.Combine(firstTurnDir, "updates.jsonl").Length < 260,
+                        "Grok fixture path must stay below legacy MAX_PATH: " + firstTurnDir);
                     Directory.CreateDirectory(firstTurnDir);
                     File.WriteAllText(Path.Combine(firstTurnDir, "updates.jsonl"),
                         "{\"timestamp\":1,\"method\":\"session/update\",\"params\":" +
