@@ -126,6 +126,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var piActivitySnapshot = PiActivitySnapshot.empty
     private let antigravityActivityMonitor = AntigravityActivityMonitor()
     private var antigravityActivitySnapshot = AntigravityActivitySnapshot.empty
+    private let openCodeActivityMonitor = SnapshotActivityMonitor(
+        queueLabel: "com.agenthalo.opencode-activity",
+        activeAgent: .opencode,
+        empty: .empty,
+        scan: {
+            OpenCodeStatusReducer.scan(
+                homeDirectory: FileManager.default.homeDirectoryForCurrentUser,
+                processes: LiveProcessProbe.processes(),
+                launched: OpenCodeActivityLaunch.date
+            )
+        }
+    )
+    private var openCodeActivitySnapshot = OpenCodeObservation.empty
+    private let workBuddyScanner = WorkBuddyScanner()
+    private lazy var workBuddyActivityMonitor: SnapshotActivityMonitor<WorkBuddyObservation> = SnapshotActivityMonitor(
+        queueLabel: "com.agenthalo.workbuddy-activity",
+        activeAgent: .workbuddy,
+        pauseStopsPolling: true,
+        empty: .empty,
+        scan: { [workBuddyScanner] in
+            workBuddyScanner.scan()
+        }
+    )
+    private var workBuddyActivitySnapshot = WorkBuddyObservation.empty
     private var nextStatusLineReconciliationAt = Date.distantPast
     private let statusLineReconciliationInterval: TimeInterval = 2
     private var selectedPreview = PreviewPayload.live
@@ -244,6 +268,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.antigravityActivityDidChange(snapshot)
             }
         }
+        openCodeActivitySnapshot = openCodeActivityMonitor.snapshot()
+        openCodeActivityMonitor.start { [weak self] snapshot in
+            Task { @MainActor in
+                self?.openCodeActivityDidChange(snapshot)
+            }
+        }
+        workBuddyActivitySnapshot = workBuddyActivityMonitor.snapshot()
+        workBuddyActivityMonitor.start { [weak self] snapshot in
+            Task { @MainActor in
+                self?.workBuddyActivityDidChange(snapshot)
+            }
+        }
         focusedSessionEvidenceProvider = { [weak self] in
             self?.makeFocusedSessionEvidence() ?? .empty
         }
@@ -313,6 +349,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         grokActivityMonitor.stop()
         piActivityMonitor.stop()
         antigravityActivityMonitor.stop()
+        openCodeActivityMonitor.stop()
+        workBuddyActivityMonitor.stop()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         settingsSaveTimer?.invalidate()
         if placementState.shouldPersistCurrentFrame, let panel {
@@ -372,6 +410,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             detailsPanelVisible: detailsPanel.isVisible,
             enabled: settings.isAgentEnabled(.antigravity)
         )
+        openCodeActivityMonitor.updatePollingContext(
+            focusedAgent: settings.focusedAgent,
+            paused: settings.paused,
+            enabled: settings.isAgentEnabled(.opencode)
+        )
+        workBuddyActivityMonitor.updatePollingContext(
+            focusedAgent: settings.focusedAgent,
+            paused: settings.paused,
+            enabled: settings.isAgentEnabled(.workbuddy)
+        )
         refreshAggregateAndUI(now: now, codexRunning: codexRunning)
     }
 
@@ -415,6 +463,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshAggregateAndUI(now: Date(), codexRunning: codexRunning)
     }
 
+    private func openCodeActivityDidChange(_ snapshot: OpenCodeObservation) {
+        guard haloView?.isDragging != true else {
+            openCodeActivitySnapshot = snapshot
+            return
+        }
+        openCodeActivitySnapshot = snapshot
+        let codexRunning = CodexAppDetector.isCodexRunning()
+        refreshAggregateAndUI(now: Date(), codexRunning: codexRunning)
+    }
+
+    private func workBuddyActivityDidChange(_ snapshot: WorkBuddyObservation) {
+        guard haloView?.isDragging != true else {
+            workBuddyActivitySnapshot = snapshot
+            return
+        }
+        workBuddyActivitySnapshot = snapshot
+        let codexRunning = CodexAppDetector.isCodexRunning()
+        refreshAggregateAndUI(now: Date(), codexRunning: codexRunning)
+    }
+
     private func codexActivityDidChange(_ snapshot: CodexActivitySnapshot) {
         guard haloView?.isDragging != true else {
             codexActivitySnapshot = snapshot
@@ -443,6 +511,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .antigravity:
             return antigravityActivitySnapshot.isPresent
                 || AntigravityAppDetector.isAntigravityRunning()
+        case .opencode:
+            return openCodeActivitySnapshot.pluginPresent
+        case .workbuddy:
+            return workBuddyActivitySnapshot.present && workBuddyActivitySnapshot.connected
         }
     }
 
@@ -458,6 +530,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             aggregate: aggregate,
             hasLiveSession: hasLiveSessionForFocusedAgent(codexRunning: codexRunning)
         )
+        aggregate = connectingAggregate(aggregate)
         applyRealtimeCodexActivity(codexActivitySnapshot.realtimeActivity)
         let errorUpdate = liveErrorPresentationState.update(
             aggregate: aggregate,
@@ -480,6 +553,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 aggregate: aggregate,
                 hasLiveSession: hasLiveSessionForFocusedAgent(codexRunning: codexRunning)
             )
+            aggregate = connectingAggregate(aggregate)
             applyRealtimeCodexActivity(codexActivitySnapshot.realtimeActivity)
         }
         haloView?.updateLiveAggregate(
@@ -806,6 +880,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .grok: return grokActivitySnapshot.sessions
         case .pi: return piActivitySnapshot.sessions
         case .antigravity: return antigravityActivitySnapshot.sessions
+        case .opencode: return openCodeActivitySnapshot.sessions
+        case .workbuddy: return workBuddyActivitySnapshot.sessions
         }
     }
 
@@ -814,7 +890,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             claude: claudeActivitySnapshot.liveSessions,
             grok: GrokActiveSessionsReader.liveSessions(),
             pi: piActivitySnapshot.livePids,
-            antigravityPresentPids: AntigravityActivityMonitor.presentProcessIds()
+            antigravityPresentPids: AntigravityActivityMonitor.presentProcessIds(),
+            opencodeHostPid: openCodeActivitySnapshot.hostPid,
+            workbuddyHostPid: workBuddyActivitySnapshot.hostPid
         )
     }
 
@@ -846,6 +924,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             piActivityMonitor.requestRefresh()
         case .antigravity:
             antigravityActivityMonitor.requestRefresh()
+        case .opencode:
+            openCodeActivityMonitor.requestRefresh()
+        case .workbuddy:
+            workBuddyActivityMonitor.requestRefresh()
         case .codex:
             break
         }
@@ -1004,6 +1086,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         antigravityActivitySnapshot.sessions
     }
 
+    private func openCodeSnapshots() -> [SessionSnapshot] {
+        openCodeActivitySnapshot.sessions
+    }
+
+    private func workBuddySnapshots() -> [SessionSnapshot] {
+        workBuddyActivitySnapshot.sessions
+    }
+
+    /// Process is up, but the plugin heartbeat or local database is not.
+    /// Keep the ring idle and say so, instead of inventing standby or offline.
+    private func connectingAggregate(_ aggregate: AggregateSnapshot) -> AggregateSnapshot {
+        guard aggregate.label != "PAUSED" else { return aggregate }
+        switch aggregate.focusedAgent {
+        case .opencode where !openCodeActivitySnapshot.pluginPresent && openCodeActivitySnapshot.processPresent:
+            return AggregateSnapshot(
+                state: .idle,
+                label: "CONNECTING",
+                detail: AgentKind.opencode.localizedConnectingDetail,
+                sessions: [],
+                focusedAgent: .opencode
+            )
+        case .workbuddy where workBuddyActivitySnapshot.present && !workBuddyActivitySnapshot.connected:
+            return AggregateSnapshot(
+                state: .idle,
+                label: "CONNECTING",
+                detail: AgentKind.workbuddy.localizedConnectingDetail,
+                sessions: [],
+                focusedAgent: .workbuddy
+            )
+        default:
+            return aggregate
+        }
+    }
+
     static func standbyAggregate(
         aggregate: AggregateSnapshot,
         hasLiveSession: Bool
@@ -1148,6 +1264,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 standbySession: piActivitySnapshot.preferredStandbySession,
                 isStandby: displayedAggregate.label == "STANDBY"
             )
+        case .opencode:
+            let session = displayedAggregate.sessions.first
+                ?? openCodeActivitySnapshot.preferredSession
+            exactSessionDetails = SessionDetailsSnapshot(
+                projectName: session?.projectName,
+                sessionTitle: session?.sessionTitle,
+                modelName: session?.modelName,
+                inputTokens: session?.inputTokens,
+                outputTokens: session?.outputTokens
+            )
+            exactContextUsedPercent = Self.contextUsedPercentForPiDetails(
+                displayedSessions: displayedAggregate.sessions,
+                standbySession: openCodeActivitySnapshot.preferredSession,
+                isStandby: displayedAggregate.label == "STANDBY",
+                agent: .opencode
+            )
+        case .workbuddy:
+            let session = displayedAggregate.sessions.first
+                ?? workBuddyActivitySnapshot.preferredSession
+            exactSessionDetails = SessionDetailsSnapshot(
+                projectName: session?.projectName,
+                sessionTitle: session?.sessionTitle,
+                modelName: session?.modelName,
+                inputTokens: session?.inputTokens,
+                outputTokens: session?.outputTokens
+            )
+            exactContextUsedPercent = Self.contextUsedPercentForPiDetails(
+                displayedSessions: displayedAggregate.sessions,
+                standbySession: workBuddyActivitySnapshot.preferredSession,
+                isStandby: displayedAggregate.label == "STANDBY",
+                agent: .workbuddy
+            )
         case .antigravity:
             exactSessionDetails = SessionDetailsSnapshot()
             exactContextUsedPercent = nil
@@ -1220,10 +1368,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     nonisolated static func contextUsedPercentForPiDetails(
         displayedSessions: [SessionSnapshot],
         standbySession: SessionSnapshot?,
-        isStandby: Bool
+        isStandby: Bool,
+        agent: AgentKind = .pi
     ) -> Double? {
         if let visible = displayedSessions.first(where: {
-            $0.agent == .pi && !$0.threadId.isEmpty
+            $0.agent == agent && !$0.threadId.isEmpty
         }) {
             return visible.contextUsedPercent
         }
@@ -1298,6 +1447,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return .grok
         case .antigravity:
             return .antigravity
+        case .opencode:
+            return nil
+        case .workbuddy:
+            return nil
         case .pi:
             return nil
         }
@@ -1395,6 +1548,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func refreshVisibleDetailsStatus() {
         guard detailsPanel.isVisible else {
+            return
+        }
+        // OpenCode and WorkBuddy session cards follow the latest snapshot,
+        // including context that stays visible through STANDBY.
+        if settings.focusedAgent == .opencode || settings.focusedAgent == .workbuddy {
+            updateDetailsPanelContent()
             return
         }
         detailsPanel.updateStatus(aggregate: displayAggregate())
@@ -1537,7 +1696,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func allSnapshots() -> [SessionSnapshot] {
-        codexActivitySnapshot.sessions + claudeSnapshots() + grokSnapshots() + piSnapshots() + antigravitySnapshots()
+        codexActivitySnapshot.sessions + claudeSnapshots() + grokSnapshots() + piSnapshots()
+            + antigravitySnapshots()
+            + openCodeSnapshots()
+            + workBuddySnapshots()
     }
 
     private func addMenuItem(
@@ -1703,6 +1865,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     grokActivityMonitor.requestRefresh()
                 case .pi:
                     piActivityMonitor.requestRefresh()
+                case .opencode:
+                    OpenCodePluginConfigurator.configure()
+                    openCodeActivityMonitor.updatePollingContext(
+                        focusedAgent: settings.focusedAgent,
+                        paused: settings.paused,
+                        enabled: true
+                    )
+                    openCodeActivityMonitor.requestRefresh()
+                case .workbuddy:
+                    workBuddyActivityMonitor.updatePollingContext(
+                        focusedAgent: settings.focusedAgent,
+                        paused: settings.paused,
+                        enabled: true
+                    )
+                    workBuddyActivityMonitor.requestRefresh()
                 case .antigravity:
                     AntigravityHookConfigurator.configure()
                     antigravityActivityMonitor.updatePollingContext(
@@ -1714,13 +1891,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 case .codex:
                     break
                 }
-            } else if !nowOn && wasOn, agent == .antigravity {
-                antigravityActivityMonitor.updatePollingContext(
-                    focusedAgent: settings.focusedAgent,
-                    detailsPanelVisible: detailsPanel.isVisible,
-                    enabled: false
-                )
-                antigravityActivitySnapshot = .empty
+            } else if !nowOn && wasOn {
+                switch agent {
+                case .antigravity:
+                    antigravityActivityMonitor.updatePollingContext(
+                        focusedAgent: settings.focusedAgent,
+                        detailsPanelVisible: detailsPanel.isVisible,
+                        enabled: false
+                    )
+                    antigravityActivitySnapshot = .empty
+                case .opencode:
+                    openCodeActivityMonitor.updatePollingContext(
+                        focusedAgent: settings.focusedAgent,
+                        paused: settings.paused,
+                        enabled: false
+                    )
+                    openCodeActivitySnapshot = .empty
+                case .workbuddy:
+                    workBuddyActivityMonitor.updatePollingContext(
+                        focusedAgent: settings.focusedAgent,
+                        paused: settings.paused,
+                        enabled: false
+                    )
+                    workBuddyActivitySnapshot = .empty
+                case .codex, .claudeCode, .grok, .pi:
+                    break
+                }
             }
         }
     }

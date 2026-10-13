@@ -6,6 +6,8 @@ public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
     case grok
     case pi
     case antigravity
+    case opencode
+    case workbuddy
 
     public var menuTitle: String {
         switch self {
@@ -14,6 +16,8 @@ public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
         case .grok: return "Grok"
         case .pi: return "Pi"
         case .antigravity: return "Antigravity"
+        case .opencode: return "OpenCode"
+        case .workbuddy: return "WorkBuddy"
         }
     }
 
@@ -24,6 +28,8 @@ public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
         case .grok: return "Grok"
         case .pi: return "Pi"
         case .antigravity: return "AG"
+        case .opencode: return "OC"
+        case .workbuddy: return "WB"
         }
     }
 
@@ -34,6 +40,8 @@ public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
         case .grok: return "Grok is standing by"
         case .pi: return "Pi is standing by"
         case .antigravity: return "Antigravity is standing by"
+        case .opencode: return "OpenCode is standing by"
+        case .workbuddy: return "WorkBuddy is standing by"
         }
     }
 
@@ -44,6 +52,8 @@ public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
         case .grok: return L10n.shared["status.standby_grok"]
         case .pi: return L10n.shared["status.standby_pi"]
         case .antigravity: return L10n.shared["status.standby_antigravity"]
+        case .opencode: return L10n.shared["status.standby_opencode"]
+        case .workbuddy: return L10n.shared["status.standby_workbuddy"]
         }
     }
 
@@ -54,6 +64,8 @@ public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
         case .grok: return "Grok is not running"
         case .pi: return "Pi is not running"
         case .antigravity: return "Antigravity is not running"
+        case .opencode: return "OpenCode is not running"
+        case .workbuddy: return "WorkBuddy is not running"
         }
     }
 
@@ -64,6 +76,16 @@ public enum AgentKind: String, Codable, CaseIterable, Equatable, Sendable {
         case .grok: return L10n.shared["status.offline_grok"]
         case .pi: return L10n.shared["status.offline_pi"]
         case .antigravity: return L10n.shared["status.offline_antigravity"]
+        case .opencode: return L10n.shared["status.offline_opencode"]
+        case .workbuddy: return L10n.shared["status.offline_workbuddy"]
+        }
+    }
+
+    public var localizedConnectingDetail: String {
+        switch self {
+        case .opencode: return L10n.shared["status.connecting_opencode"]
+        case .workbuddy: return L10n.shared["status.connecting_workbuddy"]
+        default: return localizedOfflineDetail
         }
     }
 }

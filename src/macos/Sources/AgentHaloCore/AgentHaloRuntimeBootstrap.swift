@@ -16,7 +16,8 @@ public enum AgentHaloRuntimeBootstrap {
         bundledHookBinary: URL? = nil,
         bundledStatuslineProxy: URL? = nil,
         fileManager: FileManager = .default,
-        enabledAgents: [AgentKind] = HaloSettings.defaultEnabledAgents
+        enabledAgents: [AgentKind] = HaloSettings.defaultEnabledAgents,
+        environment: [String: String] = ProcessInfo.processInfo.environment
     ) {
         let paths = AgentHaloPaths(homeDirectory: homeDirectory)
         AgentHaloLayoutMigrator.migrateIfNeeded(paths: paths, fileManager: fileManager)
@@ -77,6 +78,12 @@ public enum AgentHaloRuntimeBootstrap {
         // embedded source differs from ~/.pi/agent/extensions/agent-halo-status.ts.
         if enabledAgents.contains(.pi) {
             PiExtensionConfigurator.configure(homeDirectory: homeDirectory)
+        }
+        if enabledAgents.contains(.opencode) {
+            OpenCodePluginConfigurator.configure(
+                homeDirectory: homeDirectory,
+                environment: environment
+            )
         }
         if enabledAgents.contains(.antigravity) {
             AntigravityHookConfigurator.configure(

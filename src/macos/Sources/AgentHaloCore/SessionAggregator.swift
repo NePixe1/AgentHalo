@@ -41,7 +41,12 @@ public enum SessionAggregator {
 
         let focusedSnapshots = snapshots.filter { $0.agent == focusedAgent }
         let displayCandidates = focusedSnapshots.filter { snapshot in
-            !isSupersededError(snapshot, among: focusedSnapshots)
+            // These agents keep every current row. State priority then keeps a
+            // live error ahead of a newer sibling.
+            if snapshot.agent == .opencode || snapshot.agent == .workbuddy {
+                return true
+            }
+            return !isSupersededError(snapshot, among: focusedSnapshots)
         }
         let visible = displayCandidates.filter { snapshot in
             if snapshot.state == .done {
@@ -59,6 +64,12 @@ public enum SessionAggregator {
                     && completedAt >= now.addingTimeInterval(-Self.completedVisibleDuration)
             }
             if snapshot.state == .error {
+                // OpenCode and WorkBuddy already drop errors that are no longer
+                // the plugin or database status. The shared cutoff would hide one
+                // that is still current.
+                if snapshot.agent == .opencode || snapshot.agent == .workbuddy {
+                    return true
+                }
                 if !settings.shouldShowError(eventAt: snapshot.lastEventAt) {
                     return false
                 }
@@ -73,7 +84,12 @@ public enum SessionAggregator {
             // Hide stale thinking/working after 10 minutes. Do NOT apply this to
             // `.attention` — awaiting user approval may legitimately sit idle for
             // a long time without new events (and must not fall back to STANDBY).
+            // OpenCode and WorkBuddy prove liveness with a live process or
+            // plugin heartbeat. A long tool call must not fall back to standby
+            // just because the native row stopped changing.
             if (snapshot.state == .thinking || snapshot.state == .working)
+                && snapshot.agent != .opencode
+                && snapshot.agent != .workbuddy
                 && now.timeIntervalSince(snapshot.lastEventAt) >= 600 {
                 return false
             }

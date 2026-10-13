@@ -41,8 +41,8 @@
 
 | Platform | Supported agents | Requirement |
 | --- | --- | --- |
-| Windows | Codex, Claude Code, Grok Build, Pi | Windows 10 or 11; .NET Framework 4.8 (usually preinstalled) |
-| macOS | Codex, Claude Code, Grok Build, Pi; Antigravity (`agy`, default off) | macOS 13 or later |
+| Windows | Codex, Claude Code, Grok Build, Pi; OpenCode and WorkBuddy (default off) | Windows 10 or 11; .NET Framework 4.8 (usually preinstalled) |
+| macOS | Codex, Claude Code, Grok Build, Pi; Antigravity (`agy`), OpenCode, and WorkBuddy (default off) | macOS 13 or later |
 
 Install and sign in to at least one supported agent before using Agent Halo.
 
@@ -69,8 +69,8 @@ Official accounts do not need an OpenAI API key. When available, usage refresh r
 ## Quick usage
 
 - **Drag** the halo to move it; it snaps lightly to screen edges.
-- **Hover** for status and usage / session details; switch **Codex / CC / Grok / Pi** from the agent toggle.
-- **Double-click** the halo to bring the focused agent's session host forward (Codex app, or the terminal / desktop app hosting Claude, Grok, Pi, or Antigravity). Nothing happens if that host cannot be found.
+- **Hover** for status and usage / session details; switch **Codex / CC / Grok / Pi**, and any enabled OpenCode, WorkBuddy, or Antigravity, from the agent toggle.
+- **Double-click** the halo to bring the focused agent's session host forward (Codex app, WorkBuddy, or the terminal / desktop app hosting Claude, Grok, Pi, OpenCode, or Antigravity). Nothing happens if that host cannot be found.
 - **Right-click** to choose **Monitored Agents** and the **Current Agent**, or access state previews, temporary pause, startup, always-on-top behavior, halo size (`75% / 100% / 125%`), **Reset Position**, and quit. At least one agent remains enabled; pause clears on the next launch.
 - After a display change, an off-screen halo recovers to the primary display. On macOS, it can also return to its remembered display when that display reconnects.
 

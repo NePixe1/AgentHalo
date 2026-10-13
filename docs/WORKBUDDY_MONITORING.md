@@ -1,4 +1,4 @@
-# WorkBuddy Windows 监控
+# WorkBuddy 监控
 
 ## 数据来源
 
@@ -12,9 +12,9 @@
   `message.usage.input_tokens / output_tokens` 提供最近一次响应的输入/输出，
   `providerData.requestModelName` 提供模型显示名。不是累计账单用量。
 
-SQLite 使用 Windows 自带的 `winsqlite3.dll`，只读打开，兼容 WAL；不打包 `sqlite3.exe`。
+SQLite 只读打开，兼容 WAL。Windows 使用系统 `winsqlite3.dll`，macOS 使用系统 `libsqlite3`；两边都不打包 `sqlite3` 可执行文件。
 后台至多每 500ms 发起一次扫描，只在选中 WorkBuddy 且未暂停时轮询；
-JSONL 首次只读尾部，后续增量读取，不在 UI 线程扫描文件。
+JSONL 首次只读尾部，后续增量读取，不在界面线程扫描文件。
 
 ## 状态映射
 
@@ -42,7 +42,7 @@ JSONL 首次只读尾部，后续增量读取，不在 UI 线程扫描文件。
 
 `docs/assets/agent-switch/workbuddy.png` 来自已安装官方客户端的
 `resources/app.asar.unpacked/resources/icon.png`，品牌归原权利人所有。
-图标内嵌进 EXE，运行时不依赖 docs 目录。
+图标打进 Windows EXE 和 macOS 应用包，发布后的运行不依赖 docs 目录。
 
 ## 验证与边界
 
@@ -50,6 +50,6 @@ JSONL 首次只读尾部，后续增量读取，不在 UI 线程扫描文件。
 - `--workbuddy-snapshot <输出文件>` 可生成不含正文、密钥的诊断快照。
 - self-test 覆盖状态映射、旧记录排除、完成生命周期、勾选记忆、JSONL 增量及半行写入。
 - 授权、故障分支来自本机安装版本的原生状态定义及合成测试，未人为中断真实任务触发。
-- 本轮只实现 Windows；macOS 只同步通用翻译，不新增监控逻辑。
+- Windows 与 macOS 都只读上述本地文件。macOS 使用系统 `libsqlite3`，同样不打包 `sqlite3` 可执行文件。
 - 本地数据库不是承诺稳定的公共 API。后续 WorkBuddy 改版可能需要适配；
   当前仅覆盖本机本地会话，远程或云端任务不保证能检测到。

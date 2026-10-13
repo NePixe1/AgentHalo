@@ -1,6 +1,11 @@
 import AppKit
 import AgentHaloCore
 
+if CommandLine.arguments.contains("--snapshot-monitor-check") {
+    runSnapshotActivityMonitorChecks()
+    exit(0)
+}
+
 let packagedVerificationArgument = "--packaged-verification"
 
 if CommandLine.arguments.contains("--self-check") {

@@ -23,7 +23,7 @@ public enum ProcessTreeHostWalker {
     public static let maxDepth = 32
 
     private static let skipNames: Set<String> = [
-        "claude", "grok", "pi", "agy", "node", "bun",
+        "claude", "grok", "pi", "agy", "opencode", "node", "bun",
         "conhost", "openconsole", "wslrelay", "wslhost",
         "language_server", "agenthalo", "agenthalomac"
     ]

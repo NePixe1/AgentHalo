@@ -6,7 +6,7 @@ The entire UI must stay **minimal and refined** : ambient-first, low visual nois
 
 ## Product intent
 
-Agent Halo is a local, always-on-top desktop status ring for coding agents. Windows and macOS support Codex, Claude Code, Grok Build, and Pi; macOS optionally supports Antigravity (`agy`, default off). Ambient first: readable in peripheral vision; honest lifecycle inference; privacy-first (no session upload). Product framing: [docs/PRODUCT.md](docs/PRODUCT.md).
+Agent Halo is a local, always-on-top desktop status ring for coding agents. Windows and macOS support Codex, Claude Code, Grok Build, and Pi. OpenCode and WorkBuddy are opt-in on both platforms. macOS also optionally supports Antigravity (`agy`, default off). Ambient first: readable in peripheral vision; honest lifecycle inference; privacy-first (no session upload). Product framing: [docs/PRODUCT.md](docs/PRODUCT.md).
 
 ## Architecture
 
@@ -74,6 +74,8 @@ Platform extras:
 - **macOS** Claude: lifecycle hooks + status line proxy in `~/.claude/settings.json`
 - **macOS** Grok: lifecycle hooks in `~/.grok/hooks/agent-halo-status.json`
 - **macOS** Antigravity: lifecycle hooks named group `agent-halo-status` in `~/.gemini/config/hooks.json`
+- **OpenCode** (both platforms): plugin `agent-halo-status.js` under the OpenCode config `plugins/` directory; atomic snapshots in `.agent-halo/cache/opencode/`
+- **WorkBuddy** (both platforms): read-only `~/.workbuddy` session files, `workbuddy.db`, and project JSONL. No hook and no config writes.
 
 ## Privacy / network (implementation constraints)
 
@@ -153,8 +155,8 @@ Related scripts: `scripts/build-macos.sh`, `scripts/create-dmg.sh`. Packaged app
 ## UI / product constraints worth preserving
 
 - Hover details: focus switch + usage vs session detail modes by credential type.
-- Context pill: Codex quota-based context; Claude via status line proxy; Grok prefers live `totalTokens` from session `updates.jsonl` (fallback end-of-turn `signals.json`).
-- Click / double-click halo: double-click brings the focused agent's session host forward (Codex desktop app, or the GUI host of the live Claude / Grok / Pi / Antigravity session). Single-click does not activate. No tab targeting and no app launch.
+- Context pill: Codex quota-based context; Claude via status line proxy; Grok prefers live `totalTokens` from session `updates.jsonl` (fallback end-of-turn `signals.json`). OpenCode uses the plugin `context/contextWindow`. WorkBuddy uses `session_usage` used/size.
+- Click / double-click halo: double-click brings the focused agent's session host forward (Codex desktop app, WorkBuddy, or the GUI host of the live Claude / Grok / Pi / OpenCode / Antigravity session). Single-click does not activate. No tab targeting and no app launch.
 - Halo size submenu: `75% / 100% / 125%`, persisted.
 - No pets, chat body content, cost meter, or cloud backend for lifecycle.
 

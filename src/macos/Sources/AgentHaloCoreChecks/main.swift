@@ -6277,6 +6277,12 @@ do {
     try testPiStatusMonitorRefreshAndRotationRetention()
     try testPiRuntimeMonitorDetectsPreexistingSession()
     try testPiExtensionConfiguratorInstallsFromSource()
+    testOpenCodeParseFiltersChildCompletionAndKeepsAttention()
+    testOpenCodeHeartbeatRequiresLiveProcessAndSettlesCompletion()
+    try testOpenCodePluginInstallRespectsConfigDirAndSkipsUnchangedFile()
+    try testWorkBuddyStateMappingEligibilityAndTranscript()
+    try testWorkBuddyScanReadsDatabaseAndIgnoresPrewarm()
+    testOpenCodeAndWorkBuddyHostPidsResolve()
 } catch {
     fatalError("Pi status checks failed: \(error)")
 }

@@ -1,4 +1,5 @@
 import AppKit
+import CoreImage
 import AgentHaloCore
 
 enum DetailsPanelContentRole: Equatable {
@@ -52,6 +53,9 @@ class DetailsPanel: NSPanel {
     /// When the standby hold started/should end; `nil` means not currently holding.
     private var contextHoldExpiresAt: Date?
     private var contextHoldAgent: AgentKind?
+    private var statusMotionKey = ""
+    private var statusMotionAgent: AgentKind?
+    private let sessionDivider = NSView()
     var onMouseEntered: (() -> Void)?
     var onMouseExited: (() -> Void)?
     var onAgentSelected: ((AgentKind) -> Void)?
@@ -151,6 +155,15 @@ class DetailsPanel: NSPanel {
             view.setContentHuggingPriority(.defaultLow, for: .horizontal)
             view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         }
+        sessionDivider.wantsLayer = true
+        sessionDivider.layer?.backgroundColor = NSColor(
+            calibratedRed: 0.45,
+            green: 0.52,
+            blue: 0.58,
+            alpha: 0.72
+        ).cgColor
+        sessionDivider.translatesAutoresizingMaskIntoConstraints = false
+        bodySlot.addSubview(sessionDivider)
         bodySlot.addSubview(emptyBody)
         bodySlot.addSubview(sessionCard)
         metadataGroup.addSubview(bodySlot)
@@ -204,6 +217,10 @@ class DetailsPanel: NSPanel {
                 constant: -sessionBodyBottomEqualizer
             ),
             bodySlot.heightAnchor.constraint(equalToConstant: Self.sessionBodyHeight),
+            sessionDivider.leadingAnchor.constraint(equalTo: bodySlot.leadingAnchor),
+            sessionDivider.trailingAnchor.constraint(equalTo: bodySlot.trailingAnchor),
+            sessionDivider.topAnchor.constraint(equalTo: bodySlot.topAnchor),
+            sessionDivider.heightAnchor.constraint(equalToConstant: 1),
             emptyBody.leadingAnchor.constraint(equalTo: bodySlot.leadingAnchor),
             emptyBody.trailingAnchor.constraint(equalTo: bodySlot.trailingAnchor),
             emptyBody.topAnchor.constraint(equalTo: bodySlot.topAnchor),
@@ -430,6 +447,11 @@ class DetailsPanel: NSPanel {
         titleField.textColor = NSColor(calibratedRed: rgb.red / 255, green: rgb.green / 255, blue: rgb.blue / 255, alpha: 1)
         detailField.stringValue = Self.localizedDetail(for: aggregate)
         agentToggle.setAgent(aggregate.focusedAgent)
+        playStatusMotion(
+            agent: aggregate.focusedAgent,
+            label: aggregate.label,
+            detail: detailField.stringValue
+        )
         let isOffline = aggregate.state == .idle && aggregate.label == "OFFLINE"
         let isStandby = aggregate.label == "STANDBY"
         switch aggregate.focusedAgent {
@@ -443,7 +465,7 @@ class DetailsPanel: NSPanel {
                 focusedAgent: .codex,
                 now: now
             )
-        case .grok, .claudeCode, .pi, .antigravity:
+        case .grok, .claudeCode, .pi, .antigravity, .opencode, .workbuddy:
             // Grok/Claude/Pi context is disk-, statusline-, or extension-backed on
             // full content refresh. Only STANDBY/OFFLINE status ticks should touch
             // the pill: STANDBY soft-holds the last live percent; OFFLINE clears
@@ -458,6 +480,41 @@ class DetailsPanel: NSPanel {
                     now: now
                 )
             }
+        }
+    }
+
+    /// Short crossfade plus a few points of travel when the focused agent changes.
+    /// Opacity stays high so the panel does not flash white.
+    private func playStatusMotion(agent: AgentKind, label: String, detail: String) {
+        let key = "\(agent.rawValue)\u{1f}\(label)\u{1f}\(detail)"
+        let previousAgent = statusMotionAgent
+        let changed = key != statusMotionKey
+        statusMotionKey = key
+        statusMotionAgent = agent
+        guard changed, previousAgent != nil else { return }
+        var shift: CGFloat = 0
+        if let previousAgent, previousAgent != agent,
+           let from = AgentKind.allCases.firstIndex(of: previousAgent),
+           let to = AgentKind.allCases.firstIndex(of: agent),
+           from != to {
+            shift = to > from ? 5 : -5
+        }
+        for view in [titleField, detailField, metadataGroup, quotaGroup] as [NSView] {
+            view.wantsLayer = true
+            view.layer?.removeAnimation(forKey: "agenthalo.status.move")
+            view.layer?.removeAnimation(forKey: "agenthalo.status.fade")
+            let move = CABasicAnimation(keyPath: "transform.translation.x")
+            move.fromValue = -shift
+            move.toValue = 0
+            move.duration = 0.18
+            move.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            let fade = CABasicAnimation(keyPath: "opacity")
+            fade.fromValue = 0.78
+            fade.toValue = 1
+            fade.duration = 0.18
+            fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            view.layer?.add(move, forKey: "agenthalo.status.move")
+            view.layer?.add(fade, forKey: "agenthalo.status.fade")
         }
     }
 
@@ -499,10 +556,8 @@ class DetailsPanel: NSPanel {
         let outputStr = compactTokenCount(output)
         
         let font = NSFont.systemFont(ofSize: 10.5, weight: .medium)
-        // 莫兰迪蓝灰色：输入 (In)
-        let inColor = NSColor(calibratedRed: 0.25, green: 0.45, blue: 0.65, alpha: 1)
-        // 莫兰迪绿灰色：输出 (Out)
-        let outColor = NSColor(calibratedRed: 0.25, green: 0.55, blue: 0.45, alpha: 1)
+        let inColor = NSColor(calibratedRed: 0.16, green: 0.42, blue: 0.78, alpha: 1)
+        let outColor = NSColor(calibratedRed: 0.05, green: 0.55, blue: 0.52, alpha: 1)
         // 中间分隔点颜色
         let sepColor = NSColor.secondaryLabelColor
         
@@ -537,6 +592,11 @@ class DetailsPanel: NSPanel {
         if aggregate.state == .idle {
             if aggregate.label == "PAUSED" {
                 return L10n.shared["status.paused"]
+            }
+            if aggregate.label == "CONNECTING" {
+                return aggregate.detail.isEmpty
+                    ? aggregate.focusedAgent.localizedConnectingDetail
+                    : aggregate.detail
             }
             return aggregate.focusedAgent.localizedOfflineDetail
         }
@@ -620,10 +680,17 @@ class DetailsPanel: NSPanel {
     }
 
     func setEnabledAgents(_ agents: [AgentKind], focused: AgentKind) {
-        agentToggle.setEnabledAgents(agents, focused: focused)
-        let visibleCount = max(agentToggle.enabledAgentsForTesting.count, 1)
-        agentToggleWidthConstraint?.constant = AgentToggleView.slotWidth * CGFloat(visibleCount)
+        agentToggle.setEnabledAgents(
+            agents,
+            focused: focused,
+            maximumWidth: Self.agentToggleMaximumWidth
+        )
+        agentToggleWidthConstraint?.constant = agentToggle.toggleWidthForTesting
     }
+
+    /// Room left of the context pill inside the fixed 278pt panel:
+    /// 278 - insets 34 - pill 42 - gap 10.
+    static let agentToggleMaximumWidth: CGFloat = 192
 
     var enabledAgentsForTesting: [AgentKind] {
         agentToggle.enabledAgentsForTesting
@@ -835,11 +902,10 @@ class DetailsPanel: NSPanel {
     }
 }
 
-/// Offline empty rectangle: dashed border + centered copy.
+/// Empty session copy shares the status text's left edge. No separate dashed box.
 @MainActor
 private final class EmptySessionBodyView: NSView {
     private let label = NSTextField(labelWithString: "")
-    private let dashLayer = CAShapeLayer()
 
     var text: String {
         get { label.stringValue }
@@ -855,20 +921,10 @@ private final class EmptySessionBodyView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layerContentsRedrawPolicy = .onSetNeedsDisplay
-        layer?.cornerRadius = 12
-        layer?.masksToBounds = true
-        layer?.backgroundColor = NSColor(calibratedWhite: 1, alpha: 0.45).cgColor
-
-        dashLayer.fillColor = nil
-        dashLayer.strokeColor = NSColor(calibratedRed: 130 / 255, green: 150 / 255, blue: 165 / 255, alpha: 0.28).cgColor
-        dashLayer.lineWidth = 1
-        dashLayer.lineDashPattern = [4, 3]
-        dashLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
-        layer?.addSublayer(dashLayer)
 
         label.font = .systemFont(ofSize: 12, weight: .regular)
         label.textColor = NSColor(calibratedRed: 109 / 255, green: 129 / 255, blue: 144 / 255, alpha: 1)
-        label.alignment = .center
+        label.alignment = .left
         label.lineBreakMode = .byTruncatingTail
         label.maximumNumberOfLines = 1
         label.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -877,10 +933,9 @@ private final class EmptySessionBodyView: NSView {
         addSubview(label)
 
         NSLayoutConstraint.activate([
-            label.centerXAnchor.constraint(equalTo: centerXAnchor),
-            label.centerYAnchor.constraint(equalTo: centerYAnchor),
-            label.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 12),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12)
+            label.leadingAnchor.constraint(equalTo: leadingAnchor),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
     }
 
@@ -891,23 +946,6 @@ private final class EmptySessionBodyView: NSView {
 
     func setText(_ text: String) {
         label.stringValue = text
-        needsLayout = true
-    }
-
-    override func layout() {
-        super.layout()
-        // Keep dash stroke in view coordinates (frame = bounds origin 0).
-        dashLayer.frame = bounds
-        dashLayer.contentsScale = window?.backingScaleFactor
-            ?? NSScreen.main?.backingScaleFactor
-            ?? 2
-        let path = CGPath(
-            roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
-            cornerWidth: 12,
-            cornerHeight: 12,
-            transform: nil
-        )
-        dashLayer.path = path
     }
 }
 
@@ -931,15 +969,10 @@ private final class SessionCardView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.cornerRadius = 12
-        layer?.masksToBounds = true
-        layer?.backgroundColor = NSColor(calibratedWhite: 1, alpha: 0.62).cgColor
-        layer?.borderWidth = 1
-        layer?.borderColor = NSColor(calibratedRed: 140 / 255, green: 160 / 255, blue: 175 / 255, alpha: 0.18).cgColor
         setContentHuggingPriority(.defaultLow, for: .horizontal)
         setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
         titleLabel.textColor = NSColor(calibratedRed: 30 / 255, green: 44 / 255, blue: 54 / 255, alpha: 1)
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.maximumNumberOfLines = 1
@@ -948,11 +981,6 @@ private final class SessionCardView: NSView {
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        modelChip.wantsLayer = true
-        modelChip.layer?.cornerRadius = 6
-        modelChip.layer?.backgroundColor = NSColor.textColor.withAlphaComponent(0.06).cgColor
-        modelChip.layer?.borderWidth = 0.5
-        modelChip.layer?.borderColor = NSColor.textColor.withAlphaComponent(0.08).cgColor
         modelChip.translatesAutoresizingMaskIntoConstraints = false
         modelChip.setContentHuggingPriority(.defaultHigh, for: .horizontal)
         modelChip.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
@@ -979,20 +1007,20 @@ private final class SessionCardView: NSView {
 
         // Content vertically centered inside the fixed body slot.
         NSLayoutConstraint.activate([
-            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor),
+            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
             titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -11),
 
-            modelChip.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            modelChip.leadingAnchor.constraint(equalTo: leadingAnchor),
             modelChip.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 8),
             modelChip.heightAnchor.constraint(equalToConstant: 20),
             modelChip.trailingAnchor.constraint(lessThanOrEqualTo: tokenLabel.leadingAnchor, constant: -8),
 
-            modelLabel.leadingAnchor.constraint(equalTo: modelChip.leadingAnchor, constant: 7),
-            modelLabel.trailingAnchor.constraint(equalTo: modelChip.trailingAnchor, constant: -7),
+            modelLabel.leadingAnchor.constraint(equalTo: modelChip.leadingAnchor),
+            modelLabel.trailingAnchor.constraint(equalTo: modelChip.trailingAnchor),
             modelLabel.centerYAnchor.constraint(equalTo: modelChip.centerYAnchor),
 
-            tokenLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            tokenLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
             tokenLabel.centerYAnchor.constraint(equalTo: modelChip.centerYAnchor)
         ])
     }
@@ -1238,7 +1266,8 @@ final class RoundedMeterView: NSView {
 @MainActor
 final class AgentToggleView: NSView {
     /// Historical 144pt / 4 default-on agents. Do not divide by `allCases.count`
-    /// or adding a fifth kind shrinks every existing slot.
+    /// or adding a fifth kind shrinks every existing slot. The details panel
+    /// passes a maximum width only when the full catalog would cover the pill.
     static let slotWidth: CGFloat = 36
 
     var onAgentSelected: ((AgentKind) -> Void)?
@@ -1260,8 +1289,14 @@ final class AgentToggleView: NSView {
     private let grokIcon = NSImageView()
     private let piIcon = NSImageView()
     private let antigravityIcon = NSImageView()
+    private let openCodeIcon = NSImageView()
+    private let workBuddyIcon = NSImageView()
+    private var workBuddyColorImage: NSImage?
+    private var workBuddyGrayImage: NSImage?
+    private var maximumWidth: CGFloat?
     private var activeBgConstraints: [NSLayoutConstraint] = []
     private var iconLayoutConstraints: [NSLayoutConstraint] = []
+    private var slotGuides: [NSView] = []
     private var widthConstraint: NSLayoutConstraint!
 
     override init(frame frameRect: NSRect) {
@@ -1302,11 +1337,17 @@ final class AgentToggleView: NSView {
         configureIcon(grokIcon, assetName: "grok", accessibilityLabel: "Grok")
         configureIcon(piIcon, assetName: "pi", accessibilityLabel: "Pi")
         configureIcon(antigravityIcon, assetName: "antigravity", accessibilityLabel: "Antigravity")
+        configureIcon(openCodeIcon, assetName: "opencode", accessibilityLabel: "OpenCode")
+        configureIcon(workBuddyIcon, assetName: "workbuddy", accessibilityLabel: "WorkBuddy")
+        workBuddyColorImage = workBuddyIcon.image
+        workBuddyGrayImage = workBuddyColorImage.flatMap(AgentIconAssets.grayscale)
         bgView.addSubview(codexIcon)
         bgView.addSubview(claudeIcon)
         bgView.addSubview(grokIcon)
         bgView.addSubview(piIcon)
         bgView.addSubview(antigravityIcon)
+        bgView.addSubview(openCodeIcon)
+        bgView.addSubview(workBuddyIcon)
 
         widthConstraint = widthAnchor.constraint(
             equalToConstant: Self.slotWidth * CGFloat(HaloSettings.defaultEnabledAgents.count)
@@ -1323,7 +1364,8 @@ final class AgentToggleView: NSView {
         applyEnabledAgents(HaloSettings.defaultEnabledAgents, focused: .codex, animated: false)
     }
 
-    func setEnabledAgents(_ agents: [AgentKind], focused: AgentKind) {
+    func setEnabledAgents(_ agents: [AgentKind], focused: AgentKind, maximumWidth: CGFloat? = nil) {
+        self.maximumWidth = maximumWidth
         applyEnabledAgents(agents, focused: focused, animated: true)
     }
 
@@ -1348,7 +1390,8 @@ final class AgentToggleView: NSView {
         }
 
         rebuildIconLayout(visible: visible)
-        widthConstraint.constant = Self.slotWidth * CGFloat(visible.count)
+        let natural = Self.slotWidth * CGFloat(visible.count)
+        widthConstraint.constant = maximumWidth.map { min(natural, $0) } ?? natural
 
         let nextSelected = visible.contains(focused) ? focused : visible[0]
         if selectedAgent != nextSelected {
@@ -1361,33 +1404,37 @@ final class AgentToggleView: NSView {
     private func rebuildIconLayout(visible: [AgentKind]) {
         NSLayoutConstraint.deactivate(iconLayoutConstraints)
         iconLayoutConstraints = []
+        slotGuides.forEach { $0.removeFromSuperview() }
+        slotGuides = []
 
         guard !visible.isEmpty else { return }
 
+        // Chaining `width = slot - 2` makes each later icon start early. Once the
+        // panel compresses the row, that left edge falls in the previous hit slot.
         let fraction = 1.0 / CGFloat(visible.count)
-        var previous: NSImageView?
         for (index, agent) in visible.enumerated() {
             let imageView = icon(for: agent)
-            let leading: NSLayoutConstraint
-            if let previous {
-                leading = imageView.leadingAnchor.constraint(equalTo: previous.trailingAnchor)
-            } else {
-                leading = imageView.leadingAnchor.constraint(equalTo: bgView.leadingAnchor, constant: 2)
-            }
-
-            var constraints: [NSLayoutConstraint] = [
-                leading,
+            let guide = NSView()
+            guide.translatesAutoresizingMaskIntoConstraints = false
+            bgView.addSubview(guide)
+            slotGuides.append(guide)
+            iconLayoutConstraints.append(contentsOf: [
+                guide.leadingAnchor.constraint(equalTo: bgView.leadingAnchor),
+                guide.widthAnchor.constraint(
+                    equalTo: bgView.widthAnchor,
+                    multiplier: CGFloat(index) * fraction
+                ),
+                guide.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
+                guide.heightAnchor.constraint(equalToConstant: 0),
+                imageView.leadingAnchor.constraint(equalTo: guide.trailingAnchor, constant: 1),
                 imageView.centerYAnchor.constraint(equalTo: bgView.centerYAnchor),
-                imageView.widthAnchor.constraint(equalTo: bgView.widthAnchor, multiplier: fraction, constant: -2),
+                imageView.widthAnchor.constraint(
+                    equalTo: bgView.widthAnchor,
+                    multiplier: fraction,
+                    constant: -2
+                ),
                 imageView.heightAnchor.constraint(equalToConstant: 18),
-            ]
-            if index == visible.count - 1 {
-                constraints.append(
-                    imageView.trailingAnchor.constraint(equalTo: bgView.trailingAnchor, constant: -2)
-                )
-            }
-            iconLayoutConstraints.append(contentsOf: constraints)
-            previous = imageView
+            ])
         }
 
         NSLayoutConstraint.activate(iconLayoutConstraints)
@@ -1416,11 +1463,16 @@ final class AgentToggleView: NSView {
             NSLayoutConstraint.activate(activeBgConstraints)
         }
 
-        codexIcon.alphaValue = selectedAgent == .codex ? 1 : 0.40
-        claudeIcon.alphaValue = selectedAgent == .claudeCode ? 1 : 0.40
-        grokIcon.alphaValue = selectedAgent == .grok ? 1 : 0.40
-        piIcon.alphaValue = selectedAgent == .pi ? 1 : 0.40
-        antigravityIcon.alphaValue = selectedAgent == .antigravity ? 1 : 0.40
+        for agent in AgentKind.allCases where agent != .workbuddy {
+            icon(for: agent).alphaValue = agent == selectedAgent ? 1 : 0.40
+        }
+        if selectedAgent == .workbuddy {
+            workBuddyIcon.image = workBuddyColorImage
+            workBuddyIcon.alphaValue = 1
+        } else {
+            workBuddyIcon.image = workBuddyGrayImage ?? workBuddyColorImage
+            workBuddyIcon.alphaValue = workBuddyGrayImage == nil ? 0.40 : 1
+        }
     }
 
     private func icon(for agent: AgentKind) -> NSImageView {
@@ -1430,6 +1482,8 @@ final class AgentToggleView: NSView {
         case .grok: return grokIcon
         case .pi: return piIcon
         case .antigravity: return antigravityIcon
+        case .opencode: return openCodeIcon
+        case .workbuddy: return workBuddyIcon
         }
     }
 
@@ -1448,7 +1502,9 @@ final class AgentToggleView: NSView {
 
     private func selectAgent(atX x: CGFloat) {
         guard !enabledAgents.isEmpty else { return }
-        let index = min(enabledAgents.count - 1, max(0, Int(x / Self.slotWidth)))
+        let width = bounds.width > 1 ? bounds.width : Self.slotWidth * CGFloat(enabledAgents.count)
+        let slot = max(width / CGFloat(enabledAgents.count), 1)
+        let index = min(enabledAgents.count - 1, max(0, Int(x / slot)))
         let newAgent = enabledAgents[index]
         if newAgent != selectedAgent {
             selectedAgent = newAgent
@@ -1474,12 +1530,14 @@ enum AgentIconAssets {
     }
 
     private static func url(named name: String) -> URL? {
-        if let bundled = Bundle.main.url(
-            forResource: name,
-            withExtension: "svg",
-            subdirectory: "agent-switch"
-        ) {
-            return bundled
+        for ext in ["svg", "png"] {
+            if let bundled = Bundle.main.url(
+                forResource: name,
+                withExtension: ext,
+                subdirectory: "agent-switch"
+            ) {
+                return bundled
+            }
         }
 
         let srcRoot = URL(fileURLWithPath: #filePath)
@@ -1487,9 +1545,28 @@ enum AgentIconAssets {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let sourceAsset = srcRoot
-            .appendingPathComponent("shared/assets/agent-switch", isDirectory: true)
-            .appendingPathComponent("\(name).svg")
-        return FileManager.default.fileExists(atPath: sourceAsset.path) ? sourceAsset : nil
+        let repoRoot = srcRoot.deletingLastPathComponent()
+        let candidates = [
+            srcRoot.appendingPathComponent("shared/assets/agent-switch/\(name).svg"),
+            srcRoot.appendingPathComponent("shared/assets/agent-switch/\(name).png"),
+            repoRoot.appendingPathComponent("docs/assets/agent-switch/\(name).png"),
+            repoRoot.appendingPathComponent("docs/assets/agent-switch/\(name).svg")
+        ]
+        return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    /// Unselected WorkBuddy keeps its silhouette and transparency, without the brand tint.
+    static func grayscale(_ image: NSImage) -> NSImage? {
+        guard let tiff = image.tiffRepresentation,
+              let source = CIImage(data: tiff),
+              let filter = CIFilter(name: "CIColorControls")
+        else { return nil }
+        filter.setValue(source, forKey: kCIInputImageKey)
+        filter.setValue(0, forKey: kCIInputSaturationKey)
+        guard let output = filter.outputImage else { return nil }
+        let rep = NSCIImageRep(ciImage: output)
+        let result = NSImage(size: image.size == .zero ? rep.size : image.size)
+        result.addRepresentation(rep)
+        return result
     }
 }
