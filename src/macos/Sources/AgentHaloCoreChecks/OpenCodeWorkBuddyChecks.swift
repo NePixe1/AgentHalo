@@ -479,6 +479,7 @@ func testWorkBuddyScanReadsDatabaseAndIgnoresPrewarm() throws {
     mkfifo.waitUntilExit()
     let fd = open(fifo.path, O_RDWR)
     expect(fd >= 0, true, "lock fifo opens")
+    let marker = root.appendingPathComponent("lock-ready.txt")
     let locker = Process()
     locker.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
     locker.arguments = [database.path]
@@ -493,23 +494,39 @@ func testWorkBuddyScanReadsDatabaseAndIgnoresPrewarm() throws {
         }
         close(fd)
     }
-    try input.write(contentsOf: Data("BEGIN EXCLUSIVE;\n".utf8))
-    var locked = false
-    for _ in 0..<20 {
-        let probe = Process()
-        probe.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
-        probe.arguments = ["file:\(database.path)?mode=ro", "SELECT id FROM sessions;"]
-        probe.standardOutput = Pipe()
-        probe.standardError = Pipe()
-        try probe.run()
-        probe.waitUntilExit()
-        if probe.terminationStatus != 0 {
-            locked = true
+    // A reader started while BEGIN EXCLUSIVE is still pending makes that
+    // statement fail once. sqlite3 then sits at the next prompt with no lock.
+    // The marker is written only after the exclusive transaction is open.
+    let command = """
+    .bail on
+    .timeout 3000
+    BEGIN EXCLUSIVE;
+    .once \(marker.path)
+    SELECT 'ready';
+
+    """
+    try input.write(contentsOf: Data(command.utf8))
+    let deadline = Date().addingTimeInterval(3)
+    var ready = false
+    while Date() < deadline {
+        if let text = try? String(contentsOf: marker, encoding: .utf8), text.contains("ready") {
+            ready = true
             break
         }
-        Thread.sleep(forTimeInterval: 0.05)
+        if !locker.isRunning {
+            break
+        }
+        Thread.sleep(forTimeInterval: 0.02)
     }
-    expect(locked, true, "database lock is held")
+    expect(ready && locker.isRunning, true, "database lock is held")
+    let probe = Process()
+    probe.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+    probe.arguments = ["file:\(database.path)?mode=ro", "SELECT id FROM sessions;"]
+    probe.standardOutput = Pipe()
+    probe.standardError = Pipe()
+    try probe.run()
+    probe.waitUntilExit()
+    expect(probe.terminationStatus != 0, true, "exclusive lock blocks a read-only query")
     var blockedTranscripts: [String: WorkBuddyTranscriptCursor] = [:]
     let blocked = WorkBuddyMonitor.scan(
         homeDirectory: home,
