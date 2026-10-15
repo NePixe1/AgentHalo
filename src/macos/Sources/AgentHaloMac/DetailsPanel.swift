@@ -1,5 +1,4 @@
 import AppKit
-import CoreImage
 import AgentHaloCore
 
 enum DetailsPanelContentRole: Equatable {
@@ -19,10 +18,10 @@ enum DetailsPanelSessionBodyRole: Equatable {
 
 @MainActor
 class DetailsPanel: NSPanel {
-    private static let panelWidth: CGFloat = 278
-    private static let contextPillWidth: CGFloat = 42
-    private static let contextPillHorizontalPadding: CGFloat = 3
-    /// Fixed session body slot height (Scheme B). Keep panel fitted height at 172.
+    private static let panelWidth: CGFloat = 304
+    private static let contextPillWidth: CGFloat = 46
+    private static let contextPillHeight: CGFloat = 24
+    /// Fixed session body slot height (Scheme B). Panel fitted height is 192.
     /// Slightly under the original 72 so the card bottom sits higher and outer
     /// bottom padding matches the top chrome more closely (equalizer absorbs the delta).
     private static let sessionBodyHeight: CGFloat = 68
@@ -84,19 +83,24 @@ class DetailsPanel: NSPanel {
         container.layer?.cornerRadius = 18
         container.layer?.masksToBounds = true
         container.layer?.borderWidth = 1
-        container.layer?.borderColor = NSColor(calibratedRed: 0.70, green: 0.78, blue: 0.82, alpha: 0.35).cgColor
+        container.layer?.borderColor = NSColor(
+            calibratedRed: 183 / 255,
+            green: 199 / 255,
+            blue: 207 / 255,
+            alpha: 46 / 255
+        ).cgColor
         container.translatesAutoresizingMaskIntoConstraints = false
 
-        // Let the live backdrop material remain visible while adding only a
-        // restrained light tint for readability on very dark desktops.
+        // Near-opaque cool white. Popover material stays underneath, but the
+        // fill covers it so status color and type are not sampled from the desktop.
         let surface = NSView()
         surface.identifier = NSUserInterfaceItemIdentifier("details-panel-surface")
         surface.wantsLayer = true
         surface.layer?.backgroundColor = NSColor(
-            calibratedRed: 0.98,
-            green: 0.99,
-            blue: 1.0,
-            alpha: 0.35
+            calibratedRed: 1,
+            green: 1,
+            blue: 1,
+            alpha: 244 / 255
         ).cgColor
         surface.translatesAutoresizingMaskIntoConstraints = false
 
@@ -109,7 +113,7 @@ class DetailsPanel: NSPanel {
         let topRow = makeTopRow()
         self.topRow = topRow
         stack.addArrangedSubview(topRow)
-        stack.setCustomSpacing(0, after: topRow)
+        stack.setCustomSpacing(12, after: topRow)
 
         titleField.font = .systemFont(ofSize: 22, weight: .bold)
         titleField.lineBreakMode = .byTruncatingTail
@@ -118,8 +122,13 @@ class DetailsPanel: NSPanel {
         titleField.cell?.truncatesLastVisibleLine = true
         titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         titleField.alignment = .left
-        detailField.font = .systemFont(ofSize: 12)
-        detailField.textColor = NSColor(calibratedRed: 0.38, green: 0.45, blue: 0.50, alpha: 1)
+        detailField.font = .systemFont(ofSize: 13)
+        detailField.textColor = NSColor(
+            calibratedRed: 103 / 255,
+            green: 117 / 255,
+            blue: 126 / 255,
+            alpha: 1
+        )
         detailField.lineBreakMode = .byTruncatingTail
         detailField.maximumNumberOfLines = 1
         detailField.usesSingleLineMode = true
@@ -142,9 +151,8 @@ class DetailsPanel: NSPanel {
         // Plain container: explicit full-width pin avoids NSStackView width
         // ambiguity that shrank empty/card to label-hugging size (right-biased).
         metadataGroup.translatesAutoresizingMaskIntoConstraints = false
-        // Bottom inset keeps session body contribution aligned with the 70pt
-        // usage group so fitted panel height stays 172 (11 + 68 + 7 == 16 + 70).
-        // Larger equalizer lifts the card bottom edge without moving title/detail.
+        // Bottom inset keeps the session body contribution aligned with the 70pt
+        // usage group (11 + 68 + 7 == 16 + 70) so both panels fit to 192.
         let sessionBodyBottomEqualizer: CGFloat = 7
 
         bodySlot.translatesAutoresizingMaskIntoConstraints = false
@@ -157,10 +165,10 @@ class DetailsPanel: NSPanel {
         }
         sessionDivider.wantsLayer = true
         sessionDivider.layer?.backgroundColor = NSColor(
-            calibratedRed: 0.45,
-            green: 0.52,
-            blue: 0.58,
-            alpha: 0.72
+            calibratedRed: 190 / 255,
+            green: 205 / 255,
+            blue: 215 / 255,
+            alpha: 1
         ).cgColor
         sessionDivider.translatesAutoresizingMaskIntoConstraints = false
         bodySlot.addSubview(sessionDivider)
@@ -379,35 +387,53 @@ class DetailsPanel: NSPanel {
             // the previous session title, model, or tokens.
             sessionCard.setTitle("--", toolTip: nil)
             sessionCard.setModel("--")
-            sessionCard.setTokens(Self.formatTokenAttributedString(input: nil, output: nil))
+            sessionCard.setTokens(input: nil, output: nil)
             return
         }
 
         emptyBody.isHidden = true
         sessionCard.isHidden = false
         sessionBodyMode = .sessionCard
-        sessionCard.setTitle(Self.displayValue(session.sessionTitle), toolTip: session.sessionTitle)
+        let line = Self.sessionCardLine(session)
+        sessionCard.setTitle(line.text, toolTip: line.toolTip)
         sessionCard.setModel(Self.displayValue(session.modelName))
-        if session.inputTokens != nil || session.outputTokens != nil {
-            sessionCard.setTokens(Self.formatTokenAttributedString(
-                input: session.inputTokens,
-                output: session.outputTokens
-            ))
-        } else {
-            sessionCard.setTokens(Self.formatTokenAttributedString(input: nil, output: nil))
-        }
+        sessionCard.setTokens(input: session.inputTokens, output: session.outputTokens)
     }
 
     /// Card is only worth showing when at least one field the card paints has data.
     /// `projectName` alone does not count — the card never surfaces it.
+    /// A working directory does: Pi, OpenCode, and WorkBuddy use it as the primary line.
     static func hasSessionCardContent(_ session: SessionDetailsSnapshot) -> Bool {
-        if let title = session.sessionTitle, !title.isEmpty {
+        if nonEmpty(session.workingDirectory) != nil {
+            return true
+        }
+        if nonEmpty(session.sessionTitle) != nil {
             return true
         }
         if let model = session.modelName, !model.isEmpty {
             return true
         }
         return session.inputTokens != nil || session.outputTokens != nil
+    }
+
+    /// Primary session line. A path wins over a raw session name; Claude and
+    /// Codex keep the session title when no directory was supplied.
+    static func sessionCardLine(
+        _ session: SessionDetailsSnapshot
+    ) -> (text: String, toolTip: String?) {
+        if let path = nonEmpty(session.workingDirectory) {
+            return (path, path)
+        }
+        if let title = nonEmpty(session.sessionTitle) {
+            return (title, title)
+        }
+        return ("--", nil)
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func resizeToFitContent() {
@@ -551,34 +577,8 @@ class DetailsPanel: NSPanel {
         "\(min(99, max(0, Int(value.rounded()))))%"
     }
 
-    static func formatTokenAttributedString(input: Int64?, output: Int64?) -> NSAttributedString {
-        let inputStr = compactTokenCount(input)
-        let outputStr = compactTokenCount(output)
-        
-        let font = NSFont.systemFont(ofSize: 10.5, weight: .medium)
-        let inColor = NSColor(calibratedRed: 0.16, green: 0.42, blue: 0.78, alpha: 1)
-        let outColor = NSColor(calibratedRed: 0.05, green: 0.55, blue: 0.52, alpha: 1)
-        // 中间分隔点颜色
-        let sepColor = NSColor.secondaryLabelColor
-        
-        let attrStr = NSMutableAttributedString()
-        
-        attrStr.append(NSAttributedString(string: "↑ \(inputStr)", attributes: [
-            .font: font,
-            .foregroundColor: inColor
-        ]))
-        
-        attrStr.append(NSAttributedString(string: "  ·  ", attributes: [
-            .font: font,
-            .foregroundColor: sepColor
-        ]))
-        
-        attrStr.append(NSAttributedString(string: "↓ \(outputStr)", attributes: [
-            .font: font,
-            .foregroundColor: outColor
-        ]))
-        
-        return attrStr
+    static func formatTokenChip(input: Bool, count: Int64?) -> String {
+        (input ? "↑ " : "↓ ") + compactTokenCount(count)
     }
 
     private static func displayValue(_ value: String?) -> String {
@@ -640,14 +640,30 @@ class DetailsPanel: NSPanel {
         }
 
         contextPill.wantsLayer = true
-        contextPill.layer?.cornerRadius = 9
-        contextPill.layer?.backgroundColor = NSColor(calibratedRed: 0.88, green: 0.95, blue: 0.99, alpha: 0.80).cgColor
+        contextPill.layer?.cornerRadius = 8
+        contextPill.layer?.masksToBounds = true
+        contextPill.layer?.backgroundColor = NSColor(
+            calibratedRed: 224 / 255,
+            green: 240 / 255,
+            blue: 252 / 255,
+            alpha: 1
+        ).cgColor
         contextPill.layer?.borderWidth = 1
-        contextPill.layer?.borderColor = NSColor(calibratedRed: 0.62, green: 0.78, blue: 0.88, alpha: 0.42).cgColor
+        contextPill.layer?.borderColor = NSColor(
+            calibratedRed: 174 / 255,
+            green: 205 / 255,
+            blue: 224 / 255,
+            alpha: 72 / 255
+        ).cgColor
         contextPill.translatesAutoresizingMaskIntoConstraints = false
 
-        contextValue.font = .systemFont(ofSize: 11, weight: .regular)
-        contextValue.textColor = NSColor(calibratedRed: 0.22, green: 0.49, blue: 0.57, alpha: 1)
+        contextValue.font = .systemFont(ofSize: 15, weight: .bold)
+        contextValue.textColor = NSColor(
+            calibratedRed: 64 / 255,
+            green: 105 / 255,
+            blue: 132 / 255,
+            alpha: 1
+        )
         contextValue.alignment = .center
         contextValue.lineBreakMode = .byTruncatingTail
         contextValue.translatesAutoresizingMaskIntoConstraints = false
@@ -662,19 +678,20 @@ class DetailsPanel: NSPanel {
         agentToggleWidthConstraint = toggleWidth
 
         NSLayoutConstraint.activate([
-            row.heightAnchor.constraint(equalToConstant: 24),
+            row.heightAnchor.constraint(equalToConstant: 32),
             agentToggle.leadingAnchor.constraint(equalTo: row.leadingAnchor),
             agentToggle.centerYAnchor.constraint(equalTo: row.centerYAnchor),
             toggleWidth,
-            agentToggle.heightAnchor.constraint(equalToConstant: 24),
+            agentToggle.heightAnchor.constraint(equalToConstant: 32),
             contextPill.centerYAnchor.constraint(equalTo: row.centerYAnchor),
             contextPill.trailingAnchor.constraint(equalTo: row.trailingAnchor),
             contextPill.widthAnchor.constraint(equalToConstant: Self.contextPillWidth),
+            contextPill.heightAnchor.constraint(equalToConstant: Self.contextPillHeight),
             contextPill.leadingAnchor.constraint(greaterThanOrEqualTo: agentToggle.trailingAnchor, constant: 10),
-            contextValue.leadingAnchor.constraint(equalTo: contextPill.leadingAnchor, constant: Self.contextPillHorizontalPadding),
-            contextValue.trailingAnchor.constraint(equalTo: contextPill.trailingAnchor, constant: -Self.contextPillHorizontalPadding),
-            contextValue.topAnchor.constraint(equalTo: contextPill.topAnchor, constant: 3),
-            contextValue.bottomAnchor.constraint(equalTo: contextPill.bottomAnchor, constant: -3)
+            contextValue.centerXAnchor.constraint(equalTo: contextPill.centerXAnchor),
+            contextValue.centerYAnchor.constraint(equalTo: contextPill.centerYAnchor),
+            contextValue.leadingAnchor.constraint(greaterThanOrEqualTo: contextPill.leadingAnchor, constant: 2),
+            contextValue.trailingAnchor.constraint(lessThanOrEqualTo: contextPill.trailingAnchor, constant: -2)
         ])
         return row
     }
@@ -688,9 +705,9 @@ class DetailsPanel: NSPanel {
         agentToggleWidthConstraint?.constant = agentToggle.toggleWidthForTesting
     }
 
-    /// Room left of the context pill inside the fixed 278pt panel:
-    /// 278 - insets 34 - pill 42 - gap 10.
-    static let agentToggleMaximumWidth: CGFloat = 192
+    /// Room left of the context pill inside the fixed 304pt panel:
+    /// 304 - insets 34 - pill 46 - gap 10.
+    static let agentToggleMaximumWidth: CGFloat = 214
 
     var enabledAgentsForTesting: [AgentKind] {
         agentToggle.enabledAgentsForTesting
@@ -949,17 +966,20 @@ private final class EmptySessionBodyView: NSView {
     }
 }
 
-/// Online session summary card: title + model chip + token counts.
+/// Online session summary: path or title, then model / input / output chips.
 @MainActor
 private final class SessionCardView: NSView {
     private let titleLabel = NSTextField(labelWithString: "--")
     private let modelChip = NSView()
     private let modelLabel = NSTextField(labelWithString: "--")
-    private let tokenLabel = NSTextField(labelWithString: "↑ --  ·  ↓ --")
+    private let inputChip = NSView()
+    private let inputLabel = NSTextField(labelWithString: "↑ --")
+    private let outputChip = NSView()
+    private let outputLabel = NSTextField(labelWithString: "↓ --")
 
     var titleText: String { titleLabel.stringValue }
     var modelText: String { modelLabel.stringValue }
-    var tokensText: String { tokenLabel.stringValue }
+    var tokensText: String { "\(inputLabel.stringValue) \(outputLabel.stringValue)" }
     var titleToolTipText: String? { titleLabel.toolTip }
 
     override var intrinsicContentSize: NSSize {
@@ -981,47 +1001,54 @@ private final class SessionCardView: NSView {
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        modelChip.translatesAutoresizingMaskIntoConstraints = false
-        modelChip.setContentHuggingPriority(.defaultHigh, for: .horizontal)
-        modelChip.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
-
-        modelLabel.font = .systemFont(ofSize: 11, weight: .medium)
-        modelLabel.textColor = NSColor(calibratedRed: 0.30, green: 0.38, blue: 0.44, alpha: 1)
-        modelLabel.lineBreakMode = .byTruncatingTail
-        modelLabel.maximumNumberOfLines = 1
-        modelLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        modelLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        tokenLabel.font = .systemFont(ofSize: 10.5, weight: .medium)
-        tokenLabel.alignment = .right
-        tokenLabel.lineBreakMode = .byTruncatingTail
-        tokenLabel.maximumNumberOfLines = 1
-        tokenLabel.setContentHuggingPriority(.required, for: .horizontal)
-        tokenLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
-        tokenLabel.translatesAutoresizingMaskIntoConstraints = false
+        configureChip(
+            modelChip,
+            label: modelLabel,
+            fill: NSColor(calibratedRed: 238 / 255, green: 241 / 255, blue: 244 / 255, alpha: 1),
+            text: NSColor(calibratedRed: 77 / 255, green: 97 / 255, blue: 112 / 255, alpha: 1)
+        )
+        configureChip(
+            inputChip,
+            label: inputLabel,
+            fill: NSColor(calibratedRed: 228 / 255, green: 242 / 255, blue: 252 / 255, alpha: 1),
+            text: NSColor(calibratedRed: 51 / 255, green: 119 / 255, blue: 160 / 255, alpha: 1)
+        )
+        configureChip(
+            outputChip,
+            label: outputLabel,
+            fill: NSColor(calibratedRed: 228 / 255, green: 246 / 255, blue: 238 / 255, alpha: 1),
+            text: NSColor(calibratedRed: 35 / 255, green: 133 / 255, blue: 112 / 255, alpha: 1)
+        )
+        // Plain chip views have no intrinsic width; protect the token text so
+        // the model truncates first while chip width limits can still apply.
+        inputLabel.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        outputLabel.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
 
         addSubview(titleLabel)
         addSubview(modelChip)
-        modelChip.addSubview(modelLabel)
-        addSubview(tokenLabel)
+        addSubview(inputChip)
+        addSubview(outputChip)
 
-        // Content vertically centered inside the fixed body slot.
         NSLayoutConstraint.activate([
             titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor),
             titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
-            titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -11),
+            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 11),
 
             modelChip.leadingAnchor.constraint(equalTo: leadingAnchor),
             modelChip.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 8),
-            modelChip.heightAnchor.constraint(equalToConstant: 20),
-            modelChip.trailingAnchor.constraint(lessThanOrEqualTo: tokenLabel.leadingAnchor, constant: -8),
+            modelChip.heightAnchor.constraint(equalToConstant: 22),
+            modelChip.widthAnchor.constraint(lessThanOrEqualToConstant: 160),
+            modelChip.trailingAnchor.constraint(lessThanOrEqualTo: inputChip.leadingAnchor, constant: -8),
 
-            modelLabel.leadingAnchor.constraint(equalTo: modelChip.leadingAnchor),
-            modelLabel.trailingAnchor.constraint(equalTo: modelChip.trailingAnchor),
-            modelLabel.centerYAnchor.constraint(equalTo: modelChip.centerYAnchor),
+            inputChip.centerYAnchor.constraint(equalTo: modelChip.centerYAnchor),
+            inputChip.heightAnchor.constraint(equalToConstant: 22),
+            inputChip.widthAnchor.constraint(lessThanOrEqualToConstant: 75),
+            inputChip.trailingAnchor.constraint(equalTo: outputChip.leadingAnchor, constant: -5),
 
-            tokenLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
-            tokenLabel.centerYAnchor.constraint(equalTo: modelChip.centerYAnchor)
+            outputChip.trailingAnchor.constraint(equalTo: trailingAnchor),
+            outputChip.centerYAnchor.constraint(equalTo: modelChip.centerYAnchor),
+            outputChip.heightAnchor.constraint(equalToConstant: 22),
+            outputChip.widthAnchor.constraint(lessThanOrEqualToConstant: 75)
         ])
     }
 
@@ -1032,8 +1059,7 @@ private final class SessionCardView: NSView {
 
     func setTitle(_ title: String, toolTip: String?) {
         titleLabel.stringValue = title
-        // Only expose a tooltip when a real title exists.
-        if let toolTip, !toolTip.isEmpty {
+        if let toolTip, !toolTip.isEmpty, toolTip != "--" {
             titleLabel.toolTip = toolTip
         } else {
             titleLabel.toolTip = nil
@@ -1042,10 +1068,35 @@ private final class SessionCardView: NSView {
 
     func setModel(_ model: String) {
         modelLabel.stringValue = model
+        modelLabel.toolTip = model == "--" ? nil : model
     }
 
-    func setTokens(_ tokens: NSAttributedString) {
-        tokenLabel.attributedStringValue = tokens
+    func setTokens(input: Int64?, output: Int64?) {
+        inputLabel.stringValue = DetailsPanel.formatTokenChip(input: true, count: input)
+        outputLabel.stringValue = DetailsPanel.formatTokenChip(input: false, count: output)
+    }
+
+    private func configureChip(_ chip: NSView, label: NSTextField, fill: NSColor, text: NSColor) {
+        chip.wantsLayer = true
+        chip.layer?.cornerRadius = 5
+        chip.layer?.backgroundColor = fill.cgColor
+        chip.translatesAutoresizingMaskIntoConstraints = false
+        chip.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+
+        label.font = .systemFont(ofSize: 11, weight: .medium)
+        label.textColor = text
+        label.lineBreakMode = .byTruncatingTail
+        label.maximumNumberOfLines = 1
+        label.usesSingleLineMode = true
+        label.cell?.truncatesLastVisibleLine = true
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        chip.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: chip.leadingAnchor, constant: 7),
+            label.trailingAnchor.constraint(equalTo: chip.trailingAnchor, constant: -7),
+            label.centerYAnchor.constraint(equalTo: chip.centerYAnchor)
+        ])
     }
 }
 
@@ -1291,8 +1342,8 @@ final class AgentToggleView: NSView {
     private let antigravityIcon = NSImageView()
     private let openCodeIcon = NSImageView()
     private let workBuddyIcon = NSImageView()
-    private var workBuddyColorImage: NSImage?
-    private var workBuddyGrayImage: NSImage?
+    private var colorIconImages: [AgentKind: NSImage] = [:]
+    private var grayIconImages: [AgentKind: NSImage] = [:]
     private var maximumWidth: CGFloat?
     private var activeBgConstraints: [NSLayoutConstraint] = []
     private var iconLayoutConstraints: [NSLayoutConstraint] = []
@@ -1313,18 +1364,38 @@ final class AgentToggleView: NSView {
         translatesAutoresizingMaskIntoConstraints = false
 
         bgView.wantsLayer = true
-        bgView.layer?.cornerRadius = 12
+        bgView.layer?.cornerRadius = 16
         bgView.layer?.borderWidth = 1
-        bgView.layer?.borderColor = NSColor(calibratedRed: 0.88, green: 0.88, blue: 0.88, alpha: 0.7).cgColor
-        bgView.layer?.backgroundColor = NSColor(calibratedRed: 0.96, green: 0.96, blue: 0.96, alpha: 0.7).cgColor
+        bgView.layer?.borderColor = NSColor(
+            calibratedRed: 221 / 255,
+            green: 233 / 255,
+            blue: 238 / 255,
+            alpha: 1
+        ).cgColor
+        bgView.layer?.backgroundColor = NSColor(
+            calibratedRed: 244 / 255,
+            green: 248 / 255,
+            blue: 250 / 255,
+            alpha: 1
+        ).cgColor
         bgView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(bgView)
 
         activeBg.wantsLayer = true
-        activeBg.layer?.cornerRadius = 10
+        activeBg.layer?.cornerRadius = 13
         activeBg.layer?.borderWidth = 1
-        activeBg.layer?.borderColor = NSColor(calibratedRed: 0.72, green: 0.92, blue: 0.97, alpha: 0.85).cgColor
-        activeBg.layer?.backgroundColor = NSColor(calibratedRed: 0.88, green: 0.97, blue: 1.0, alpha: 1.0).cgColor
+        activeBg.layer?.borderColor = NSColor(
+            calibratedRed: 183 / 255,
+            green: 235 / 255,
+            blue: 246 / 255,
+            alpha: 1
+        ).cgColor
+        activeBg.layer?.backgroundColor = NSColor(
+            calibratedRed: 225 / 255,
+            green: 249 / 255,
+            blue: 255 / 255,
+            alpha: 1
+        ).cgColor
         activeBg.layer?.shadowColor = NSColor(calibratedRed: 0.26, green: 0.70, blue: 0.80, alpha: 1).cgColor
         activeBg.layer?.shadowOpacity = 0.12
         activeBg.layer?.shadowRadius = 5
@@ -1339,8 +1410,11 @@ final class AgentToggleView: NSView {
         configureIcon(antigravityIcon, assetName: "antigravity", accessibilityLabel: "Antigravity")
         configureIcon(openCodeIcon, assetName: "opencode", accessibilityLabel: "OpenCode")
         configureIcon(workBuddyIcon, assetName: "workbuddy", accessibilityLabel: "WorkBuddy")
-        workBuddyColorImage = workBuddyIcon.image
-        workBuddyGrayImage = workBuddyColorImage.flatMap(AgentIconAssets.grayscale)
+        for agent in AgentKind.allCases {
+            guard let image = icon(for: agent).image else { continue }
+            colorIconImages[agent] = image
+            grayIconImages[agent] = AgentIconAssets.grayscale(image)
+        }
         bgView.addSubview(codexIcon)
         bgView.addSubview(claudeIcon)
         bgView.addSubview(grokIcon)
@@ -1448,8 +1522,8 @@ final class AgentToggleView: NSView {
         activeBgConstraints = [
             activeBg.leadingAnchor.constraint(equalTo: targetIcon.leadingAnchor),
             activeBg.trailingAnchor.constraint(equalTo: targetIcon.trailingAnchor),
-            activeBg.topAnchor.constraint(equalTo: bgView.topAnchor, constant: 2),
-            activeBg.bottomAnchor.constraint(equalTo: bgView.bottomAnchor, constant: -2)
+            activeBg.topAnchor.constraint(equalTo: bgView.topAnchor, constant: 3),
+            activeBg.bottomAnchor.constraint(equalTo: bgView.bottomAnchor, constant: -3)
         ]
 
         if animated {
@@ -1463,15 +1537,13 @@ final class AgentToggleView: NSView {
             NSLayoutConstraint.activate(activeBgConstraints)
         }
 
-        for agent in AgentKind.allCases where agent != .workbuddy {
-            icon(for: agent).alphaValue = agent == selectedAgent ? 1 : 0.40
-        }
-        if selectedAgent == .workbuddy {
-            workBuddyIcon.image = workBuddyColorImage
-            workBuddyIcon.alphaValue = 1
-        } else {
-            workBuddyIcon.image = workBuddyGrayImage ?? workBuddyColorImage
-            workBuddyIcon.alphaValue = workBuddyGrayImage == nil ? 0.40 : 1
+        for agent in AgentKind.allCases {
+            let imageView = icon(for: agent)
+            let isSelected = agent == selectedAgent
+            let grayImage = grayIconImages[agent]
+            imageView.image = isSelected ? colorIconImages[agent] : (grayImage ?? colorIconImages[agent])
+            let inactiveAlpha: CGFloat = agent == .workbuddy && grayImage != nil ? 1 : 0.40
+            imageView.alphaValue = isSelected ? 1 : inactiveAlpha
         }
     }
 
@@ -1555,18 +1627,41 @@ enum AgentIconAssets {
         return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
     }
 
-    /// Unselected WorkBuddy keeps its silhouette and transparency, without the brand tint.
+    /// Unselected icons keep their silhouette and transparency, without brand colors.
+    @MainActor
     static func grayscale(_ image: NSImage) -> NSImage? {
-        guard let tiff = image.tiffRepresentation,
-              let source = CIImage(data: tiff),
-              let filter = CIFilter(name: "CIColorControls")
-        else { return nil }
-        filter.setValue(source, forKey: kCIInputImageKey)
-        filter.setValue(0, forKey: kCIInputSaturationKey)
-        guard let output = filter.outputImage else { return nil }
-        let rep = NSCIImageRep(ciImage: output)
-        let result = NSImage(size: image.size == .zero ? rep.size : image.size)
-        result.addRepresentation(rep)
+        guard image.size.width > 0, image.size.height > 0 else { return nil }
+        // Rasterize small icons at 2x for Retina, bounded to their UI needs.
+        let scale = min(2, 64 / max(image.size.width, image.size.height))
+        let width = max(1, Int(ceil(image.size.width * scale)))
+        let height = max(1, Int(ceil(image.size.height * scale)))
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+            isPlanar: false, colorSpaceName: .deviceRGB, bitmapFormat: [], bytesPerRow: 0, bitsPerPixel: 0
+        ), let context = NSGraphicsContext(bitmapImageRep: bitmap),
+           let pixels = bitmap.bitmapData else { return nil }
+
+        let bounds = NSRect(x: 0, y: 0, width: width, height: height)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        context.cgContext.clear(bounds)
+        image.draw(in: bounds, from: .zero, operation: .copy, fraction: 1)
+        NSGraphicsContext.restoreGraphicsState()
+
+        for y in 0..<height {
+            for x in 0..<width {
+                let pixel = pixels.advanced(by: y * bitmap.bytesPerRow + x * 4)
+                let luminance = 54 * Int(pixel[0]) + 183 * Int(pixel[1]) + 19 * Int(pixel[2])
+                let gray = UInt8((luminance + 128) / 256)
+                pixel[0] = gray
+                pixel[1] = gray
+                pixel[2] = gray
+            }
+        }
+        bitmap.size = image.size
+        let result = NSImage(size: image.size)
+        result.addRepresentation(bitmap)
         return result
     }
 }

@@ -173,19 +173,24 @@ public struct SessionDetailsSnapshot: Equatable, Sendable {
     public var modelName: String?
     public var inputTokens: Int64?
     public var outputTokens: Int64?
+    /// Full working directory for the session card's primary line.
+    /// Claude and Codex keep using `sessionTitle` when this is empty.
+    public var workingDirectory: String?
 
     public init(
         projectName: String? = nil,
         sessionTitle: String? = nil,
         modelName: String? = nil,
         inputTokens: Int64? = nil,
-        outputTokens: Int64? = nil
+        outputTokens: Int64? = nil,
+        workingDirectory: String? = nil
     ) {
         self.projectName = projectName
         self.sessionTitle = sessionTitle
         self.modelName = modelName
         self.inputTokens = inputTokens
         self.outputTokens = outputTokens
+        self.workingDirectory = workingDirectory
     }
 }
 

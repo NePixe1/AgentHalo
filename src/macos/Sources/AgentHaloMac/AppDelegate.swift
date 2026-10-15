@@ -1257,7 +1257,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 sessionTitle: session?.sessionTitle,
                 modelName: session?.modelName,
                 inputTokens: session?.inputTokens,
-                outputTokens: session?.outputTokens
+                outputTokens: session?.outputTokens,
+                workingDirectory: Self.detailsWorkingDirectory(session?.workingDirectory)
             )
             exactContextUsedPercent = Self.contextUsedPercentForPiDetails(
                 displayedSessions: displayedAggregate.sessions,
@@ -1272,7 +1273,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 sessionTitle: session?.sessionTitle,
                 modelName: session?.modelName,
                 inputTokens: session?.inputTokens,
-                outputTokens: session?.outputTokens
+                outputTokens: session?.outputTokens,
+                workingDirectory: Self.detailsWorkingDirectory(session?.workingDirectory)
             )
             exactContextUsedPercent = Self.contextUsedPercentForPiDetails(
                 displayedSessions: displayedAggregate.sessions,
@@ -1288,7 +1290,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 sessionTitle: session?.sessionTitle,
                 modelName: session?.modelName,
                 inputTokens: session?.inputTokens,
-                outputTokens: session?.outputTokens
+                outputTokens: session?.outputTokens,
+                workingDirectory: Self.detailsWorkingDirectory(session?.workingDirectory)
             )
             exactContextUsedPercent = Self.contextUsedPercentForPiDetails(
                 displayedSessions: displayedAggregate.sessions,
@@ -1360,6 +1363,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return nil
         }
         return diskContextPercent
+    }
+
+    /// Full working directory for the session card. Empty strings stay nil so
+    /// the card can fall back to a real session title.
+    nonisolated static func detailsWorkingDirectory(_ path: String?) -> String? {
+        guard let path else { return nil }
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     /// Pi context comes from the extension record. While a turn is displayed

@@ -1,6 +1,10 @@
 import Foundation
 
 public enum ClaudeStatusLineConfigurator {
+    // Local settings do not require a file-coordination service. Serialize our
+    // read/modify/write operations and replace the JSON atomically for readers.
+    private static let settingsWriteLock = NSLock()
+
     public static func isConfigured(
         homeDirectory home: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> Bool {
@@ -49,67 +53,54 @@ public enum ClaudeStatusLineConfigurator {
             return
         }
 
-        let coordinator = NSFileCoordinator()
-        var coordinatorError: NSError?
-        var wroteSettingsSuccessfully = false
+        settingsWriteLock.lock()
+        defer { settingsWriteLock.unlock() }
 
-        coordinator.coordinate(writingItemAt: settingsURL, options: [], error: &coordinatorError) { url in
-            var settings: [String: Any]
-            if let data = try? Data(contentsOf: url),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                settings = json
-            } else {
-                settings = [:]
-            }
+        var settings: [String: Any]
+        if let data = try? Data(contentsOf: settingsURL),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            settings = json
+        } else {
+            settings = [:]
+        }
 
-            var statusLine = (settings["statusLine"] as? [String: Any]) ?? [:]
-            let currentCommand = statusLine["command"] as? String ?? ""
-            let alreadyUsesNewProxy =
-                URL(fileURLWithPath: currentCommand).standardizedFileURL
-                == installedProxy.standardizedFileURL
-            let alreadyUsesLegacyProxy = currentCommand.contains("claude-code-statusline-proxy")
+        var statusLine = (settings["statusLine"] as? [String: Any]) ?? [:]
+        let currentCommand = statusLine["command"] as? String ?? ""
+        let alreadyUsesNewProxy =
+            URL(fileURLWithPath: currentCommand).standardizedFileURL
+            == installedProxy.standardizedFileURL
+        let alreadyUsesLegacyProxy = currentCommand.contains("claude-code-statusline-proxy")
 
-            if !currentCommand.isEmpty, !alreadyUsesNewProxy, !alreadyUsesLegacyProxy {
-                do {
-                    try Data(currentCommand.utf8).write(to: originalCommandURL, options: [.atomic])
-                    try? fileManager.setAttributes(
-                        [.posixPermissions: 0o600],
-                        ofItemAtPath: originalCommandURL.path
-                    )
-                } catch {
-                    AgentHaloLogger.log("ClaudeStatusLineConfigurator: failed to preserve original command: \(error)")
-                    return
-                }
-            }
-
-            guard currentCommand != installedProxy.path else {
-                wroteSettingsSuccessfully = true
+        if !currentCommand.isEmpty, !alreadyUsesNewProxy, !alreadyUsesLegacyProxy {
+            do {
+                try Data(currentCommand.utf8).write(to: originalCommandURL, options: [.atomic])
+                try? fileManager.setAttributes(
+                    [.posixPermissions: 0o600],
+                    ofItemAtPath: originalCommandURL.path
+                )
+            } catch {
+                AgentHaloLogger.log("ClaudeStatusLineConfigurator: failed to preserve original command: \(error)")
                 return
             }
-
-            statusLine["type"] = "command"
-            statusLine["command"] = installedProxy.path
-            settings["statusLine"] = statusLine
-
-            do {
-                try fileManager.createDirectory(
-                    at: url.deletingLastPathComponent(),
-                    withIntermediateDirectories: true,
-                    attributes: [.posixPermissions: 0o700]
-                )
-                let data = try JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys])
-                try data.write(to: url, options: [.atomic])
-                wroteSettingsSuccessfully = true
-            } catch {
-                AgentHaloLogger.log("ClaudeStatusLineConfigurator: failed to update settings: \(error)")
-            }
         }
 
-        if let error = coordinatorError {
-            AgentHaloLogger.log("ClaudeStatusLineConfigurator: file coordination failed: \(error)")
-        }
+        guard currentCommand != installedProxy.path else { return }
 
-        _ = wroteSettingsSuccessfully
+        statusLine["type"] = "command"
+        statusLine["command"] = installedProxy.path
+        settings["statusLine"] = statusLine
+
+        do {
+            try fileManager.createDirectory(
+                at: settingsURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            let data = try JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: settingsURL, options: [.atomic])
+        } catch {
+            AgentHaloLogger.log("ClaudeStatusLineConfigurator: failed to update settings: \(error)")
+        }
     }
 
     private static func bundledProxyBinary() -> URL? {

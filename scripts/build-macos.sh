@@ -44,7 +44,12 @@ cd "$mac_root"
 swift build --product ClaudeCodeStatusHook
 swift build --product ClaudeCodeStatusLineProxy
 swift run AgentHaloCoreChecks
-swift run AgentHaloMac --self-check
+interaction_check_output="$(swift run AgentHaloMac --self-check)"
+printf '%s\n' "$interaction_check_output"
+if ! grep -Fxq 'PASS AgentHaloMac checks' <<< "$interaction_check_output"; then
+    echo "Interaction self-check exited without its completion marker" >&2
+    exit 1
+fi
 swift run AgentHaloDiagnostics --self-test "$output_root/diagnostics-self-test.txt"
 swift build -c release --product AgentHaloDiagnostics
 swift build -c release --product AgentHaloMac

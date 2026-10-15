@@ -2076,6 +2076,38 @@ func testStatuslineProxyRecursionCheckUsesExactExecutablePaths() {
     )
 }
 
+func testClaudeStatusLineConfiguratorCreatesSettingsWithoutExistingClaudeDirectory() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent("agent-halo-statusline-fresh-\(UUID().uuidString)")
+    try fm.createDirectory(at: home, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: home) }
+    let bundled = home.appendingPathComponent("bundled-proxy")
+    try Data("proxy".utf8).write(to: bundled)
+
+    ClaudeStatusLineConfigurator.configure(homeDirectory: home, bundledProxyBinary: bundled)
+
+    expect(
+        ClaudeStatusLineConfigurator.isConfigured(homeDirectory: home),
+        "statusline should initialize settings when the Claude directory does not exist"
+    )
+    let paths = AgentHaloPaths(homeDirectory: home)
+    expect(fm.isExecutableFile(atPath: paths.statuslineProxy.path), "fresh statusline proxy should be executable")
+    expect(
+        !fm.fileExists(atPath: paths.statuslineOriginalCommand.path),
+        "fresh settings should not invent a downstream statusline command"
+    )
+    let settingsURL = home.appendingPathComponent(".claude/settings.json")
+    let data = try Data(contentsOf: settingsURL)
+    let attributes = try fm.attributesOfItem(atPath: settingsURL.path)
+    ClaudeStatusLineConfigurator.configure(homeDirectory: home, bundledProxyBinary: bundled)
+    expect(try Data(contentsOf: settingsURL), data, "healthy statusline settings should stay unchanged")
+    expect(
+        try fm.attributesOfItem(atPath: settingsURL.path)[.modificationDate] as? Date,
+        attributes[.modificationDate] as? Date,
+        "healthy statusline settings should not be rewritten"
+    )
+}
+
 func testClaudeStatusLineConfiguratorPreservesAndChainsExistingCommand() throws {
     let home = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("agent-halo-statusline-config-\(UUID().uuidString)", isDirectory: true)
@@ -6323,6 +6355,7 @@ do {
     fatalError("\(error)")
 }
 do {
+    try testClaudeStatusLineConfiguratorCreatesSettingsWithoutExistingClaudeDirectory()
     try testClaudeStatusLineConfiguratorPreservesAndChainsExistingCommand()
     try testClaudeHookConfiguratorRewritesLegacyPathToPreferred()
     try testClaudeHookConfiguratorDoesNotDeleteLegacyBinaryWhenBundledMissing()

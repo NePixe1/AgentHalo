@@ -43,6 +43,7 @@
 
 ## macOS 专属交互
 
+- 详情面板代理切换栏中，未选中的图标使用灰度，选中后恢复品牌原色。
 - 菜单栏图标与光环右键菜单暴露同一套控制项（`fullControlMenuV1`）。
 - 启动项通过 LaunchAgent 注册，路径指向 `<App>.app/Contents/MacOS/AgentHaloMac`。
 - 多显示器和窗口位置由原生 AppKit 行为管理，不与 Windows 共享。

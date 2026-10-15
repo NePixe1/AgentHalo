@@ -98,7 +98,9 @@ func runHaloInteractionChecks() {
     testDetailsPanelShowsMissingAndExpiredUsageWindows()
     testDetailsPanelShowsSessionCardForAPIKey()
     testDetailsPanelAPIKeyTokensAreCompactAndSymmetric()
+    testDetailsPanelKeepsTokenCountsVisibleBesideLongModel()
     testDetailsPanelLeavesMissingSessionTitleEmpty()
+    testDetailsPanelPrefersWorkingDirectoryOverSessionTitle()
     testDetailsPanelBlankStandbyUsesSoftEmptyNotDashCard()
     testDetailsPanelPartialSessionStillUsesCard()
     testDetailsPanelKeepsUsageAndSessionBodiesMutuallyExclusive()
@@ -174,6 +176,7 @@ func runHaloInteractionChecks() {
     testDetailsPanelLocalizesClaudeActivityDetails()
     testAgentToggleUsesSharedSVGAssets()
     testAgentToggleUsesCodexAndClaudeIcons()
+    testAgentToggleGraysInactiveIconsAndRestoresSelectedColors()
     testAgentToggleDimsInactiveIconMoreStrongly()
     testAgentToggleSelectionPillFitsItsIconWidth()
     testAgentToggleKeepsWholeControlClickable()
@@ -1341,7 +1344,7 @@ private func testDetailsPanelShowsSessionCardForAPIKey() {
     expect(panel.sessionBodyModeForTesting, .sessionCard, "online API body is session card")
     expect(panel.sessionCardTitleForTesting, "Redesign details", "card title")
     expect(panel.sessionCardModelForTesting, "gpt-5.5", "card model")
-    expect(panel.sessionCardTokensForTesting, "↑ 38k  ·  ↓ 1.2k", "card tokens")
+    expect(panel.sessionCardTokensForTesting, "↑ 38k ↓ 1.2k", "card tokens")
     expect(panel.sessionCardTitleToolTipForTesting, "Redesign details", "title tooltip")
     expect(panel.sessionBodySlotHeightForTesting, 68, "body slot height constant")
     expect(panel.sessionCardHeightForTesting, 68, "card matches body slot height")
@@ -1365,31 +1368,80 @@ private func testDetailsPanelAPIKeyTokensAreCompactAndSymmetric() {
         let modelField = textField(in: panel.contentView, matching: "gpt-5.5"),
         let modelChip = modelField.superview,
         let sessionCard = modelChip.superview,
-        let tokenField = textField(in: panel.contentView, matching: "↑ 38k  ·  ↓ 1.2k"),
-        tokenField.superview === sessionCard
+        let inputField = textField(in: panel.contentView, matching: "↑ 38k"),
+        let inputChip = inputField.superview,
+        let outputField = textField(in: panel.contentView, matching: "↓ 1.2k"),
+        let outputChip = outputField.superview,
+        inputChip.superview === sessionCard,
+        outputChip.superview === sessionCard
     else {
-        fatalError("API Key session card should expose model and token fields")
+        fatalError("API Key session card should expose model and token chips")
     }
 
-    let tokenFont = tokenField.attributedStringValue.attribute(
-        .font,
-        at: 0,
-        effectiveRange: nil
-    ) as? NSFont
     expect(
-        abs((tokenFont?.pointSize ?? 0) - 10.5) < 0.01,
-        "API Key token metrics should use the compact 10.5pt font"
+        abs((inputField.font?.pointSize ?? 0) - 11) < 0.01,
+        "token chips should use the 11pt font"
     )
+    expect(modelChip.layer?.cornerRadius ?? 0, 5, "model chip should be rounded")
+    expect(inputChip.layer?.backgroundColor != nil, "input chip should have a fill")
+    expect(outputChip.layer?.backgroundColor != nil, "output chip should have a fill")
 
-    let modelAlignmentFrame = modelChip.alignmentRect(forFrame: modelChip.frame)
-    let tokenAlignmentFrame = tokenField.alignmentRect(forFrame: tokenField.frame)
-    let modelLeadingInset = modelAlignmentFrame.minX
-    let tokenTrailingInset = sessionCard.bounds.maxX - tokenAlignmentFrame.maxX
+    let modelLeadingInset = modelChip.frame.minX
+    let outputTrailingInset = sessionCard.bounds.maxX - outputChip.frame.maxX
     expect(
-        abs(modelLeadingInset - tokenTrailingInset) < 0.5,
-        "model chip and token metrics should be symmetric within the session card "
-            + "(model: \(modelLeadingInset), tokens: \(tokenTrailingInset))"
+        abs(modelLeadingInset - outputTrailingInset) < 0.5,
+        "model chip and output chip should share the session card edges "
+            + "(model: \(modelLeadingInset), output: \(outputTrailingInset))"
     )
+    expect(
+        abs(inputChip.frame.midY - outputChip.frame.midY) < 0.5,
+        "input and output chips should sit on one row"
+    )
+}
+
+@MainActor
+private func testDetailsPanelKeepsTokenCountsVisibleBesideLongModel() {
+    let panel = DetailsPanel()
+    let initialSize = panel.frame.size
+    let modelName = "claude-opus-4-6-thinking-20261015"
+    let cases: [(input: Int64, output: Int64, inputText: String, outputText: String)] = [
+        (123_456, 987_654, "↑ 123.5k", "↓ 987.7k"),
+        (9_876_543, 1_234_567, "↑ 9876.5k", "↓ 1234.6k"),
+    ]
+
+    for sample in cases {
+        panel.render(
+            aggregate: detailsAggregate(),
+            model: sessionDetailsModel(session: SessionDetailsSnapshot(
+                sessionTitle: "Long model token layout",
+                modelName: modelName,
+                inputTokens: sample.input,
+                outputTokens: sample.output
+            ))
+        )
+        panel.contentView?.layoutSubtreeIfNeeded()
+
+        guard let modelField = textField(in: panel.contentView, matching: modelName),
+              let inputField = textField(in: panel.contentView, matching: sample.inputText),
+              let outputField = textField(in: panel.contentView, matching: sample.outputText) else {
+            fatalError("long-model session should expose its model and both token counts")
+        }
+
+        for field in [inputField, outputField] {
+            let expansion = field.cell?.expansionFrame(withFrame: field.bounds, in: field) ?? .zero
+            expect(expansion.isEmpty, "token count \(field.stringValue) should remain visible beside a long model")
+            expect(
+                field.bounds.width + 0.5 >= field.intrinsicContentSize.width,
+                "token count \(field.stringValue) should retain its text width"
+            )
+        }
+        expect(
+            modelField.bounds.width < modelField.intrinsicContentSize.width,
+            "long model should yield horizontal space to token counts"
+        )
+        expect(modelField.toolTip, modelName, "truncated model should keep its full-name tooltip")
+        expect(panel.frame.size, initialSize, "token counts should fit without enlarging the panel")
+    }
 }
 
 @MainActor
@@ -1408,6 +1460,34 @@ private func testDetailsPanelLeavesMissingSessionTitleEmpty() {
         "blank online uses No session"
     )
     expect(panel.sessionCardTitleForTesting, "--", "hidden card must not fall back to projectName")
+}
+
+@MainActor
+private func testDetailsPanelPrefersWorkingDirectoryOverSessionTitle() {
+    let panel = DetailsPanel()
+    let path = "/Users/wjs/work/pyproj/AgentHalo"
+    panel.render(
+        aggregate: detailsAggregate(state: .done, label: "STANDBY"),
+        model: sessionDetailsModel(session: SessionDetailsSnapshot(
+            projectName: "AgentHalo",
+            sessionTitle: "New session - 2026-10-15T03:26:00",
+            modelName: "ling-3.1-flash-free",
+            workingDirectory: path
+        ))
+    )
+
+    expect(panel.sessionBodyModeForTesting, .sessionCard, "a working directory keeps the session card")
+    expect(panel.sessionCardTitleForTesting, path, "card primary line is the full path")
+    expect(panel.sessionCardTitleToolTipForTesting, path, "path tooltip is the full directory")
+    expect(panel.sessionCardModelForTesting, "ling-3.1-flash-free", "model stays on its chip")
+
+    panel.render(
+        aggregate: detailsAggregate(state: .done, label: "STANDBY"),
+        model: sessionDetailsModel(session: SessionDetailsSnapshot(
+            workingDirectory: "  /tmp/proj  "
+        ))
+    )
+    expect(panel.sessionCardTitleForTesting, "/tmp/proj", "directory whitespace is trimmed")
 }
 
 @MainActor
@@ -1496,7 +1576,7 @@ private func testDetailsPanelClearsContextAndSessionRowsOffline() {
     )
     expect(panel.sessionCardTitleForTesting, "--", "offline must clear card title")
     expect(panel.sessionCardModelForTesting, "--", "offline must clear card model")
-    expect(panel.sessionCardTokensForTesting, "↑ --  ·  ↓ --", "offline must clear card tokens")
+    expect(panel.sessionCardTokensForTesting, "↑ -- ↓ --", "offline must clear card tokens")
     expect(panel.sessionCardTitleToolTipForTesting == nil, "offline must clear title tooltip")
     expect(panel.sessionBodySlotHeightForTesting, 68, "empty slot height")
     expect(panel.emptyBodyHeightForTesting, 68, "empty rect matches card height")
@@ -1522,8 +1602,8 @@ private func testDetailsPanelAPIKeyOfflineAndOnlineShareHeight() {
     )
     panel.contentView?.layoutSubtreeIfNeeded()
     expect(panel.frameHeightForTesting, onlineHeight, "API Key offline/online panel height")
-    expect(panel.frameHeightForTesting, 172, "API Key panel must keep production fitted height 172")
-    expect(onlineHeight, 172, "online API Key panel height locked to 172")
+    expect(panel.frameHeightForTesting, 192, "API Key panel fitted height")
+    expect(onlineHeight, 192, "online API Key panel height")
     expect(panel.sessionBodySlotHeightForTesting, onlineSlot, "body slot height stable")
     expect(panel.sessionBodyModeForTesting, .empty, "offline mode")
 }
@@ -1542,8 +1622,8 @@ private func testDetailsPanelKeepsFixedWidthForLongProviderContent() {
     panel.contentView?.layoutSubtreeIfNeeded()
 
     expect(panel.frameWidthForTesting, initialWidth, "long provider content should not widen the panel")
-    expect(panel.frameWidthForTesting, 278, "details panel should keep the expanded fixed width")
-    expect((panel.contentView?.fittingSize.width ?? 0) <= 278.5, "content should fit the expanded fixed width")
+    expect(panel.frameWidthForTesting, 304, "details panel should keep the expanded fixed width")
+    expect((panel.contentView?.fittingSize.width ?? 0) <= 304.5, "content should fit the expanded fixed width")
 }
 
 @MainActor
@@ -1602,9 +1682,9 @@ private func testDetailsPanelUsesBackdropMaterialWithRestrainedTint() {
     }
 
     let alpha = color.alphaComponent
-    expect(surface.superview is NSVisualEffectView, true, "tint should sit above the live backdrop material")
-    expect(alpha >= 0.30, true, "details panel should retain a light readability tint")
-    expect(alpha <= 0.40, true, "details panel tint should not hide the backdrop material")
+    expect(surface.superview is NSVisualEffectView, true, "fill should sit above the backdrop material")
+    expect(alpha >= 0.94, true, "details panel fill should be near-opaque cool white")
+    expect(color.redComponent >= 0.97, true, "details panel fill should stay white")
 }
 
 @MainActor
@@ -1624,7 +1704,7 @@ private func testDetailsPanelResizesHeightWithoutAnimation() {
     expect(!usageCall.display, "usage resize should not request immediate display")
     expect(!usageCall.animate, "usage resize should not animate")
     expect(usageCall.frame.height, usageExpectedHeight, "usage height should be an even, pixel-aligned stack fitting height")
-    expect(usageCall.frame.height, 172, "hiding the provider header should reduce the established panel height")
+    expect(usageCall.frame.height, 192, "usage and session panels share the fitted height")
     expect(usageCall.frame.maxY, initialTopEdge, "usage resize should preserve the prior top edge")
     expect(panel.frame, usageCall.frame, "window should apply the observed usage resize frame")
 
@@ -1710,8 +1790,8 @@ private func testDetailsPanelMovesTitleGapIntoBodySpacing() {
     let weeklyQuotaRow = containingFrame(of: L10n.shared["quota.weekly"])
 
     expect(titleField.font?.pointSize, 22, "status title should use the smaller font")
-    expect(detailField.font?.pointSize, 12, "status detail should use the smaller font")
-    expect(topRowFrame.minY - titleFrame.maxY, 0, "status title should start immediately below the agent switcher")
+    expect(detailField.font?.pointSize, 13, "status detail should use the 13pt subtitle")
+    expect(topRowFrame.minY - titleFrame.maxY, 12, "status title should keep a gap below the agent switcher")
     expect(detailFrame.minY - quotaRow.maxY, 16, "usage body should keep a clear gap below the subtitle")
     expect(quotaRow.minY - weeklyQuotaRow.maxY, 4, "quota rows should be compact")
 
@@ -1734,7 +1814,7 @@ private func testDetailsPanelMovesTitleGapIntoBodySpacing() {
     let sessionDetailFrame = frame(of: "Codex Standing By")
     // Scheme B: body is the session card (title lives inside the card).
     let sessionBodyFrame = containingFrame(of: "Layout spacing")
-    expect(sessionTopRowFrame.minY - sessionTitleFrame.maxY, 0, "session title should start immediately below the agent switcher")
+    expect(sessionTopRowFrame.minY - sessionTitleFrame.maxY, 12, "session title should keep a gap below the agent switcher")
     expect(sessionDetailFrame.minY - sessionBodyFrame.maxY, 11, "session body should receive the released title spacing")
 }
 
@@ -1859,7 +1939,7 @@ private func testDetailsPanelKeepsContextPillWidthStable() {
     let doubleDigitWidth = panel.contextPillWidthForTesting
 
     expect(abs(singleDigitWidth - doubleDigitWidth) < 0.5, "context pill width should stay stable as the percent changes")
-    expect(abs(doubleDigitWidth - 42) < 0.5, "context pill should use the tighter fixed width")
+    expect(abs(doubleDigitWidth - 46) < 0.5, "context pill should use the fixed 46pt width")
     expect(
         panel.contextValueExpansionFrameForTesting.isEmpty,
         "context pill should not ask AppKit for an expansion frame, which means the percent would be truncated"
@@ -3062,9 +3142,21 @@ private func testApplyEnabledAgentsForTestingSyncsDetailsToggle() {
 
 @MainActor
 private func testApplySettingsFromWindowRemapsDisabledFocus() {
-    let delegate = AppDelegate(settingsStore: SettingsStore(settingsURL: temporarySettingsURL()))
+    let settingsURL = temporarySettingsURL()
+    let delegate = AppDelegate(
+        settingsStore: SettingsStore(settingsURL: settingsURL),
+        usageCoordinator: UsageMonitoringCoordinator(
+            providers: [],
+            cache: UsageSnapshotCache(
+                cacheURL: settingsURL.deletingLastPathComponent().appendingPathComponent("usage.json"),
+                files: FilesystemUsageFiles()
+            )
+        )
+    )
+    // Focus remapping needs neither optional-agent installation nor a real
+    // menu-bar connection (which can terminate a sandboxed CLI check process).
     delegate.applySettingsFromWindowForTesting(
-        HaloSettings(focusedAgent: .claudeCode, enabledAgents: AgentKind.allCases)
+        HaloSettings(focusedAgent: .claudeCode, enabledAgents: [.codex, .claudeCode], showMenuBarIcon: false)
     )
     expect(delegate.focusedAgentForTesting, .claudeCode, "start focused on Claude Code")
 
@@ -3073,7 +3165,8 @@ private func testApplySettingsFromWindowRemapsDisabledFocus() {
     delegate.applySettingsFromWindowForTesting(
         HaloSettings(
             focusedAgent: .claudeCode,
-            enabledAgents: AgentKind.allCases.filter { $0 != .claudeCode }
+            enabledAgents: [.codex],
+            showMenuBarIcon: false
         )
     )
     expect(
@@ -4349,6 +4442,57 @@ private func testAgentToggleUsesCodexAndClaudeIcons() {
 }
 
 @MainActor
+private func testAgentToggleGraysInactiveIconsAndRestoresSelectedColors() {
+    let toggle = AgentToggleView(frame: .zero)
+    toggle.setEnabledAgents(AgentKind.allCases, focused: .pi)
+    let icons = allDescendants(of: toggle).compactMap { $0 as? NSImageView }
+    let colorAgents: [AgentKind] = [.claudeCode, .antigravity, .workbuddy]
+
+    func hasColor(_ image: NSImage?) -> Bool {
+        guard let image,
+              let bitmap = NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: 24, pixelsHigh: 24,
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+              ), let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
+            fatalError("agent icon should render into an RGBA bitmap")
+        }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        context.cgContext.clear(CGRect(x: 0, y: 0, width: 24, height: 24))
+        image.draw(in: NSRect(x: 0, y: 0, width: 24, height: 24), from: .zero, operation: .copy, fraction: 1)
+        NSGraphicsContext.restoreGraphicsState()
+
+        var hasVisiblePixels = false
+        for y in 0..<24 {
+            for x in 0..<24 {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                      color.alphaComponent > 0.1 else { continue }
+                hasVisiblePixels = true
+                let channels = [color.redComponent, color.greenComponent, color.blueComponent]
+                if channels.max()! - channels.min()! > 0.03 { return true }
+            }
+        }
+        expect(hasVisiblePixels, "gray agent icon should retain visible pixels")
+        return false
+    }
+
+    for selected in [AgentKind.pi, .claudeCode, .pi, .claudeCode, .antigravity, .workbuddy, .codex] {
+        toggle.setAgent(selected)
+        for agent in AgentKind.allCases {
+            guard let icon = icons.first(where: { $0.accessibilityLabel() == agent.menuTitle }) else {
+                fatalError("agent toggle should expose the \(agent.menuTitle) icon")
+            }
+            if agent != selected {
+                expect(!hasColor(icon.image), "inactive \(agent.menuTitle) icon should be gray")
+            } else if colorAgents.contains(agent) {
+                expect(hasColor(icon.image), "selected \(agent.menuTitle) icon should recover its brand colors")
+            }
+        }
+    }
+}
+
+@MainActor
 private func testAgentToggleDimsInactiveIconMoreStrongly() {
     let toggle = AgentToggleView(frame: NSRect(x: 0, y: 0, width: 144, height: 24))
     let icons = allDescendants(of: toggle).compactMap { $0 as? NSImageView }
@@ -4503,9 +4647,17 @@ private func testAgentToggleClickMapsEnabledSlotsOnly() {
 @MainActor
 private func testCompressedAgentToggleClickMatchesTheIcon() {
     let toggle = AgentToggleView(frame: .zero)
-    toggle.setEnabledAgents(AgentKind.allCases, focused: .codex, maximumWidth: 192)
+    toggle.setEnabledAgents(
+        AgentKind.allCases,
+        focused: .codex,
+        maximumWidth: DetailsPanel.agentToggleMaximumWidth
+    )
     toggle.layoutSubtreeIfNeeded()
-    expect(toggle.bounds.width, 192, "seven agents compress into the panel maximum")
+    expect(
+        toggle.bounds.width,
+        DetailsPanel.agentToggleMaximumWidth,
+        "seven agents compress into the panel maximum"
+    )
 
     let icons = allDescendants(of: toggle)
         .compactMap { $0 as? NSImageView }
