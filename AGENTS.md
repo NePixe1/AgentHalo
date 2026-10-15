@@ -166,3 +166,10 @@ Related scripts: `scripts/build-macos.sh`, `scripts/create-dmg.sh`. Packaged app
 2. Keep platform-only material/morph under `platformExtensions` or native code.
 3. Update visual docs if user-visible motion/color meaning changes.
 4. Keep README user-facing; put new contributor detail here or under `docs/`.
+
+## Release language
+
+- New PR titles and descriptions must use Simplified Chinese first, followed by English.
+- Tag names must remain standard version numbers, such as `v1.2.0`. Annotated tag messages must use Simplified Chinese first, followed by English.
+- New Release titles and release notes must use Simplified Chinese first, followed by English.
+- Do not retroactively rename or rewrite existing published releases, tags, or PRs to apply this convention.
