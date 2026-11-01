@@ -1088,8 +1088,8 @@ private func testDetailsPanelHidesProviderPlanAndWarning() {
 private func testDetailsPanelShowsFiveHourAndWeeklyRemainingUsage() {
     let panel = DetailsPanel()
     let now = Date(timeIntervalSince1970: 1_800_000_000)
-    let sessionReset = now.addingTimeInterval(2 * 3_600 + 14 * 60)
-    let weeklyReset = now.addingTimeInterval(3 * 86_400 + 18 * 3_600 + 30 * 60)
+    let sessionReset = now.addingTimeInterval(TimeInterval(2 * 3_600 + 14 * 60))
+    let weeklyReset = now.addingTimeInterval(TimeInterval(3 * 86_400 + 18 * 3_600 + 30 * 60))
     panel.render(
         aggregate: detailsAggregate(),
         model: usageDetailsModel(windows: [
@@ -1143,13 +1143,13 @@ private func testEnglishQuotaResetCopyPreservesRowLayout() {
     defer { L10n.shared.setLanguage("zh") }
 
     let now = Date(timeIntervalSince1970: 1_800_000_000)
-    let reset = now.addingTimeInterval(3 * 86_400 + 18 * 3_600 + 30 * 60)
+    let reset = now.addingTimeInterval(TimeInterval(3 * 86_400 + 18 * 3_600 + 30 * 60))
 
     let panel = DetailsPanel()
     panel.render(
         aggregate: detailsAggregate(),
         model: usageDetailsModel(windows: [
-            UsageWindow(kind: .session, usedPercent: 18, resetsAt: now.addingTimeInterval(45 * 60), duration: 18_000),
+            UsageWindow(kind: .session, usedPercent: 18, resetsAt: now.addingTimeInterval(TimeInterval(45 * 60)), duration: 18_000),
             UsageWindow(kind: .weekly, usedPercent: 9, resetsAt: reset, duration: 604_800),
         ]),
         now: now
@@ -4822,7 +4822,7 @@ private func testL10nEnglishSwitchProducesEnglishStrings() {
     expect(L10n.shared["quota.reset_at"], "Reset at", "quota.reset_at should be English")
 
     let now = Date(timeIntervalSince1970: 1_800_000_000)
-    let reset = now.addingTimeInterval(3 * 86_400 + 18 * 3_600 + 30 * 60)
+    let reset = now.addingTimeInterval(TimeInterval(3 * 86_400 + 18 * 3_600 + 30 * 60))
     let formatted = DetailsPanel.formatResetTime(reset, now: now)
     expect(
         formatted == "3d 18:30",
