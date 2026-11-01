@@ -1087,27 +1087,54 @@ private func testDetailsPanelHidesProviderPlanAndWarning() {
 @MainActor
 private func testDetailsPanelShowsFiveHourAndWeeklyRemainingUsage() {
     let panel = DetailsPanel()
-    let reset = Date().addingTimeInterval(3_600)
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    let sessionReset = now.addingTimeInterval(2 * 3_600 + 14 * 60)
+    let weeklyReset = now.addingTimeInterval(3 * 86_400 + 18 * 3_600 + 30 * 60)
     panel.render(
         aggregate: detailsAggregate(),
         model: usageDetailsModel(windows: [
-            UsageWindow(kind: .weekly, usedPercent: 60, resetsAt: reset, duration: 604_800),
-            UsageWindow(kind: .session, usedPercent: 30, resetsAt: reset, duration: 18_000),
-        ])
+            UsageWindow(kind: .weekly, usedPercent: 60, resetsAt: weeklyReset, duration: 604_800),
+            UsageWindow(kind: .session, usedPercent: 30, resetsAt: sessionReset, duration: 18_000),
+        ]),
+        now: now
     )
 
+    expect(panel.usageTrackModeForTesting, .dual, "both 5h and weekly windows should use dual-track mode")
     expect(panel.primaryQuotaTitleForTesting, L10n.shared["quota.5h"], "short window title")
     expect(panel.secondaryQuotaTitleForTesting, L10n.shared["quota.weekly"], "weekly window title")
-    expect(panel.primaryQuotaValueForTesting, L10n.shared.format("quota.remaining", 70), "short window remaining value")
-    expect(panel.secondaryQuotaValueForTesting, L10n.shared.format("quota.remaining", 40), "weekly remaining value")
-    expect(panel.primaryQuotaMeterFillForTesting, 70, "short window meter should use remaining percent")
-    expect(panel.secondaryQuotaMeterFillForTesting, 40, "weekly meter should use remaining percent")
-    panel.contentView?.layoutSubtreeIfNeeded()
-    let meters = panel.contentView.map(allDescendants(of:))?.compactMap { $0 as? RoundedMeterView } ?? []
-    expect(meters.count, 2, "usage panel quota meter count")
-    expect(meters.allSatisfy { abs($0.frame.height - 4) < 0.001 }, "usage panel quota meters should remain 4pt high")
+    expect(panel.primaryQuotaUsedValueForTesting, "\(L10n.shared["quota.used_label"]) 30%", "short window used value")
+    expect(panel.secondaryQuotaUsedValueForTesting, "\(L10n.shared["quota.used_label"]) 60%", "weekly used value")
+    expect(panel.primaryQuotaValueForTesting, "\(L10n.shared["quota.remaining_label"]) 70%", "short window remaining value")
+    expect(panel.secondaryQuotaValueForTesting, "\(L10n.shared["quota.remaining_label"]) 40%", "weekly remaining value")
+    expect(panel.primaryQuotaMeterFillForTesting, 30, "short window meter should fill to used percent")
+    expect(panel.secondaryQuotaMeterFillForTesting, 60, "weekly meter should fill to used percent")
+    expect(panel.primaryQuotaResetTextForTesting, "2h 14m", "short window relative countdown")
+    expect(panel.secondaryQuotaResetTextForTesting, "3d 18:30", "weekly relative countdown")
     expect(!panel.primaryQuotaResetHiddenForTesting, "future short-window reset should be visible")
     expect(!panel.secondaryQuotaResetHiddenForTesting, "future weekly reset should be visible")
+
+    // Verify Single-Track Hero mode when only Weekly window is returned (e.g. Grok or Weekly-only Plus)
+    panel.render(
+        aggregate: detailsAggregate(agent: .grok),
+        model: usageDetailsModel(provider: "Grok", windows: [
+            UsageWindow(kind: .weekly, usedPercent: 38, resetsAt: weeklyReset, duration: 604_800),
+        ]),
+        now: now
+    )
+    expect(panel.usageTrackModeForTesting, .single, "weekly-only payload should switch to single-track Hero mode")
+    expect(panel.singleTrackTitleForTesting, L10n.shared["quota.weekly"], "single-track title")
+    expect(panel.singleTrackHeroValueForTesting, "38%", "single-track hero used percent")
+    expect(panel.singleTrackUsedValueForTesting, "38%", "single-track used sub-value")
+    expect(panel.singleTrackRemainingValueForTesting, "62%", "single-track remaining sub-value")
+    expect(panel.singleTrackResetValueForTesting, "3d 18:30", "single-track reset countdown")
+    expect(panel.singleTrackMeterFillForTesting, 38, "single-track meter fill")
+
+    // Verify Dark & Light theme switching
+    expect(!panel.isDarkThemeForTesting, "default headless test theme is light")
+    panel.setAppearanceOverrideForTesting(true)
+    expect(panel.isDarkThemeForTesting, "override switches panel to dark theme")
+    panel.setAppearanceOverrideForTesting(nil)
+    expect(!panel.isDarkThemeForTesting, "clearing override restores light theme")
 }
 
 @MainActor
@@ -1115,22 +1142,17 @@ private func testEnglishQuotaResetCopyPreservesRowLayout() {
     L10n.shared.setLanguage("en")
     defer { L10n.shared.setLanguage("zh") }
 
-    var components = DateComponents()
-    components.year = 2099
-    components.month = 8
-    components.day = 2
-    components.hour = 14
-    components.minute = 30
-    guard let reset = Calendar.current.date(from: components) else {
-        fatalError("English quota reset test date should be constructible")
-    }
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    let reset = now.addingTimeInterval(3 * 86_400 + 18 * 3_600 + 30 * 60)
 
     let panel = DetailsPanel()
     panel.render(
         aggregate: detailsAggregate(),
         model: usageDetailsModel(windows: [
+            UsageWindow(kind: .session, usedPercent: 18, resetsAt: now.addingTimeInterval(45 * 60), duration: 18_000),
             UsageWindow(kind: .weekly, usedPercent: 9, resetsAt: reset, duration: 604_800),
-        ])
+        ]),
+        now: now
     )
     panel.contentView?.layoutSubtreeIfNeeded()
 
@@ -1146,20 +1168,20 @@ private func testEnglishQuotaResetCopyPreservesRowLayout() {
     )
     expect(
         panel.primaryQuotaFrameForTesting.minY - panel.secondaryQuotaFrameForTesting.maxY,
-        4,
-        "English quota copy should preserve spacing between quota rows"
+        8,
+        "English quota copy should preserve spacing between dual-track quota rows"
     )
     expect(
         panel.secondaryQuotaFrameForTesting.contains(panel.secondaryQuotaResetFrameForTesting),
-        "English reset text should stay inside the weekly quota row"
+        "English reset countdown should stay inside the weekly quota row"
     )
     expect(
         !panel.primaryQuotaHasAmbiguousLayoutForTesting,
-        "English no-data quota row should have an unambiguous layout"
+        "English primary quota row should have an unambiguous layout"
     )
     expect(
         !panel.secondaryQuotaHasAmbiguousLayoutForTesting,
-        "English reset quota row should have an unambiguous layout"
+        "English weekly quota row should have an unambiguous layout"
     )
 }
 
@@ -1310,6 +1332,8 @@ private func testDetailsPanelShowsMissingAndExpiredUsageWindows() {
         ])
     )
 
+    expect(panel.usageTrackModeForTesting, .single, "single weekly window uses single-track mode")
+    expect(panel.singleTrackHeroValueForTesting, L10n.shared["quota.waiting_refresh"], "expired single-track window should wait for refresh")
     expect(panel.primaryQuotaValueForTesting, L10n.shared["quota.no_data"], "missing short window should show no data")
     expect(panel.primaryQuotaResetHiddenForTesting, "missing short-window reset should be hidden")
     expect(panel.primaryQuotaMeterFillForTesting, 0, "missing short-window meter should be empty")
@@ -1323,7 +1347,12 @@ private func testDetailsPanelShowsMissingAndExpiredUsageWindows() {
             UsageWindow(kind: .session, usedPercent: 25, resetsAt: nil, duration: 18_000),
         ])
     )
-    expect(panel.primaryQuotaValueForTesting, L10n.shared.format("quota.remaining", 75), "nil reset should preserve remaining usage")
+    expect(panel.usageTrackModeForTesting, .single, "single session window uses single-track mode")
+    expect(panel.singleTrackTitleForTesting, L10n.shared["quota.5h"], "single session window title")
+    expect(panel.singleTrackHeroValueForTesting, "25%", "single session window hero used percent")
+    expect(panel.singleTrackRemainingValueForTesting, "75%", "single session window remaining percent")
+    expect(panel.singleTrackResetValueForTesting, "--", "nil reset should show placeholder in single-track footer")
+    expect(panel.primaryQuotaValueForTesting, "\(L10n.shared["quota.remaining_label"]) 75%", "nil reset should preserve remaining usage")
     expect(panel.primaryQuotaResetHiddenForTesting, "nil reset should not show a placeholder reset")
 }
 
@@ -1602,8 +1631,8 @@ private func testDetailsPanelAPIKeyOfflineAndOnlineShareHeight() {
     )
     panel.contentView?.layoutSubtreeIfNeeded()
     expect(panel.frameHeightForTesting, onlineHeight, "API Key offline/online panel height")
-    expect(panel.frameHeightForTesting, 192, "API Key panel fitted height")
-    expect(onlineHeight, 192, "online API Key panel height")
+    expect(panel.frameHeightForTesting, 226, "API Key panel fitted height")
+    expect(onlineHeight, 226, "online API Key panel height")
     expect(panel.sessionBodySlotHeightForTesting, onlineSlot, "body slot height stable")
     expect(panel.sessionBodyModeForTesting, .empty, "offline mode")
 }
@@ -1704,7 +1733,7 @@ private func testDetailsPanelResizesHeightWithoutAnimation() {
     expect(!usageCall.display, "usage resize should not request immediate display")
     expect(!usageCall.animate, "usage resize should not animate")
     expect(usageCall.frame.height, usageExpectedHeight, "usage height should be an even, pixel-aligned stack fitting height")
-    expect(usageCall.frame.height, 192, "usage and session panels share the fitted height")
+    expect(usageCall.frame.height, 226, "usage and session panels share the fitted height")
     expect(usageCall.frame.maxY, initialTopEdge, "usage resize should preserve the prior top edge")
     expect(panel.frame, usageCall.frame, "window should apply the observed usage resize frame")
 
@@ -1793,7 +1822,7 @@ private func testDetailsPanelMovesTitleGapIntoBodySpacing() {
     expect(detailField.font?.pointSize, 13, "status detail should use the 13pt subtitle")
     expect(topRowFrame.minY - titleFrame.maxY, 12, "status title should keep a gap below the agent switcher")
     expect(detailFrame.minY - quotaRow.maxY, 16, "usage body should keep a clear gap below the subtitle")
-    expect(quotaRow.minY - weeklyQuotaRow.maxY, 4, "quota rows should be compact")
+    expect(quotaRow.minY - weeklyQuotaRow.maxY, 8, "quota rows should be compact with room for divider")
 
     panel.render(
         aggregate: aggregate,
@@ -4788,22 +4817,16 @@ private func testL10nEnglishSwitchProducesEnglishStrings() {
         "DetailsPanel.localizedDetail should follow the active language"
     )
 
-    // formatResetTime must honor date.culture (en-US) and include the
-    // English quota reset prefix rather than the Chinese refresh suffix.
-    var components = DateComponents()
-    components.year = 2026
-    components.month = 1
-    components.day = 5
-    components.hour = 14
-    components.minute = 30
-    let calendar = Calendar.current
-    guard let reset = calendar.date(from: components) else {
-        fatalError("test date should be constructible")
-    }
-    let formatted = DetailsPanel.formatResetTime(reset)
+    expect(L10n.shared["quota.used_label"], "Used", "quota.used_label should be English")
+    expect(L10n.shared["quota.remaining_label"], "Remaining", "quota.remaining_label should be English")
+    expect(L10n.shared["quota.reset_at"], "Reset at", "quota.reset_at should be English")
+
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    let reset = now.addingTimeInterval(3 * 86_400 + 18 * 3_600 + 30 * 60)
+    let formatted = DetailsPanel.formatResetTime(reset, now: now)
     expect(
-        formatted == "Resets Jan 5",
-        "formatResetTime should render the English quota reset label when language=en (got: \(formatted))"
+        formatted == "3d 18:30",
+        "formatResetTime should render the relative countdown (got: \(formatted))"
     )
 }
 

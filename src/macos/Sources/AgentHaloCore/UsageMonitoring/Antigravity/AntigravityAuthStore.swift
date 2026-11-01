@@ -48,17 +48,17 @@ public struct AntigravityAuthStore: Sendable {
         self.memo = AntigravityKeychainMemo()
     }
 
-    public func resolveAccess(lsAvailable: Bool) -> ResolvedProviderAccess {
+    public func resolveAccess(lsAvailable: @autoclosure () -> Bool) -> ResolvedProviderAccess {
         let token: AntigravityKeychainToken?
         do {
             token = try loadKeychainToken()
         } catch {
-            return lsAvailable ? lsOnlyAccess() : .oauthNeedsSignIn(accountKey: nil)
+            return lsAvailable() ? lsOnlyAccess() : .oauthNeedsSignIn(accountKey: nil)
         }
         if let token {
             return .oauth(makeOAuthAccess(from: token))
         }
-        if lsAvailable {
+        if lsAvailable() {
             return lsOnlyAccess()
         }
         return .oauthNeedsSignIn(accountKey: nil)

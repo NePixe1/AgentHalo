@@ -872,6 +872,11 @@ func testAntigravityProviderProbesLanguageServerThenAgyThenCloudCode() async {
 
     let access = await provider.resolveAccess(accountKey: nil)
     if case .apiKey = access { fatalError("provider must not resolve apiKey") }
+    expect(
+        lsThenAgy.processNames.isEmpty,
+        true,
+        "resolveAccess must read Keychain first without blocking on ps/lsof discovery"
+    )
     let result = await provider.refresh(using: access)
     guard let snapshot = result.snapshot else {
         fatalError("language_server summary must win: \(String(describing: result.failure))")

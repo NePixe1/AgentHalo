@@ -16,28 +16,117 @@ enum DetailsPanelSessionBodyRole: Equatable {
     case unknown
 }
 
+enum DetailsPanelUsageTrackMode: Equatable {
+    case dual
+    case single
+}
+
+@MainActor
+struct DetailsPanelThemePalette {
+    let isDark: Bool
+    let surfaceFill: NSColor
+    let containerBorder: NSColor
+    let primaryText: NSColor
+    let mutedText: NSColor
+    let divider: NSColor
+    let meterTrack: NSColor
+    let meterAccentStart: NSColor
+    let meterAccentEnd: NSColor
+    let contextPillFill: NSColor
+    let contextPillBorder: NSColor
+    let contextPillText: NSColor
+    let toggleBgFill: NSColor
+    let toggleBgBorder: NSColor
+    let toggleActiveFill: NSColor
+    let toggleActiveBorder: NSColor
+    let modelChipFill: NSColor
+    let modelChipText: NSColor
+    let inputChipFill: NSColor
+    let inputChipText: NSColor
+    let outputChipFill: NSColor
+    let outputChipText: NSColor
+
+    static let light = DetailsPanelThemePalette(
+        isDark: false,
+        surfaceFill: NSColor(calibratedRed: 1, green: 1, blue: 1, alpha: 246 / 255),
+        containerBorder: NSColor(calibratedRed: 183 / 255, green: 199 / 255, blue: 207 / 255, alpha: 64 / 255),
+        primaryText: NSColor(calibratedRed: 17 / 255, green: 24 / 255, blue: 39 / 255, alpha: 1),
+        mutedText: NSColor(calibratedRed: 103 / 255, green: 117 / 255, blue: 126 / 255, alpha: 1),
+        divider: NSColor(calibratedRed: 15 / 255, green: 23 / 255, blue: 42 / 255, alpha: 22 / 255),
+        meterTrack: NSColor(calibratedRed: 229 / 255, green: 231 / 255, blue: 235 / 255, alpha: 1),
+        meterAccentStart: NSColor(calibratedRed: 29 / 255, green: 140 / 255, blue: 248 / 255, alpha: 1),
+        meterAccentEnd: NSColor(calibratedRed: 37 / 255, green: 99 / 255, blue: 235 / 255, alpha: 1),
+        contextPillFill: NSColor(calibratedRed: 224 / 255, green: 240 / 255, blue: 252 / 255, alpha: 1),
+        contextPillBorder: NSColor(calibratedRed: 174 / 255, green: 205 / 255, blue: 224 / 255, alpha: 72 / 255),
+        contextPillText: NSColor(calibratedRed: 64 / 255, green: 105 / 255, blue: 132 / 255, alpha: 1),
+        toggleBgFill: NSColor(calibratedRed: 244 / 255, green: 248 / 255, blue: 250 / 255, alpha: 1),
+        toggleBgBorder: NSColor(calibratedRed: 221 / 255, green: 233 / 255, blue: 238 / 255, alpha: 1),
+        toggleActiveFill: NSColor(calibratedRed: 225 / 255, green: 249 / 255, blue: 255 / 255, alpha: 1),
+        toggleActiveBorder: NSColor(calibratedRed: 183 / 255, green: 235 / 255, blue: 246 / 255, alpha: 1),
+        modelChipFill: NSColor(calibratedRed: 238 / 255, green: 241 / 255, blue: 244 / 255, alpha: 1),
+        modelChipText: NSColor(calibratedRed: 77 / 255, green: 97 / 255, blue: 112 / 255, alpha: 1),
+        inputChipFill: NSColor(calibratedRed: 228 / 255, green: 242 / 255, blue: 252 / 255, alpha: 1),
+        inputChipText: NSColor(calibratedRed: 51 / 255, green: 119 / 255, blue: 160 / 255, alpha: 1),
+        outputChipFill: NSColor(calibratedRed: 228 / 255, green: 246 / 255, blue: 238 / 255, alpha: 1),
+        outputChipText: NSColor(calibratedRed: 35 / 255, green: 133 / 255, blue: 112 / 255, alpha: 1)
+    )
+
+    static let dark = DetailsPanelThemePalette(
+        isDark: true,
+        surfaceFill: NSColor(calibratedRed: 10 / 255, green: 11 / 255, blue: 14 / 255, alpha: 246 / 255),
+        containerBorder: NSColor(calibratedRed: 1, green: 1, blue: 1, alpha: 30 / 255),
+        primaryText: NSColor(calibratedRed: 248 / 255, green: 250 / 255, blue: 252 / 255, alpha: 1),
+        mutedText: NSColor(calibratedRed: 148 / 255, green: 163 / 255, blue: 184 / 255, alpha: 1),
+        divider: NSColor(calibratedRed: 1, green: 1, blue: 1, alpha: 26 / 255),
+        meterTrack: NSColor(calibratedRed: 38 / 255, green: 41 / 255, blue: 48 / 255, alpha: 1),
+        meterAccentStart: NSColor(calibratedRed: 34 / 255, green: 148 / 255, blue: 252 / 255, alpha: 1),
+        meterAccentEnd: NSColor(calibratedRed: 37 / 255, green: 99 / 255, blue: 235 / 255, alpha: 1),
+        contextPillFill: NSColor(calibratedRed: 56 / 255, green: 189 / 255, blue: 248 / 255, alpha: 42 / 255),
+        contextPillBorder: NSColor(calibratedRed: 56 / 255, green: 189 / 255, blue: 248 / 255, alpha: 76 / 255),
+        contextPillText: NSColor(calibratedRed: 125 / 255, green: 211 / 255, blue: 252 / 255, alpha: 1),
+        toggleBgFill: NSColor(calibratedRed: 1, green: 1, blue: 1, alpha: 16 / 255),
+        toggleBgBorder: NSColor(calibratedRed: 1, green: 1, blue: 1, alpha: 26 / 255),
+        toggleActiveFill: NSColor(calibratedRed: 56 / 255, green: 189 / 255, blue: 248 / 255, alpha: 52 / 255),
+        toggleActiveBorder: NSColor(calibratedRed: 56 / 255, green: 189 / 255, blue: 248 / 255, alpha: 108 / 255),
+        modelChipFill: NSColor(calibratedRed: 1, green: 1, blue: 1, alpha: 22 / 255),
+        modelChipText: NSColor(calibratedRed: 203 / 255, green: 213 / 255, blue: 225 / 255, alpha: 1),
+        inputChipFill: NSColor(calibratedRed: 56 / 255, green: 189 / 255, blue: 248 / 255, alpha: 36 / 255),
+        inputChipText: NSColor(calibratedRed: 125 / 255, green: 211 / 255, blue: 252 / 255, alpha: 1),
+        outputChipFill: NSColor(calibratedRed: 16 / 255, green: 185 / 255, blue: 129 / 255, alpha: 36 / 255),
+        outputChipText: NSColor(calibratedRed: 110 / 255, green: 231 / 255, blue: 183 / 255, alpha: 1)
+    )
+}
+
 @MainActor
 class DetailsPanel: NSPanel {
     private static let panelWidth: CGFloat = 304
     private static let contextPillWidth: CGFloat = 46
     private static let contextPillHeight: CGFloat = 24
-    /// Fixed session body slot height (Scheme B). Panel fitted height is 192.
-    /// Slightly under the original 72 so the card bottom sits higher and outer
-    /// bottom padding matches the top chrome more closely (equalizer absorbs the delta).
+    private static let usageBodyHeight: CGFloat = 104
+    /// Fixed session body slot height (Scheme B).
     private static let sessionBodyHeight: CGFloat = 68
+    /// Bottom inset keeps the session body contribution aligned with the 104pt
+    /// usage group (11 + 68 + 41 == 16 + 104) so both panels fit to 226.
+    private static let sessionBodyBottomEqualizer: CGFloat = 41
     /// After COMPLETE settles into STANDBY (empty sessions), keep the last live
     /// context percent for this long before hiding. OFFLINE still clears immediately.
     nonisolated static let standbyContextHoldDuration: TimeInterval = 12
 
+    private let containerView = NSVisualEffectView()
+    private let surfaceView = NSView()
     private let stack = NSStackView()
     private let contextValue = NSTextField(labelWithString: L10n.shared["context.empty"])
     private let titleField = NSTextField(labelWithString: "OFFLINE")
     private let detailField = NSTextField(labelWithString: L10n.shared["status.offline_codex"])
     private let primaryQuota = QuotaRowView(title: L10n.shared["quota.5h"])
     private let secondaryQuota = QuotaRowView(title: L10n.shared["quota.weekly"])
+    private let dualTrackContainer = NSView()
+    private let quotaTopDivider = NSView()
+    private let quotaInterRowDivider = NSView()
+    private let singleTrackView = SingleTrackQuotaView()
     private let agentToggle = AgentToggleView()
     private let contextPill = NSView()
-    private let quotaGroup = NSStackView()
+    private let quotaGroup = NSView()
     /// Hosts the fixed-height session body slot (empty | session card).
     /// Plain `NSView` (not `NSStackView`) so width is explicit and not ambiguous.
     private let metadataGroup = NSView()
@@ -47,6 +136,8 @@ class DetailsPanel: NSPanel {
     private var topRow: NSView?
     private var agentToggleWidthConstraint: NSLayoutConstraint?
     private var sessionBodyMode: DetailsPanelSessionBodyRole = .unknown
+    private var usageTrackMode: DetailsPanelUsageTrackMode = .dual
+    private var appearanceOverride: Bool?
     /// Last live context percent used to soft-hold the pill after STANDBY.
     private var heldContextPercent: Double?
     /// When the standby hold started/should end; `nil` means not currently holding.
@@ -61,7 +152,7 @@ class DetailsPanel: NSPanel {
 
     init() {
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: Self.panelWidth, height: 192),
+            contentRect: NSRect(x: 0, y: 0, width: Self.panelWidth, height: 226),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -75,34 +166,19 @@ class DetailsPanel: NSPanel {
         contentMinSize = NSSize(width: Self.panelWidth, height: 0)
         contentMaxSize = NSSize(width: Self.panelWidth, height: CGFloat.greatestFiniteMagnitude)
 
-        let container = NSVisualEffectView(frame: contentView?.bounds ?? .zero)
-        container.material = .popover
-        container.blendingMode = .behindWindow
-        container.state = .active
-        container.wantsLayer = true
-        container.layer?.cornerRadius = 18
-        container.layer?.masksToBounds = true
-        container.layer?.borderWidth = 1
-        container.layer?.borderColor = NSColor(
-            calibratedRed: 183 / 255,
-            green: 199 / 255,
-            blue: 207 / 255,
-            alpha: 46 / 255
-        ).cgColor
-        container.translatesAutoresizingMaskIntoConstraints = false
+        containerView.frame = contentView?.bounds ?? .zero
+        containerView.material = .popover
+        containerView.blendingMode = .behindWindow
+        containerView.state = .active
+        containerView.wantsLayer = true
+        containerView.layer?.cornerRadius = 22
+        containerView.layer?.masksToBounds = true
+        containerView.layer?.borderWidth = 1
+        containerView.translatesAutoresizingMaskIntoConstraints = false
 
-        // Near-opaque cool white. Popover material stays underneath, but the
-        // fill covers it so status color and type are not sampled from the desktop.
-        let surface = NSView()
-        surface.identifier = NSUserInterfaceItemIdentifier("details-panel-surface")
-        surface.wantsLayer = true
-        surface.layer?.backgroundColor = NSColor(
-            calibratedRed: 1,
-            green: 1,
-            blue: 1,
-            alpha: 244 / 255
-        ).cgColor
-        surface.translatesAutoresizingMaskIntoConstraints = false
+        surfaceView.identifier = NSUserInterfaceItemIdentifier("details-panel-surface")
+        surfaceView.wantsLayer = true
+        surfaceView.translatesAutoresizingMaskIntoConstraints = false
 
         stack.orientation = .vertical
         stack.spacing = 0
@@ -123,12 +199,6 @@ class DetailsPanel: NSPanel {
         titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         titleField.alignment = .left
         detailField.font = .systemFont(ofSize: 13)
-        detailField.textColor = NSColor(
-            calibratedRed: 103 / 255,
-            green: 117 / 255,
-            blue: 126 / 255,
-            alpha: 1
-        )
         detailField.lineBreakMode = .byTruncatingTail
         detailField.maximumNumberOfLines = 1
         detailField.usesSingleLineMode = true
@@ -140,36 +210,36 @@ class DetailsPanel: NSPanel {
         stack.addArrangedSubview(detailField)
         stack.setCustomSpacing(11, after: detailField)
 
-        quotaGroup.orientation = .vertical
-        quotaGroup.spacing = 4
-        quotaGroup.alignment = .leading
         quotaGroup.translatesAutoresizingMaskIntoConstraints = false
-        quotaGroup.addArrangedSubview(primaryQuota)
-        quotaGroup.addArrangedSubview(secondaryQuota)
+        dualTrackContainer.translatesAutoresizingMaskIntoConstraints = false
+        singleTrackView.translatesAutoresizingMaskIntoConstraints = false
+        quotaTopDivider.wantsLayer = true
+        quotaTopDivider.translatesAutoresizingMaskIntoConstraints = false
+        quotaInterRowDivider.wantsLayer = true
+        quotaInterRowDivider.translatesAutoresizingMaskIntoConstraints = false
+
+        dualTrackContainer.addSubview(primaryQuota)
+        dualTrackContainer.addSubview(quotaInterRowDivider)
+        dualTrackContainer.addSubview(secondaryQuota)
+
+        quotaGroup.addSubview(quotaTopDivider)
+        quotaGroup.addSubview(dualTrackContainer)
+        quotaGroup.addSubview(singleTrackView)
+        singleTrackView.isHidden = true
         stack.addArrangedSubview(quotaGroup)
 
         // Plain container: explicit full-width pin avoids NSStackView width
         // ambiguity that shrank empty/card to label-hugging size (right-biased).
         metadataGroup.translatesAutoresizingMaskIntoConstraints = false
-        // Bottom inset keeps the session body contribution aligned with the 70pt
-        // usage group (11 + 68 + 7 == 16 + 70) so both panels fit to 192.
-        let sessionBodyBottomEqualizer: CGFloat = 7
 
         bodySlot.translatesAutoresizingMaskIntoConstraints = false
         emptyBody.translatesAutoresizingMaskIntoConstraints = false
         sessionCard.translatesAutoresizingMaskIntoConstraints = false
-        // Expand horizontally; never hug label intrinsic width.
-        for view in [bodySlot, emptyBody, sessionCard] as [NSView] {
+        for view in [quotaGroup, dualTrackContainer, singleTrackView, bodySlot, emptyBody, sessionCard] as [NSView] {
             view.setContentHuggingPriority(.defaultLow, for: .horizontal)
             view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         }
         sessionDivider.wantsLayer = true
-        sessionDivider.layer?.backgroundColor = NSColor(
-            calibratedRed: 190 / 255,
-            green: 205 / 255,
-            blue: 215 / 255,
-            alpha: 1
-        ).cgColor
         sessionDivider.translatesAutoresizingMaskIntoConstraints = false
         bodySlot.addSubview(sessionDivider)
         bodySlot.addSubview(emptyBody)
@@ -184,45 +254,71 @@ class DetailsPanel: NSPanel {
         let rootView = TrackingDetailsContentView()
         rootView.owner = self
         contentView = rootView
-        contentView?.addSubview(container)
-        container.addSubview(surface)
-        container.addSubview(stack)
+        contentView?.addSubview(containerView)
+        containerView.addSubview(surfaceView)
+        containerView.addSubview(stack)
+
         NSLayoutConstraint.activate([
             contentView!.widthAnchor.constraint(equalToConstant: Self.panelWidth),
-            container.leadingAnchor.constraint(equalTo: contentView!.leadingAnchor),
-            container.trailingAnchor.constraint(equalTo: contentView!.trailingAnchor),
-            container.topAnchor.constraint(equalTo: contentView!.topAnchor),
-            container.bottomAnchor.constraint(equalTo: contentView!.bottomAnchor),
-            surface.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            surface.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            surface.topAnchor.constraint(equalTo: container.topAnchor),
-            surface.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: container.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            containerView.leadingAnchor.constraint(equalTo: contentView!.leadingAnchor),
+            containerView.trailingAnchor.constraint(equalTo: contentView!.trailingAnchor),
+            containerView.topAnchor.constraint(equalTo: contentView!.topAnchor),
+            containerView.bottomAnchor.constraint(equalTo: contentView!.bottomAnchor),
+            surfaceView.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
+            surfaceView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
+            surfaceView.topAnchor.constraint(equalTo: containerView.topAnchor),
+            surfaceView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: containerView.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
 
             topRow.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
             titleField.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 17),
             titleField.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
             detailField.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 17),
             detailField.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
+
             quotaGroup.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 17),
             quotaGroup.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
-            quotaGroup.heightAnchor.constraint(equalToConstant: 70),
-            primaryQuota.leadingAnchor.constraint(equalTo: quotaGroup.leadingAnchor),
-            primaryQuota.trailingAnchor.constraint(equalTo: quotaGroup.trailingAnchor),
-            secondaryQuota.leadingAnchor.constraint(equalTo: quotaGroup.leadingAnchor),
-            secondaryQuota.trailingAnchor.constraint(equalTo: quotaGroup.trailingAnchor),
+            quotaGroup.heightAnchor.constraint(equalToConstant: Self.usageBodyHeight),
+
+            quotaTopDivider.leadingAnchor.constraint(equalTo: quotaGroup.leadingAnchor),
+            quotaTopDivider.trailingAnchor.constraint(equalTo: quotaGroup.trailingAnchor),
+            quotaTopDivider.bottomAnchor.constraint(equalTo: quotaGroup.topAnchor, constant: -7),
+            quotaTopDivider.heightAnchor.constraint(equalToConstant: 1),
+
+            dualTrackContainer.leadingAnchor.constraint(equalTo: quotaGroup.leadingAnchor),
+            dualTrackContainer.trailingAnchor.constraint(equalTo: quotaGroup.trailingAnchor),
+            dualTrackContainer.topAnchor.constraint(equalTo: quotaGroup.topAnchor),
+            dualTrackContainer.bottomAnchor.constraint(equalTo: quotaGroup.bottomAnchor),
+
+            primaryQuota.leadingAnchor.constraint(equalTo: dualTrackContainer.leadingAnchor),
+            primaryQuota.trailingAnchor.constraint(equalTo: dualTrackContainer.trailingAnchor),
+            primaryQuota.topAnchor.constraint(equalTo: dualTrackContainer.topAnchor),
+
+            quotaInterRowDivider.leadingAnchor.constraint(equalTo: dualTrackContainer.leadingAnchor),
+            quotaInterRowDivider.trailingAnchor.constraint(equalTo: dualTrackContainer.trailingAnchor),
+            quotaInterRowDivider.topAnchor.constraint(equalTo: primaryQuota.bottomAnchor, constant: 4),
+            quotaInterRowDivider.heightAnchor.constraint(equalToConstant: 1),
+
+            secondaryQuota.leadingAnchor.constraint(equalTo: dualTrackContainer.leadingAnchor),
+            secondaryQuota.trailingAnchor.constraint(equalTo: dualTrackContainer.trailingAnchor),
+            secondaryQuota.topAnchor.constraint(equalTo: primaryQuota.bottomAnchor, constant: 8),
+
+            singleTrackView.leadingAnchor.constraint(equalTo: quotaGroup.leadingAnchor),
+            singleTrackView.trailingAnchor.constraint(equalTo: quotaGroup.trailingAnchor),
+            singleTrackView.topAnchor.constraint(equalTo: quotaGroup.topAnchor),
+            singleTrackView.bottomAnchor.constraint(equalTo: quotaGroup.bottomAnchor),
+
             metadataGroup.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 17),
             metadataGroup.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
-            // Full-bleed body slot inside metadata container (+ bottom equalizer).
             bodySlot.leadingAnchor.constraint(equalTo: metadataGroup.leadingAnchor),
             bodySlot.trailingAnchor.constraint(equalTo: metadataGroup.trailingAnchor),
             bodySlot.topAnchor.constraint(equalTo: metadataGroup.topAnchor),
             bodySlot.bottomAnchor.constraint(
                 equalTo: metadataGroup.bottomAnchor,
-                constant: -sessionBodyBottomEqualizer
+                constant: -Self.sessionBodyBottomEqualizer
             ),
             bodySlot.heightAnchor.constraint(equalToConstant: Self.sessionBodyHeight),
             sessionDivider.leadingAnchor.constraint(equalTo: bodySlot.leadingAnchor),
@@ -238,9 +334,55 @@ class DetailsPanel: NSPanel {
             sessionCard.topAnchor.constraint(equalTo: bodySlot.topAnchor),
             sessionCard.bottomAnchor.constraint(equalTo: bodySlot.bottomAnchor)
         ])
+
+        applyTheme()
     }
 
-    func render(aggregate: AggregateSnapshot, model: DetailsPanelViewModel) {
+    var currentThemePalette: DetailsPanelThemePalette {
+        if let appearanceOverride {
+            return appearanceOverride ? .dark : .light
+        }
+        // In the live macOS app (`NSApp != nil`), follow the system's effective
+        // appearance. In headless CLI self-tests (`NSApp == nil`), default to
+        // light unless explicitly overridden via `setAppearanceOverrideForTesting`.
+        guard let app = NSApp else {
+            return .light
+        }
+        let match = app.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua])
+        return match == .darkAqua ? .dark : .light
+    }
+
+    func applyTheme() {
+        let palette = currentThemePalette
+        containerView.appearance = NSAppearance(named: palette.isDark ? .darkAqua : .aqua)
+        containerView.layer?.borderColor = palette.containerBorder.cgColor
+        surfaceView.layer?.backgroundColor = palette.surfaceFill.cgColor
+        detailField.textColor = palette.mutedText
+        contextPill.layer?.backgroundColor = palette.contextPillFill.cgColor
+        contextPill.layer?.borderColor = palette.contextPillBorder.cgColor
+        contextValue.textColor = palette.contextPillText
+        quotaTopDivider.layer?.backgroundColor = palette.divider.cgColor
+        quotaInterRowDivider.layer?.backgroundColor = palette.divider.cgColor
+        sessionDivider.layer?.backgroundColor = palette.divider.cgColor
+
+        agentToggle.applyTheme(palette)
+        primaryQuota.applyTheme(palette)
+        secondaryQuota.applyTheme(palette)
+        singleTrackView.applyTheme(palette)
+        emptyBody.applyTheme(palette)
+        sessionCard.applyTheme(palette)
+    }
+
+    func setAppearanceOverrideForTesting(_ isDark: Bool?) {
+        appearanceOverride = isDark
+        applyTheme()
+    }
+
+    var isDarkThemeForTesting: Bool {
+        currentThemePalette.isDark
+    }
+
+    func render(aggregate: AggregateSnapshot, model: DetailsPanelViewModel, now: Date = Date()) {
         #if DEBUG
         let startTime = CFAbsoluteTimeGetCurrent()
         defer {
@@ -251,14 +393,16 @@ class DetailsPanel: NSPanel {
         }
         #endif
 
-        updateStatus(aggregate: aggregate)
+        applyTheme()
+        updateStatus(aggregate: aggregate, now: now)
         let isOffline = aggregate.state == .idle && aggregate.label == "OFFLINE"
         let isStandby = aggregate.label == "STANDBY"
         updateContext(
             model.contextUsedPercent,
             isOffline: isOffline,
             isStandby: isStandby,
-            focusedAgent: aggregate.focusedAgent
+            focusedAgent: aggregate.focusedAgent,
+            now: now
         )
 
         quotaGroup.isHidden = true
@@ -269,7 +413,7 @@ class DetailsPanel: NSPanel {
             stack.setCustomSpacing(16, after: detailField)
             stack.edgeInsets.bottom = 4
             sessionBodyMode = .unknown
-            renderUsage(usage)
+            renderUsage(usage, focusedAgent: aggregate.focusedAgent, now: now)
             quotaGroup.isHidden = false
         case .session(let session):
             stack.setCustomSpacing(11, after: detailField)
@@ -359,19 +503,53 @@ class DetailsPanel: NSPanel {
         return (nil, nil, nil)
     }
 
-    private func renderUsage(_ usage: UsageDetailsModel) {
-        primaryQuota.setTitle(L10n.shared["quota.5h"])
-        secondaryQuota.setTitle(L10n.shared["quota.weekly"])
-        renderUsageWindow(usage.windows.first { $0.kind == .session }, in: primaryQuota)
-        renderUsageWindow(usage.windows.first { $0.kind == .weekly }, in: secondaryQuota)
+    static func resolveUsageTrackMode(
+        usage: UsageDetailsModel,
+        focusedAgent: AgentKind
+    ) -> DetailsPanelUsageTrackMode {
+        let hasSession = usage.windows.contains { $0.kind == .session }
+        let hasWeekly = usage.windows.contains { $0.kind == .weekly }
+        if hasSession && hasWeekly {
+            return .dual
+        }
+        if hasSession != hasWeekly {
+            return .single
+        }
+        return focusedAgent == .grok ? .single : .dual
     }
 
-    private func renderUsageWindow(_ window: UsageWindow?, in row: QuotaRowView) {
+    private func renderUsage(_ usage: UsageDetailsModel, focusedAgent: AgentKind, now: Date) {
+        let sessionWindow = usage.windows.first { $0.kind == .session }
+        let weeklyWindow = usage.windows.first { $0.kind == .weekly }
+
+        primaryQuota.setTitle(L10n.shared["quota.5h"])
+        secondaryQuota.setTitle(L10n.shared["quota.weekly"])
+        renderUsageWindow(sessionWindow, in: primaryQuota, now: now)
+        renderUsageWindow(weeklyWindow, in: secondaryQuota, now: now)
+
+        let mode = Self.resolveUsageTrackMode(usage: usage, focusedAgent: focusedAgent)
+        usageTrackMode = mode
+        dualTrackContainer.isHidden = (mode == .single)
+        singleTrackView.isHidden = (mode == .dual)
+
+        if let weeklyWindow {
+            singleTrackView.setTitle(L10n.shared["quota.weekly"])
+            singleTrackView.update(usedPercent: weeklyWindow.usedPercent, resetAt: weeklyWindow.resetsAt, now: now)
+        } else if let sessionWindow {
+            singleTrackView.setTitle(L10n.shared["quota.5h"])
+            singleTrackView.update(usedPercent: sessionWindow.usedPercent, resetAt: sessionWindow.resetsAt, now: now)
+        } else {
+            singleTrackView.setTitle(L10n.shared["quota.weekly"])
+            singleTrackView.updateUnavailable()
+        }
+    }
+
+    private func renderUsageWindow(_ window: UsageWindow?, in row: QuotaRowView, now: Date) {
         guard let window else {
             row.updateUnavailable()
             return
         }
-        row.update(usedPercent: window.usedPercent, resetAt: window.resetsAt)
+        row.update(usedPercent: window.usedPercent, resetAt: window.resetsAt, now: now)
     }
 
     private func renderSession(_ session: SessionDetailsSnapshot, isOffline: Bool) {
@@ -544,19 +722,52 @@ class DetailsPanel: NSPanel {
         }
     }
 
-    static func formatResetTime(_ date: Date?) -> String {
+    /// Formats a future reset timestamp as a compact relative countdown:
+    /// - `>= 1 day`: `"3d 18:30"`
+    /// - `>= 1 hour`: `"2h 14m"`
+    /// - `< 1 hour`: `"45m"`
+    static func formatResetTime(_ date: Date?, now: Date = Date()) -> String {
         guard let date else {
             return ""
         }
-        let calendar = Calendar.current
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: L10n.shared["date.culture"])
-        if calendar.isDateInToday(date) {
-            formatter.dateFormat = L10n.shared["date.today_format"]
-        } else {
-            formatter.dateFormat = L10n.shared["date.other_format"]
+        let remaining = date.timeIntervalSince(now)
+        guard remaining > 0 else {
+            return ""
         }
-        return L10n.shared.format("quota.resets", formatter.string(from: date))
+        let totalMinutes = max(1, Int(ceil(remaining / 60)))
+        let days = totalMinutes / (24 * 60)
+        let hours = (totalMinutes % (24 * 60)) / 60
+        let minutes = totalMinutes % 60
+        if days > 0 {
+            return String(format: "%dd %02d:%02d", days, hours, minutes)
+        }
+        if hours > 0 {
+            return String(format: "%dh %02dm", hours, minutes)
+        }
+        return "\(minutes)m"
+    }
+
+    static func makeClockIcon(color: NSColor, size: CGFloat = 11) -> NSImage {
+        let image = NSImage(size: NSSize(width: size, height: size), flipped: false) { rect in
+            color.setStroke()
+            let inset = rect.insetBy(dx: 1.1, dy: 1.1)
+            let circle = NSBezierPath(ovalIn: inset)
+            circle.lineWidth = 1.25
+            circle.stroke()
+
+            let center = NSPoint(x: rect.midX, y: rect.midY)
+            let hands = NSBezierPath()
+            hands.lineWidth = 1.25
+            hands.lineCapStyle = .round
+            hands.lineJoinStyle = .round
+            hands.move(to: NSPoint(x: center.x, y: center.y + inset.height * 0.28))
+            hands.line(to: center)
+            hands.line(to: NSPoint(x: center.x + inset.width * 0.22, y: center.y - inset.height * 0.12))
+            hands.stroke()
+            return true
+        }
+        image.isTemplate = false
+        return image
     }
 
     static func compactTokenCount(_ count: Int64?) -> String {
@@ -642,28 +853,10 @@ class DetailsPanel: NSPanel {
         contextPill.wantsLayer = true
         contextPill.layer?.cornerRadius = 8
         contextPill.layer?.masksToBounds = true
-        contextPill.layer?.backgroundColor = NSColor(
-            calibratedRed: 224 / 255,
-            green: 240 / 255,
-            blue: 252 / 255,
-            alpha: 1
-        ).cgColor
         contextPill.layer?.borderWidth = 1
-        contextPill.layer?.borderColor = NSColor(
-            calibratedRed: 174 / 255,
-            green: 205 / 255,
-            blue: 224 / 255,
-            alpha: 72 / 255
-        ).cgColor
         contextPill.translatesAutoresizingMaskIntoConstraints = false
 
         contextValue.font = .systemFont(ofSize: 15, weight: .bold)
-        contextValue.textColor = NSColor(
-            calibratedRed: 64 / 255,
-            green: 105 / 255,
-            blue: 132 / 255,
-            alpha: 1
-        )
         contextValue.alignment = .center
         contextValue.lineBreakMode = .byTruncatingTail
         contextValue.translatesAutoresizingMaskIntoConstraints = false
@@ -776,8 +969,35 @@ class DetailsPanel: NSPanel {
         metadataGroup.isHidden
     }
 
+    var usageTrackModeForTesting: DetailsPanelUsageTrackMode {
+        usageTrackMode
+    }
+
+    var singleTrackTitleForTesting: String {
+        singleTrackView.titleForTesting
+    }
+
+    var singleTrackHeroValueForTesting: String {
+        singleTrackView.heroValueForTesting
+    }
+
+    var singleTrackUsedValueForTesting: String {
+        singleTrackView.usedValueForTesting
+    }
+
+    var singleTrackRemainingValueForTesting: String {
+        singleTrackView.remainingValueForTesting
+    }
+
+    var singleTrackResetValueForTesting: String {
+        singleTrackView.resetValueForTesting
+    }
+
+    var singleTrackMeterFillForTesting: Double {
+        singleTrackView.meterFillForTesting
+    }
+
     var sessionBodyOrderForTesting: [DetailsPanelSessionBodyRole] {
-        // Legacy diagnostics only. Scheme B contract uses sessionBodyModeForTesting.
         [sessionBodyModeForTesting]
     }
 
@@ -829,6 +1049,22 @@ class DetailsPanel: NSPanel {
 
     var secondaryQuotaValueForTesting: String {
         secondaryQuota.valueForTesting
+    }
+
+    var primaryQuotaUsedValueForTesting: String {
+        primaryQuota.usedForTesting
+    }
+
+    var secondaryQuotaUsedValueForTesting: String {
+        secondaryQuota.usedForTesting
+    }
+
+    var primaryQuotaResetTextForTesting: String {
+        primaryQuota.resetTextForTesting
+    }
+
+    var secondaryQuotaResetTextForTesting: String {
+        secondaryQuota.resetTextForTesting
     }
 
     var primaryQuotaResetHiddenForTesting: Bool {
@@ -904,8 +1140,6 @@ class DetailsPanel: NSPanel {
     }
 
     var metadataTopInsetForTesting: CGFloat {
-        // Session body container is a plain NSView; top inset is always 0
-        // (bottom equalizer is applied via bodySlot bottom constraint).
         0
     }
 
@@ -929,7 +1163,6 @@ private final class EmptySessionBodyView: NSView {
         set { label.stringValue = newValue }
     }
 
-    /// Prefer expanding to fill body slot; do not hug label width.
     override var intrinsicContentSize: NSSize {
         NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
     }
@@ -940,7 +1173,6 @@ private final class EmptySessionBodyView: NSView {
         layerContentsRedrawPolicy = .onSetNeedsDisplay
 
         label.font = .systemFont(ofSize: 12, weight: .regular)
-        label.textColor = NSColor(calibratedRed: 109 / 255, green: 129 / 255, blue: 144 / 255, alpha: 1)
         label.alignment = .left
         label.lineBreakMode = .byTruncatingTail
         label.maximumNumberOfLines = 1
@@ -963,6 +1195,10 @@ private final class EmptySessionBodyView: NSView {
 
     func setText(_ text: String) {
         label.stringValue = text
+    }
+
+    func applyTheme(_ palette: DetailsPanelThemePalette) {
+        label.textColor = palette.mutedText
     }
 }
 
@@ -993,7 +1229,6 @@ private final class SessionCardView: NSView {
         setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
-        titleLabel.textColor = NSColor(calibratedRed: 30 / 255, green: 44 / 255, blue: 54 / 255, alpha: 1)
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.maximumNumberOfLines = 1
         titleLabel.usesSingleLineMode = true
@@ -1001,26 +1236,9 @@ private final class SessionCardView: NSView {
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        configureChip(
-            modelChip,
-            label: modelLabel,
-            fill: NSColor(calibratedRed: 238 / 255, green: 241 / 255, blue: 244 / 255, alpha: 1),
-            text: NSColor(calibratedRed: 77 / 255, green: 97 / 255, blue: 112 / 255, alpha: 1)
-        )
-        configureChip(
-            inputChip,
-            label: inputLabel,
-            fill: NSColor(calibratedRed: 228 / 255, green: 242 / 255, blue: 252 / 255, alpha: 1),
-            text: NSColor(calibratedRed: 51 / 255, green: 119 / 255, blue: 160 / 255, alpha: 1)
-        )
-        configureChip(
-            outputChip,
-            label: outputLabel,
-            fill: NSColor(calibratedRed: 228 / 255, green: 246 / 255, blue: 238 / 255, alpha: 1),
-            text: NSColor(calibratedRed: 35 / 255, green: 133 / 255, blue: 112 / 255, alpha: 1)
-        )
-        // Plain chip views have no intrinsic width; protect the token text so
-        // the model truncates first while chip width limits can still apply.
+        configureChip(modelChip, label: modelLabel)
+        configureChip(inputChip, label: inputLabel)
+        configureChip(outputChip, label: outputLabel)
         inputLabel.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
         outputLabel.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
 
@@ -1050,11 +1268,23 @@ private final class SessionCardView: NSView {
             outputChip.heightAnchor.constraint(equalToConstant: 22),
             outputChip.widthAnchor.constraint(lessThanOrEqualToConstant: 75)
         ])
+
+        applyTheme(.light)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    func applyTheme(_ palette: DetailsPanelThemePalette) {
+        titleLabel.textColor = palette.primaryText
+        modelChip.layer?.backgroundColor = palette.modelChipFill.cgColor
+        modelLabel.textColor = palette.modelChipText
+        inputChip.layer?.backgroundColor = palette.inputChipFill.cgColor
+        inputLabel.textColor = palette.inputChipText
+        outputChip.layer?.backgroundColor = palette.outputChipFill.cgColor
+        outputLabel.textColor = palette.outputChipText
     }
 
     func setTitle(_ title: String, toolTip: String?) {
@@ -1076,15 +1306,13 @@ private final class SessionCardView: NSView {
         outputLabel.stringValue = DetailsPanel.formatTokenChip(input: false, count: output)
     }
 
-    private func configureChip(_ chip: NSView, label: NSTextField, fill: NSColor, text: NSColor) {
+    private func configureChip(_ chip: NSView, label: NSTextField) {
         chip.wantsLayer = true
         chip.layer?.cornerRadius = 5
-        chip.layer?.backgroundColor = fill.cgColor
         chip.translatesAutoresizingMaskIntoConstraints = false
         chip.setContentHuggingPriority(.defaultHigh, for: .horizontal)
 
         label.font = .systemFont(ofSize: 11, weight: .medium)
-        label.textColor = text
         label.lineBreakMode = .byTruncatingTail
         label.maximumNumberOfLines = 1
         label.usesSingleLineMode = true
@@ -1114,6 +1342,11 @@ private final class TrackingDetailsContentView: NSView {
         ))
     }
 
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        owner?.applyTheme()
+    }
+
     override func mouseEntered(with event: NSEvent) {
         owner?.onMouseEntered?()
     }
@@ -1123,12 +1356,21 @@ private final class TrackingDetailsContentView: NSView {
     }
 }
 
+/// Dual-Track quota row (Scheme A):
+/// Top row: Window title (left) + Clock icon & countdown (right)
+/// Middle row: 6pt rounded capsule progress bar
+/// Bottom row: Used X% (left) + Remaining Y% (right)
 @MainActor
 private final class QuotaRowView: NSView {
     private let nameField: NSTextField
+    private let resetContainer = NSView()
+    private let resetClockView = NSImageView()
     private let resetField = NSTextField(labelWithString: "")
+    private let usedField = NSTextField(labelWithString: "")
     private let valueField = NSTextField(labelWithString: L10n.shared["quota.no_data"])
     private let meter = RoundedMeterView()
+    private var currentPalette: DetailsPanelThemePalette = .light
+    private var lastUsedPercent: Double?
 
     init(title: String) {
         nameField = NSTextField(labelWithString: title)
@@ -1142,27 +1384,102 @@ private final class QuotaRowView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func update(usedPercent: Double, resetAt: Date?) {
-        if let resetAt, resetAt <= Date() {
+    func applyTheme(_ palette: DetailsPanelThemePalette) {
+        currentPalette = palette
+        nameField.textColor = palette.primaryText
+        resetField.textColor = palette.mutedText
+        resetClockView.image = DetailsPanel.makeClockIcon(color: palette.mutedText, size: 11)
+        meter.trackColor = palette.meterTrack
+        meter.accentStartColor = palette.meterAccentStart
+        meter.accentEndColor = palette.meterAccentEnd
+        if let used = lastUsedPercent {
+            applyActiveDualLabels(usedPercent: used)
+        } else {
+            usedField.textColor = palette.mutedText
+            valueField.textColor = palette.mutedText
+        }
+    }
+
+    func update(usedPercent: Double, resetAt: Date?, now: Date = Date()) {
+        if let resetAt, resetAt <= now {
+            lastUsedPercent = nil
+            usedField.attributedStringValue = NSAttributedString(string: "")
+            usedField.stringValue = "\(L10n.shared["quota.used_label"]) --"
+            usedField.textColor = currentPalette.mutedText
+            valueField.attributedStringValue = NSAttributedString(string: "")
             valueField.stringValue = L10n.shared["quota.waiting_refresh"]
+            valueField.textColor = currentPalette.mutedText
             resetField.stringValue = ""
-            resetField.isHidden = true
+            resetContainer.isHidden = true
             meter.value = 0
             return
         }
-        let remaining = min(100, max(0, 100 - usedPercent))
-        valueField.stringValue = L10n.shared.format("quota.remaining", Int(remaining.rounded()))
-        meter.value = remaining
-        let resetText = DetailsPanel.formatResetTime(resetAt)
+        let clampedUsed = min(100, max(0, usedPercent))
+        lastUsedPercent = clampedUsed
+        applyActiveDualLabels(usedPercent: clampedUsed)
+        meter.value = clampedUsed
+        let resetText = DetailsPanel.formatResetTime(resetAt, now: now)
         resetField.stringValue = resetText
-        resetField.isHidden = resetText.isEmpty
+        resetContainer.isHidden = resetText.isEmpty
     }
 
     func updateUnavailable() {
+        lastUsedPercent = nil
+        usedField.attributedStringValue = NSAttributedString(string: "")
+        usedField.stringValue = "\(L10n.shared["quota.used_label"]) --"
+        usedField.textColor = currentPalette.mutedText
+        valueField.attributedStringValue = NSAttributedString(string: "")
         valueField.stringValue = L10n.shared["quota.no_data"]
+        valueField.textColor = currentPalette.mutedText
         resetField.stringValue = ""
-        resetField.isHidden = true
+        resetContainer.isHidden = true
         meter.value = 0
+    }
+
+    private func applyActiveDualLabels(usedPercent: Double) {
+        let usedInt = Int(usedPercent.rounded())
+        let remainingInt = min(100, max(0, 100 - usedInt))
+        usedField.attributedStringValue = Self.makePairAttributedString(
+            label: L10n.shared["quota.used_label"],
+            value: "\(usedInt)%",
+            palette: currentPalette,
+            alignment: .left
+        )
+        valueField.attributedStringValue = Self.makePairAttributedString(
+            label: L10n.shared["quota.remaining_label"],
+            value: "\(remainingInt)%",
+            palette: currentPalette,
+            alignment: .right
+        )
+    }
+
+    private static func makePairAttributedString(
+        label: String,
+        value: String,
+        palette: DetailsPanelThemePalette,
+        alignment: NSTextAlignment
+    ) -> NSAttributedString {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = alignment
+        paragraph.lineBreakMode = .byTruncatingTail
+
+        let result = NSMutableAttributedString(
+            string: "\(label) ",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .regular),
+                .foregroundColor: palette.mutedText,
+                .paragraphStyle: paragraph
+            ]
+        )
+        result.append(NSAttributedString(
+            string: value,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11.5, weight: .bold),
+                .foregroundColor: palette.primaryText,
+                .paragraphStyle: paragraph
+            ]
+        ))
+        return result
     }
 
     func setTitle(_ title: String) {
@@ -1177,8 +1494,16 @@ private final class QuotaRowView: NSView {
         valueField.stringValue
     }
 
+    var usedForTesting: String {
+        usedField.stringValue
+    }
+
+    var resetTextForTesting: String {
+        resetField.stringValue
+    }
+
     var resetHiddenForTesting: Bool {
-        resetField.isHidden
+        resetContainer.isHidden
     }
 
     var meterFillForTesting: Double {
@@ -1190,45 +1515,271 @@ private final class QuotaRowView: NSView {
     }
 
     var resetFrameForTesting: CGRect {
-        resetField.frame
+        resetContainer.frame
     }
 
     private func setup() {
-        nameField.font = .systemFont(ofSize: 12, weight: .regular)
-        nameField.textColor = NSColor(calibratedRed: 0.37, green: 0.44, blue: 0.48, alpha: 1)
+        meter.usesAccentFill = true
+        nameField.font = .systemFont(ofSize: 12.5, weight: .bold)
         nameField.lineBreakMode = .byTruncatingTail
         nameField.setContentCompressionResistancePriority(.required, for: .horizontal)
         nameField.setContentHuggingPriority(.required, for: .horizontal)
-        resetField.font = .systemFont(ofSize: 11, weight: .regular)
-        // Darker than the old muted gray so "Resets …" remains legible on dark desktops.
-        resetField.textColor = NSColor(calibratedRed: 0.40, green: 0.46, blue: 0.50, alpha: 1)
+
+        resetClockView.translatesAutoresizingMaskIntoConstraints = false
+        resetClockView.imageScaling = .scaleProportionallyDown
+
+        resetField.font = .systemFont(ofSize: 11, weight: .medium)
         resetField.lineBreakMode = .byTruncatingTail
-        resetField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        valueField.font = .systemFont(ofSize: 12, weight: .semibold)
-        valueField.textColor = NSColor(calibratedRed: 0.18, green: 0.24, blue: 0.29, alpha: 1)
+        resetField.alignment = .right
+        resetField.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        resetField.setContentHuggingPriority(.required, for: .horizontal)
+        resetField.translatesAutoresizingMaskIntoConstraints = false
+
+        resetContainer.translatesAutoresizingMaskIntoConstraints = false
+        resetContainer.addSubview(resetClockView)
+        resetContainer.addSubview(resetField)
+
+        usedField.font = .systemFont(ofSize: 11, weight: .regular)
+        usedField.alignment = .left
+        usedField.lineBreakMode = .byTruncatingTail
+        usedField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        valueField.font = .systemFont(ofSize: 11.5, weight: .semibold)
         valueField.alignment = .right
+        valueField.lineBreakMode = .byTruncatingTail
         valueField.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
         valueField.setContentHuggingPriority(.required, for: .horizontal)
 
-        [nameField, resetField, valueField, meter].forEach {
+        [nameField, resetContainer, meter, usedField, valueField].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             addSubview($0)
         }
-        resetField.isHidden = true
+        resetContainer.isHidden = true
+
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 33),
+            heightAnchor.constraint(equalToConstant: 46),
+
             nameField.leadingAnchor.constraint(equalTo: leadingAnchor),
             nameField.topAnchor.constraint(equalTo: topAnchor),
-            resetField.leadingAnchor.constraint(equalTo: nameField.trailingAnchor, constant: 7),
-            resetField.centerYAnchor.constraint(equalTo: nameField.centerYAnchor),
-            resetField.trailingAnchor.constraint(lessThanOrEqualTo: valueField.leadingAnchor, constant: -8),
-            valueField.trailingAnchor.constraint(equalTo: trailingAnchor),
-            valueField.centerYAnchor.constraint(equalTo: nameField.centerYAnchor),
+
+            resetContainer.leadingAnchor.constraint(greaterThanOrEqualTo: nameField.trailingAnchor, constant: 8),
+            resetContainer.trailingAnchor.constraint(equalTo: trailingAnchor),
+            resetContainer.centerYAnchor.constraint(equalTo: nameField.centerYAnchor),
+            resetContainer.heightAnchor.constraint(equalToConstant: 14),
+
+            resetClockView.leadingAnchor.constraint(equalTo: resetContainer.leadingAnchor),
+            resetClockView.centerYAnchor.constraint(equalTo: resetContainer.centerYAnchor),
+            resetClockView.widthAnchor.constraint(equalToConstant: 11),
+            resetClockView.heightAnchor.constraint(equalToConstant: 11),
+
+            resetField.leadingAnchor.constraint(equalTo: resetClockView.trailingAnchor, constant: 4),
+            resetField.trailingAnchor.constraint(equalTo: resetContainer.trailingAnchor),
+            resetField.centerYAnchor.constraint(equalTo: resetContainer.centerYAnchor),
+
             meter.leadingAnchor.constraint(equalTo: leadingAnchor),
             meter.trailingAnchor.constraint(equalTo: trailingAnchor),
-            meter.topAnchor.constraint(equalTo: nameField.bottomAnchor, constant: 7),
-            meter.heightAnchor.constraint(equalToConstant: 4)
+            meter.topAnchor.constraint(equalTo: nameField.bottomAnchor, constant: 4),
+            meter.heightAnchor.constraint(equalToConstant: 6),
+
+            usedField.leadingAnchor.constraint(equalTo: leadingAnchor),
+            usedField.topAnchor.constraint(equalTo: meter.bottomAnchor, constant: 4),
+            usedField.trailingAnchor.constraint(lessThanOrEqualTo: valueField.leadingAnchor, constant: -8),
+
+            valueField.trailingAnchor.constraint(equalTo: trailingAnchor),
+            valueField.centerYAnchor.constraint(equalTo: usedField.centerYAnchor)
         ])
+
+        applyTheme(.light)
+    }
+}
+
+/// Single-Track Hero View (Style 1):
+/// Used when an agent or subscription provides only a single window (e.g., Grok Weekly or Codex Weekly-only Plus).
+@MainActor
+private final class SingleTrackQuotaView: NSView {
+    private let titleField = NSTextField(labelWithString: L10n.shared["quota.weekly"])
+    private let heroValueField = NSTextField(labelWithString: L10n.shared["quota.no_data"])
+    private let meter = RoundedMeterView()
+    private let usedCaptionField = NSTextField(labelWithString: L10n.shared["quota.used_label"])
+    private let usedValueField = NSTextField(labelWithString: "--")
+    private let remainingCaptionField = NSTextField(labelWithString: L10n.shared["quota.remaining_label"])
+    private let remainingValueField = NSTextField(labelWithString: "--")
+    private let divider = NSView()
+    private let resetClockView = NSImageView()
+    private let resetTitleField = NSTextField(labelWithString: L10n.shared["quota.reset_at"])
+    private let resetValueField = NSTextField(labelWithString: "--")
+    private var currentPalette: DetailsPanelThemePalette = .light
+    private var isAvailable = false
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+        setup()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func applyTheme(_ palette: DetailsPanelThemePalette) {
+        currentPalette = palette
+        titleField.textColor = palette.primaryText
+        heroValueField.textColor = isAvailable ? palette.primaryText : palette.mutedText
+        usedCaptionField.textColor = palette.mutedText
+        usedValueField.textColor = palette.primaryText
+        remainingCaptionField.textColor = palette.mutedText
+        remainingValueField.textColor = palette.primaryText
+        divider.layer?.backgroundColor = palette.divider.cgColor
+        resetClockView.image = DetailsPanel.makeClockIcon(color: palette.primaryText, size: 12)
+        resetTitleField.textColor = palette.primaryText
+        resetValueField.textColor = palette.mutedText
+        meter.trackColor = palette.meterTrack
+        meter.accentStartColor = palette.meterAccentStart
+        meter.accentEndColor = palette.meterAccentEnd
+    }
+
+    func setTitle(_ title: String) {
+        titleField.stringValue = title
+        usedCaptionField.stringValue = L10n.shared["quota.used_label"]
+        remainingCaptionField.stringValue = L10n.shared["quota.remaining_label"]
+        resetTitleField.stringValue = L10n.shared["quota.reset_at"]
+    }
+
+    func update(usedPercent: Double, resetAt: Date?, now: Date = Date()) {
+        usedCaptionField.stringValue = L10n.shared["quota.used_label"]
+        remainingCaptionField.stringValue = L10n.shared["quota.remaining_label"]
+        resetTitleField.stringValue = L10n.shared["quota.reset_at"]
+
+        if let resetAt, resetAt <= now {
+            isAvailable = false
+            heroValueField.font = .systemFont(ofSize: 13, weight: .semibold)
+            heroValueField.textColor = currentPalette.mutedText
+            heroValueField.stringValue = L10n.shared["quota.waiting_refresh"]
+            usedValueField.stringValue = "--"
+            remainingValueField.stringValue = "--"
+            resetValueField.stringValue = "--"
+            meter.value = 0
+            return
+        }
+
+        isAvailable = true
+        let clampedUsed = min(100, max(0, usedPercent))
+        let usedInt = Int(clampedUsed.rounded())
+        let remainingInt = min(100, max(0, 100 - usedInt))
+
+        heroValueField.font = .systemFont(ofSize: 25, weight: .heavy)
+        heroValueField.textColor = currentPalette.primaryText
+        heroValueField.stringValue = "\(usedInt)%"
+
+        usedValueField.stringValue = "\(usedInt)%"
+        remainingValueField.stringValue = "\(remainingInt)%"
+        meter.value = clampedUsed
+
+        let resetText = DetailsPanel.formatResetTime(resetAt, now: now)
+        resetValueField.stringValue = resetText.isEmpty ? "--" : resetText
+    }
+
+    func updateUnavailable() {
+        isAvailable = false
+        usedCaptionField.stringValue = L10n.shared["quota.used_label"]
+        remainingCaptionField.stringValue = L10n.shared["quota.remaining_label"]
+        resetTitleField.stringValue = L10n.shared["quota.reset_at"]
+
+        heroValueField.font = .systemFont(ofSize: 13, weight: .semibold)
+        heroValueField.textColor = currentPalette.mutedText
+        heroValueField.stringValue = L10n.shared["quota.no_data"]
+        usedValueField.stringValue = "--"
+        remainingValueField.stringValue = "--"
+        resetValueField.stringValue = "--"
+        meter.value = 0
+    }
+
+    var titleForTesting: String { titleField.stringValue }
+    var heroValueForTesting: String { heroValueField.stringValue }
+    var usedValueForTesting: String { usedValueField.stringValue }
+    var remainingValueForTesting: String { remainingValueField.stringValue }
+    var resetValueForTesting: String { resetValueField.stringValue }
+    var meterFillForTesting: Double { meter.value }
+
+    private func setup() {
+        meter.usesAccentFill = true
+        titleField.font = .systemFont(ofSize: 16, weight: .bold)
+        titleField.lineBreakMode = .byTruncatingTail
+
+        heroValueField.font = .systemFont(ofSize: 25, weight: .heavy)
+        heroValueField.alignment = .right
+        heroValueField.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        usedCaptionField.font = .systemFont(ofSize: 11, weight: .regular)
+        usedValueField.font = .systemFont(ofSize: 12.5, weight: .bold)
+
+        remainingCaptionField.font = .systemFont(ofSize: 11, weight: .regular)
+        remainingCaptionField.alignment = .right
+        remainingValueField.font = .systemFont(ofSize: 12.5, weight: .bold)
+        remainingValueField.alignment = .right
+
+        divider.wantsLayer = true
+
+        resetClockView.imageScaling = .scaleProportionallyDown
+        resetTitleField.font = .systemFont(ofSize: 11.5, weight: .semibold)
+        resetValueField.font = .systemFont(ofSize: 11.5, weight: .medium)
+        resetValueField.alignment = .right
+
+        [
+            titleField, heroValueField, meter,
+            usedCaptionField, usedValueField,
+            remainingCaptionField, remainingValueField,
+            divider, resetClockView, resetTitleField, resetValueField
+        ].forEach {
+            $0.translatesAutoresizingMaskIntoConstraints = false
+            addSubview($0)
+        }
+
+        NSLayoutConstraint.activate([
+            heroValueField.topAnchor.constraint(equalTo: topAnchor, constant: -2),
+            heroValueField.trailingAnchor.constraint(equalTo: trailingAnchor),
+
+            titleField.leadingAnchor.constraint(equalTo: leadingAnchor),
+            titleField.centerYAnchor.constraint(equalTo: heroValueField.centerYAnchor),
+            titleField.trailingAnchor.constraint(lessThanOrEqualTo: heroValueField.leadingAnchor, constant: -8),
+
+            meter.leadingAnchor.constraint(equalTo: leadingAnchor),
+            meter.trailingAnchor.constraint(equalTo: trailingAnchor),
+            meter.topAnchor.constraint(equalTo: topAnchor, constant: 29),
+            meter.heightAnchor.constraint(equalToConstant: 7),
+
+            usedCaptionField.leadingAnchor.constraint(equalTo: leadingAnchor),
+            usedCaptionField.topAnchor.constraint(equalTo: meter.bottomAnchor, constant: 5),
+
+            usedValueField.leadingAnchor.constraint(equalTo: leadingAnchor),
+            usedValueField.topAnchor.constraint(equalTo: usedCaptionField.bottomAnchor, constant: 1),
+
+            remainingCaptionField.trailingAnchor.constraint(equalTo: trailingAnchor),
+            remainingCaptionField.centerYAnchor.constraint(equalTo: usedCaptionField.centerYAnchor),
+
+            remainingValueField.trailingAnchor.constraint(equalTo: trailingAnchor),
+            remainingValueField.centerYAnchor.constraint(equalTo: usedValueField.centerYAnchor),
+
+            divider.leadingAnchor.constraint(equalTo: leadingAnchor),
+            divider.trailingAnchor.constraint(equalTo: trailingAnchor),
+            divider.topAnchor.constraint(equalTo: usedValueField.bottomAnchor, constant: 6),
+            divider.heightAnchor.constraint(equalToConstant: 1),
+
+            resetClockView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            resetClockView.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 7),
+            resetClockView.widthAnchor.constraint(equalToConstant: 12),
+            resetClockView.heightAnchor.constraint(equalToConstant: 12),
+
+            resetTitleField.leadingAnchor.constraint(equalTo: resetClockView.trailingAnchor, constant: 5),
+            resetTitleField.centerYAnchor.constraint(equalTo: resetClockView.centerYAnchor),
+
+            resetValueField.trailingAnchor.constraint(equalTo: trailingAnchor),
+            resetValueField.centerYAnchor.constraint(equalTo: resetClockView.centerYAnchor),
+            resetValueField.leadingAnchor.constraint(greaterThanOrEqualTo: resetTitleField.trailingAnchor, constant: 8)
+        ])
+
+        applyTheme(.light)
     }
 }
 
@@ -1291,34 +1842,63 @@ final class RoundedMeterView: NSView {
         }
     }
 
+    var usesAccentFill: Bool = false {
+        didSet {
+            needsDisplay = true
+        }
+    }
+
+    var trackColor: NSColor = NSColor(calibratedRed: 0.72, green: 0.79, blue: 0.84, alpha: 0.30) {
+        didSet {
+            needsDisplay = true
+        }
+    }
+
+    var accentStartColor: NSColor = DetailsPanelThemePalette.light.meterAccentStart {
+        didSet {
+            needsDisplay = true
+        }
+    }
+
+    var accentEndColor: NSColor = DetailsPanelThemePalette.light.meterAccentEnd {
+        didSet {
+            needsDisplay = true
+        }
+    }
+
     override var isFlipped: Bool { true }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         let bounds = NSRect(x: 0, y: 0, width: bounds.width, height: bounds.height)
         let radius = bounds.height / 2
-        NSColor(calibratedRed: 0.72, green: 0.79, blue: 0.84, alpha: 0.30).setFill()
-        NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
+        let trackPath = NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius)
+        if usesAccentFill {
+            trackColor.setFill()
+        } else {
+            NSColor(calibratedRed: 0.72, green: 0.79, blue: 0.84, alpha: 0.30).setFill()
+        }
+        trackPath.fill()
 
         let rawFillWidth = bounds.width * min(100, max(0, value)) / 100
         guard rawFillWidth > 0 else {
             return
         }
         let fillWidth = max(bounds.height, rawFillWidth)
-        QuotaMeterPalette.fillColor(for: value).setFill()
-        NSBezierPath(
-            roundedRect: NSRect(x: 0, y: 0, width: fillWidth, height: bounds.height),
-            xRadius: radius,
-            yRadius: radius
-        ).fill()
+        let fillRect = NSRect(x: 0, y: 0, width: fillWidth, height: bounds.height)
+        let fillPath = NSBezierPath(roundedRect: fillRect, xRadius: radius, yRadius: radius)
+        if usesAccentFill,
+           let gradient = NSGradient(starting: accentStartColor, ending: accentEndColor) {
+            gradient.draw(in: fillPath, angle: 0)
+        } else {
+            QuotaMeterPalette.fillColor(for: value).setFill()
+            fillPath.fill()
+        }
     }
 }
 
 @MainActor
 final class AgentToggleView: NSView {
-    /// Historical 144pt / 4 default-on agents. Do not divide by `allCases.count`
-    /// or adding a fifth kind shrinks every existing slot. The details panel
-    /// passes a maximum width only when the full catalog would cover the pill.
     static let slotWidth: CGFloat = 36
 
     var onAgentSelected: ((AgentKind) -> Void)?
@@ -1343,7 +1923,10 @@ final class AgentToggleView: NSView {
     private let openCodeIcon = NSImageView()
     private let workBuddyIcon = NSImageView()
     private var colorIconImages: [AgentKind: NSImage] = [:]
+    private var darkActiveIconImages: [AgentKind: NSImage] = [:]
     private var grayIconImages: [AgentKind: NSImage] = [:]
+    private var darkGrayIconImages: [AgentKind: NSImage] = [:]
+    private var currentPalette: DetailsPanelThemePalette = .light
     private var maximumWidth: CGFloat?
     private var activeBgConstraints: [NSLayoutConstraint] = []
     private var iconLayoutConstraints: [NSLayoutConstraint] = []
@@ -1360,42 +1943,27 @@ final class AgentToggleView: NSView {
         setup()
     }
 
+    func applyTheme(_ palette: DetailsPanelThemePalette) {
+        currentPalette = palette
+        bgView.layer?.borderColor = palette.toggleBgBorder.cgColor
+        bgView.layer?.backgroundColor = palette.toggleBgFill.cgColor
+        activeBg.layer?.borderColor = palette.toggleActiveBorder.cgColor
+        activeBg.layer?.backgroundColor = palette.toggleActiveFill.cgColor
+        updateSelectedState(animated: false)
+    }
+
     private func setup() {
         translatesAutoresizingMaskIntoConstraints = false
 
         bgView.wantsLayer = true
         bgView.layer?.cornerRadius = 16
         bgView.layer?.borderWidth = 1
-        bgView.layer?.borderColor = NSColor(
-            calibratedRed: 221 / 255,
-            green: 233 / 255,
-            blue: 238 / 255,
-            alpha: 1
-        ).cgColor
-        bgView.layer?.backgroundColor = NSColor(
-            calibratedRed: 244 / 255,
-            green: 248 / 255,
-            blue: 250 / 255,
-            alpha: 1
-        ).cgColor
         bgView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(bgView)
 
         activeBg.wantsLayer = true
         activeBg.layer?.cornerRadius = 13
         activeBg.layer?.borderWidth = 1
-        activeBg.layer?.borderColor = NSColor(
-            calibratedRed: 183 / 255,
-            green: 235 / 255,
-            blue: 246 / 255,
-            alpha: 1
-        ).cgColor
-        activeBg.layer?.backgroundColor = NSColor(
-            calibratedRed: 225 / 255,
-            green: 249 / 255,
-            blue: 255 / 255,
-            alpha: 1
-        ).cgColor
         activeBg.layer?.shadowColor = NSColor(calibratedRed: 0.26, green: 0.70, blue: 0.80, alpha: 1).cgColor
         activeBg.layer?.shadowOpacity = 0.12
         activeBg.layer?.shadowRadius = 5
@@ -1414,6 +1982,12 @@ final class AgentToggleView: NSView {
             guard let image = icon(for: agent).image else { continue }
             colorIconImages[agent] = image
             grayIconImages[agent] = AgentIconAssets.grayscale(image)
+            darkGrayIconImages[agent] = AgentIconAssets.lightSilhouette(image, brightness: 200)
+            if agent == .codex || agent == .grok || agent == .pi {
+                darkActiveIconImages[agent] = AgentIconAssets.lightSilhouette(image, brightness: 248)
+            } else {
+                darkActiveIconImages[agent] = image
+            }
         }
         bgView.addSubview(codexIcon)
         bgView.addSubview(claudeIcon)
@@ -1435,6 +2009,7 @@ final class AgentToggleView: NSView {
             bgView.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
 
+        applyTheme(.light)
         applyEnabledAgents(HaloSettings.defaultEnabledAgents, focused: .codex, animated: false)
     }
 
@@ -1483,8 +2058,6 @@ final class AgentToggleView: NSView {
 
         guard !visible.isEmpty else { return }
 
-        // Chaining `width = slot - 2` makes each later icon start early. Once the
-        // panel compresses the row, that left edge falls in the previous hit slot.
         let fraction = 1.0 / CGFloat(visible.count)
         for (index, agent) in visible.enumerated() {
             let imageView = icon(for: agent)
@@ -1540,10 +2113,17 @@ final class AgentToggleView: NSView {
         for agent in AgentKind.allCases {
             let imageView = icon(for: agent)
             let isSelected = agent == selectedAgent
-            let grayImage = grayIconImages[agent]
-            imageView.image = isSelected ? colorIconImages[agent] : (grayImage ?? colorIconImages[agent])
-            let inactiveAlpha: CGFloat = agent == .workbuddy && grayImage != nil ? 1 : 0.40
-            imageView.alphaValue = isSelected ? 1 : inactiveAlpha
+            if currentPalette.isDark {
+                let activeImg = darkActiveIconImages[agent] ?? colorIconImages[agent]
+                let inactiveImg = darkGrayIconImages[agent] ?? grayIconImages[agent] ?? colorIconImages[agent]
+                imageView.image = isSelected ? activeImg : inactiveImg
+                imageView.alphaValue = isSelected ? 1 : 0.48
+            } else {
+                let grayImage = grayIconImages[agent]
+                imageView.image = isSelected ? colorIconImages[agent] : (grayImage ?? colorIconImages[agent])
+                let inactiveAlpha: CGFloat = agent == .workbuddy && grayImage != nil ? 1 : 0.40
+                imageView.alphaValue = isSelected ? 1 : inactiveAlpha
+            }
         }
     }
 
@@ -1631,7 +2211,6 @@ enum AgentIconAssets {
     @MainActor
     static func grayscale(_ image: NSImage) -> NSImage? {
         guard image.size.width > 0, image.size.height > 0 else { return nil }
-        // Rasterize small icons at 2x for Retina, bounded to their UI needs.
         let scale = min(2, 64 / max(image.size.width, image.size.height))
         let width = max(1, Int(ceil(image.size.width * scale)))
         let height = max(1, Int(ceil(image.size.height * scale)))
@@ -1657,6 +2236,42 @@ enum AgentIconAssets {
                 pixel[0] = gray
                 pixel[1] = gray
                 pixel[2] = gray
+            }
+        }
+        bitmap.size = image.size
+        let result = NSImage(size: image.size)
+        result.addRepresentation(bitmap)
+        return result
+    }
+
+    /// Light silhouette used on dark surfaces so black-ink SVGs remain legible.
+    @MainActor
+    static func lightSilhouette(_ image: NSImage, brightness: UInt8) -> NSImage? {
+        guard image.size.width > 0, image.size.height > 0 else { return nil }
+        let scale = min(2, 64 / max(image.size.width, image.size.height))
+        let width = max(1, Int(ceil(image.size.width * scale)))
+        let height = max(1, Int(ceil(image.size.height * scale)))
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+            isPlanar: false, colorSpaceName: .deviceRGB, bitmapFormat: [], bytesPerRow: 0, bitsPerPixel: 0
+        ), let context = NSGraphicsContext(bitmapImageRep: bitmap),
+           let pixels = bitmap.bitmapData else { return nil }
+
+        let bounds = NSRect(x: 0, y: 0, width: width, height: height)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        context.cgContext.clear(bounds)
+        image.draw(in: bounds, from: .zero, operation: .copy, fraction: 1)
+        NSGraphicsContext.restoreGraphicsState()
+
+        for y in 0..<height {
+            for x in 0..<width {
+                let pixel = pixels.advanced(by: y * bitmap.bytesPerRow + x * 4)
+                guard pixel[3] > 0 else { continue }
+                pixel[0] = brightness
+                pixel[1] = brightness
+                pixel[2] = brightness
             }
         }
         bitmap.size = image.size

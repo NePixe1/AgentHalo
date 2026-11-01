@@ -53,10 +53,10 @@ public struct AntigravityUsageProvider: UsageProvider, Sendable {
     }
 
     public func resolveAccess(accountKey: AccountCacheKey?) async -> ResolvedProviderAccess {
-        let lsAvailable =
-            discovery.discover(Self.languageServerOptions) != nil
-            || discovery.discover(Self.agyOptions) != nil
-        return authStore.resolveAccess(lsAvailable: lsAvailable)
+        authStore.resolveAccess(
+            lsAvailable: discovery.discover(Self.languageServerOptions) != nil
+                || discovery.discover(Self.agyOptions) != nil
+        )
     }
 
     public func refresh(using access: ResolvedProviderAccess) async -> UsageRefreshResult {
