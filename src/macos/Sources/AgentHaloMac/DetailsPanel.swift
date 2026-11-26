@@ -19,6 +19,7 @@ enum DetailsPanelSessionBodyRole: Equatable {
 enum DetailsPanelUsageTrackMode: Equatable {
     case dual
     case single
+    case grouped
 }
 
 @MainActor
@@ -32,6 +33,8 @@ struct DetailsPanelThemePalette {
     let meterTrack: NSColor
     let meterAccentStart: NSColor
     let meterAccentEnd: NSColor
+    let segmentedMeterFill: NSColor
+    let segmentedMeterTrack: NSColor
     let contextPillFill: NSColor
     let contextPillBorder: NSColor
     let contextPillText: NSColor
@@ -56,6 +59,8 @@ struct DetailsPanelThemePalette {
         meterTrack: NSColor(calibratedRed: 229 / 255, green: 231 / 255, blue: 235 / 255, alpha: 1),
         meterAccentStart: NSColor(calibratedRed: 29 / 255, green: 140 / 255, blue: 248 / 255, alpha: 1),
         meterAccentEnd: NSColor(calibratedRed: 37 / 255, green: 99 / 255, blue: 235 / 255, alpha: 1),
+        segmentedMeterFill: NSColor(calibratedRed: 96 / 255, green: 156 / 255, blue: 250 / 255, alpha: 1),
+        segmentedMeterTrack: NSColor(calibratedRed: 231 / 255, green: 236 / 255, blue: 243 / 255, alpha: 1),
         contextPillFill: NSColor(calibratedRed: 224 / 255, green: 240 / 255, blue: 252 / 255, alpha: 1),
         contextPillBorder: NSColor(calibratedRed: 174 / 255, green: 205 / 255, blue: 224 / 255, alpha: 72 / 255),
         contextPillText: NSColor(calibratedRed: 64 / 255, green: 105 / 255, blue: 132 / 255, alpha: 1),
@@ -81,6 +86,8 @@ struct DetailsPanelThemePalette {
         meterTrack: NSColor(calibratedRed: 38 / 255, green: 41 / 255, blue: 48 / 255, alpha: 1),
         meterAccentStart: NSColor(calibratedRed: 34 / 255, green: 148 / 255, blue: 252 / 255, alpha: 1),
         meterAccentEnd: NSColor(calibratedRed: 37 / 255, green: 99 / 255, blue: 235 / 255, alpha: 1),
+        segmentedMeterFill: NSColor(calibratedRed: 59 / 255, green: 130 / 255, blue: 246 / 255, alpha: 0.92),
+        segmentedMeterTrack: NSColor(calibratedRed: 1, green: 1, blue: 1, alpha: 22 / 255),
         contextPillFill: NSColor(calibratedRed: 56 / 255, green: 189 / 255, blue: 248 / 255, alpha: 42 / 255),
         contextPillBorder: NSColor(calibratedRed: 56 / 255, green: 189 / 255, blue: 248 / 255, alpha: 76 / 255),
         contextPillText: NSColor(calibratedRed: 125 / 255, green: 211 / 255, blue: 252 / 255, alpha: 1),
@@ -99,10 +106,11 @@ struct DetailsPanelThemePalette {
 
 @MainActor
 class DetailsPanel: NSPanel {
-    private static let panelWidth: CGFloat = 304
+    private static let panelWidth: CGFloat = 264
     private static let contextPillWidth: CGFloat = 46
     private static let contextPillHeight: CGFloat = 24
     private static let usageBodyHeight: CGFloat = 104
+    private static let groupedUsageBodyHeight: CGFloat = 122
     /// Fixed session body slot height (Scheme B).
     private static let sessionBodyHeight: CGFloat = 68
     /// Bottom inset keeps the session body contribution aligned with the 104pt
@@ -116,6 +124,7 @@ class DetailsPanel: NSPanel {
     private let surfaceView = NSView()
     private let stack = NSStackView()
     private let contextValue = NSTextField(labelWithString: L10n.shared["context.empty"])
+    private let compactStatusRow = CompactStatusRowView()
     private let titleField = NSTextField(labelWithString: "OFFLINE")
     private let detailField = NSTextField(labelWithString: L10n.shared["status.offline_codex"])
     private let primaryQuota = QuotaRowView(title: L10n.shared["quota.5h"])
@@ -124,6 +133,7 @@ class DetailsPanel: NSPanel {
     private let quotaTopDivider = NSView()
     private let quotaInterRowDivider = NSView()
     private let singleTrackView = SingleTrackQuotaView()
+    private let groupedTrackView = GroupedQuotaView()
     private let agentToggle = AgentToggleView()
     private let contextPill = NSView()
     private let quotaGroup = NSView()
@@ -135,6 +145,7 @@ class DetailsPanel: NSPanel {
     private let sessionCard = SessionCardView()
     private var topRow: NSView?
     private var agentToggleWidthConstraint: NSLayoutConstraint?
+    private var quotaGroupHeightConstraint: NSLayoutConstraint?
     private var sessionBodyMode: DetailsPanelSessionBodyRole = .unknown
     private var usageTrackMode: DetailsPanelUsageTrackMode = .dual
     private var appearanceOverride: Bool?
@@ -145,6 +156,12 @@ class DetailsPanel: NSPanel {
     private var contextHoldAgent: AgentKind?
     private var statusMotionKey = ""
     private var statusMotionAgent: AgentKind?
+    private var lastStatusTitle = "OFFLINE"
+    private var lastStatusColor: NSColor = {
+        let rgb = HaloVisualModel.stateColor(.idle)
+        return NSColor(calibratedRed: rgb.red / 255, green: rgb.green / 255, blue: rgb.blue / 255, alpha: 1)
+    }()
+    private var lastStatusDetail = L10n.shared["status.offline_codex"]
     private let sessionDivider = NSView()
     var onMouseEntered: (() -> Void)?
     var onMouseExited: (() -> Void)?
@@ -191,6 +208,11 @@ class DetailsPanel: NSPanel {
         stack.addArrangedSubview(topRow)
         stack.setCustomSpacing(12, after: topRow)
 
+        compactStatusRow.translatesAutoresizingMaskIntoConstraints = false
+        compactStatusRow.isHidden = true
+        stack.addArrangedSubview(compactStatusRow)
+        stack.setCustomSpacing(14, after: compactStatusRow)
+
         titleField.font = .systemFont(ofSize: 22, weight: .bold)
         titleField.lineBreakMode = .byTruncatingTail
         titleField.maximumNumberOfLines = 1
@@ -213,6 +235,7 @@ class DetailsPanel: NSPanel {
         quotaGroup.translatesAutoresizingMaskIntoConstraints = false
         dualTrackContainer.translatesAutoresizingMaskIntoConstraints = false
         singleTrackView.translatesAutoresizingMaskIntoConstraints = false
+        groupedTrackView.translatesAutoresizingMaskIntoConstraints = false
         quotaTopDivider.wantsLayer = true
         quotaTopDivider.translatesAutoresizingMaskIntoConstraints = false
         quotaInterRowDivider.wantsLayer = true
@@ -225,7 +248,9 @@ class DetailsPanel: NSPanel {
         quotaGroup.addSubview(quotaTopDivider)
         quotaGroup.addSubview(dualTrackContainer)
         quotaGroup.addSubview(singleTrackView)
+        quotaGroup.addSubview(groupedTrackView)
         singleTrackView.isHidden = true
+        groupedTrackView.isHidden = true
         stack.addArrangedSubview(quotaGroup)
 
         // Plain container: explicit full-width pin avoids NSStackView width
@@ -235,7 +260,7 @@ class DetailsPanel: NSPanel {
         bodySlot.translatesAutoresizingMaskIntoConstraints = false
         emptyBody.translatesAutoresizingMaskIntoConstraints = false
         sessionCard.translatesAutoresizingMaskIntoConstraints = false
-        for view in [quotaGroup, dualTrackContainer, singleTrackView, bodySlot, emptyBody, sessionCard] as [NSView] {
+        for view in [quotaGroup, dualTrackContainer, singleTrackView, groupedTrackView, bodySlot, emptyBody, sessionCard] as [NSView] {
             view.setContentHuggingPriority(.defaultLow, for: .horizontal)
             view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         }
@@ -258,6 +283,9 @@ class DetailsPanel: NSPanel {
         containerView.addSubview(surfaceView)
         containerView.addSubview(stack)
 
+        let qHeight = quotaGroup.heightAnchor.constraint(equalToConstant: Self.usageBodyHeight)
+        self.quotaGroupHeightConstraint = qHeight
+
         NSLayoutConstraint.activate([
             contentView!.widthAnchor.constraint(equalToConstant: Self.panelWidth),
             containerView.leadingAnchor.constraint(equalTo: contentView!.leadingAnchor),
@@ -274,6 +302,8 @@ class DetailsPanel: NSPanel {
             stack.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
 
             topRow.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
+            compactStatusRow.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 17),
+            compactStatusRow.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
             titleField.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 17),
             titleField.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
             detailField.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 17),
@@ -281,7 +311,7 @@ class DetailsPanel: NSPanel {
 
             quotaGroup.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 17),
             quotaGroup.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
-            quotaGroup.heightAnchor.constraint(equalToConstant: Self.usageBodyHeight),
+            qHeight,
 
             quotaTopDivider.leadingAnchor.constraint(equalTo: quotaGroup.leadingAnchor),
             quotaTopDivider.trailingAnchor.constraint(equalTo: quotaGroup.trailingAnchor),
@@ -310,6 +340,11 @@ class DetailsPanel: NSPanel {
             singleTrackView.trailingAnchor.constraint(equalTo: quotaGroup.trailingAnchor),
             singleTrackView.topAnchor.constraint(equalTo: quotaGroup.topAnchor),
             singleTrackView.bottomAnchor.constraint(equalTo: quotaGroup.bottomAnchor),
+
+            groupedTrackView.leadingAnchor.constraint(equalTo: quotaGroup.leadingAnchor),
+            groupedTrackView.trailingAnchor.constraint(equalTo: quotaGroup.trailingAnchor),
+            groupedTrackView.topAnchor.constraint(equalTo: quotaGroup.topAnchor),
+            groupedTrackView.bottomAnchor.constraint(equalTo: quotaGroup.bottomAnchor),
 
             metadataGroup.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 17),
             metadataGroup.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -17),
@@ -366,9 +401,11 @@ class DetailsPanel: NSPanel {
         sessionDivider.layer?.backgroundColor = palette.divider.cgColor
 
         agentToggle.applyTheme(palette)
+        compactStatusRow.applyTheme(palette)
         primaryQuota.applyTheme(palette)
         secondaryQuota.applyTheme(palette)
         singleTrackView.applyTheme(palette)
+        groupedTrackView.applyTheme(palette)
         emptyBody.applyTheme(palette)
         sessionCard.applyTheme(palette)
     }
@@ -410,18 +447,60 @@ class DetailsPanel: NSPanel {
 
         switch model.body {
         case .usage(let usage):
-            stack.setCustomSpacing(16, after: detailField)
-            stack.edgeInsets.bottom = 4
+            let mode = Self.resolveUsageTrackMode(usage: usage, focusedAgent: aggregate.focusedAgent)
+            applyHeaderAndBodyMetrics(isGroupedUsage: mode == .grouped, isSession: false)
             sessionBodyMode = .unknown
             renderUsage(usage, focusedAgent: aggregate.focusedAgent, now: now)
             quotaGroup.isHidden = false
         case .session(let session):
-            stack.setCustomSpacing(11, after: detailField)
-            stack.edgeInsets.bottom = 4
+            applyHeaderAndBodyMetrics(isGroupedUsage: false, isSession: true)
             renderSession(session, isOffline: isOffline)
             metadataGroup.isHidden = false
         }
         resizeToFitContent()
+    }
+
+    private func applyHeaderAndBodyMetrics(isGroupedUsage: Bool, isSession: Bool) {
+        if isGroupedUsage {
+            compactStatusRow.isHidden = false
+            titleField.isHidden = true
+            detailField.isHidden = true
+            if let topRow {
+                stack.setCustomSpacing(10, after: topRow)
+            }
+            stack.setCustomSpacing(14, after: compactStatusRow)
+            quotaGroupHeightConstraint?.constant = Self.groupedUsageBodyHeight
+            stack.edgeInsets.bottom = 14
+        } else {
+            compactStatusRow.isHidden = true
+            titleField.isHidden = false
+            detailField.isHidden = false
+            if let topRow {
+                stack.setCustomSpacing(12, after: topRow)
+            }
+            stack.setCustomSpacing(isSession ? 11 : 16, after: detailField)
+            quotaGroupHeightConstraint?.constant = Self.usageBodyHeight
+            stack.edgeInsets.bottom = 4
+        }
+        syncStatusHeaderText()
+    }
+
+    private func syncStatusHeaderText() {
+        if compactStatusRow.isHidden {
+            compactStatusRow.clear()
+            titleField.stringValue = lastStatusTitle
+            titleField.textColor = lastStatusColor
+            detailField.stringValue = lastStatusDetail
+        } else {
+            compactStatusRow.update(
+                title: lastStatusTitle,
+                titleColor: lastStatusColor,
+                detail: lastStatusDetail
+            )
+            // Keep hidden standard fields empty so descendant queries never pick them up.
+            titleField.stringValue = ""
+            detailField.stringValue = ""
+        }
     }
 
     /// Disk-/statusline-backed agents (Grok, Claude) only refresh context on
@@ -507,6 +586,9 @@ class DetailsPanel: NSPanel {
         usage: UsageDetailsModel,
         focusedAgent: AgentKind
     ) -> DetailsPanelUsageTrackMode {
+        if focusedAgent == .antigravity {
+            return .grouped
+        }
         let hasSession = usage.windows.contains { $0.kind == .session }
         let hasWeekly = usage.windows.contains { $0.kind == .weekly }
         if hasSession && hasWeekly {
@@ -519,6 +601,27 @@ class DetailsPanel: NSPanel {
     }
 
     private func renderUsage(_ usage: UsageDetailsModel, focusedAgent: AgentKind, now: Date) {
+        let mode = Self.resolveUsageTrackMode(usage: usage, focusedAgent: focusedAgent)
+        usageTrackMode = mode
+        dualTrackContainer.isHidden = (mode != .dual)
+        singleTrackView.isHidden = (mode != .single)
+        groupedTrackView.isHidden = (mode != .grouped)
+
+        if mode == .grouped {
+            let gemini5h = usage.windows.first { ($0.group == .gemini || $0.group == nil) && $0.kind == .session }
+            let geminiWeekly = usage.windows.first { ($0.group == .gemini || $0.group == nil) && $0.kind == .weekly }
+            let claude5h = usage.windows.first { $0.group == .claudeGPT && $0.kind == .session }
+            let claudeWeekly = usage.windows.first { $0.group == .claudeGPT && $0.kind == .weekly }
+            groupedTrackView.update(
+                geminiSession: gemini5h,
+                geminiWeekly: geminiWeekly,
+                claudeSession: claude5h,
+                claudeWeekly: claudeWeekly,
+                now: now
+            )
+            return
+        }
+
         let sessionWindow = usage.windows.first { $0.kind == .session }
         let weeklyWindow = usage.windows.first { $0.kind == .weekly }
 
@@ -526,11 +629,6 @@ class DetailsPanel: NSPanel {
         secondaryQuota.setTitle(L10n.shared["quota.weekly"])
         renderUsageWindow(sessionWindow, in: primaryQuota, now: now)
         renderUsageWindow(weeklyWindow, in: secondaryQuota, now: now)
-
-        let mode = Self.resolveUsageTrackMode(usage: usage, focusedAgent: focusedAgent)
-        usageTrackMode = mode
-        dualTrackContainer.isHidden = (mode == .single)
-        singleTrackView.isHidden = (mode == .dual)
 
         if let weeklyWindow {
             singleTrackView.setTitle(L10n.shared["quota.weekly"])
@@ -646,15 +744,16 @@ class DetailsPanel: NSPanel {
     }
 
     func updateStatus(aggregate: AggregateSnapshot, now: Date = Date()) {
-        titleField.stringValue = aggregate.label
         let rgb = HaloVisualModel.stateColor(aggregate.state)
-        titleField.textColor = NSColor(calibratedRed: rgb.red / 255, green: rgb.green / 255, blue: rgb.blue / 255, alpha: 1)
-        detailField.stringValue = Self.localizedDetail(for: aggregate)
+        lastStatusTitle = aggregate.label
+        lastStatusColor = NSColor(calibratedRed: rgb.red / 255, green: rgb.green / 255, blue: rgb.blue / 255, alpha: 1)
+        lastStatusDetail = Self.localizedDetail(for: aggregate)
+        syncStatusHeaderText()
         agentToggle.setAgent(aggregate.focusedAgent)
         playStatusMotion(
             agent: aggregate.focusedAgent,
             label: aggregate.label,
-            detail: detailField.stringValue
+            detail: lastStatusDetail
         )
         let isOffline = aggregate.state == .idle && aggregate.label == "OFFLINE"
         let isStandby = aggregate.label == "STANDBY"
@@ -703,7 +802,7 @@ class DetailsPanel: NSPanel {
            from != to {
             shift = to > from ? 5 : -5
         }
-        for view in [titleField, detailField, metadataGroup, quotaGroup] as [NSView] {
+        for view in [compactStatusRow, titleField, detailField, metadataGroup, quotaGroup] as [NSView] {
             view.wantsLayer = true
             view.layer?.removeAnimation(forKey: "agenthalo.status.move")
             view.layer?.removeAnimation(forKey: "agenthalo.status.fade")
@@ -898,9 +997,9 @@ class DetailsPanel: NSPanel {
         agentToggleWidthConstraint?.constant = agentToggle.toggleWidthForTesting
     }
 
-    /// Room left of the context pill inside the fixed 304pt panel:
-    /// 304 - insets 34 - pill 46 - gap 10.
-    static let agentToggleMaximumWidth: CGFloat = 214
+    /// Room left of the context pill inside the fixed 264pt panel:
+    /// 264 - insets 34 - pill 46 - gap 10.
+    static let agentToggleMaximumWidth: CGFloat = 174
 
     var enabledAgentsForTesting: [AgentKind] {
         agentToggle.enabledAgentsForTesting
@@ -915,15 +1014,18 @@ class DetailsPanel: NSPanel {
     }
 
     var titleTextForTesting: String {
-        titleField.stringValue
+        compactHeaderVisibleForTesting ? compactStatusRow.titleForTesting : titleField.stringValue
     }
 
     var detailTextForTesting: String {
-        detailField.stringValue
+        compactHeaderVisibleForTesting ? compactStatusRow.detailForTesting : detailField.stringValue
     }
 
     var detailFrameForTesting: CGRect {
-        detailField.convert(detailField.bounds, to: contentView)
+        if compactHeaderVisibleForTesting {
+            return compactStatusRow.detailFrame(in: contentView)
+        }
+        return detailField.convert(detailField.bounds, to: contentView)
     }
 
     var contextPillHiddenForTesting: Bool {
@@ -951,7 +1053,8 @@ class DetailsPanel: NSPanel {
     }
 
     var contentOrderForTesting: [DetailsPanelContentRole] {
-        stack.arrangedSubviews.map { view in
+        stack.arrangedSubviews.compactMap { view in
+            if view === compactStatusRow { return nil }
             if view === topRow { return .agentSwitcher }
             if view === titleField { return .statusTitle }
             if view === detailField { return .statusDetail }
@@ -959,6 +1062,22 @@ class DetailsPanel: NSPanel {
             if view === metadataGroup { return .sessionBody }
             return .unknown
         }
+    }
+
+    var compactHeaderVisibleForTesting: Bool {
+        !compactStatusRow.isHidden && titleField.isHidden && detailField.isHidden
+    }
+
+    var compactTitleTextForTesting: String {
+        compactStatusRow.titleForTesting
+    }
+
+    var compactDetailTextForTesting: String {
+        compactStatusRow.detailForTesting
+    }
+
+    var compactStatusRowFrameForTesting: CGRect {
+        compactStatusRow.convert(compactStatusRow.bounds, to: contentView)
     }
 
     var usageGroupHiddenForTesting: Bool {
@@ -995,6 +1114,64 @@ class DetailsPanel: NSPanel {
 
     var singleTrackMeterFillForTesting: Double {
         singleTrackView.meterFillForTesting
+    }
+
+    var groupedGeminiTitleForTesting: String {
+        groupedTrackView.geminiTitleForTesting
+    }
+
+    var groupedClaudeTitleForTesting: String {
+        groupedTrackView.claudeTitleForTesting
+    }
+
+    var groupedGeminiResetTextForTesting: String {
+        groupedTrackView.geminiResetTextForTesting
+    }
+
+    var groupedGeminiResetHiddenForTesting: Bool {
+        groupedTrackView.geminiResetHiddenForTesting
+    }
+
+    var groupedClaudeResetTextForTesting: String {
+        groupedTrackView.claudeResetTextForTesting
+    }
+
+    var groupedClaudeResetHiddenForTesting: Bool {
+        groupedTrackView.claudeResetHiddenForTesting
+    }
+
+    func groupedRowTitleForTesting(group: UsageModelGroup, kind: UsageWindowKind) -> String {
+        groupedTrackView.row(group: group, kind: kind).shortLabelForTesting
+    }
+
+    func groupedRowPercentForTesting(group: UsageModelGroup, kind: UsageWindowKind) -> String {
+        groupedTrackView.row(group: group, kind: kind).percentForTesting
+    }
+
+    func groupedRowPercentExpansionFrameForTesting(group: UsageModelGroup, kind: UsageWindowKind) -> CGRect {
+        contentView?.layoutSubtreeIfNeeded()
+        return groupedTrackView.row(group: group, kind: kind).percentExpansionFrameForTesting
+    }
+
+    func groupedRowMeterFillForTesting(group: UsageModelGroup, kind: UsageWindowKind) -> Double {
+        groupedTrackView.row(group: group, kind: kind).meterFillForTesting
+    }
+
+    func groupedRowMeterWidthForTesting(group: UsageModelGroup, kind: UsageWindowKind) -> CGFloat {
+        contentView?.layoutSubtreeIfNeeded()
+        return groupedTrackView.row(group: group, kind: kind).meterWidthForTesting
+    }
+
+    var groupedTrackHasAmbiguousLayoutForTesting: Bool {
+        groupedTrackView.hasAmbiguousLayoutForTesting
+    }
+
+    var groupedTrackFrameForTesting: CGRect {
+        groupedTrackView.convert(groupedTrackView.bounds, to: contentView)
+    }
+
+    var groupedGeminiTitleFrameForTesting: CGRect {
+        groupedTrackView.convert(groupedTrackView.geminiTitleFrameForTesting, to: contentView)
     }
 
     var sessionBodyOrderForTesting: [DetailsPanelSessionBodyRole] {
@@ -1780,6 +1957,426 @@ private final class SingleTrackQuotaView: NSView {
         ])
 
         applyTheme(.light)
+    }
+}
+
+/// Compact single-line status header used by Antigravity grouped quota mode
+/// (`[TITLE] · [Detail]`) so the two quota groups receive generous vertical air.
+@MainActor
+private final class CompactStatusRowView: NSView {
+    private let titleField = NSTextField(labelWithString: "OFFLINE")
+    private let separatorField = NSTextField(labelWithString: "·")
+    private let detailField = NSTextField(labelWithString: "")
+
+    var titleForTesting: String { titleField.stringValue }
+    var detailForTesting: String { detailField.stringValue }
+
+    func detailFrame(in container: NSView?) -> CGRect {
+        detailField.convert(detailField.bounds, to: container)
+    }
+
+    func clear() {
+        titleField.stringValue = ""
+        detailField.stringValue = ""
+        separatorField.isHidden = true
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: 20)
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+        setup()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func applyTheme(_ palette: DetailsPanelThemePalette) {
+        separatorField.textColor = palette.mutedText.withAlphaComponent(0.6)
+        detailField.textColor = palette.mutedText
+    }
+
+    func update(title: String, titleColor: NSColor, detail: String) {
+        titleField.stringValue = title
+        titleField.textColor = titleColor
+        detailField.stringValue = detail
+        separatorField.isHidden = detail.isEmpty
+    }
+
+    private func setup() {
+        titleField.font = .systemFont(ofSize: 14.5, weight: .bold)
+        titleField.lineBreakMode = .byTruncatingTail
+        titleField.maximumNumberOfLines = 1
+        titleField.usesSingleLineMode = true
+        titleField.cell?.truncatesLastVisibleLine = true
+        titleField.setContentHuggingPriority(.required, for: .horizontal)
+        titleField.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+
+        separatorField.font = .systemFont(ofSize: 12, weight: .medium)
+        separatorField.setContentHuggingPriority(.required, for: .horizontal)
+        separatorField.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        detailField.font = .systemFont(ofSize: 12, weight: .regular)
+        detailField.alignment = .left
+        detailField.lineBreakMode = .byTruncatingTail
+        detailField.maximumNumberOfLines = 1
+        detailField.usesSingleLineMode = true
+        detailField.cell?.truncatesLastVisibleLine = true
+        detailField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        detailField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        [titleField, separatorField, detailField].forEach {
+            $0.translatesAutoresizingMaskIntoConstraints = false
+            addSubview($0)
+        }
+
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 20),
+
+            titleField.leadingAnchor.constraint(equalTo: leadingAnchor),
+            titleField.centerYAnchor.constraint(equalTo: centerYAnchor),
+            titleField.widthAnchor.constraint(lessThanOrEqualToConstant: 128),
+
+            separatorField.leadingAnchor.constraint(equalTo: titleField.trailingAnchor, constant: 5),
+            separatorField.firstBaselineAnchor.constraint(equalTo: titleField.firstBaselineAnchor),
+
+            detailField.leadingAnchor.constraint(equalTo: separatorField.trailingAnchor, constant: 5),
+            detailField.trailingAnchor.constraint(equalTo: trailingAnchor),
+            detailField.firstBaselineAnchor.constraint(equalTo: titleField.firstBaselineAnchor),
+        ])
+
+        applyTheme(.light)
+        clear()
+    }
+}
+
+/// Grouped two-section quota view for Antigravity (`Gemini` and `Claude/GPT`),
+/// fitted to the 122pt grouped usage body with 16-segment micro-pill bars and remaining%.
+@MainActor
+private final class GroupedQuotaView: NSView {
+    private let geminiTitleField = NSTextField(labelWithString: L10n.shared["quota.group.gemini"])
+    private let geminiResetField = NSTextField(labelWithString: "")
+    private let geminiSessionRow = CompactQuotaRowView(shortLabel: L10n.shared["quota.short.5h"])
+    private let geminiWeeklyRow = CompactQuotaRowView(shortLabel: L10n.shared["quota.short.weekly"])
+    private let claudeTitleField = NSTextField(labelWithString: L10n.shared["quota.group.claude_gpt"])
+    private let claudeResetField = NSTextField(labelWithString: "")
+    private let claudeSessionRow = CompactQuotaRowView(shortLabel: L10n.shared["quota.short.5h"])
+    private let claudeWeeklyRow = CompactQuotaRowView(shortLabel: L10n.shared["quota.short.weekly"])
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+        setup()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func applyTheme(_ palette: DetailsPanelThemePalette) {
+        let titleColor = palette.primaryText.withAlphaComponent(0.84)
+        geminiTitleField.textColor = titleColor
+        claudeTitleField.textColor = titleColor
+        geminiResetField.textColor = palette.mutedText
+        claudeResetField.textColor = palette.mutedText
+        geminiSessionRow.applyTheme(palette)
+        geminiWeeklyRow.applyTheme(palette)
+        claudeSessionRow.applyTheme(palette)
+        claudeWeeklyRow.applyTheme(palette)
+    }
+
+    func update(
+        geminiSession: UsageWindow?,
+        geminiWeekly: UsageWindow?,
+        claudeSession: UsageWindow?,
+        claudeWeekly: UsageWindow?,
+        now: Date
+    ) {
+        geminiTitleField.stringValue = L10n.shared["quota.group.gemini"]
+        claudeTitleField.stringValue = L10n.shared["quota.group.claude_gpt"]
+        geminiSessionRow.setShortLabel(L10n.shared["quota.short.5h"])
+        geminiWeeklyRow.setShortLabel(L10n.shared["quota.short.weekly"])
+        claudeSessionRow.setShortLabel(L10n.shared["quota.short.5h"])
+        claudeWeeklyRow.setShortLabel(L10n.shared["quota.short.weekly"])
+
+        updateResetHeader(geminiResetField, session: geminiSession, weekly: geminiWeekly, now: now)
+        updateResetHeader(claudeResetField, session: claudeSession, weekly: claudeWeekly, now: now)
+
+        geminiSessionRow.update(window: geminiSession, now: now)
+        geminiWeeklyRow.update(window: geminiWeekly, now: now)
+        claudeSessionRow.update(window: claudeSession, now: now)
+        claudeWeeklyRow.update(window: claudeWeekly, now: now)
+    }
+
+    private func updateResetHeader(
+        _ field: NSTextField,
+        session: UsageWindow?,
+        weekly: UsageWindow?,
+        now: Date
+    ) {
+        let primaryText = DetailsPanel.formatResetTime(session?.resetsAt, now: now)
+        let fallbackText = primaryText.isEmpty
+            ? DetailsPanel.formatResetTime(weekly?.resetsAt, now: now)
+            : primaryText
+        if fallbackText.isEmpty {
+            field.stringValue = ""
+            field.isHidden = true
+        } else {
+            field.stringValue = "↻ " + fallbackText
+            field.isHidden = false
+        }
+    }
+
+    func row(group: UsageModelGroup, kind: UsageWindowKind) -> CompactQuotaRowView {
+        switch (group, kind) {
+        case (.gemini, .session): return geminiSessionRow
+        case (.gemini, .weekly): return geminiWeeklyRow
+        case (.claudeGPT, .session): return claudeSessionRow
+        case (.claudeGPT, .weekly): return claudeWeeklyRow
+        }
+    }
+
+    var geminiTitleForTesting: String { geminiTitleField.stringValue }
+    var claudeTitleForTesting: String { claudeTitleField.stringValue }
+    var geminiResetTextForTesting: String { geminiResetField.stringValue }
+    var geminiResetHiddenForTesting: Bool { geminiResetField.isHidden }
+    var claudeResetTextForTesting: String { claudeResetField.stringValue }
+    var claudeResetHiddenForTesting: Bool { claudeResetField.isHidden }
+    var geminiTitleFrameForTesting: CGRect { geminiTitleField.frame }
+    var hasAmbiguousLayoutForTesting: Bool {
+        hasAmbiguousLayout
+            || geminiSessionRow.hasAmbiguousLayout
+            || geminiWeeklyRow.hasAmbiguousLayout
+            || claudeSessionRow.hasAmbiguousLayout
+            || claudeWeeklyRow.hasAmbiguousLayout
+    }
+
+    private func setup() {
+        for title in [geminiTitleField, claudeTitleField] {
+            title.font = .systemFont(ofSize: 12.5, weight: .semibold)
+            title.lineBreakMode = .byTruncatingTail
+            title.maximumNumberOfLines = 1
+            title.usesSingleLineMode = true
+        }
+        for reset in [geminiResetField, claudeResetField] {
+            reset.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+            reset.alignment = .right
+            reset.lineBreakMode = .byTruncatingTail
+            reset.maximumNumberOfLines = 1
+            reset.setContentHuggingPriority(.required, for: .horizontal)
+            reset.setContentCompressionResistancePriority(.required, for: .horizontal)
+            reset.isHidden = true
+        }
+
+        [
+            geminiTitleField, geminiResetField, geminiSessionRow, geminiWeeklyRow,
+            claudeTitleField, claudeResetField, claudeSessionRow, claudeWeeklyRow,
+        ].forEach {
+            $0.translatesAutoresizingMaskIntoConstraints = false
+            addSubview($0)
+        }
+
+        NSLayoutConstraint.activate([
+            geminiTitleField.leadingAnchor.constraint(equalTo: leadingAnchor),
+            geminiTitleField.topAnchor.constraint(equalTo: topAnchor),
+            geminiTitleField.heightAnchor.constraint(equalToConstant: 16),
+
+            geminiResetField.leadingAnchor.constraint(greaterThanOrEqualTo: geminiTitleField.trailingAnchor, constant: 8),
+            geminiResetField.trailingAnchor.constraint(equalTo: trailingAnchor),
+            geminiResetField.centerYAnchor.constraint(equalTo: geminiTitleField.centerYAnchor),
+
+            geminiSessionRow.leadingAnchor.constraint(equalTo: leadingAnchor),
+            geminiSessionRow.trailingAnchor.constraint(equalTo: trailingAnchor),
+            geminiSessionRow.topAnchor.constraint(equalTo: geminiTitleField.bottomAnchor, constant: 4),
+
+            geminiWeeklyRow.leadingAnchor.constraint(equalTo: leadingAnchor),
+            geminiWeeklyRow.trailingAnchor.constraint(equalTo: trailingAnchor),
+            geminiWeeklyRow.topAnchor.constraint(equalTo: geminiSessionRow.bottomAnchor, constant: 4),
+
+            claudeTitleField.leadingAnchor.constraint(equalTo: leadingAnchor),
+            claudeTitleField.topAnchor.constraint(equalTo: geminiWeeklyRow.bottomAnchor, constant: 10),
+            claudeTitleField.heightAnchor.constraint(equalToConstant: 16),
+
+            claudeResetField.leadingAnchor.constraint(greaterThanOrEqualTo: claudeTitleField.trailingAnchor, constant: 8),
+            claudeResetField.trailingAnchor.constraint(equalTo: trailingAnchor),
+            claudeResetField.centerYAnchor.constraint(equalTo: claudeTitleField.centerYAnchor),
+
+            claudeSessionRow.leadingAnchor.constraint(equalTo: leadingAnchor),
+            claudeSessionRow.trailingAnchor.constraint(equalTo: trailingAnchor),
+            claudeSessionRow.topAnchor.constraint(equalTo: claudeTitleField.bottomAnchor, constant: 4),
+
+            claudeWeeklyRow.leadingAnchor.constraint(equalTo: leadingAnchor),
+            claudeWeeklyRow.trailingAnchor.constraint(equalTo: trailingAnchor),
+            claudeWeeklyRow.topAnchor.constraint(equalTo: claudeSessionRow.bottomAnchor, constant: 4),
+        ])
+
+        applyTheme(.light)
+    }
+}
+
+@MainActor
+private final class CompactQuotaRowView: NSView {
+    private let shortLabelField: NSTextField
+    private let meter = SegmentedMeterView()
+    private let percentField = NSTextField(labelWithString: "--")
+    private var currentPalette: DetailsPanelThemePalette = .light
+    private var isAvailable = false
+
+    init(shortLabel: String) {
+        self.shortLabelField = NSTextField(labelWithString: shortLabel)
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        setup()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func applyTheme(_ palette: DetailsPanelThemePalette) {
+        currentPalette = palette
+        shortLabelField.textColor = palette.mutedText
+        percentField.textColor = isAvailable ? palette.primaryText : palette.mutedText
+        meter.fillColor = palette.segmentedMeterFill
+        meter.trackColor = palette.segmentedMeterTrack
+    }
+
+    func setShortLabel(_ label: String) {
+        shortLabelField.stringValue = label
+    }
+
+    func update(window: UsageWindow?, now: Date) {
+        guard let window else {
+            isAvailable = false
+            meter.value = 0
+            percentField.stringValue = "--"
+            percentField.textColor = currentPalette.mutedText
+            toolTip = L10n.shared["quota.no_data"]
+            return
+        }
+        if let resetAt = window.resetsAt, resetAt <= now {
+            isAvailable = false
+            meter.value = 0
+            percentField.stringValue = "--"
+            percentField.textColor = currentPalette.mutedText
+            toolTip = L10n.shared["quota.waiting_refresh"]
+            return
+        }
+
+        isAvailable = true
+        let clampedUsed = min(100, max(0, window.usedPercent))
+        let usedInt = Int(clampedUsed.rounded())
+        let remainingInt = min(100, max(0, 100 - usedInt))
+        let remainingExact = min(100, max(0, 100 - clampedUsed))
+        meter.value = remainingExact
+        percentField.stringValue = "\(remainingInt)%"
+        percentField.textColor = currentPalette.primaryText
+        let resetText = DetailsPanel.formatResetTime(window.resetsAt, now: now)
+        toolTip = resetText.isEmpty ? nil : "\(L10n.shared["quota.reset_at"]) \(resetText)"
+    }
+
+    var shortLabelForTesting: String { shortLabelField.stringValue }
+    var percentForTesting: String { percentField.stringValue }
+    var percentExpansionFrameForTesting: CGRect {
+        percentField.cell?.expansionFrame(withFrame: percentField.bounds, in: percentField) ?? .zero
+    }
+    var meterFillForTesting: Double { meter.value }
+    var meterWidthForTesting: CGFloat { meter.frame.width }
+
+    private func setup() {
+        shortLabelField.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        shortLabelField.alignment = .left
+        shortLabelField.lineBreakMode = .byTruncatingTail
+        shortLabelField.maximumNumberOfLines = 1
+
+        percentField.font = .monospacedDigitSystemFont(ofSize: 12.5, weight: .semibold)
+        percentField.alignment = .right
+        percentField.lineBreakMode = .byTruncatingTail
+        percentField.maximumNumberOfLines = 1
+
+        [shortLabelField, meter, percentField].forEach {
+            $0.translatesAutoresizingMaskIntoConstraints = false
+            addSubview($0)
+        }
+
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 16),
+
+            shortLabelField.leadingAnchor.constraint(equalTo: leadingAnchor),
+            shortLabelField.centerYAnchor.constraint(equalTo: centerYAnchor),
+            shortLabelField.widthAnchor.constraint(equalToConstant: 20),
+
+            meter.leadingAnchor.constraint(equalTo: shortLabelField.trailingAnchor, constant: 8),
+            meter.trailingAnchor.constraint(equalTo: percentField.leadingAnchor, constant: -8),
+            meter.centerYAnchor.constraint(equalTo: centerYAnchor),
+            meter.heightAnchor.constraint(equalToConstant: 11),
+
+            percentField.trailingAnchor.constraint(equalTo: trailingAnchor),
+            percentField.centerYAnchor.constraint(equalTo: centerYAnchor),
+            percentField.widthAnchor.constraint(equalToConstant: 38),
+        ])
+
+        applyTheme(.light)
+    }
+}
+
+@MainActor
+private final class SegmentedMeterView: NSView {
+    static let segmentCount = 16
+
+    var value: Double = 0 {
+        didSet {
+            needsDisplay = true
+        }
+    }
+
+    var fillColor: NSColor = DetailsPanelThemePalette.light.segmentedMeterFill {
+        didSet {
+            needsDisplay = true
+        }
+    }
+
+    var trackColor: NSColor = DetailsPanelThemePalette.light.segmentedMeterTrack {
+        didSet {
+            needsDisplay = true
+        }
+    }
+
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let count = Self.segmentCount
+        let gap: CGFloat = 4
+        let totalGaps = gap * CGFloat(count - 1)
+        let segWidth = max(2, (bounds.width - totalGaps) / CGFloat(count))
+        let segHeight = bounds.height
+        let radius = min(2.0, segWidth / 2)
+
+        let clamped = min(100, max(0, value))
+        let filledUnits = (clamped / 100.0) * Double(count)
+
+        for index in 0..<count {
+            let x = CGFloat(index) * (segWidth + gap)
+            let rect = NSRect(x: x, y: 0, width: segWidth, height: segHeight)
+            let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
+
+            trackColor.setFill()
+            path.fill()
+
+            let unitProgress = min(1.0, max(0.0, filledUnits - Double(index)))
+            if unitProgress > 0.01 {
+                fillColor.withAlphaComponent(fillColor.alphaComponent * CGFloat(unitProgress)).setFill()
+                path.fill()
+            }
+        }
     }
 }
 

@@ -73,7 +73,7 @@ Platform extras:
 - **Windows** Claude hook host: on launch, the current `AgentHalo.exe` is atomically staged as `%USERPROFILE%\.agent-halo\bin\status-hook.exe`; hooks invoke `status-hook.exe --claude-hook <event>` (not a separate download)
 - **macOS** Claude: lifecycle hooks + status line proxy in `~/.claude/settings.json`
 - **macOS** Grok: lifecycle hooks in `~/.grok/hooks/agent-halo-status.json`
-- **macOS** Antigravity: lifecycle hooks named group `agent-halo-status` in `~/.gemini/config/hooks.json`
+- **macOS** Antigravity: lifecycle hooks named group `agent-halo-status` in `~/.gemini/config/hooks.json`; usage discovery prefers local daemon JSON (`~/.gemini/antigravity/daemon/*.json`) then `ps`/`lsof` and Cloud Code, surfacing both `Gemini` and `Claude / GPT` `5h`/`W` quota groups.
 - **OpenCode** (both platforms): plugin `agent-halo-status.js` under the OpenCode config `plugins/` directory; atomic snapshots in `.agent-halo/cache/opencode/`
 - **WorkBuddy** (both platforms): read-only `~/.workbuddy` session files, `workbuddy.db`, and project JSONL. No hook and no config writes.
 

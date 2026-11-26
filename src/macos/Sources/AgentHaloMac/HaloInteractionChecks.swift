@@ -92,6 +92,7 @@ func runHaloInteractionChecks() {
     testLiveCodexErrorCyclesThroughBrightAndDimPresentations()
     testDetailsPanelHidesProviderPlanAndWarning()
     testDetailsPanelShowsFiveHourAndWeeklyRemainingUsage()
+    testDetailsPanelRendersAntigravityGroupedModelQuotas()
     testEnglishQuotaResetCopyPreservesRowLayout()
     testQuotaMeterUsesApprovedSoftFadePalette()
     testQuotaMeterRendersApprovedSoftFadeOutput()
@@ -1138,6 +1139,103 @@ private func testDetailsPanelShowsFiveHourAndWeeklyRemainingUsage() {
 }
 
 @MainActor
+private func testDetailsPanelRendersAntigravityGroupedModelQuotas() {
+    let panel = DetailsPanel()
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    let gemini5hReset = now.addingTimeInterval(TimeInterval(3 * 3_600 + 39 * 60))
+    let geminiWeeklyReset = now.addingTimeInterval(TimeInterval(5 * 86_400 + 2 * 3_600 + 43 * 60))
+
+    panel.render(
+        aggregate: detailsAggregate(state: .done, label: "STANDBY", agent: .antigravity),
+        model: usageDetailsModel(
+            provider: "Antigravity",
+            plan: "Ultra",
+            windows: [
+                UsageWindow(kind: .session, usedPercent: 8, resetsAt: gemini5hReset, duration: 18_000, group: .gemini),
+                UsageWindow(kind: .weekly, usedPercent: 25, resetsAt: geminiWeeklyReset, duration: 604_800, group: .gemini),
+                UsageWindow(kind: .session, usedPercent: 0, resetsAt: nil, duration: 18_000, group: .claudeGPT),
+            ]
+        ),
+        now: now
+    )
+    panel.contentView?.layoutSubtreeIfNeeded()
+
+    expect(panel.usageTrackModeForTesting, .grouped, "Antigravity should use grouped track mode")
+    expect(panel.groupedGeminiTitleForTesting, L10n.shared["quota.group.gemini"], "Gemini group title")
+    expect(panel.groupedClaudeTitleForTesting, L10n.shared["quota.group.claude_gpt"], "Claude/GPT group title")
+    expect(panel.groupedClaudeTitleForTesting, "Claude/GPT", "Claude/GPT group title copy")
+    expect(panel.groupedRowTitleForTesting(group: .gemini, kind: .session), "5h", "compact 5h label")
+    expect(panel.groupedRowTitleForTesting(group: .gemini, kind: .weekly), "W", "compact weekly label")
+    expect(panel.groupedRowTitleForTesting(group: .claudeGPT, kind: .session), "5h", "claude 5h label")
+    expect(panel.groupedRowTitleForTesting(group: .claudeGPT, kind: .weekly), "W", "claude weekly label")
+
+    expect(panel.groupedRowPercentForTesting(group: .gemini, kind: .session), "92%", "gemini 5h remaining percent")
+    expect(panel.groupedRowPercentForTesting(group: .gemini, kind: .weekly), "75%", "gemini weekly remaining percent")
+    expect(panel.groupedRowPercentForTesting(group: .claudeGPT, kind: .session), "100%", "claude 5h remaining percent")
+    expect(panel.groupedRowPercentForTesting(group: .claudeGPT, kind: .weekly), "--", "missing claude weekly shows --")
+    expect(
+        panel.groupedRowPercentExpansionFrameForTesting(group: .claudeGPT, kind: .session).isEmpty,
+        "100% label must fit cleanly without truncation"
+    )
+
+    expect(panel.groupedRowMeterFillForTesting(group: .gemini, kind: .session), 92, "gemini 5h remaining meter fill")
+    expect(panel.groupedRowMeterFillForTesting(group: .gemini, kind: .weekly), 75, "gemini weekly remaining meter fill")
+    expect(panel.groupedRowMeterFillForTesting(group: .claudeGPT, kind: .session), 100, "claude 5h remaining meter fill")
+    expect(panel.groupedRowMeterFillForTesting(group: .claudeGPT, kind: .weekly), 0, "missing claude weekly meter fill")
+
+    expect(!panel.groupedGeminiResetHiddenForTesting, "active gemini header shows reset")
+    expect(panel.groupedGeminiResetTextForTesting, "↻ 3h 39m", "gemini header reset text")
+    expect(panel.groupedClaudeResetHiddenForTesting, "nil/missing claude group hides reset header")
+
+    let gemini5hWidth = panel.groupedRowMeterWidthForTesting(group: .gemini, kind: .session)
+    let geminiWeeklyWidth = panel.groupedRowMeterWidthForTesting(group: .gemini, kind: .weekly)
+    let claude5hWidth = panel.groupedRowMeterWidthForTesting(group: .claudeGPT, kind: .session)
+    let claudeWeeklyWidth = panel.groupedRowMeterWidthForTesting(group: .claudeGPT, kind: .weekly)
+    expect(gemini5hWidth, 156, "exact 156pt segmented meter width")
+    expect(geminiWeeklyWidth, gemini5hWidth, "all rows share identical segmented bar width")
+    expect(claude5hWidth, gemini5hWidth, "claude 5h aligns with gemini 5h")
+    expect(claudeWeeklyWidth, gemini5hWidth, "claude weekly aligns with gemini 5h")
+
+    expect(!panel.groupedTrackHasAmbiguousLayoutForTesting, "grouped quota view must have unambiguous layout")
+    expect(panel.compactHeaderVisibleForTesting, "Antigravity grouped mode uses compact single-line status header")
+    expect(panel.compactTitleTextForTesting, "STANDBY", "compact header shows status title")
+    expect(panel.groupedTrackFrameForTesting.height, 122, "grouped quota body expands to 122pt")
+    expect(panel.groupedTrackFrameForTesting.minY, 14, "grouped quota body has symmetric 14pt bottom inset")
+    expect(panel.frameWidthForTesting, 264, "grouped Antigravity panel keeps fixed 264pt width")
+    expect(panel.frameHeightForTesting, 226, "grouped Antigravity panel matches standard 226pt height")
+
+    panel.updateStatus(
+        aggregate: AggregateSnapshot(
+            state: .thinking,
+            label: "THINKING",
+            detail: "AgentHalo - Planning",
+            sessions: [],
+            focusedAgent: .antigravity
+        ),
+        now: now
+    )
+    expect(panel.compactTitleTextForTesting, "THINKING", "live status tick updates compact title")
+    expect(panel.compactDetailTextForTesting, L10n.shared["status.thinking"], "live status tick updates compact detail")
+
+    panel.setAppearanceOverrideForTesting(true)
+    expect(panel.isDarkThemeForTesting, "grouped panel supports dark theme")
+    panel.setAppearanceOverrideForTesting(nil)
+
+    // Switching back to Codex restores dual-track mode and standard two-line header.
+    panel.render(
+        aggregate: detailsAggregate(agent: .codex),
+        model: usageDetailsModel(windows: [
+            UsageWindow(kind: .session, usedPercent: 30, resetsAt: gemini5hReset, duration: 18_000),
+            UsageWindow(kind: .weekly, usedPercent: 60, resetsAt: geminiWeeklyReset, duration: 604_800),
+        ]),
+        now: now
+    )
+    expect(panel.usageTrackModeForTesting, .dual, "Codex restores dual-track mode")
+    expect(!panel.compactHeaderVisibleForTesting, "Codex restores standard two-line status header")
+    expect(panel.frameHeightForTesting, 226, "Codex restores 226pt panel height")
+}
+
+@MainActor
 private func testEnglishQuotaResetCopyPreservesRowLayout() {
     L10n.shared.setLanguage("en")
     defer { L10n.shared.setLanguage("zh") }
@@ -1651,8 +1749,8 @@ private func testDetailsPanelKeepsFixedWidthForLongProviderContent() {
     panel.contentView?.layoutSubtreeIfNeeded()
 
     expect(panel.frameWidthForTesting, initialWidth, "long provider content should not widen the panel")
-    expect(panel.frameWidthForTesting, 304, "details panel should keep the expanded fixed width")
-    expect((panel.contentView?.fittingSize.width ?? 0) <= 304.5, "content should fit the expanded fixed width")
+    expect(panel.frameWidthForTesting, 264, "details panel should keep the compact fixed width")
+    expect((panel.contentView?.fittingSize.width ?? 0) <= 264.5, "content should fit the compact fixed width")
 }
 
 @MainActor

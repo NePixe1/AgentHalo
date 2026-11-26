@@ -87,7 +87,7 @@ public struct AntigravityUsageClient: Sendable {
         path: String,
         token: String,
         userAgent: String,
-        body: [String: String]
+        body: [String: Any]
     ) async -> AntigravityCloudCodeOutcome {
         let payload = (try? JSONSerialization.data(withJSONObject: body)) ?? Data("{}".utf8)
         for base in Self.cloudCodeURLs {

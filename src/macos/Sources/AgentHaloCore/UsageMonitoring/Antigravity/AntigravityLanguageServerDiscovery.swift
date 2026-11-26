@@ -1,10 +1,13 @@
+import Darwin
 import Foundation
 
 /// Finds a running Antigravity `language_server` or `agy` process and returns
 /// the CSRF token plus listening ports needed for the local Connect-RPC.
 ///
-/// Port of OpenUsage `LanguageServerDiscovery`: scan `ps`, match name + markers,
-/// pull `--csrf_token` / `--extension_server_port`, and read listen ports via `lsof`.
+/// Prefers `~/.gemini/antigravity/daemon/*.json` (and `antigravity-cli/daemon`
+/// for `agy`) when a `homeDirectory` is supplied (Antigravity 2.35+ passes the
+/// bridge token via stdin instead of `--csrf_token` in argv), then falls back
+/// to scanning `ps` + `lsof` for legacy processes.
 public struct AntigravityLanguageServerDiscovery: Sendable {
     public struct Options: Sendable {
         /// Executable name to match (e.g. `language_server`, `agy`).
@@ -40,13 +43,31 @@ public struct AntigravityLanguageServerDiscovery: Sendable {
         }
     }
 
+    private let homeDirectory: URL?
+    private let files: any UsageFileAccessing
+    private let daemonFileLister: (@Sendable (URL) -> [URL])?
+    private let isProcessAlive: @Sendable (Int32) -> Bool
     private let processRunner: any UsageProcessRunning
 
-    public init(processRunner: any UsageProcessRunning = ProcessUsageRunner()) {
+    public init(
+        homeDirectory: URL? = nil,
+        files: any UsageFileAccessing = FilesystemUsageFiles(),
+        daemonFileLister: (@Sendable (URL) -> [URL])? = nil,
+        isProcessAlive: @escaping @Sendable (Int32) -> Bool = AntigravityLanguageServerDiscovery.defaultProcessIsAlive,
+        processRunner: any UsageProcessRunning = ProcessUsageRunner()
+    ) {
+        self.homeDirectory = homeDirectory
+        self.files = files
+        self.daemonFileLister = daemonFileLister
+        self.isProcessAlive = isProcessAlive
         self.processRunner = processRunner
     }
 
     public func discover(_ options: Options) -> Result? {
+        if let daemonResult = discoverFromDaemonFiles(options) {
+            return daemonResult
+        }
+
         guard let psOutput = try? processRunner.run(
             executable: "/bin/ps",
             arguments: ["-ax", "-o", "pid=,command="],
@@ -93,6 +114,87 @@ public struct AntigravityLanguageServerDiscovery: Sendable {
         }
 
         return nil
+    }
+
+    public static func defaultProcessIsAlive(_ pid: Int32) -> Bool {
+        guard pid > 0 else { return false }
+        if kill(pid, 0) == 0 {
+            return true
+        }
+        return errno == EPERM
+    }
+
+    private func discoverFromDaemonFiles(_ options: Options) -> Result? {
+        guard let homeDirectory,
+              let daemonDirectory = Self.daemonDirectory(for: options.processName, homeDirectory: homeDirectory)
+        else {
+            return nil
+        }
+        let candidates = (daemonFileLister ?? Self.defaultDaemonFiles)(daemonDirectory)
+            .filter { $0.pathExtension.lowercased() == "json" }
+        let requiresCSRF = !options.csrfFlag.trimmingCharacters(in: .whitespaces).isEmpty
+
+        for fileURL in candidates {
+            guard let data = try? files.readDataIfPresent(at: fileURL.path),
+                  let info = try? JSONDecoder().decode(DaemonHubInfo.self, from: data),
+                  let pid = info.pid,
+                  isProcessAlive(pid)
+            else {
+                continue
+            }
+            let csrf = (info.csrfToken ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if requiresCSRF && csrf.isEmpty {
+                continue
+            }
+            let validHTTPS = info.httpsPort.flatMap { (1..<65_536).contains($0) ? $0 : nil }
+            let validHTTP = info.httpPort.flatMap { (1..<65_536).contains($0) ? $0 : nil }
+            let ports = validHTTPS.map { [$0] } ?? []
+            let extensionPort: Int? = if let validHTTP, validHTTP != validHTTPS {
+                validHTTP
+            } else {
+                nil
+            }
+            guard !ports.isEmpty || extensionPort != nil else {
+                continue
+            }
+            return Result(pid: pid, csrf: csrf, ports: ports, extensionPort: extensionPort)
+        }
+        return nil
+    }
+
+    private static func daemonDirectory(for processName: String, homeDirectory: URL) -> URL? {
+        switch processName.lowercased() {
+        case "language_server":
+            return homeDirectory.appendingPathComponent(".gemini/antigravity/daemon", isDirectory: true)
+        case "agy":
+            return homeDirectory.appendingPathComponent(".gemini/antigravity-cli/daemon", isDirectory: true)
+        default:
+            return nil
+        }
+    }
+
+    private static func defaultDaemonFiles(in directory: URL) -> [URL] {
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+        return entries
+            .filter { url in
+                guard url.pathExtension.lowercased() == "json" else { return false }
+                let values = try? url.resourceValues(forKeys: [.isRegularFileKey])
+                return values?.isRegularFile ?? true
+            }
+            .sorted { lhs, rhs in
+                let lhsDate = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let rhsDate = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                if lhsDate != rhsDate {
+                    return lhsDate > rhsDate
+                }
+                return lhs.lastPathComponent > rhs.lastPathComponent
+            }
     }
 
     /// Parse `ps -ax -o pid=,command=` output into candidates matching the process + markers,
@@ -202,4 +304,11 @@ public struct AntigravityLanguageServerDiscovery: Sendable {
         }
         return ports.sorted()
     }
+}
+
+private struct DaemonHubInfo: Decodable {
+    let pid: Int32?
+    let httpsPort: Int?
+    let httpPort: Int?
+    let csrfToken: String?
 }

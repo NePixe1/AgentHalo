@@ -1,16 +1,19 @@
 import Foundation
 
-/// Maps Antigravity `RetrieveUserQuotaSummary` bodies into Gemini-only usage windows.
+/// Maps Antigravity `RetrieveUserQuotaSummary` bodies into Gemini and Claude/GPT usage windows.
 ///
-/// Only exact `bucketId` values `gemini-5h` and `gemini-weekly` are kept (session then weekly).
-/// `3p-*` and unknown buckets are dropped. Accepts bare `{"groups":…}` and LS-wrapped
-/// `{"response":{"groups":…}}`. Missing/unusable `remainingFraction` drops that bucket only.
+/// Recognizes exact `bucketId` values `gemini-5h`, `gemini-weekly`, `3p-5h`, and `3p-weekly`
+/// (in deterministic order: Gemini 5h/Weekly, then Claude/GPT 5h/Weekly). Unknown buckets
+/// are dropped. Accepts bare `{"groups":…}` and LS-wrapped `{"response":{"groups":…}}`.
+/// Missing/unusable `remainingFraction` drops that bucket only.
 public enum AntigravityUsageMapper {
     public static let sessionDuration: TimeInterval = 18_000
     public static let weeklyDuration: TimeInterval = 604_800
 
     private static let geminiSessionBucketID = "gemini-5h"
     private static let geminiWeeklyBucketID = "gemini-weekly"
+    private static let thirdPartySessionBucketID = "3p-5h"
+    private static let thirdPartyWeeklyBucketID = "3p-weekly"
 
     public static func mapQuotaSummary(
         response: UsageHTTPResponse,
@@ -42,7 +45,7 @@ public enum AntigravityUsageMapper {
         )
     }
 
-    /// Parses a quota-summary body into Gemini windows only.
+    /// Parses a quota-summary body into Gemini and Claude/GPT windows.
     /// - Returns `nil` when the body is not a summary (no decodable `groups`).
     /// - Returns a non-nil array (possibly empty) when `groups` is present — authoritative even if empty.
     public static func windowsFromQuotaSummaryBody(_ data: Data) -> [UsageWindow]? {
@@ -52,8 +55,10 @@ public enum AntigravityUsageMapper {
             return nil
         }
 
-        var session: UsageWindow?
-        var weekly: UsageWindow?
+        var geminiSession: UsageWindow?
+        var geminiWeekly: UsageWindow?
+        var claudeSession: UsageWindow?
+        var claudeWeekly: UsageWindow?
         for bucket in groups.flatMap({ $0.buckets ?? [] }) {
             guard let id = bucket.bucketId else { continue }
             guard let fraction = bucket.remainingFraction, fraction.isFinite else { continue }
@@ -61,21 +66,43 @@ public enum AntigravityUsageMapper {
             let resetsAt = bucket.resetTime.flatMap(parseResetTime)
             switch id {
             case geminiSessionBucketID:
-                if session == nil {
-                    session = UsageWindow(
+                if geminiSession == nil {
+                    geminiSession = UsageWindow(
                         kind: .session,
                         usedPercent: usedPercent,
                         resetsAt: resetsAt,
-                        duration: sessionDuration
+                        duration: sessionDuration,
+                        group: .gemini
                     )
                 }
             case geminiWeeklyBucketID:
-                if weekly == nil {
-                    weekly = UsageWindow(
+                if geminiWeekly == nil {
+                    geminiWeekly = UsageWindow(
                         kind: .weekly,
                         usedPercent: usedPercent,
                         resetsAt: resetsAt,
-                        duration: weeklyDuration
+                        duration: weeklyDuration,
+                        group: .gemini
+                    )
+                }
+            case thirdPartySessionBucketID:
+                if claudeSession == nil {
+                    claudeSession = UsageWindow(
+                        kind: .session,
+                        usedPercent: usedPercent,
+                        resetsAt: resetsAt,
+                        duration: sessionDuration,
+                        group: .claudeGPT
+                    )
+                }
+            case thirdPartyWeeklyBucketID:
+                if claudeWeekly == nil {
+                    claudeWeekly = UsageWindow(
+                        kind: .weekly,
+                        usedPercent: usedPercent,
+                        resetsAt: resetsAt,
+                        duration: weeklyDuration,
+                        group: .claudeGPT
                     )
                 }
             default:
@@ -83,10 +110,23 @@ public enum AntigravityUsageMapper {
             }
         }
 
-        var windows: [UsageWindow] = []
-        if let session { windows.append(session) }
-        if let weekly { windows.append(weekly) }
-        return windows
+        return [geminiSession, geminiWeekly, claudeSession, claudeWeekly].compactMap { $0 }
+    }
+
+    /// Legacy per-model pool: worst remaining fraction → one 5h session window for `group`. No weekly.
+    public static func sessionWindowFromLegacyConfigs(
+        remainingFractions: [Double],
+        resetTime: Date?,
+        group: UsageModelGroup
+    ) -> UsageWindow? {
+        guard let worst = remainingFractions.min() else { return nil }
+        return UsageWindow(
+            kind: .session,
+            usedPercent: usedPercent(fromRemaining: worst),
+            resetsAt: resetTime,
+            duration: sessionDuration,
+            group: group
+        )
     }
 
     /// Legacy per-model Gemini pool: worst remaining fraction → one 5h session window. No weekly.
@@ -94,12 +134,10 @@ public enum AntigravityUsageMapper {
         remainingFractions: [Double],
         resetTime: Date?
     ) -> UsageWindow? {
-        guard let worst = remainingFractions.min() else { return nil }
-        return UsageWindow(
-            kind: .session,
-            usedPercent: usedPercent(fromRemaining: worst),
-            resetsAt: resetTime,
-            duration: sessionDuration
+        sessionWindowFromLegacyConfigs(
+            remainingFractions: remainingFractions,
+            resetTime: resetTime,
+            group: .gemini
         )
     }
 
@@ -171,14 +209,47 @@ private struct QuotaSummaryBucket: Decodable {
 
     private enum CodingKeys: String, CodingKey {
         case bucketId
+        case bucketIdSnake = "bucket_id"
         case remainingFraction
+        case remainingFractionSnake = "remaining_fraction"
         case resetTime
+        case resetTimeSnake = "reset_time"
     }
 
     init(from decoder: Decoder) {
         let container = try? decoder.container(keyedBy: CodingKeys.self)
-        bucketId = container.flatMap { (try? $0.decodeIfPresent(String.self, forKey: .bucketId)) ?? nil }
-        remainingFraction = container.flatMap { (try? $0.decodeIfPresent(Double.self, forKey: .remainingFraction)) ?? nil }
-        resetTime = container.flatMap { (try? $0.decodeIfPresent(String.self, forKey: .resetTime)) ?? nil }
+        bucketId = Self.firstString(in: container, keys: [.bucketId, .bucketIdSnake])
+        remainingFraction = Self.firstDouble(in: container, keys: [.remainingFraction, .remainingFractionSnake])
+        resetTime = Self.firstString(in: container, keys: [.resetTime, .resetTimeSnake])
+    }
+
+    private static func firstString(
+        in container: KeyedDecodingContainer<CodingKeys>?,
+        keys: [CodingKeys]
+    ) -> String? {
+        guard let container else { return nil }
+        for key in keys {
+            if let value = try? container.decodeIfPresent(String.self, forKey: key) {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private static func firstDouble(
+        in container: KeyedDecodingContainer<CodingKeys>?,
+        keys: [CodingKeys]
+    ) -> Double? {
+        guard let container else { return nil }
+        for key in keys {
+            if let value = try? container.decodeIfPresent(Double.self, forKey: key) {
+                return value
+            }
+            if let text = try? container.decodeIfPresent(String.self, forKey: key),
+               let parsed = Double(text) {
+                return parsed
+            }
+        }
+        return nil
     }
 }

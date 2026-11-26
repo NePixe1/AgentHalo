@@ -286,7 +286,7 @@ public actor UsageMonitoringCoordinator {
         let antigravityProvider = AntigravityUsageProvider(
             authStore: antigravityAuthStore,
             usageClient: AntigravityUsageClient(http: http),
-            discovery: AntigravityLanguageServerDiscovery(),
+            discovery: AntigravityLanguageServerDiscovery(homeDirectory: homeDirectory),
             focusController: focusController
         )
         let cacheURL = AgentHaloPaths(homeDirectory: homeDirectory).usageSnapshots

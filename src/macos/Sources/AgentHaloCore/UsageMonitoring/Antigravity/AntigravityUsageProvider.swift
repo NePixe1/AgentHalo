@@ -41,7 +41,9 @@ public struct AntigravityUsageProvider: UsageProvider, Sendable {
     public init(
         authStore: AntigravityAuthStore,
         usageClient: AntigravityUsageClient = AntigravityUsageClient(),
-        discovery: any AntigravityLanguageServerDiscovering = AntigravityLanguageServerDiscovery(),
+        discovery: any AntigravityLanguageServerDiscovering = AntigravityLanguageServerDiscovery(
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser
+        ),
         focusController: UsageProviderFocusController = UsageProviderFocusController(),
         now: @escaping @Sendable () -> Date = Date.init
     ) {
@@ -124,8 +126,9 @@ public struct AntigravityUsageProvider: UsageProvider, Sendable {
             }
 
             let planName = Self.userTierPlan(from: status.body)
-            if let window = Self.sessionWindow(from: Self.geminiConfigs(fromUserStatus: status.body)) {
-                return makeSnapshot(accountKey: accountKey, planName: planName, windows: [window])
+            let statusWindows = Self.sessionWindows(from: Self.modelConfigs(fromUserStatus: status.body))
+            if !statusWindows.isEmpty {
+                return makeSnapshot(accountKey: accountKey, planName: planName, windows: statusWindows)
             }
 
             if let fallback = await usageClient.callLS(
@@ -133,11 +136,13 @@ public struct AntigravityUsageProvider: UsageProvider, Sendable {
                 port: endpoint.port,
                 csrf: discovered.csrf,
                 method: "GetCommandModelConfigs"
-            ), (200..<300).contains(fallback.statusCode),
-               let window = Self.sessionWindow(
-                    from: Self.geminiConfigs(fromCommandConfigs: fallback.body)
-               ) {
-                return makeSnapshot(accountKey: accountKey, planName: planName, windows: [window])
+            ), (200..<300).contains(fallback.statusCode) {
+                let fallbackWindows = Self.sessionWindows(
+                    from: Self.modelConfigs(fromCommandConfigs: fallback.body)
+                )
+                if !fallbackWindows.isEmpty {
+                    return makeSnapshot(accountKey: accountKey, planName: planName, windows: fallbackWindows)
+                }
             }
         }
         return nil
@@ -276,6 +281,10 @@ public struct AntigravityUsageProvider: UsageProvider, Sendable {
     }
 
     private func fetchCloudCode(token: String, accountKey: AccountCacheKey) async -> CloudCodeProbe {
+        var hadAuthoritativeEmptySummary = false
+        var resolvedPlanName: String?
+        var resolvedProject: String?
+
         switch await usageClient.cloudCode(
             path: AntigravityUsageClient.quotaSummaryPath,
             token: token,
@@ -288,25 +297,82 @@ public struct AntigravityUsageProvider: UsageProvider, Sendable {
             return .rateLimited
         case .ok(let data):
             if let windows = AntigravityUsageMapper.windowsFromQuotaSummaryBody(data) {
-                return .success(makeSnapshot(accountKey: accountKey, planName: nil, windows: windows))
+                if !windows.isEmpty {
+                    return .success(makeSnapshot(accountKey: accountKey, planName: nil, windows: windows))
+                }
+                hadAuthoritativeEmptySummary = true
+                let loadOutcome = await usageClient.cloudCode(
+                    path: AntigravityUsageClient.loadCodeAssistPath,
+                    token: token,
+                    userAgent: "antigravity",
+                    body: [
+                        "metadata": [
+                            "ideType": "ANTIGRAVITY",
+                            "platform": "PLATFORM_UNSPECIFIED",
+                            "pluginType": "GEMINI",
+                        ]
+                    ]
+                )
+                switch loadOutcome {
+                case .authFailed:
+                    return .authFailed
+                case .rateLimited:
+                    return .rateLimited
+                case .ok(let loadData):
+                    let info = Self.loadCodeAssistInfo(from: loadData)
+                    resolvedPlanName = info.planName
+                    resolvedProject = info.project
+                    if let project = info.project {
+                        let retryOutcome = await usageClient.cloudCode(
+                            path: AntigravityUsageClient.quotaSummaryPath,
+                            token: token,
+                            userAgent: "antigravity",
+                            body: ["project": project]
+                        )
+                        switch retryOutcome {
+                        case .authFailed:
+                            return .authFailed
+                        case .rateLimited:
+                            return .rateLimited
+                        case .ok(let retryData):
+                            if let retryWindows = AntigravityUsageMapper.windowsFromQuotaSummaryBody(retryData),
+                               !retryWindows.isEmpty {
+                                return .success(
+                                    makeSnapshot(
+                                        accountKey: accountKey,
+                                        planName: resolvedPlanName,
+                                        windows: retryWindows
+                                    )
+                                )
+                            }
+                        case .unavailable:
+                            break
+                        }
+                    }
+                case .unavailable:
+                    break
+                }
             }
         case .unavailable:
             break
         }
 
+        let fallbackBody: [String: Any] = resolvedProject.map { ["project": $0] } ?? [:]
+
         switch await usageClient.cloudCode(
             path: AntigravityUsageClient.fetchModelsPath,
             token: token,
             userAgent: "antigravity",
-            body: [:]
+            body: fallbackBody
         ) {
         case .authFailed:
             return .authFailed
         case .rateLimited:
             return .rateLimited
         case .ok(let data):
-            if let window = Self.sessionWindow(from: Self.geminiConfigs(fromCloudModels: data)) {
-                return .success(makeSnapshot(accountKey: accountKey, planName: nil, windows: [window]))
+            let windows = Self.sessionWindows(from: Self.modelConfigs(fromCloudModels: data))
+            if !windows.isEmpty {
+                return .success(makeSnapshot(accountKey: accountKey, planName: resolvedPlanName, windows: windows))
             }
         case .unavailable:
             break
@@ -316,18 +382,22 @@ public struct AntigravityUsageProvider: UsageProvider, Sendable {
             path: AntigravityUsageClient.retrieveQuotaPath,
             token: token,
             userAgent: "agy",
-            body: [:]
+            body: fallbackBody
         ) {
         case .authFailed:
             return .authFailed
         case .rateLimited:
             return .rateLimited
         case .ok(let data):
-            if let window = Self.sessionWindow(from: Self.geminiConfigs(fromQuotaBuckets: data)) {
-                return .success(makeSnapshot(accountKey: accountKey, planName: nil, windows: [window]))
+            let windows = Self.sessionWindows(from: Self.modelConfigs(fromQuotaBuckets: data))
+            if !windows.isEmpty {
+                return .success(makeSnapshot(accountKey: accountKey, planName: resolvedPlanName, windows: windows))
             }
         case .unavailable:
             break
+        }
+        if hadAuthoritativeEmptySummary {
+            return .success(makeSnapshot(accountKey: accountKey, planName: resolvedPlanName, windows: []))
         }
         return .unavailable
     }
@@ -352,38 +422,54 @@ public struct AntigravityUsageProvider: UsageProvider, Sendable {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    // MARK: - Legacy Gemini extraction
+    // MARK: - Legacy model extraction
+
+    private static func loadCodeAssistInfo(from data: Data) -> (project: String?, planName: String?) {
+        guard let envelope = try? JSONDecoder().decode(LoadCodeAssistEnvelope.self, from: data) else {
+            return (nil, nil)
+        }
+        let project = envelope.cloudaicompanionProject?.projectID
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let nonEmptyProject = (project?.isEmpty == false) ? project : nil
+        let plan = AntigravityUsageMapper.formatPlan(
+            envelope.paidTier?.name ?? envelope.currentTier?.name
+        )
+        return (nonEmptyProject, plan)
+    }
 
     private static func userTierPlan(from data: Data) -> String? {
         guard let envelope = try? JSONDecoder().decode(UserStatusEnvelope.self, from: data) else {
             return nil
         }
-        return AntigravityUsageMapper.formatPlan(envelope.status?.userTier?.name)
+        if let tier = AntigravityUsageMapper.formatPlan(envelope.status?.userTier?.name) {
+            return tier
+        }
+        return AntigravityUsageMapper.formatPlan(envelope.status?.planStatus?.planInfo?.planName)
     }
 
-    private static func geminiConfigs(fromUserStatus data: Data) -> [LegacyGeminiConfig] {
+    private static func modelConfigs(fromUserStatus data: Data) -> [LegacyModelConfig] {
         guard let envelope = try? JSONDecoder().decode(UserStatusEnvelope.self, from: data) else {
             return []
         }
         return (envelope.status?.cascadeModelConfigData?.clientModelConfigs ?? [])
-            .compactMap(legacyGemini(from:))
+            .compactMap(legacyModel(from:))
     }
 
-    private static func geminiConfigs(fromCommandConfigs data: Data) -> [LegacyGeminiConfig] {
+    private static func modelConfigs(fromCommandConfigs data: Data) -> [LegacyModelConfig] {
         guard let envelope = try? JSONDecoder().decode(UserStatusEnvelope.self, from: data) else {
             return []
         }
-        return (envelope.commandConfigs ?? []).compactMap(legacyGemini(from:))
+        return (envelope.commandConfigs ?? []).compactMap(legacyModel(from:))
     }
 
-    private static func geminiConfigs(fromCloudModels data: Data) -> [LegacyGeminiConfig] {
+    private static func modelConfigs(fromCloudModels data: Data) -> [LegacyModelConfig] {
         guard let envelope = try? JSONDecoder().decode(CloudModelsEnvelope.self, from: data),
               let models = envelope.models
         else {
             return []
         }
         return models.compactMap { key, model in
-            legacyGemini(
+            legacyModel(
                 label: model.displayName ?? model.label,
                 modelID: model.model ?? key,
                 remainingFraction: model.quotaInfo?.remainingFraction,
@@ -392,14 +478,14 @@ public struct AntigravityUsageProvider: UsageProvider, Sendable {
         }
     }
 
-    private static func geminiConfigs(fromQuotaBuckets data: Data) -> [LegacyGeminiConfig] {
+    private static func modelConfigs(fromQuotaBuckets data: Data) -> [LegacyModelConfig] {
         guard let envelope = try? JSONDecoder().decode(CloudQuotaEnvelope.self, from: data),
               let buckets = envelope.buckets
         else {
             return []
         }
         return buckets.compactMap { bucket in
-            legacyGemini(
+            legacyModel(
                 label: bucket.modelId,
                 modelID: bucket.modelId,
                 remainingFraction: bucket.remainingFraction,
@@ -408,8 +494,8 @@ public struct AntigravityUsageProvider: UsageProvider, Sendable {
         }
     }
 
-    private static func legacyGemini(from config: UserStatusEnvelope.ModelConfig) -> LegacyGeminiConfig? {
-        legacyGemini(
+    private static func legacyModel(from config: UserStatusEnvelope.ModelConfig) -> LegacyModelConfig? {
+        legacyModel(
             label: config.label,
             modelID: config.modelOrAlias?.model,
             remainingFraction: config.quotaInfo?.remainingFraction,
@@ -417,34 +503,52 @@ public struct AntigravityUsageProvider: UsageProvider, Sendable {
         )
     }
 
-    private static func legacyGemini(
+    private static func legacyModel(
         label: String?,
         modelID: String?,
         remainingFraction: Double?,
         resetTime: String?
-    ) -> LegacyGeminiConfig? {
-        guard isGemini(label: label, modelID: modelID),
+    ) -> LegacyModelConfig? {
+        guard let group = modelGroup(label: label, modelID: modelID),
               let fraction = remainingFraction, fraction.isFinite
         else {
             return nil
         }
-        return LegacyGeminiConfig(remainingFraction: fraction, resetTime: resetTime.flatMap(parseResetTime))
-    }
-
-    private static func isGemini(label: String?, modelID: String?) -> Bool {
-        [label, modelID].compactMap { $0 }.contains {
-            $0.range(of: "gemini", options: .caseInsensitive) != nil
-        }
-    }
-
-    private static func sessionWindow(from configs: [LegacyGeminiConfig]) -> UsageWindow? {
-        guard let worst = configs.min(by: { $0.remainingFraction < $1.remainingFraction }) else {
-            return nil
-        }
-        return AntigravityUsageMapper.sessionWindowFromLegacyGeminiConfigs(
-            remainingFractions: configs.map(\.remainingFraction),
-            resetTime: worst.resetTime
+        return LegacyModelConfig(
+            group: group,
+            remainingFraction: fraction,
+            resetTime: resetTime.flatMap(parseResetTime)
         )
+    }
+
+    private static func modelGroup(label: String?, modelID: String?) -> UsageModelGroup? {
+        let candidates = [label, modelID]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        if candidates.contains(where: { $0.range(of: "gemini", options: .caseInsensitive) != nil }) {
+            return .gemini
+        }
+        let thirdPartyKeywords = ["claude", "gpt", "sonnet", "opus", "haiku", "o1", "o3", "o4", "3p"]
+        if candidates.contains(where: { candidate in
+            thirdPartyKeywords.contains { candidate.range(of: $0, options: .caseInsensitive) != nil }
+        }) {
+            return .claudeGPT
+        }
+        return nil
+    }
+
+    private static func sessionWindows(from configs: [LegacyModelConfig]) -> [UsageWindow] {
+        [UsageModelGroup.gemini, .claudeGPT].compactMap { group in
+            let groupConfigs = configs.filter { $0.group == group }
+            guard let worst = groupConfigs.min(by: { $0.remainingFraction < $1.remainingFraction }) else {
+                return nil
+            }
+            return AntigravityUsageMapper.sessionWindowFromLegacyConfigs(
+                remainingFractions: groupConfigs.map(\.remainingFraction),
+                resetTime: worst.resetTime,
+                group: group
+            )
+        }
     }
 
     private static func parseResetTime(_ raw: String) -> Date? {
@@ -459,9 +563,40 @@ public struct AntigravityUsageProvider: UsageProvider, Sendable {
     }
 }
 
-private struct LegacyGeminiConfig {
+private struct LegacyModelConfig {
+    var group: UsageModelGroup
     var remainingFraction: Double
     var resetTime: Date?
+}
+
+private struct LoadCodeAssistEnvelope: Decodable {
+    struct Tier: Decodable { let name: String? }
+    enum ProjectRef: Decodable {
+        case string(String)
+        case object(id: String)
+
+        var projectID: String {
+            switch self {
+            case .string(let value): return value
+            case .object(let id): return id
+            }
+        }
+
+        init(from decoder: Decoder) throws {
+            let single = try decoder.singleValueContainer()
+            if let text = try? single.decode(String.self) {
+                self = .string(text)
+                return
+            }
+            struct Object: Decodable { let id: String }
+            let object = try single.decode(Object.self)
+            self = .object(id: object.id)
+        }
+    }
+
+    let cloudaicompanionProject: ProjectRef?
+    let currentTier: Tier?
+    let paidTier: Tier?
 }
 
 private struct UserStatusEnvelope: Decodable {
@@ -472,8 +607,14 @@ private struct UserStatusEnvelope: Decodable {
 
     struct UserStatus: Decodable {
         struct Tier: Decodable { let name: String? }
+        struct PlanInfo: Decodable {
+            let planName: String?
+            let teamsTier: String?
+        }
+        struct PlanStatus: Decodable { let planInfo: PlanInfo? }
         struct Cascade: Decodable { let clientModelConfigs: [ModelConfig]? }
         let userTier: Tier?
+        let planStatus: PlanStatus?
         let cascadeModelConfigData: Cascade?
     }
 

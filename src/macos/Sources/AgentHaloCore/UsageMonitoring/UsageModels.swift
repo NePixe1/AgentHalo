@@ -23,24 +23,33 @@ public enum UsageWindowKind: String, Codable, Sendable {
     case weekly
 }
 
+/// Model family group for providers with separate quota pools (e.g. Antigravity).
+public enum UsageModelGroup: String, Codable, CaseIterable, Sendable {
+    case gemini
+    case claudeGPT
+}
+
 /// A single usage window (e.g. "5h session" or "weekly") with its used percent,
-/// optional reset time and window duration in seconds.
+/// optional reset time, window duration in seconds, and optional model group.
 public struct UsageWindow: Codable, Equatable, Sendable {
     public var kind: UsageWindowKind
     public var usedPercent: Double
     public var resetsAt: Date?
     public var duration: TimeInterval
+    public var group: UsageModelGroup?
 
     public init(
         kind: UsageWindowKind,
         usedPercent: Double,
-        resetsAt: Date?,
-        duration: TimeInterval
+        resetsAt: Date? = nil,
+        duration: TimeInterval,
+        group: UsageModelGroup? = nil
     ) {
         self.kind = kind
         self.usedPercent = usedPercent
         self.resetsAt = resetsAt
         self.duration = duration
+        self.group = group
     }
 }
 

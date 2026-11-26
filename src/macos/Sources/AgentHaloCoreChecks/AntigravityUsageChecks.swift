@@ -2,10 +2,10 @@ import Foundation
 import AgentHaloCore
 
 func runAntigravityUsageChecks() async {
-    try! testAntigravityMapperKeepsOnlyGeminiWindows()
+    try! testAntigravityMapperMapsGeminiAndClaudeGPTWindows()
     testAntigravityMapperLegacyGeminiIsSessionOnly()
     testAntigravityMapperDropsMissingFraction()
-    testAntigravityMapperIgnoresUnknownAnd3PBuckets()
+    testAntigravityMapperIgnoresUnknownBucketsAndSupportsSnakeCase()
     testAntigravityMapperRejectsNonSummary()
     testAntigravityMapperHTTPErrors()
     testAntigravityFormatPlan()
@@ -22,8 +22,10 @@ func runAntigravityUsageChecks() async {
     await testAntigravityRefreshGoogleTokenPostsInstalledAppForm()
     await testAntigravityCallLSUsesLoopbackURLAndCSRFHeaders()
     testAntigravityDiscoveryParsesMarkedLanguageServerAndDropsUnmarked()
+    try! testAntigravityDiscoveryReadsLiveDaemonJSONAndSkipsDeadPID()
     await testAntigravityProviderSummaryDoesNotFillWindowsFromLegacyRemainingFraction()
     try! await testAntigravityProviderCloudCodeFallsBackToLegacySessionOnly()
+    try! await testAntigravityProviderCloudCodeEmptySummaryLoadsCodeAssistProjectAndRetries()
     await testAntigravityProviderSignInAgainWithoutHTTPWhenNoLSAndNoKeychain()
     await testAntigravityProviderProbesLanguageServerThenAgyThenCloudCode()
     try! await testAntigravityProviderRefreshesUnusableAccessThenCachesViaFocusWrite()
@@ -32,7 +34,7 @@ func runAntigravityUsageChecks() async {
     try! await testAntigravityProviderCloudCode429IsRateLimited()
 }
 
-func testAntigravityMapperKeepsOnlyGeminiWindows() throws {
+func testAntigravityMapperMapsGeminiAndClaudeGPTWindows() throws {
     let json = """
     {"groups":[
       {"buckets":[
@@ -50,19 +52,29 @@ func testAntigravityMapperKeepsOnlyGeminiWindows() throws {
         planName: "Pro",
         now: Date(timeIntervalSince1970: 1)
     )
-    expect(snap.windows.count, 2, "only gemini windows")
+    expect(snap.windows.count, 4, "gemini and claude/gpt windows")
+    expect(snap.windows[0].group, .gemini, "gemini-5h group")
     expect(snap.windows[0].kind, .session, "gemini-5h → session, always first")
     expect(snap.windows[0].usedPercent, 25, "1-0.75")
     expect(snap.windows[0].duration, 18_000, "5h duration")
+    expect(snap.windows[1].group, .gemini, "gemini-weekly group")
     expect(snap.windows[1].kind, .weekly, "gemini-weekly → weekly")
     expect(snap.windows[1].usedPercent, 10, "1-0.9")
     expect(snap.windows[1].duration, 604_800, "weekly duration")
+    expect(snap.windows[2].group, .claudeGPT, "3p-5h group")
+    expect(snap.windows[2].kind, .session, "3p-5h → claudeGPT session")
+    expect(snap.windows[2].usedPercent, 60, "1-0.4")
+    expect(snap.windows[2].duration, 18_000, "3p 5h duration")
+    expect(snap.windows[3].group, .claudeGPT, "3p-weekly group")
+    expect(snap.windows[3].kind, .weekly, "3p-weekly → claudeGPT weekly")
+    expect(snap.windows[3].usedPercent, 0, "1-1.0")
+    expect(snap.windows[3].duration, 604_800, "3p weekly duration")
     expect(snap.planName, "Pro", "plan passthrough")
 
     let wrapped = AntigravityUsageMapper.windowsFromQuotaSummaryBody(
         Data("{\"response\":\(json)}".utf8)
     )
-    expect(wrapped?.count, 2, "wrapped response.groups is a summary")
+    expect(wrapped?.count, 4, "wrapped response.groups maps all four buckets")
 }
 
 func testAntigravityMapperLegacyGeminiIsSessionOnly() {
@@ -95,10 +107,16 @@ func testAntigravityMapperDropsMissingFraction() {
     expect(windows?.first?.usedPercent, 50, "used percent")
 }
 
-func testAntigravityMapperIgnoresUnknownAnd3PBuckets() {
+func testAntigravityMapperIgnoresUnknownBucketsAndSupportsSnakeCase() {
     let json = #"{"groups":[{"buckets":[{"bucketId":"gemini-image-5h","remainingFraction":0.1}]}]}"#
     let windows = AntigravityUsageMapper.windowsFromQuotaSummaryBody(Data(json.utf8))
     expect(windows?.isEmpty, true, "unknown bucket dropped")
+
+    let snake = #"{"groups":[{"buckets":[{"bucket_id":"3p-5h","remaining_fraction":"0.25","reset_time":"2026-07-02T15:30:00Z"}]}]}"#
+    let snakeWindows = AntigravityUsageMapper.windowsFromQuotaSummaryBody(Data(snake.utf8))
+    expect(snakeWindows?.count, 1, "snake_case bucket decodes")
+    expect(snakeWindows?.first?.group, .claudeGPT, "3p-5h maps to claudeGPT")
+    expect(snakeWindows?.first?.usedPercent, 75, "1-0.25 string fraction")
 }
 
 func testAntigravityMapperRejectsNonSummary() {
@@ -627,6 +645,46 @@ func testAntigravityDiscoveryParsesMarkedLanguageServerAndDropsUnmarked() {
     expect(unmarked == nil, true, "unmarked language_server discarded")
 }
 
+func testAntigravityDiscoveryReadsLiveDaemonJSONAndSkipsDeadPID() throws {
+    let tmpHome = antigravityCheckHome()
+    let daemonDir = tmpHome.appendingPathComponent(".gemini/antigravity/daemon", isDirectory: true)
+    let deadURL = daemonDir.appendingPathComponent("hub_11111.json")
+    let liveURL = daemonDir.appendingPathComponent("hub_49658.json")
+    let files = FakeUsageFiles(contents: [
+        deadURL.path: Data(#"{"pid":11111,"httpsPort":11110,"httpPort":11111,"csrfToken":"dead-csrf"}"#.utf8),
+        liveURL.path: Data(#"{"pid":64011,"httpsPort":49657,"httpPort":49658,"csrfToken":"live-csrf"}"#.utf8),
+    ])
+    let discovery = AntigravityLanguageServerDiscovery(
+        homeDirectory: tmpHome,
+        files: files,
+        daemonFileLister: { _ in [deadURL, liveURL] },
+        isProcessAlive: { pid in pid == 64011 },
+        processRunner: RecordingUsageProcessRunner(results: [])
+    )
+    guard let found = discovery.discover(AntigravityUsageProvider.languageServerOptions) else {
+        fatalError("live daemon JSON must be discovered without running ps")
+    }
+    expect(found.pid, 64011, "live daemon pid")
+    expect(found.csrf, "live-csrf", "live daemon csrf")
+    expect(found.ports, [49657], "live daemon httpsPort")
+    expect(found.extensionPort, 49658 as Int?, "live daemon httpPort")
+
+    let deadOnly = AntigravityLanguageServerDiscovery(
+        homeDirectory: tmpHome,
+        files: files,
+        daemonFileLister: { _ in [deadURL] },
+        isProcessAlive: { _ in false },
+        processRunner: RecordingUsageProcessRunner(results: [
+            UsageProcessResult(exitCode: 0, standardOutput: Data(), standardError: Data())
+        ])
+    )
+    expect(
+        deadOnly.discover(AntigravityUsageProvider.languageServerOptions) == nil,
+        true,
+        "dead daemon PID falls through and returns nil when ps has no match"
+    )
+}
+
 actor RecordingAntigravityLoopbackHTTPClient: AntigravityLoopbackHTTPClienting {
     struct CapturedRequest: Sendable {
         var url: URL
@@ -774,9 +832,13 @@ func testAntigravityProviderCloudCodeFallsBackToLegacySessionOnly() async throws
     guard let snapshot = result.snapshot else {
         fatalError("legacy Cloud Code models must map to a snapshot: \(String(describing: result.failure))")
     }
-    expect(snapshot.windows.count, 1, "legacy Cloud Code is session only")
+    expect(snapshot.windows.count, 2, "legacy Cloud Code produces gemini and claudeGPT session windows")
+    expect(snapshot.windows[0].group, .gemini, "legacy Gemini pool first")
     expect(snapshot.windows[0].kind, .session, "legacy Gemini pool is 5h")
-    expect(snapshot.windows[0].usedPercent, 40, "worst Gemini remaining 0.6 → 40, ignore Claude")
+    expect(snapshot.windows[0].usedPercent, 40, "worst Gemini remaining 0.6 → 40")
+    expect(snapshot.windows[1].group, .claudeGPT, "legacy Claude/GPT pool second")
+    expect(snapshot.windows[1].kind, .session, "legacy Claude/GPT pool is 5h")
+    expect(snapshot.windows[1].usedPercent, 90, "worst Claude remaining 0.1 → 90")
     expect(snapshot.windows.contains { $0.kind == .weekly }, false, "legacy must not synthesize weekly")
 
     let requests = await http.capturedRequests
@@ -789,6 +851,62 @@ func testAntigravityProviderCloudCodeFallsBackToLegacySessionOnly() async throws
         "usable fetchAvailableModels must not also hit retrieveUserQuota"
     )
     expect(await lsHTTP.capturedRequests.isEmpty, true, "undiscoverable LS must not call loopback")
+}
+
+func testAntigravityProviderCloudCodeEmptySummaryLoadsCodeAssistProjectAndRetries() async throws {
+    let discovery = FakeAntigravityDiscovery()
+    let keychain = FakeUsageKeychain()
+    try keychain.write(
+        service: AntigravityAuthStore.keychainService,
+        account: AntigravityAuthStore.keychainAccount,
+        value: """
+        {"token":{"access_token":"ya29.cloud","refresh_token":"1//refresh","expiry":"2099-01-01T00:00:00Z"}}
+        """
+    )
+    let lsHTTP = RecordingAntigravityLoopbackHTTPClient()
+    let http = RecordingUsageHTTPClient()
+    await http.enqueue(response: UsageHTTPResponse(
+        statusCode: 200,
+        headers: [:],
+        body: Data(#"{"groups":[]}"#.utf8)
+    ))
+    await http.enqueue(response: UsageHTTPResponse(
+        statusCode: 200,
+        headers: [:],
+        body: Data(#"{"cloudaicompanionProject":"proj-123","paidTier":{"name":"Google AI Ultra"}}"#.utf8)
+    ))
+    await http.enqueue(response: UsageHTTPResponse(
+        statusCode: 200,
+        headers: [:],
+        body: Data(#"{"groups":[{"buckets":[{"bucketId":"gemini-5h","remainingFraction":0.8},{"bucketId":"3p-weekly","remainingFraction":0.5}]}]}"#.utf8)
+    ))
+    let provider = antigravityCheckProvider(
+        discovery: discovery,
+        keychain: keychain,
+        lsHTTP: lsHTTP,
+        http: http
+    )
+
+    let access = await provider.resolveAccess(accountKey: nil)
+    guard case .oauth = access else { fatalError("Keychain token must be oauth") }
+    let result = await provider.refresh(using: access)
+    guard let snapshot = result.snapshot else {
+        fatalError("project-scoped Cloud Code summary must produce a snapshot")
+    }
+    expect(snapshot.planName, "Ultra", "loadCodeAssist paidTier plan name")
+    expect(snapshot.windows.count, 2, "retried summary returns both groups")
+    expect(snapshot.windows[0].group, .gemini, "gemini group")
+    expect(snapshot.windows[0].usedPercent, 20, "gemini-5h used")
+    expect(snapshot.windows[1].group, .claudeGPT, "claudeGPT group")
+    expect(snapshot.windows[1].usedPercent, 50, "3p-weekly used")
+
+    let requests = await http.capturedRequests
+    expect(requests.count, 3, "summary → loadCodeAssist → project-scoped summary")
+    expect(requests[0].path, "/v1internal:retrieveUserQuotaSummary", "initial summary")
+    expect(requests[1].path, "/v1internal:loadCodeAssist", "loadCodeAssist on empty summary")
+    expect(requests[2].path, "/v1internal:retrieveUserQuotaSummary", "project-scoped summary retry")
+    let retryBody = String(data: requests[2].body ?? Data(), encoding: .utf8) ?? ""
+    expect(retryBody.contains("proj-123"), true, "retry summary passes project id")
 }
 
 func testAntigravityProviderSignInAgainWithoutHTTPWhenNoLSAndNoKeychain() async {
